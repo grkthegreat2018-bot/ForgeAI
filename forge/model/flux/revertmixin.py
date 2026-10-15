@@ -88,7 +88,7 @@ class _RevertMixin:
                 t.to(dev) for t in knn_blk)
             self._knn_pos.index_copy_(0, kslots, torch.where(
                 kalive, kppos, torch.full((), -1, dtype=torch.int64,
-                                          device=dev)))
+                                          device=dev)).to(torch.int32))
             self._knn_succ.index_copy_(0, kslots, torch.where(
                 kalive, kpsucc, torch.full((), -1, dtype=torch.int32,
                                            device=dev)))
@@ -281,7 +281,7 @@ class _RevertMixin:
                     self._gt.traw[re_, s] = raw[j]
                     self._epi_pos[s] = torch.where(
                         keep, pos_r[j],
-                        torch.full((), -1, dtype=torch.int64,
+                        torch.full((), -1, dtype=torch.int32,
                                    device=dev))
                     if succ_r is not None:
                         self._epi_succ[s] = torch.where(

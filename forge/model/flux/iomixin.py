@@ -551,7 +551,8 @@ class _IOMixin:
             model._knn_fp[:n_r] = kfp[:n_r].to(
                 model._dev).to(model._knn_fp.dtype)
             model._knn_succ[:n_r] = ksucc[:n_r].to(model._dev)
-            model._knn_pos[:n_r] = kpos[:n_r].to(model._dev)
+            model._knn_pos[:n_r] = kpos[:n_r].to(
+                model._dev).to(torch.int32)
             model._knn_cur = min(int(kcur), 1 << 62)
             if model._gpu:
                 model._knncur_g.fill_(model._knn_cur)
@@ -747,7 +748,7 @@ class _IOMixin:
             rank[s_] = r + 1
         col = torch.tensor(cols, dtype=torch.int64,
                            device=model._dev)
-        model._epi_pos[se2, col] = pp
+        model._epi_pos[se2, col] = pp.to(torch.int32)
         model._epi_succ[se2, col] = ss
         if LC:
             model._epi_cert[se2, col] = cc_

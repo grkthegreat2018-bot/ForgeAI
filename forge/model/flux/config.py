@@ -614,6 +614,14 @@ class FluxConfig:
     gpu_probe_max: int = 64          # linear-probe iterations
     gpu_bulk_chunk: int = 8192       # tokens per vectorized ingest block
     epi_slots: int = 1 << 18         # GPU episodic index rows
+    # elastic capacity: at >85% pressure, double the store instead of
+    # decay+rehash (tables) / ring-wrap eviction (ring/knn) - opt-in,
+    # bounded by the grow_max_* ceilings so VRAM stays budgeted.
+    auto_grow: bool = False
+    grow_factor: int = 2
+    grow_max_slots: int = 1 << 23    # gpu tables ceiling (8M rows)
+    grow_max_knn: int = 1 << 24      # fingerprint bank ceiling
+    grow_max_ring: int = 1 << 26     # token/hash ring ceiling
     # positions per seed key - GPU-table analogue of epi_max_per_key.
     # 16 starved deep coverage; 32 = -19% NLL on GPU bench for +0.23GB
     # (sweep S8; 64 showed no further gain).  CPU keeps 512-key deques.
@@ -693,6 +701,14 @@ class FluxConfig:
     # reaches past the question into the previous generation's output -
     # bag only the current-episode (prompt) tokens instead
     knn_episode: bool = False
+    # write-time dedup (retention hygiene): skip a bank row whose
+    # fingerprint is already covered at cosine >= knn_dedup_sim with
+    # the SAME successor - near-verbatim repeated contexts (doc
+    # re-ingest, self-play re-teach) merge instead of spending a row.
+    # Checked against the most recent knn_dedup_win rows only, so a
+    # re-ingested doc dedups while novel text always writes.
+    knn_dedup_sim: float = 0.0       # 0 = off
+    knn_dedup_win: int = 4096        # recency window scanned per write
     # span voting (retrieve-passage -> extract-answer): when >0, a
     # matched bank row votes not just its successor but EVERY token
     # within +/- knn_span stream positions of the match, weighted by

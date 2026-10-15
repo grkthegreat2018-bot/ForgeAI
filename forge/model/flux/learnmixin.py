@@ -514,7 +514,7 @@ class _LearnMixin:
             ep_flat[:, None],
             err.index_select(0, se)[:, None],
             self._epi_cnt.index_select(0, se)[:, None],
-            self._epi_pos.index_select(0, se),
+            self._epi_pos.index_select(0, se).long(),
             self._epi_succ.index_select(0, se).long(),
             self._epi_cert.index_select(0, se).reshape(1, -1)
             if LC else torch.zeros(1, 0, dtype=torch.int64,
@@ -538,7 +538,7 @@ class _LearnMixin:
         epv.index_copy_(
             0, se, torch.where(ee[:, None].expand(1, ER),
                                torch.full((1, ER), -1,
-                                          dtype=torch.int64,
+                                          dtype=torch.int32,
                                           device=dev), prow))
         svv = self._epi_succ
         svv.index_copy_(
@@ -579,7 +579,8 @@ class _LearnMixin:
         self._epi_pos.view(-1).index_copy_(
             0, eflat,
             torch.where(dok1r, end.reshape(1),
-                        self._epi_pos.view(-1).index_select(0, eflat)))
+                        self._epi_pos.view(-1).index_select(
+                            0, eflat)).to(torch.int32))
         self._epi_succ.view(-1).index_copy_(
             0, eflat,
             torch.where(dok1r, x.to(torch.int32).reshape(1),
@@ -640,7 +641,7 @@ class _LearnMixin:
                 0, ksl, torch.where(
                     knn_gate.reshape(1), end.reshape(1),
                     torch.full((1,), -1, dtype=torch.int64,
-                               device=dev)))
+                               device=dev)).to(torch.int32))
             self._knncur_g += knn_gate.long()
         else:
             ksl = torch.full((1,), -1, dtype=torch.int64, device=dev)
@@ -1875,6 +1876,8 @@ class _LearnMixin:
                 self._bulk_split = False
             return total
         base = self._count
+        if c.auto_grow and base + n > 0.85 * c.ring_capacity:
+            self.grow_ring()
         cap = c.ring_capacity
         ids_np = np.asarray(ids, dtype=np.int64)
         ids_t = torch.from_numpy(ids_np).to(dev)
@@ -2193,8 +2196,10 @@ class _LearnMixin:
                 self._gt.used[oi] += cnt
                 if oi < O and self._gt.used[oi] \
                         > 0.85 * c.gpu_table_slots:
-                    self._gt.decay(c.orders[oi])
-                    self._gt.rehash(c.orders[oi])
+                    grew = (self.grow_tables() if c.auto_grow else {})
+                    if not grew.get("grown"):
+                        self._gt.decay(c.orders[oi])
+                        self._gt.rehash(c.orders[oi])
 
         # -- unigram (host + mirror) ------------------------------------
         uniq, cnts = np.unique(ids_np, return_counts=True)
@@ -2348,7 +2353,7 @@ class _LearnMixin:
                                              reduce="amin")
             rank_e = ar_e - first_i[inv_e]
             col = (self._epi_cnt[se2w] + rank_e) % ER
-            self._epi_pos[se2w, col] = ee_w
+            self._epi_pos[se2w, col] = ee_w.to(torch.int32)
             self._epi_succ[se2w, col] = ids_w.to(torch.int32)
             if LC:
                 self._epi_cert[se2w, col] = certs_d[fe2]
@@ -2686,15 +2691,42 @@ class _LearnMixin:
 
         # -- knn bank bulk write: (fp of ctx end pos-1) -> succ ids[i] --
         if c.use_knn and knn_fps:
-            P = c.knn_capacity
             fpall = torch.cat(knn_fps)                       # [n, d]
             # surprise gate: covered/unsurprising tokens don't earn a
             # bank row - keep only the newest P of the REAL writes
             keep = (s_v >= c.write_gate_knn_s if c.write_gate
                     else torch.ones(n, dtype=torch.bool, device=dev))
-            fpall = fpall[keep][-P:]
-            kk_ids = ids_t[keep][-fpall.shape[0]:]
-            kk_pos = (pos - 1)[keep][-fpall.shape[0]:]
+            fpall = fpall[keep]
+            kk_ids = ids_t[keep]
+            kk_pos = (pos - 1)[keep]
+            if c.auto_grow and self._knn_cur + fpall.shape[0] \
+                    > c.knn_capacity:
+                self.grow_knn()
+            P = c.knn_capacity
+            fpall = fpall[-P:]
+            kk_ids = kk_ids[-fpall.shape[0]:]
+            kk_pos = kk_pos[-fpall.shape[0]:]
+            if c.knn_dedup_sim > 0 and fpall.shape[0] \
+                    and self._knn_cur > 0:
+                # near-verbatim context repeats merge with the
+                # matching bank row instead of spending a new one -
+                # only drops a write whose (fp~same, succ same) is
+                # already covered; chunked sim vs the recency window
+                kb = min(int(self._knn_cur), P)
+                W = min(int(c.knn_dedup_win), kb)
+                bank = self._knn_fp[kb - W:kb].float()      # [W, d]
+                bsucc = self._knn_succ[kb - W:kb]
+                dq = torch.ones(fpall.shape[0], dtype=torch.bool,
+                                device=dev)
+                for q0 in range(0, fpall.shape[0], 4096):
+                    sm = fpall[q0:q0 + 4096].float() @ bank.T
+                    sim, ix = sm.max(dim=1)
+                    dup = (sim >= c.knn_dedup_sim) & (
+                        bsucc[ix] == kk_ids[q0:q0 + 4096])
+                    dq[q0:q0 + 4096] = ~dup
+                fpall = fpall[dq]
+                kk_ids = kk_ids[dq]
+                kk_pos = kk_pos[dq]
             if c.knn_utility_evict \
                     and self._knn_cur >= P:
                 # bank-full: this block's rows take the n coldest
@@ -2719,7 +2751,8 @@ class _LearnMixin:
                 0, kslots, fpall.to(self._knn_fp.dtype))
             self._knn_succ.index_copy_(0, kslots,
                                        kk_ids.to(torch.int32))
-            self._knn_pos.index_copy_(0, kslots, kk_pos)
+            self._knn_pos.index_copy_(
+                0, kslots, kk_pos.to(torch.int32))
             self._knn_hits.index_fill_(0, kslots, 0)
             self._knn_cur += fpall.shape[0]
             if self._gpu:
@@ -3492,6 +3525,8 @@ class _LearnMixin:
             self._rl_flush()
             self._gsd_flush()
             self._dnet_flush()
+        if learn:
+            self.maybe_grow()
         self.tag, self.learning = prev_tag, prev_learn
         return n
 

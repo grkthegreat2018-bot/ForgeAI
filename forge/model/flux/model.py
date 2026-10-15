@@ -379,8 +379,8 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
             else torch.float32, device=self._dev)
         self._knn_succ = torch.full((P + 1,), -1, dtype=torch.int32,
                                     device=self._dev)
-        self._knn_pos = torch.full((P + 1,), -1, dtype=torch.int64,
-                                   device=self._dev)
+        self._knn_pos = torch.full((P + 1,), -1, dtype=torch.int32,
+                                    device=self._dev)
         self._knn_cur = 0                   # ring cursor (host mirror)
         # retrieval-utility counter per row (topk membership) - feeds
         # knn_utility_evict; derived stat, not journaled/snapshotted
@@ -455,7 +455,7 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
             # The host _epi dict stays authoritative for snapshots.
             S, ER = self._gt.S, c.epi_row
             self._epi_pos = torch.full((S, ER), -1,
-                                       dtype=torch.int64,
+                                       dtype=torch.int32,
                                        device=self._dev)
             self._epi_cnt = torch.zeros(S, dtype=torch.int64,
                                         device=self._dev)

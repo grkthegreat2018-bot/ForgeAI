@@ -681,6 +681,146 @@ class _GPUCellTables:
         self.ttot[oi].mul_(0.5)
         self.tocc[oi].copy_(self.ttot[oi])
 
+    def grow(self, factor: int = 2) -> list[torch.Tensor]:
+        """Resize every row to ``factor * S`` slots and reinsert all
+        live entries under the new modulus - elastic capacity, the
+        alternative to decay+rehash forgetting.  Order rows migrate
+        through ``add()`` column-by-column so intra-batch conflicts
+        resolve with exactly the live-write semantics; ``ttot`` is
+        then restored to true sightings (add recomputes kept-sum).
+        Shared key rows (csem/epi) use a dedup claim loop with
+        min-load eviction identical to probe_write.
+
+        Returns ``smap``: smap[r][old_slot] -> new slot (-1 empty),
+        so model-side slot-indexed payloads (_epi_pos/_csem_rows)
+        can remap.  Caller must drop captured CUDA graphs."""
+        old_S = self.S
+        self.S = newS = old_S * int(factor)
+        dev = self.dev
+        tk, tr, tt, tc, tto, toc = (self.tkeys, self.traw, self.ttoks,
+                                   self.tcnt, self.ttot, self.tocc)
+        self.tkeys = torch.zeros((self.R, newS), dtype=torch.int64,
+                                 device=dev)
+        self.traw = torch.zeros_like(self.tkeys)
+        self.ttoks = torch.full((self.O, newS, self.M), -1,
+                                dtype=torch.int32, device=dev)
+        self.tcnt = torch.zeros((self.O, newS, self.M),
+                                dtype=torch.float32, device=dev)
+        self.ttot = torch.zeros((self.O, newS), dtype=torch.float32,
+                                device=dev)
+        self.tocc = torch.zeros((self.R, newS), dtype=torch.float32,
+                                device=dev)
+        smaps = []
+        for r in range(self.R):
+            occ = tk[r] != 0
+            smap = torch.full((old_S,), -1, dtype=torch.int64,
+                              device=dev)
+            if bool(occ.any()):
+                oi = torch.nonzero(occ).squeeze(1)
+                is_ord = r < self.O
+                pk, raw, oc = tk[r][occ], tr[r][occ], toc[r][occ]
+                rt_ = tt[r][occ] if is_ord else None
+                rc_ = tc[r][occ] if is_ord else None
+                rtt_ = tto[r][occ] if is_ord else None
+                pend = torch.arange(pk.numel(), device=dev)
+                pend = pend[torch.argsort(oc[pend], descending=True)]
+                anch = torch.zeros(newS, dtype=torch.bool, device=dev)
+                for _round in range(64):
+                    if not pend.numel():
+                        break
+                    pk_p, oc_p = pk[pend], oc[pend]
+                    s1, s2 = self._slots2(pk_p)
+                    e1 = self.tkeys[r][s1] == 0
+                    e2 = self.tkeys[r][s2] == 0
+                    o1 = self.tocc[r][s1]
+                    o2 = self.tocc[r][s2]
+                    o1 = torch.where(
+                        e1, torch.full_like(o1, -1.0), o1)
+                    o2 = torch.where(
+                        e2, torch.full_like(o2, -1.0), o2)
+                    # anchored (force-placed) rows are un-evictable
+                    o1 = torch.where(
+                        anch[s1], torch.full_like(o1, 3e38), o1)
+                    o2 = torch.where(
+                        anch[s2], torch.full_like(o2, 3e38), o2)
+                    # free slot preferred; evict only strictly weaker
+                    # occupants so eviction chains strictly decrease
+                    pick2 = (~e1 & e2) | (~e1 & ~e2 & (o2 < o1))
+                    slot = torch.where(pick2, s2, s1)
+                    free = e1 | e2
+                    beat = oc_p > torch.minimum(o1, o2).clamp(min=0)
+                    can = free | beat
+                    n_p = pend.numel()
+                    # dedup targets - pend is oc-desc so first = strongest
+                    seq = torch.arange(n_p, device=dev)
+                    srt = torch.argsort(slot * n_p + seq)
+                    slot_s = slot[srt]
+                    first = torch.ones(n_p, dtype=torch.bool,
+                                       device=dev)
+                    first[1:] = slot_s[1:] != slot_s[:-1]
+                    win_i = srt[first]
+                    win_i = win_i[can[win_i]]
+                    forced = not bool(win_i.numel())
+                    if forced:
+                        # forced placement: nobody can win a slot ->
+                        # evict min-tocc candidates unconditionally;
+                        # winners anchor so their victims cannot
+                        # re-evict them (kills the X<->V ping-pong)
+                        win_i = srt[first]
+                        tgt = slot[win_i]
+                        if bool(anch[tgt].any()):
+                            raise RuntimeError(
+                                "grow(): >2 keys on one slot pair - "
+                                "structural overflow, cannot place "
+                                "losslessly")
+                        anch[tgt] = True
+                    else:
+                        tgt = slot[win_i]
+                    loser_m = torch.ones(n_p, dtype=torch.bool,
+                                         device=dev)
+                    loser_m[win_i] = False
+                    # evicted occupants re-enter the pending pool -
+                    # nothing is dropped on growth
+                    ev_t = tgt[self.tkeys[r][tgt] != 0]
+                    nxt = [pend[loser_m]]
+                    if ev_t.numel():
+                        nk = pk.numel()
+                        pk = torch.cat([pk,
+                                        self.tkeys[r][ev_t].clone()])
+                        raw = torch.cat([raw,
+                                         self.traw[r][ev_t].clone()])
+                        oc = torch.cat([oc,
+                                        self.tocc[r][ev_t].clone()])
+                        if is_ord:
+                            rt_ = torch.cat(
+                                [rt_, self.ttoks[r][ev_t].clone()])
+                            rc_ = torch.cat(
+                                [rc_, self.tcnt[r][ev_t].clone()])
+                            rtt_ = torch.cat(
+                                [rtt_, self.ttot[r][ev_t].clone()])
+                        nxt.append(torch.arange(
+                            nk, pk.numel(), device=dev))
+                    wsrc = pend[win_i]
+                    self.tkeys[r][tgt] = pk_p[win_i]
+                    self.traw[r][tgt] = raw[wsrc]
+                    self.tocc[r][tgt] = oc[wsrc]
+                    if is_ord:
+                        self.ttoks[r][tgt] = rt_[wsrc]
+                        self.tcnt[r][tgt] = rc_[wsrc]
+                        self.ttot[r][tgt] = rtt_[wsrc]
+                    pend = (torch.cat(nxt) if len(nxt) > 1
+                            else nxt[0])
+                if pend.numel():
+                    raise RuntimeError(
+                        f"grow(): {pend.numel()} entries unplaced "
+                        f"on row {r} after 64 rounds")
+                slot_f, _ = self._probe(self.tkeys[r], pk[:oi.numel()])
+                smap[oi] = slot_f
+            smaps.append(smap)
+        self.used = [int((self.tkeys[r] != 0).sum())
+                     for r in range(self.R)]
+        return smaps
+
     def rehash(self, k: int) -> None:
         """Rebuild dropping rows whose counts all decayed to zero."""
         oi = self.kidx[k]

@@ -1384,6 +1384,15 @@ class _StateMixin:
             slot = self._knn_cur % c.knn_capacity
         if fp is None:
             fp = self._knn_fp_ctx(self._count - 1)
+        if c.knn_dedup_sim > 0 and self._knn_cur > 0:
+            kb = min(int(self._knn_cur), c.knn_capacity)
+            W = min(int(c.knn_dedup_win), kb)
+            bank = self._knn_fp[kb - W:kb].float()
+            sims = bank @ fp.float()
+            sim, ix = sims.max(dim=0)
+            if float(sim) >= c.knn_dedup_sim and \
+                    int(self._knn_succ[kb - W + int(ix)]) == int(succ):
+                return kb - W + int(ix)     # already covered - merge
         prev_pos = int(self._knn_pos[slot])
         if journal:
             if self._gpu:
@@ -1405,6 +1414,104 @@ class _StateMixin:
         if self._gpu:
             self._knncur_g += 1       # keep device cursor in sync
         return slot
+
+    # -- elastic capacity: grow-on-pressure instead of evict-on-full --
+
+    def grow_tables(self, factor: int = 0) -> dict:
+        """Double (config.grow_factor) the shared GPU cell tables and
+        remap every slot-indexed payload (epi rows, csem rows).
+        Alternative to decay+rehash forgetting - keeps all entries.
+        Drops captured CUDA graphs (buffers are reallocated)."""
+        c = self.config
+        if self._gt is None:
+            return {"grown": False}
+        f = int(factor) if factor else int(c.grow_factor)
+        if f < 2 or self._gt.S * f > int(c.grow_max_slots):
+            return {"grown": False}
+        smaps = self._gt.grow(f)
+        newS = self._gt.S
+        re_, cs_ = self._gt.row_epi, self._gt.row_csem
+        me = smaps[re_] >= 0
+        for name, fill in (("_epi_pos", -1), ("_epi_succ", -1),
+                           ("_epi_cert", 0)):
+            old = getattr(self, name)
+            new = torch.full((newS,) + tuple(old.shape[1:]), fill,
+                             dtype=old.dtype, device=old.device)
+            new[smaps[re_][me]] = old[me]
+            setattr(self, name, new)
+        cs = torch.zeros((newS, c.csem_dim),
+                         dtype=self._csem_rows.dtype, device=self._dev)
+        mc = smaps[cs_] >= 0
+        cs[smaps[cs_][mc]] = self._csem_rows[mc]
+        self._csem_rows = cs
+        c.gpu_table_slots = newS
+        self._graphs.clear()
+        return {"grown": True, "slots": newS}
+
+    def grow_knn(self, factor: int = 0) -> dict:
+        """Extend the fingerprint bank in place - rows keep their
+        indices (positional ring), only capacity changes."""
+        c = self.config
+        f = int(factor) if factor else int(c.grow_factor)
+        P = c.knn_capacity
+        if f < 2 or P * f > int(c.grow_max_knn):
+            return {"grown": False}
+        newP = P * f
+        for name, fill in (("_knn_fp", 0), ("_knn_succ", -1),
+                           ("_knn_pos", -1), ("_knn_hits", 0)):
+            old = getattr(self, name)
+            new = torch.full((newP + 1,) + tuple(old.shape[1:]), fill,
+                             dtype=old.dtype, device=old.device)
+            new[:P + 1] = old
+            setattr(self, name, new)
+        c.knn_capacity = newP
+        self._graphs.clear()
+        return {"grown": True, "capacity": newP}
+
+    def grow_ring(self, factor: int = 0) -> dict:
+        """Extend the token/hash rings - live positions migrate to
+        ``p % newcap`` slots so the horizon doubles instead of
+        wrapping into eviction."""
+        c = self.config
+        f = int(factor) if factor else int(c.grow_factor)
+        cap = c.ring_capacity
+        if f < 2 or cap * f > int(c.grow_max_ring):
+            return {"grown": False}
+        ncap = cap * f
+        lo = max(0, self._count - cap)
+        pos = np.arange(lo, self._count, dtype=np.int64)
+        nr = np.zeros(ncap, dtype=np.int32)
+        nH = np.zeros(ncap, dtype=np.uint64)
+        nr[pos % ncap] = self._ring[pos % cap]
+        nH[pos % ncap] = self._H[pos % cap]
+        self._ring, self._H = nr, nH
+        if self._gpu:
+            pg = torch.from_numpy(pos).to(self._dev)
+            nrg = torch.zeros(ncap, dtype=torch.int32, device=self._dev)
+            nHg = torch.zeros(ncap, dtype=torch.int64, device=self._dev)
+            nrg[pg % ncap] = self._ringg[pg % cap]
+            nHg[pg % ncap] = self._Hg[pg % cap]
+            self._ringg, self._Hg = nrg, nHg
+        c.ring_capacity = ncap
+        self._graphs.clear()
+        return {"grown": True, "capacity": ncap}
+
+    def maybe_grow(self) -> dict:
+        """Pressure check at bulk-block boundaries: prefer growing
+        over decay/rehash/ring-wrap while under the configured
+        ceilings.  Returns what grew (empty dict when off/full)."""
+        c = self.config
+        if not c.auto_grow:
+            return {}
+        out = {}
+        if self._gt is not None and max(self._gt.used) \
+                > 0.85 * c.gpu_table_slots:
+            out["tables"] = self.grow_tables()
+        if self._knn_cur >= c.knn_capacity:
+            out["knn"] = self.grow_knn()
+        if self._count > 0.85 * c.ring_capacity:
+            out["ring"] = self.grow_ring()
+        return {k: v for k, v in out.items() if v.get("grown")}
 
     def _epi_drop(self, key: int, pos: int) -> bool:
         """Drop one (key, ctx_end) entry - journaled (``eE``) so a
@@ -1467,7 +1574,7 @@ class _StateMixin:
                 self._epi_cnt[s] = 0
                 gt.used[oi] -= 1
                 continue
-            pos = torch.full((ER,), -1, dtype=torch.int64,
+            pos = torch.full((ER,), -1, dtype=torch.int32,
                              device=self._dev)
             succ = torch.full((ER,), -1, dtype=torch.int32,
                               device=self._dev)
@@ -1516,7 +1623,7 @@ class _StateMixin:
             self._epi_cnt[s] = 0
             gt.used[oi] -= 1
             return
-        pos = torch.full((ER,), -1, dtype=torch.int64,
+        pos = torch.full((ER,), -1, dtype=torch.int32,
                          device=self._dev)
         succ = torch.full((ER,), -1, dtype=torch.int32,
                           device=self._dev)

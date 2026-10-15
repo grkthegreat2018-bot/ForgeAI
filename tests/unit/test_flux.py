@@ -2334,6 +2334,82 @@ def test_gen_head_holds_no_params():
     assert m._Wh is None and m._Wh1 is None
 
 
+# -- elastic capacity: grow-on-pressure (auto_grow) -------------------
+
+
+def test_grow_tables_lossless(gpu_available):
+    """grow(factor=2) re-inserts every live entry under the doubled
+    modulus - no drops, no follower loss - and predictions on warm
+    contexts are identical to pre-grow."""
+    m = FluxLM(_cfg(device="cuda", cuda_primary=True,
+                    gpu_table_slots=1 << 12))
+    m.ingest(_ids("".join(
+        f"sentence number {i} has different words here. "
+        for i in range(300))), tag="t")
+    lg0 = torch.as_tensor(m._predict()).clone()
+    rep = m.grow_tables(factor=2)
+    assert rep["grown"] and rep["slots"] == (1 << 13)
+    lg1 = torch.as_tensor(m._predict())
+    assert torch.allclose(lg0, lg1, atol=1e-4)
+    # spot-check: every probed occupied slot's followers survived
+    gt = m._gt
+    occ = (gt.tkeys[gt.kidx[3]] != 0).sum()
+    assert int(occ) > 10            # table actually populated
+    for r in range(gt.R):
+        n = int((gt.tkeys[r] != 0).sum())
+        assert n == gt.used[r]
+
+
+def test_grow_knn_and_ring(gpu_available):
+    """knn/ring growth preserves rows and positions; a model that
+    outgrows capacity keeps learning instead of evicting."""
+    m = FluxLM(_cfg(device="cuda", cuda_primary=True,
+                    knn_capacity=64, ring_capacity=256))
+    m.ingest(_ids("streaming content for the knn bank. " * 10), tag="t")
+    P0, cap0 = m.config.knn_capacity, m.config.ring_capacity
+    rep = m.grow_knn(factor=2)
+    assert rep["grown"] and m.config.knn_capacity == P0 * 2
+    live = int((m._knn_pos[:P0] >= 0).sum())
+    assert live == min(P0, int(m._knn_cur))
+    ring0 = m._ring.copy()
+    rep = m.grow_ring(factor=2)
+    assert rep["grown"] and m.config.ring_capacity == cap0 * 2
+    # live positions preserved under the new modulus
+    ncap = m.config.ring_capacity
+    for p in range(max(0, m._count - cap0), m._count):
+        assert int(m._ring[p % ncap]) == int(ring0[p % cap0])
+
+
+def test_auto_grow_under_pressure(gpu_available):
+    """auto_grow fires inside ingest: a too-small table grows instead
+    of decay+rehash forgetting rows."""
+    m = FluxLM(_cfg(device="cuda", cuda_primary=True,
+                    gpu_table_slots=1 << 10, auto_grow=True,
+                    grow_max_slots=1 << 14))
+    m.ingest(_ids("pressure filler text goes here " * 80), tag="t")
+    assert m.config.gpu_table_slots > (1 << 10)
+
+
+def test_knn_dedup_merges_repeats(gpu_available):
+    """knn_dedup_sim merges near-verbatim context writes: with the
+    surprise gate off, re-ingesting the same text doubles a plain
+    model's bank rows but adds almost none under dedup - retention
+    hygiene without losing coverage."""
+    text = "the same paragraph about shared context windows. " * 6
+    kw = dict(device="cuda", cuda_primary=True, write_gate=False)
+    m_d = FluxLM(_cfg(knn_dedup_sim=0.9, knn_dedup_win=4096, **kw))
+    m_p = FluxLM(_cfg(**kw))
+    for m in (m_d, m_p):
+        m.ingest(_ids(text), tag="a")
+        n0 = int(m._knn_cur)
+        m.ingest(_ids(text), tag="b")   # verbatim repeat
+        m._dedup_delta = int(m._knn_cur) - n0
+    assert m_p._dedup_delta > 0
+    assert m_d._dedup_delta < max(4, m_p._dedup_delta // 4)
+    # first ingest still wrote rows - dedup doesn't suppress novel text
+    assert int(m_d._knn_cur) > 0
+
+
 # -- gsyn_deep: separate nonlinear (TTT-MLP) memory channel ----------
 
 

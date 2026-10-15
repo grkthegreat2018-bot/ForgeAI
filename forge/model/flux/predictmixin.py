@@ -434,7 +434,8 @@ class _PredictMixin:
             pk = self._epi_hash(dk.reshape(1))
             se, fe = self._epi_probe(pk)
             se = se.reshape(1)
-        pos_row = self._epi_pos.index_select(0, se).squeeze(0)  # [ER]
+        pos_row = self._epi_pos.index_select(
+            0, se).squeeze(0).long()                          # [ER]
         if self._use_triton:
             # one launch evaluates all ER cells - seed check, backward
             # extension, cert grading.  Per-cell mass is staged, then
