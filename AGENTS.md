@@ -1457,13 +1457,19 @@ construction — snapshot is a hand-built dict).
   the RoPE rotations they were written at (StreamingLLM semantics).
 
 Measured (docs190k, Qwen-BPE held slice):
-`flux-only 6.69 | teacher-only ~4.33 | HYBRID 4.5457 NLL / 0.2825
-top1 | Qwen-0.5B reference 4.298` — mixture beats the teacher alone
-at equal context (4.317 vs 4.330 on the 2K-token probe).  Bug chain
+`flux-only 6.69 | teacher-only ~4.33 | HYBRID 4.5543 NLL / 0.2852
+top1 | Qwen-0.5B reference 4.298` — the floor is real; recall rides
+on top via confident-memory arbitration.  Blend form:
+`row += w_t*(1-gate)*(lp - row)`; gate = `_dconf_g` (any order cell
+clearing the adaptive-read evidence bar = verbatim context → the
+teacher yields; gated positions score NLL 2.10 vs 5.70 ungated).
+Verbatim generation recalls trained facts (" 4242 and never 777")
+that teacher-only and memory-only both miss.  Bug chain
 to that result (each measured): log-vs-prob rewards, `_pmask`
 abstention overwriting real_r, prefix-vs-tail crop, RoPE position
 corruption past crop, missing sinks, len*w clip flattening teacher
-ordering (NLL 62.9), lp-uni reference leaking mass (mixture 6.47).
+ordering (NLL 62.9), lp-uni reference leaking mass (mixture 6.47),
+free additive lifts on ungated text net-negative (+1.3).
 `teacher_decode=False` skips the HF forward per generated token
 (~20 tok/s cap) — memory-only decode stays ~200-990.
 Tests: `test_flux_teacher.py` (7: lift math, abstention, CPU abstain,
