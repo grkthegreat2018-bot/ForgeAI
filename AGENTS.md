@@ -835,13 +835,16 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   `web_primitives._ua_for` sends a descriptive BOT_UA to
   *.wikipedia.org/wiktionary.org/etc; also MediaWiki REST paths need
   `_` for spaces (`+` 404s).  Tests: `tests/unit/test_flux_goals.py`.
-  Sandbox surface (afcc357): `file <path>` = READ-ONLY local file tool
-  — the loop may read anything incl. its own source (exact-component
-  denylist for secrets/envs, 256KB cap, works offline; `flux_file_root`
-  config).  `note <text>` = the ONLY model-writable tool — appends to
-  one fixed journal path (`flux_note_file`, default
-  `status_dir/flux_notes.md`), so model text cannot redirect writes
-  outside the sandbox.  Self-posed goals (2275df2): `flux_self_frac`
+  Sandbox surface (afcc357/60955d3): `file <path>` = READ-ONLY local
+  file tool — the loop may read anything incl. its own source
+  (exact-component denylist for secrets/envs, 256KB cap, works
+  offline; `flux_file_root` config).  `note <text>` appends to one
+  fixed journal path (`flux_note_file`, default
+  `status_dir/flux_notes.md`); `write <relpath>::<text>` appends a
+  line under `flux_sandbox_dir` (default `status_dir/flux_sandbox`)
+  — resolved path must stay inside the jail (no absolute paths, no
+  `..`, deny components blocked), so model text can never redirect a
+  write outside the sandbox.  Self-posed goals (2275df2): `flux_self_frac`
   of each epoch's tasks are MODEL-authored questions run through the
   tool path, scored by extractive grounding in the real observation
   (`_flux_score_self` — no canonical key); teach-fail internalizes the

@@ -315,3 +315,27 @@ normalization if recall quality suffers).
 - Still missing vs spec: model self-prompting (AZR proposal machinery
   is transformer-only), write-to-sandbox file editing, stop-on-
   advancement, execution sandbox for model code.
+
+### Self-speculative decode (commit 37b6fb0)
+- generate(speculate=K): read-only draft rollout (_draft_tokens —
+  virtual suffix hashes over order cells, deepest-hit argmax
+  follower), learn row via ONE _fused_seq, longest verified prefix,
+  revert+relearn tail. GPU+learn+argmax only.
+- Bit-exactness VERIFIED on GPU: speculate=6 == sequential argmax
+  (4 tests green). stream len exact (prompt+emitted, no orphan
+  learns).
+- Notable: bc blocks are all-or-nothing so rejected tails revert
+  whole row + relearn accepted prefix (extra pass, bounded).
+- Budget cap: row len <= max_new-_step prevents output overshoot.
+- Throughput estimate ~aK+1 tokens/pass vs 1 — measures vs GPU when
+  15M run frees the card.
+
+### Sandbox-jailed write tool (commit 60955d3)
+- `write <relpath>::<text>` appends under flux_sandbox_dir
+  (status_dir/flux_sandbox) — resolved path must stay inside jail
+  (absolute/.. rejected, deny components blocked).  Closes the
+  read-anything/write-sandbox contract for code experiments.
+- Remaining spec gaps (documented in AGENTS.md): code-execution
+  sandbox for model code, stop-on-proven-advancement sentinel.
+- NOTE: T:-phase budget is 14 tokens — long write calls truncate;
+  short writes work, long ones need a bump if write usage grows.
