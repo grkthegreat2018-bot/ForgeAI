@@ -115,6 +115,7 @@ class ReverseMem:
 
 def generate_rerank(model, rev: ReverseMem, prompt_ids, max_new: int = 64,
                     k: int = 4, learn: bool = True, tag: str = "gen",
+                    margin: float | None = None,
                     generator=None) -> dict:
     """FluxLM greedy decode with backward-consistency rerank.
 
@@ -124,23 +125,33 @@ def generate_rerank(model, rev: ReverseMem, prompt_ids, max_new: int = 64,
     forwards/token stays 1.0 — the mechanism is free vs K model
     forwards on a transformer.
 
+    ``margin``: if set, rerank only when the mixture is contested
+    (top1-top2 logp gap < margin) — the consistency/accuracy tension
+    says consistency pressure should not override a confident
+    prediction, only break ties.
+
     Returns dict(ids=generated, corrections=n_swapped, steps=n).
     """
     import torch
     model.ingest([int(t) for t in prompt_ids], tag=tag, learn=learn)
     rev.feed(prompt_ids)
     out: list[int] = []
-    corrections = 0
+    corrections = contested = 0
     for _ in range(max_new):
         lg = torch.as_tensor(model._predict()).float()
         k_c = min(k, lg.numel())
         topv, topi = lg.topk(k_c)
         fwd = torch.log_softmax(topv, dim=-1)
         last = out[-1] if out else int(prompt_ids[-1])
-        scores = [float(fwd[j]) + rev.alpha * rev.rev_logp(int(topi[j]),
-                                                         last)
-                  for j in range(k_c)]
-        best = int(scores.index(max(scores)))
+        if margin is not None and k_c > 1 \
+                and float(fwd[0] - fwd[1]) >= margin:
+            best = 0                      # confident -> trust mixture
+        else:
+            contested += 1
+            scores = [float(fwd[j])
+                      + rev.alpha * rev.rev_logp(int(topi[j]), last)
+                      for j in range(k_c)]
+            best = int(scores.index(max(scores)))
         x = int(topi[best])
         if best != 0:
             corrections += 1
@@ -150,7 +161,8 @@ def generate_rerank(model, rev: ReverseMem, prompt_ids, max_new: int = 64,
         else:
             model._push(x)
         rev.feed_one(x)
-    return {"ids": out, "corrections": corrections, "steps": max_new}
+    return {"ids": out, "corrections": corrections,
+            "contested": contested, "steps": max_new}
 
 
 def joint_prev_nll(model, rev: ReverseMem, ids) -> dict:

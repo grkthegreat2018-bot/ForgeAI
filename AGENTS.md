@@ -1215,6 +1215,15 @@ Measured (two corpora, `scripts/exp_fluxrev.py`):
   predictive NLL — o1 maximizes self-consistency while minimizing
   held-out accuracy.  Consistency is a generation regularizer, not a
   free accuracy win.
+- Margin-gated rerank probe (.tmp/rev_margin_probe.py): unconditional
+  rev-rerank at a=1 reproduces o1's consistency win EXACTLY (gen
+  prev_nll 3.049→1.335, 42/64 corrections) — but margin gating kills
+  it (2.89+): FluxLM's degeneracy lives at CONFIDENT steps (83%
+  uncontested), not where the mixture is uncertain.  Deeper
+  implication: Hedge weights optimized for next-token rewards are not
+  optimal generation weights — a channel mediocre at prediction can be
+  exactly what decode needs.  Two-regime weighting (predict-time vs
+  generate-time) is the open upgrade.
 
 ## Build & Test Commands
 
