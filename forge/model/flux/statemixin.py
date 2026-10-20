@@ -1531,8 +1531,14 @@ class _StateMixin:
             for k, b in self._banks.items():
                 over = len(b) - c.bank_rows_cap
                 if over > 0:
-                    b.drop_rows(b.coldest(over))
-                    rep["purged"] += int(over)
+                    if b.disk_dir is not None:
+                        # coldest rows seal to .fluxbank shards -
+                        # they still vote through bloom-gated probes
+                        rep["spilled"][f"{k}disk"] = \
+                            b.spill_to_disk(over)
+                    else:
+                        b.drop_rows(b.coldest(over))
+                        rep["purged"] += int(over)
         return rep
 
     def grow_knn(self, factor: int = 0) -> dict:

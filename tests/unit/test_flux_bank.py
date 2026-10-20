@@ -143,3 +143,44 @@ def test_bank_drop_coldest():
     assert len(b) == 5
     assert all(b.cell(k) is None for k in range(5))
     assert all(b.cell(k) is not None for k in range(5, 10))
+
+
+def test_disk_shard_spill_and_probe(tmp_path):
+    """Rows sealed to disk still answer cell() - RAM is freed but
+    memory survives as files (the frozen-cost weight tier)."""
+    b = FluxBank(order=2, M=4, disk_dir=str(tmp_path), shard_rows=8)
+    b.add_rows(np.arange(20), np.arange(20),
+               np.tile(np.array([[5, -1, -1, -1]]), (20, 1)).astype(np.int32),
+               np.tile(np.array([[3.0, 0, 0, 0]]), (20, 1)).astype(np.float32),
+               np.full(20, 3.0), np.arange(20, dtype=np.float32),
+               np.zeros(20, dtype=np.int64))
+    n = b.spill_to_disk(12)
+    assert n == 12 and len(b) == 8 and b.disk_rows == 12
+    # coldest (occ 0..11) went to disk; RAM holds 12..19
+    assert b.cell(3) == ({5: 3.0}, 3.0)      # disk hit
+    assert b.cell(15) == ({5: 3.0}, 3.0)     # ram hit
+    assert b.cell(999) is None               # bloom clean-miss
+    # reload index from a fresh bank = post-restart recovery
+    b2 = FluxBank(order=2, M=4, disk_dir=str(tmp_path))
+    assert b2.load_disk_index() == 12
+    assert b2.cell(7) == ({5: 3.0}, 3.0)
+
+
+def test_disk_spill_via_regulate(tmp_path):
+    """regulate() prefers disk shards over purging when bank_dir is
+    set - memory is demoted to files, never dropped."""
+    m = _mk(bank_enable=True, bank_dir=str(tmp_path),
+            bank_rows_cap=4)
+    _stream(m, [i % 40 for i in range(200)])
+    m._spill_order(2, 24)                   # RAM bank over cap
+    rep = m.regulate()
+    b = m._banks[2]
+    assert len(b) <= 4 and b.disk_rows >= 20
+    assert b._shards and list(tmp_path.glob("*.fluxbank"))
+    # a shard row still answers through the order channel
+    k0 = int(b._load_shard(0).keys[0])
+    cell, tot = b.cell(k0)
+    assert cell and tot > 0
+    p, awake = m._channel_prob(f"o2", next(iter(cell)), {2: k0},
+                             None, float(m._total) + 64)
+    assert awake and p > 0

@@ -116,7 +116,8 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
         # through the same order-channel prob (see _cold_cell).
         _bw = c.bank_row_width or c.gpu_row_width
         self._banks: dict[int, "FluxBank"] = (
-            {k: FluxBank(k, _bw) for k in c.orders}
+            {k: FluxBank(k, _bw, disk_dir=c.bank_dir)
+             for k in c.orders}
             if c.bank_enable else {})
         # sparse-tap tables: same cell semantics as _tables but keyed
         # by the taps tuple (noncontiguous suffix contexts)

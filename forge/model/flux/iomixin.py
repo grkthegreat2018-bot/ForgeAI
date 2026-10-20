@@ -499,6 +499,11 @@ class _IOMixin:
                 b._ix = {int(kk): i
                          for i, kk in enumerate(keys)}
                 model._banks[int(k)] = b
+        # disk-tier shards are standalone artifacts - reindex from
+        # bank_dir rather than embedding shard contents in snapshots
+        for b in model._banks.values():
+            if b.disk_dir is not None:
+                b.load_disk_index()
         # GPU backend: prefer decoded triplets; fall back to converting
         # CPU dicts (recompute pair keys + rebuild tot slots)
         if model._gpu:
