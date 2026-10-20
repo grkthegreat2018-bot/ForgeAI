@@ -222,6 +222,10 @@ class _IOMixin:
             "regime": self._regime,
             "channels": list(self.channels),
             "uni": self._uni,
+            "uniL": (self._uniL if self._uniL is not None else None),
+            "totalL": self._totalL,
+            "dom": self._dom_id,
+            "dom_score": self._dom_score,
             "log_uni_num": self._log_uni_num.cpu(),
             "total": self._total,
             "tables": self._tables if not self._gpu else {},
@@ -437,6 +441,26 @@ class _IOMixin:
             model._reg_used_g.fill_(model._regime)
         model._uni = state["uni"]
         model._total = state["total"]
+        # domain lanes (older snapshots lack them -> lane state zeros)
+        if state.get("uniL") is not None:
+            model._uniL = np.asarray(state["uniL"], dtype=np.float64)
+            if model._uniL.shape != (
+                    max(1, len(model.config.domains)),
+                    model.vocab_size):
+                model._uniL = np.zeros(
+                    (max(1, len(model.config.domains)),
+                     model.vocab_size), dtype=np.float64)
+        model._totalL = np.asarray(
+            state.get("totalL",
+                      np.zeros(max(1, len(model.config.domains)))),
+            dtype=np.float64)
+        model._dom_id = int(state.get("dom", 0))
+        model._dom_score = np.asarray(
+            state.get("dom_score",
+                      np.zeros(max(1, len(model.config.domains)))),
+            dtype=np.float64)
+        if model._gpu:
+            model._dommix_g.copy_(model._dommask_g[model._dom_id])
         model._log_uni_num = state.get(
             "log_uni_num",
             np.log(state["uni"] + model.config.uni_alpha))
@@ -682,8 +706,13 @@ class _IOMixin:
                 model._ring.astype(np.int32)).to(model._dev)
             model._Hg = torch.from_numpy(
                 model._H.view(np.int64)).to(model._dev)
+            # lane-aware unigram mirror: _unig = ACTIVE lane's counts
+            src_uni = (model._uniL[model._dom_id]
+                       if model._uniL is not None
+                       and model._dom_id > 0
+                       else model._uni)
             model._unig = torch.from_numpy(
-                model._uni.astype(np.float32)).to(model._dev)
+                src_uni.astype(np.float32)).to(model._dev)
             model._seen_g.fill_(-10 ** 9)
             for t, p in model._last_seen.items():
                 model._seen_g[t] = p
@@ -692,6 +721,10 @@ class _IOMixin:
             model._prompt_start = model._count
             model._prompt_g.fill_(model._count)
             model._tot_g.fill_(float(model._total))
+            model._totL_g.fill_(
+                float(model._totalL[model._dom_id])
+                if model._uniL is not None and model._dom_id > 0
+                else float(model._total))
             model._wg = torch.from_numpy(
                 model._w.astype(np.float64)).to(model._dev)
             # derived A projections/norms - recompute once (the same

@@ -119,6 +119,38 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
             {k: FluxBank(k, _bw, disk_dir=c.bank_dir)
              for k in c.orders}
             if c.bank_enable else {})
+        # domain lanes: dommask[k] is XORed into the raw order-k key
+        # so shared low-order contexts ("the" in code vs prose) store
+        # followers in different cells of the same table.  _dom_id =
+        # current lane; _dom_score = router EMA over probe hits.
+        from .helpers import _mix64_np as _mxn
+        _dords = tuple(c.domain_orders) or tuple(
+            k for k in c.orders if k <= 4)
+        self._dom_orders = frozenset(_dords)
+        self._dom_ix = {k: i for i, k in enumerate(c.orders)}
+        D = max(1, len(c.domains))
+        self._dom_id = 0
+        self._dom_score = np.zeros(D, dtype=np.float64)
+        self._dom_n = 0                # probes since last route pick
+        # lane'd unigram priors: shared contexts are domain-masked, but
+        # _uni pooling would still dilute prose priors 16x under a
+        # code-heavy stream - per-lane counts fix the escape prior.
+        # Lane 0 (shared) reports the global tables instead.
+        self._uniL = (np.zeros((D, V), dtype=np.float64)
+                      if c.domains else None)
+        self._totalL = np.zeros(D, dtype=np.float64)
+        # mask row per (lane, order); lane 0 mask = 0 -> shared lane
+        # keeps raw keys (back-compat with untagged ingest)
+        self._dommask_np = np.zeros(
+            (D, len(c.orders)), dtype=np.uint64)
+        if c.domains:
+            for d in range(1, D):
+                for oi, k in enumerate(c.orders):
+                    if k in self._dom_orders:
+                        self._dommask_np[d, oi] = _mxn(
+                            np.uint64(k)
+                            * np.uint64(0x9E3779B97F4A7C15)
+                            + np.uint64(0xD0A1E5 ^ d))
         # sparse-tap tables: same cell semantics as _tables but keyed
         # by the taps tuple (noncontiguous suffix contexts)
         self._ptabs: dict[tuple, dict[int, dict[int, float]]] = {
@@ -467,6 +499,17 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
                 dtype=torch.int64, device=self._dev)
             self._orders_g = torch.tensor(
                 list(c.orders), dtype=torch.int64, device=self._dev)
+            # domain-lane key mask [O] - a graph input tensor like
+            # _pos_g: replays read current contents, so the active lane
+            # is swapped by one H2D copy between steps (0 = shared lane)
+            self._dommix_g = torch.zeros(
+                len(c.orders), dtype=torch.int64, device=self._dev)
+            self._dommask_g = torch.from_numpy(
+                self._dommask_np.astype(np.int64)).to(self._dev)
+            # active-lane unigram denominator mirror - swapped on
+            # _set_domain like _dommix_g, incremented per step in-graph
+            self._totL_g = torch.zeros((), dtype=torch.float64,
+                                       device=self._dev)
             # gv device probes: static class membership (padded to
             # gen_cls_cap per class) - vocab property, not learned state
             _cc = max(1, int(c.gen_cls_cap))

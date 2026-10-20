@@ -73,7 +73,7 @@ class _LearnMixin:
         cs, cf = slot1[gt.row_csem].reshape(1), \
             found1[gt.row_csem].reshape(1)
 
-        denom = self._tot_g + c.uni_alpha * V
+        denom = self._totL_g + c.uni_alpha * V
         uni_x = (self._unig.index_select(0, x.reshape(1))
                  .squeeze(0) + c.uni_alpha) / denom
 
@@ -282,6 +282,7 @@ class _LearnMixin:
         self._unig.index_add_(
             0, x.reshape(1), torch.ones(1, device=dev))
         self._tot_g += 1.0
+        self._totL_g += 1.0
         self._log_uni_num.index_copy_(
             0, x.reshape(1),
             torch.log(self._unig.index_select(0, x.reshape(1))
@@ -802,7 +803,7 @@ class _LearnMixin:
             # implied channel dist p(v) âˆ p_uni(v)Â·exp(Â±lift(v)):
             # reward = p_uni(x)Â·exp(f_x)/Z, Z = 1 + Î£_v p_uniÂ·(e^fâˆ’1)
             # over the live span window (unseen tokens contribute 0).
-            denom_v = (self._tot_g + c.uni_alpha * self.vocab_size)
+            denom_v = (self._totL_g + c.uni_alpha * self.vocab_size)
             uni_pv = (self._unig + c.uni_alpha) / denom_v
             ages_v = (end - self._seen_g)
             rec_v = torch.where(
@@ -1235,6 +1236,9 @@ class _LearnMixin:
         self._w = w_row
         self._uni[x] += 1.0
         self._total += 1
+        if self._uniL is not None:
+            self._uniL[self._dom_id, x] += 1.0
+            self._totalL[self._dom_id] += 1
         prev_seen = bi[O + 7]
         prev_j = int(prev_seen) if prev_seen >= 0 else -1
         self._last_seen[x] = end
@@ -1515,6 +1519,7 @@ class _LearnMixin:
 
     def _learn_token_gpu(self, x: int) -> None:
         """Single-token learn - fused step (logits discarded)."""
+        self._dom_tick(x)
         self._fused_step(x)
 
     def _learn_token(self, x: int) -> None:
@@ -1522,6 +1527,7 @@ class _LearnMixin:
         if self._gpu:
             return self._learn_token_gpu(x)
         c = self.config
+        self._dom_tick(x)
         end = self._count - 1               # context ends just before x
         keys = self._keys_at(end) if end >= self._ep_start else {}
         pkeys = {j: self._gap_key(taps, end)
@@ -1645,6 +1651,9 @@ class _LearnMixin:
         # unigram
         self._uni[x] += 1.0
         self._total += 1
+        if self._uniL is not None:
+            self._uniL[self._dom_id, x] += 1.0
+            self._totalL[self._dom_id] += 1
         self._log_uni_num[x] = math.log(self._uni[x] + c.uni_alpha)
         self.journal.append(("u", x))
 
@@ -1896,6 +1905,7 @@ class _LearnMixin:
         slots = pos % cap
 
         blk = {"tag": self.tag, "n": n, "count": base,
+               "dom": self._dom_id if self._uniL is not None else 0,
                "ep_start": self._ep_start,
                "c": self._c.clone(), "proto": self._proto.clone(),
                "c2": self._c2.clone(),
@@ -1980,7 +1990,9 @@ class _LearnMixin:
         O = len(c.orders)
         kvec = self._orders_g                                     # [O]
         i64 = torch.arange(n, dtype=torch.int64, device=dev)
-        denom0 = float(self._total) + c.uni_alpha * V
+        denom0 = (float(self._totalL[self._dom_id])
+                  if self._uniL is not None and self._dom_id > 0
+                  else float(self._total)) + c.uni_alpha * V
         uni_pre = (self._unig[ids_t] + c.uni_alpha) / denom0  # [n]
         w_o = torch.from_numpy(
             self._w[:O].astype(np.float32)).to(dev)[:, None]
@@ -2063,6 +2075,9 @@ class _LearnMixin:
             kk_s = Hfull[(posb - base + Kmax)] - Hfull[
                 (posb - kvec[:, None] - base + Kmax).clamp(min=0)] \
                 * self._pows_g[kvec][:, None]                     # [O,m]
+            # domain lane: mask folded into the raw key, so probe,
+            # bloom, write, and the journaled kk_all all agree
+            kk_s = kk_s ^ self._dommix_g[:, None]
             pk_s = _mix64(kk_s * _MIX1
                           + self._gt._salt[:O, None])
             rows_f = self._gt._ordx[:, None].expand(O, m) \
@@ -2279,6 +2294,9 @@ class _LearnMixin:
         uniq, cnts = np.unique(ids_np, return_counts=True)
         self._uni[uniq] += cnts
         self._total += n
+        if self._uniL is not None:
+            self._uniL[self._dom_id, uniq] += cnts
+            self._totalL[self._dom_id] += n
         # unique indices - a plain index_add_ is exact (each dst row
         # touched once); scattering ones over raw ids_t would race
         # float atomics and round differently across runs
@@ -3381,6 +3399,10 @@ class _LearnMixin:
         # device scalars + hedge weights mirrors
         self._pos_g.fill_(self._count)
         self._tot_g.fill_(float(self._total))
+        self._totL_g.fill_(
+            float(self._totalL[self._dom_id])
+            if self._uniL is not None and self._dom_id > 0
+            else float(self._total))
         self._wg.copy_(torch.from_numpy(self._w).to(dev))
         self._hmg.fill_(self._hedge_mix)
         if c.cond_hedge:
@@ -3570,8 +3592,14 @@ class _LearnMixin:
             + (1 - c.topic_decay) * lamj[:, None] * csum
         return torch.cat([c20[None].double(), C])
 
-    def ingest(self, ids, tag: str | None = None, learn: bool = True) -> int:
-        """Stream-train on token ids (instant, hot). Returns #tokens."""
+    def ingest(self, ids, tag: str | None = None, learn: bool = True,
+               domain=None) -> int:
+        """Stream-train on token ids (instant, hot). Returns #tokens.
+
+        ``domain`` (name or id) selects the domain lane: order keys
+        in ``domain_orders`` are masked per-lane so shared contexts
+        in different domains store followers in different cells.
+        A tag equal to a lane name selects it implicitly."""
         if isinstance(ids, torch.Tensor):
             ids = ids.reshape(-1).tolist()
         self._prompt_start = self._count
@@ -3581,6 +3609,9 @@ class _LearnMixin:
         if tag is not None:
             self.tag = tag
         self.learning = learn
+        if self.config.domains and (domain is not None
+                                    or tag in self.config.domains):
+            self._set_domain(self._resolve_domain(domain, tag))
         if self.learning:
             self._rl_session = {}       # one "rB" entry per call
             self._gsd_session = {}      # one "gd" entry per call
@@ -4348,6 +4379,7 @@ class _LearnMixin:
                         kk[oi][ends - k + 1 < ring_floor] = 0
                     kk_t = torch.from_numpy(
                         kk.astype(np.int64)).to(dev)          # [O, m]
+                    kk_t = kk_t ^ self._dommix_g[:, None]     # domain
                     pk_all = _mix64(kk_t * _MIX1
                                     + self._gt._salt[
                                         :len(c.orders), None])

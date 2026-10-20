@@ -1111,7 +1111,7 @@ class _PredictMixin:
         V = self.vocab_size
         gt = self._gt
         O = gt.O
-        denom = (self._tot_g + c.uni_alpha * V).float()
+        denom = (self._totL_g + c.uni_alpha * V).float()
         uni_pv = (self._unig + c.uni_alpha) / denom
         log_uni = self._log_uni_num - torch.log(denom)
         logits = log_uni.clone()

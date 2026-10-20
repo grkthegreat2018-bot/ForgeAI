@@ -22,10 +22,13 @@ V = 151936
 
 
 def pool_bytes():
+    eval_list = sorted(
+        (ROOT / "docs" / "research").glob("*.md")) + \
+        [ROOT / "docs" / "CODEBASE_CRITIQUE_2026-09-16.md"]
     docs = b""
-    for p in sorted((ROOT / "docs" / "research").glob("*.md")) + \
-            [ROOT / "docs" / "CODEBASE_CRITIQUE_2026-09-16.md"]:
+    for p in eval_list:                  # original order = same held
         docs += p.read_bytes()
+    eval_files = {p.resolve() for p in eval_list}
     tr_docs, held = docs[:-8000], docs[-8000:]
     pool = bytearray(tr_docs)
     for d in ("forge", "scripts", "tests", "docs", "research"):
@@ -36,13 +39,49 @@ def pool_bytes():
             if "venv" in r or "__pycache__" in r:
                 continue
             for f in fs:
-                if f.endswith((".py", ".md", ".txt")):
-                    pool += (Path(r) / f).read_bytes()
+                if not f.endswith((".py", ".md", ".txt")):
+                    continue
+                fp = (Path(r) / f).resolve()
+                if fp in eval_files:      # held-out source: no leak
+                    continue
+                pool += fp.read_bytes()
     return tr_docs, bytes(pool), held
 
 
-def tf(model_proto, ids):
+def pool_segments(tok):
+    """Same pool but as (ids, domain) segments - .py -> "code",
+    .md/.txt -> "prose" - for the domain-lane run."""
+    tr_docs, _pool, held = pool_bytes()
+    eval_list = sorted(
+        (ROOT / "docs" / "research").glob("*.md")) + \
+        [ROOT / "docs" / "CODEBASE_CRITIQUE_2026-09-16.md"]
+    eval_files = {p.resolve() for p in eval_list}
+    segs = [(tok(tr_docs.decode("utf-8", "ignore"))["input_ids"],
+             "prose")]
+    for d in ("forge", "scripts", "tests", "docs", "research"):
+        base = ROOT / d
+        if not base.is_dir():
+            continue
+        for r, _dirs, fs in os.walk(base):
+            if "venv" in r or "__pycache__" in r:
+                continue
+            for f in fs:
+                fp = (Path(r) / f).resolve()
+                if not f.endswith((".py", ".md", ".txt")) \
+                        or fp in eval_files:
+                    continue
+                dom = "code" if f.endswith(".py") else "prose"
+                ids = tok(fp.read_bytes().decode("utf-8", "ignore")
+                          )["input_ids"]
+                segs.append((ids, dom))
+    return segs, held
+
+
+def tf(model_proto, ids, w_override=None):
     m = model_proto.clone()
+    if w_override is not None:
+        m._w = w_override.copy()
+        m._wg.copy_(torch.from_numpy(w_override).to(m._dev))
     hit = n = 0
     nll = 0.0
     m._learn_token(ids[0])
@@ -56,7 +95,7 @@ def tf(model_proto, ids):
     return hit / n, nll / n
 
 
-def run(name, train_ids, held_ids, **kw):
+def run(name, train_ids, held_ids, ret=None, **kw):
     torch.cuda.reset_peak_memory_stats()
     t0 = time.perf_counter()
     cfg = dict(vocab_size=V, device="cuda", cuda_primary=True,
@@ -77,11 +116,16 @@ def run(name, train_ids, held_ids, **kw):
     print(f"[fluxscale] {name}: nll={nll:.4f} top1={top1:.4f} "
           f"vram={vram:.2f}GB ingest={t1-t0:.0f}s "
           f"train={len(train_ids)}", flush=True)
-    del m
-    torch.cuda.empty_cache()
+    if ret is not None:
+        ret["m"], ret["w"] = m, m._w.copy()
+    else:
+        del m
+        torch.cuda.empty_cache()
 
 
 def main():
+    phases = sys.argv[1].split(",") if len(sys.argv) > 1 \
+        else ["all"]
     _hf, tok = load_hf()
     tr_docs, pool, held_b = pool_bytes()
     held = tok(held_b.decode("utf-8", "ignore"))["input_ids"]
@@ -90,11 +134,66 @@ def main():
     torch.cuda.empty_cache()
 
     tr_ids = tok(tr_docs.decode("utf-8", "ignore"))["input_ids"]
-    run("docs190k", tr_ids, held)
+    dret = {}
+    if "base" in phases or "all" in phases:
+        run("docs190k", tr_ids, held, ret=dret)
     pool_ids = tok(pool.decode("utf-8", "ignore"))["input_ids"]
     print(f"[fluxscale] pool={len(pool_ids)} bpe-tokens", flush=True)
-    run("pool_bigslots", pool_ids, held,
-        gpu_table_slots=1 << 20)
+    if "pool" in phases or "all" in phases:
+        pret = {}
+        run("pool_bigslots", pool_ids, held, ret=pret,
+            gpu_table_slots=1 << 20)
+        # attribute the pool regression: eval the pool model under
+        # DOCS-adapted hedge weights and under uniform weights -
+        # isolates w-mismatch (shared state) from cell pollution.
+        import numpy as np
+        pm = pret["m"]
+        if dret:
+            for tag, w in (("docs_w", dret["w"]),
+                           ("unif_w", np.full_like(
+                               pm._w, 1.0 / len(pm._w)))):
+                t1, nl = tf(pm, held, w_override=w)
+                print(f"[fluxscale] pool_bigslots+{tag}: nll={nl:.4f} "
+                      f"top1={t1:.4f}", flush=True)
+        # recency probe: keep ingesting docs over the pool model -
+        # does ordering (docs-last) recover?
+        pm.ingest(tr_ids, tag="recall")
+        t1, nl = tf(pm, held)
+        print(f"[fluxscale] pool+docs_last: nll={nl:.4f} "
+              f"top1={t1:.4f}", flush=True)
+        del pm
+        torch.cuda.empty_cache()
+    if "dom" not in phases and "all" not in phases:
+        print("[fluxscale] done")
+        return
+
+    # domain lanes: same pool, per-file domain tags - low-order cells
+    # stop being shared across domains, so code mass can't dilute
+    # prose contexts.
+    segs, _held = pool_segments(tok)
+    torch.cuda.reset_peak_memory_stats()
+    t0 = time.perf_counter()
+    m = FluxLM(FluxConfig(
+        vocab_size=V, device="cuda", cuda_primary=True,
+        sparse_taps=(), class_orders=(), word_orders=(),
+        hybrid_taps=(), use_knn=False,
+        orders=(1, 2, 3, 4, 6, 8, 12, 16, 24, 32),
+        gpu_table_slots=1 << 20,
+        domains=("shared", "code", "prose"),
+        domain_route_every=16))
+    n_seg = 0
+    for ids, dom in segs:
+        m.ingest(ids, tag=dom, domain=dom)
+        n_seg += len(ids)
+    t1s = time.perf_counter()
+    t1, nl = tf(m, held)
+    vr = torch.cuda.max_memory_allocated() / 1e9
+    print(f"[fluxscale] pool_dom: nll={nl:.4f} top1={t1:.4f} "
+          f"vram={vr:.2f}GB ingest={t1s-t0:.0f}s "
+          f"eval={time.perf_counter()-t1s:.0f}s n={n_seg} "
+          f"dom={m._dom_id}", flush=True)
+    del m
+    torch.cuda.empty_cache()
     print("[fluxscale] done")
 
 

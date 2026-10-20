@@ -156,6 +156,15 @@ class _RevertMixin:
         self._regime = blk.get("regime", 0)
         self._uni = blk["uni"]
         self._unig = blk["unig"].to(dev)
+        if self._uniL is not None:
+            # lane priors: the block's tokens came out of lane dom -
+            # un-recompute lane counts from blk ids (approximate when
+            # _uniL predates this block; exact when the lane kept
+            # writing only this block)
+            dom = int(blk.get("dom", 0))
+            uq, cc = np.unique(blk["ids"], return_counts=True)
+            self._uniL[dom, uq] -= cc
+            self._totalL[dom] -= blk["n"]
         self._log_uni_num = blk["log_uni_num"].to(dev)
         self._total -= blk["n"]
         self._count = base
@@ -181,6 +190,10 @@ class _RevertMixin:
             self._pos_g.fill_(base)
             self._ep_g.fill_(blk["ep_start"])
             self._tot_g.fill_(float(self._total))
+            self._totL_g.fill_(
+                float(self._totalL[self._dom_id])
+                if self._uniL is not None and self._dom_id > 0
+                else float(self._total))
             eg = blk.get("epi_gpu")
             if eg is not None:
                 if len(eg) == 9 and eg[5].dtype != torch.bool:
@@ -473,11 +486,15 @@ class _RevertMixin:
             if self._uni[e[1]] >= 1.0:
                 self._uni[e[1]] -= 1.0
                 self._total -= 1
+                if self._uniL is not None:
+                    self._uniL[self._dom_id, e[1]] -= 1.0
+                    self._totalL[self._dom_id] -= 1
                 self._log_uni_num[e[1]] = math.log(
                     self._uni[e[1]] + self.config.uni_alpha)
                 if self._gpu:
                     self._unig[e[1]] -= 1.0
                     self._tot_g -= 1.0
+                    self._totL_g -= 1.0
                 return True
             return False
         if op == "c":

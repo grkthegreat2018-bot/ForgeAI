@@ -683,6 +683,21 @@ class FluxConfig:
     bank_row_width: int = 0          # 0 = inherit gpu_row_width
     bank_dir: str = ""               # dir for .fluxbank persistence
 
+    # domain lanes ("tiny head decides which weight bank reads"): low
+    # orders are domain-SHARED contexts - "the" in code and "the" in
+    # prose would mix followers in one cell.  Folding a per-domain mask
+    # into the raw suffix key (key ^= dommask[k]) makes code-"the" and
+    # prose-"the" DIFFERENT cells in the same table - no extra memory,
+    # revert/journal/banks see the masked pk transparently.  Write
+    # domain comes from ingest(tag/domain=); the read domain is routed
+    # online by which lane's cells hit most at the probe order (EMA).
+    # () = off (mask 0 everywhere -> identical behavior to pre-domain).
+    domains: tuple = ()              # lane names, e.g. ("code","prose")
+    domain_orders: tuple = ()        # orders mixed; () -> orders <= 4
+    domain_probe_order: int = 0      # router probe order; 0 -> max
+    domain_route_every: int = 32     # token cadence between refreshes
+    domain_ema: float = 0.85         # hit-rate EMA decay
+
     # csem: per-CONTEXT semantic fingerprint (contextual recombination -
     # the per-key version of the global `sem` channel).  Own hash table
     # context_key -> fp16 fingerprint row; EMA'd toward follower A-rows.

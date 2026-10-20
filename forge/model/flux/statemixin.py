@@ -40,10 +40,12 @@ class _StateMixin:
 
     def _keys_at(self, end: int) -> dict[int, int]:
         keys = {}
-        for k in self.config.orders:
+        mask = self._dommask_np[self._dom_id]
+        for oi, k in enumerate(self.config.orders):
             key = self._suffix_key(k, end)
             if key is not None:
-                keys[k] = key
+                keys[k] = key ^ int(mask[oi]) \
+                    if mask[oi] else key
         return keys
 
     def _keys_extended(self, tok: int) -> dict[int, int]:
@@ -54,13 +56,130 @@ class _StateMixin:
         cap = c.ring_capacity
         h_e = ((int(self._H[(end - 1) % cap]) * 1099511628211 + tok + 1)
                % (1 << 64)) if end > 0 else (tok + 1)
+        mask = self._dommask_np[self._dom_id]
         keys = {}
-        for k in c.orders:
+        for oi, k in enumerate(c.orders):
             if end - k + 1 < self._ep_start or end < k - 1:
                 continue
-            keys[k] = (h_e - int(self._H[(end - k) % cap])
-                       * int(self._pows[k])) % (1 << 64)
+            keys[k] = ((h_e - int(self._H[(end - k) % cap])
+                        * int(self._pows[k])) % (1 << 64)) \
+                ^ int(mask[oi])
         return keys
+
+    # -- domain lanes ---------------------------------------------------
+
+    def _set_domain(self, d: int) -> None:
+        """Switch the active domain lane - one host write plus the
+        lane mirrors (_dommix_g, _unig, _totL_g, _log_uni_num) swapped
+        on device.  Lane 0 is the shared lane and reports the global
+        unigram tables."""
+        d = int(d)
+        if d == self._dom_id:
+            return
+        self._dom_id = d
+        if self._gpu:
+            self._dommix_g.copy_(self._dommask_g[d])
+            if self.config.domains:
+                src = (self._uniL[d] if d > 0 else self._uni)
+                self._unig.copy_(torch.from_numpy(
+                    src.astype(np.float32)).to(self._dev))
+                td = (self._totalL[d] if d > 0 else float(self._total))
+                self._totL_g.fill_(float(td))
+                self._log_uni_num.copy_(torch.log(
+                    self._unig + self.config.uni_alpha))
+
+    def _resolve_domain(self, domain, tag) -> int:
+        """ingest(domain=) arg or a tag matching a lane name -> id."""
+        c = self.config
+        if isinstance(domain, str):
+            domain = c.domains.index(domain) \
+                if domain in c.domains else 0
+        if domain is None:
+            domain = (c.domains.index(tag)
+                      if tag in c.domains else 0)
+        return int(domain)
+
+    def _dom_refresh(self, x: int = -1) -> int:
+        """Route the read lane by REWARD, not coverage: probe the
+        probe-order cell under each lane's mask and score the lane by
+        p(actual next token | its cell) - AdaHedge over lanes, the
+        same signal the channels use.  Hit-rate scoring biases to the
+        biggest lane (coverage luck); reward scoring picks the lane
+        whose evidence predicts this stream.  All-miss contexts are
+        neutral (no lane gets credit)."""
+        c = self.config
+        if not c.domains:
+            return self._dom_id
+        kp = c.domain_probe_order or max(self._dom_orders, default=1)
+        oi = self._dom_ix.get(kp)
+        raw = self._suffix_key(kp, self._count - 1)
+        if raw is None or oi is None:
+            return self._dom_id
+        D = self._dommask_np.shape[0]
+        if self._gt is not None:
+            dev = self._dev
+            raw_i = raw if raw < (1 << 63) else raw - (1 << 64)
+            rk = torch.full((D,), raw_i, dtype=torch.int64,
+                            device=dev)
+            pk = _mix64((rk ^ self._dommask_g[:, oi])
+                        * _MIX1 + self._gt._salt[oi])
+            rows = torch.full((D,), int(self._gt._ordx[oi]),
+                              dtype=torch.int64, device=dev)
+            slot, found = self._gt.probe_fixed(pk, rows=rows)
+            tots = self._gt.ttot[rows, slot]
+            hit = found & (tots > 0)
+            if x >= 0:
+                # reward: prob the lane's cell assigned to x
+                rt = self._gt.ttoks[rows, slot]            # [D,M]
+                rc = self._gt.tcnt[rows, slot]
+                cnt_x = (rc.double()
+                         * (rt == int(x)).to(rc.dtype)).sum(dim=1)
+                a = float(c.alpha)
+                uni_x = (float(self._uni[x]) + a) \
+                    / (self._total + a * self.vocab_size)
+                p_d = torch.where(
+                    hit, (cnt_x + a * uni_x)
+                         / (tots.double() + a),
+                    torch.zeros_like(cnt_x))
+                hits = p_d.cpu().numpy()                  # rewards
+            else:
+                hits = hit.double().cpu().numpy()
+        else:
+            tab = self._tables.get(kp, {})
+            tots_k = self._totals.get(kp, {})
+            denom = self._total + c.uni_alpha * self.vocab_size
+            hits = np.zeros(D)
+            for d in range(D):
+                cell = tab.get(raw ^ int(self._dommask_np[d, oi]))
+                if cell is None:
+                    continue
+                tot = tots_k.get(raw ^ int(self._dommask_np[d, oi]),
+                                 0.0)
+                if x >= 0 and tot > 0:
+                    a = self._esc_alpha(len(cell))
+                    hits[d] = (cell.get(x, 0.0)
+                               + a * self._uni_p(x, denom)) \
+                        / (tot + a)
+                else:
+                    hits[d] = 1.0
+        self._dom_score = c.domain_ema * self._dom_score \
+            + (1.0 - c.domain_ema) * hits
+        best = int(self._dom_score.argmax())
+        cur = self._dom_id
+        if best != cur and self._dom_score[best] > 0 \
+                and self._dom_score[best] \
+                > self._dom_score[cur] * 1.05:
+            self._set_domain(best)
+        self._dom_n = 0
+        return self._dom_id
+
+    def _dom_tick(self, x: int = -1) -> None:
+        """Per-token router cadence - refresh every
+        ``domain_route_every`` tokens (cheap: D probes + row gather)."""
+        if self.config.domains:
+            self._dom_n += 1
+            if self._dom_n >= self.config.domain_route_every:
+                self._dom_refresh(x)
 
     def _gap_key(self, taps: tuple, end: int) -> int | None:
         """Hash of the gapped suffix (tokens at end - off for off in
@@ -1784,6 +1903,16 @@ class _StateMixin:
         return True
 
     def _uni_p(self, t: int, denom: float) -> float:
+        """Unigram prior.  Domain lanes use the lane's own counts +
+        lane total (the shared global denom would dilute a small
+        lane's prior by total_d/total); lane 0 is the shared/global
+        lane."""
+        if self._uniL is not None and self._dom_id > 0 \
+                and self._totalL[self._dom_id] > 0:
+            d = self._dom_id
+            return (self._uniL[d, t] + self.config.uni_alpha) \
+                / (self._totalL[d]
+                   + self.config.uni_alpha * self.vocab_size)
         return (self._uni[t] + self.config.uni_alpha) / denom
 
     def _csem_read(self, key: int | None = None) -> torch.Tensor | None:
@@ -1886,6 +2015,9 @@ class _StateMixin:
             & (end >= 0)
         keys = he - self._Hg[(end - ks) % cap] \
             * self._pows_g[ks]
+        # domain lanes: XOR the active lane's per-order mask - lane 0
+        # is all-zeros so undomed models see unchanged keys
+        keys = keys ^ self._dommix_g
         return keys, valid
 
     def _suffix_dev(self, k: int, end: torch.Tensor) -> torch.Tensor:
