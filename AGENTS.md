@@ -1489,10 +1489,24 @@ ordering (NLL 62.9), lp-uni reference leaking mass (mixture 6.47),
 free additive lifts on ungated text net-negative (+1.3).
 `teacher_decode=False` skips the HF forward per generated token
 (~20 tok/s cap) — memory-only decode stays ~200-990.
-Tests: `test_flux_teacher.py` (7: lift math, abstention, CPU abstain,
-GPU bulk rewards, tail-crop + sink pinning, snapshot exclusion).
+Tests: `test_flux_teacher.py` (8: lift math, abstention, CPU abstain,
+GPU bulk rewards, tail-crop + sink pinning, snapshot exclusion,
+persistent floor).
 Peak VRAM at 190K tokens: 12.4GB — teacher ~1.4GB incl. 4K KV;
 memory work continues (the 2-6GB gold stat still open).
+
+15M-token collapse + floor (commit a12be79): at 13.77M tokens
+AdaHedge drove `w_tch→0.001` / `o2→0.981` — trained-stream rewards
+always favour memorized recall, so an unfloored teacher starves and
+the mixture degenerates to ~bigram (wt 7.42 / doc 8.53 ≈ flux-only
+7.23/8.37).  `teacher_w0` is now a **persistent share floor** —
+`_teacher_floor_` after every hedge update (device/host/bulk +
+cond_hedge rows) sets tch=w0 and rescales the rest to 1−w0; above
+floor untouched.  Reweighting the collapsed snapshot to floor 0.6
+(cells identical) recovers **wt 4.9277 / doc 5.7063, top1
+0.2453/0.2301** — wt-held approaches the Qwen 4.30 floor.  NOTE:
+rescaling must hit `_wg`/`_wgR` (device), not just the `_w` host
+mirror, or evals silently read collapsed weights.
 
 ## Build & Test Commands
 

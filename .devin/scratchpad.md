@@ -339,3 +339,43 @@ normalization if recall quality suffers).
   sandbox for model code, stop-on-proven-advancement sentinel.
 - NOTE: T:-phase budget is 14 tokens — long write calls truncate;
   short writes work, long ones need a bump if write usage grows.
+
+### 15M hybrid: teacher-weight collapse + floor fix (commit a12be79)
+- Hybrid ingest completed: 13,770,997 tok, 5867s (~2.3K tok/s with
+  teacher bulk rewards), peak VRAM 13.26GB (over 12GB target).
+- COLLAPSE: AdaHedge drove w_tch->0.001, o2->0.981.  Trained-stream
+  rewards always favour memorized recall -> teacher starves ->
+  mixture degenerates to ~bigram.  Numbers: wt 7.42/doc 8.53 ~=
+  flux-only 7.23/8.37.
+- Reweight probes on the SAME snapshot (cells intact, only w changed;
+  MUST rescale _wg device weights + _wgR, not just _w host mirror):
+  floor 0.5 -> doc 6.07 | 0.7 -> doc 5.87 (0.85 eval contaminated -
+  re-measured ingested tokens; discarded).
+- floor 0.6 clean eval (one process, fresh slices):
+  wt 4.9277/0.2453 | doc 5.7063/0.2301.
+  wt-held 4.93 approaches Qwen floor 4.30.  Logged variant
+  wt15m+docs-hybrid-floor0.6.
+- FIX: teacher_w0 now = persistent share floor via _teacher_floor_
+  after every hedge update (device/host/bulk + cond_hedge rows).
+  Exact: teacher=w0, others rescaled to 1-w0.  Above floor untouched.
+  Init share also set to w0 directly (was w0/len(channels)).
+- Driver sets teacher_w0=0.6 for future 15M runs.
+- OPEN: full re-ingest WITH floor during training may differ slightly
+  (surprise->write strengths depend on p_mix which the floor changes)
+  - cells mostly identical, expect similar numbers.
+- OPEN: 13.26GB peak still >12GB - teacher_bulk_chunk already 4096;
+  next lever = chunk 2048 or KV-pinning the sink window.
+
+### Spec-decode bench result (2026-10-20) - NET LOSS, shelved
+- bench_fluxspec.py (learn=True, V=4096, mixed periodic+random):
+  spec=0: 398 tok/s | spec=4: 98 | spec=8: 198 | spec=12: 183.
+- Bit-exactness still verified (test_flux_spec 4/4) - the bench's
+  'identical:False' is an artifact: each generate() learns emitted
+  tokens into the stream, so the later spec=0 reference sees a
+  different context.
+- Why it loses: pipelined learn=True decode is already ~2.5ms/tok;
+  _draft_tokens does K host-side read_row+virtual-hash passes, then
+  fused_seq + prefix verify + revert+relearn adds more host work
+  than the ~K saved device passes.  Spec pays when per-step cost is
+  HIGH (large tables, teacher_decode=True) - revisit if decode
+  crosses >10ms/tok or if drafting moves device-side.
