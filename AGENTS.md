@@ -1506,7 +1506,20 @@ floor untouched.  Reweighting the collapsed snapshot to floor 0.6
 (cells identical) recovers **wt 4.9277 / doc 5.7063, top1
 0.2453/0.2301** — wt-held approaches the Qwen 4.30 floor.  NOTE:
 rescaling must hit `_wg`/`_wgR` (device), not just the `_w` host
-mirror, or evals silently read collapsed weights.
+mirror, or evals silently read collapsed weights.  NOTE with
+`cond_hedge` the lift reads `_wR[warm]` — rescale ALL rows.
+
+Decode (commit 47a70e1): three eval-invisible bugs fixed — pipeline
+now applies post-graph lifts to `_fused_step` rows; `teacher_hard_arb`
+makes ungated positions adopt `lp` outright (trained cells lift
++20..40 nats — no blend weight <0.95 reaches teacher argmax) while
+`_dconf_g` still hands verbatim contexts to memory; `generate()`
+rebuilds the teacher KV as prompt-only (the window otherwise served
+the ingest tail's register).  Measured on wt15m.flux: `Paris, France`
+/ `capital of France is Paris` / `12-5+3 = 10 apples.` / real
+fibonacci structure — base-Qwen-0.5B serving quality.  Serve with
+`learn=False` (learn=True self-poisons: emitted tokens write cells,
+the gate then fires on the model's own output).
 
 ## Build & Test Commands
 

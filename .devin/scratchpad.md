@@ -379,3 +379,24 @@ normalization if recall quality suffers).
   than the ~K saved device passes.  Spec pays when per-step cost is
   HIGH (large tables, teacher_decode=True) - revisit if decode
   crosses >10ms/tok or if drafting moves device-side.
+
+### Decode-time teacher bugs + fixes (commit 47a70e1) - chat probe
+- Generation probes on wt15m.flux exposed 3 eval-invisible bugs:
+  1) pipeline learn=True path used raw _fused_step logits -> ALL
+     post-graph lifts skipped (teacher never voted at decode).
+  2) convex blend can't reach teacher argmax under +20..40-nat
+     corpus lifts -> teacher_hard_arb: ungated row:=lp, mem_scale=0.
+  3) teacher KV window = ingest tail (research-notes register) ->
+     generate() rebuilds teacher as prompt-only context.
+- Also: dom lane now routes at prompt ingest (16-tok cadence missed
+  short prompts; dom=1 IS prose lane, was fine - earlier misread).
+- RESULT (learn=False, hard_arb, prompt-scoped teacher):
+  ' Paris, France. The tower is...' | ' The capital of France is
+  Paris.' | ' 12-5+3 = 10 apples.' | real fibonacci structure.
+  = base-Qwen-0.5B serving quality reached.
+- learn=True decode self-poisons: emitted tokens write cells ->
+  gate fires on own output -> corpus-echo cascade.  Serving =
+  learn=False always.
+- Corpus-echo caveat: facts NOT in corpus can't be recalled
+  (4242 probe) - expected: gate only fires on trained contexts.
+  Self-play ingest of chat data is the path to real recall+chat.
