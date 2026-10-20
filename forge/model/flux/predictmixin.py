@@ -3492,9 +3492,56 @@ class _PredictMixin:
                 if losses else None)
         return logits, loss, None
 
+    def _draft_tokens(self, x: int, n: int) -> list[int]:
+        """Greedy continuation for speculative decode: a virtual
+        suffix rollout over the order cells — deepest hitting context
+        wins, argmax follower.  Read-only (no ring/table writes)."""
+        if n <= 0 or self._gt is None:
+            return []
+        c = self.config
+        cap = c.ring_capacity
+        ep = self._ep_start
+        mask = self._dommask_np[self._dom_id]
+        P = 1099511628211
+        end0 = self._count
+        hs = {end0 - 1: int(self._H[(end0 - 1) % cap])}
+        out: list[int] = []
+        hist = [x]
+        for i in range(n):
+            end = end0 + i
+            hs[end] = (hs[end - 1] * P + hist[-1] + 1) % (1 << 64)
+            nxt = -1
+            for oi in range(len(c.orders) - 1, -1, -1):
+                k = c.orders[oi]
+                if end - k + 1 < ep or end < k - 1:
+                    continue
+                hprev = hs.get(
+                    end - k, int(self._H[(end - k) % cap]))
+                key = (hs[end] - hprev * int(self._pows[k])) \
+                    % (1 << 64)
+                m = int(mask[oi])
+                if m:
+                    key ^= m
+                try:
+                    trow, crow, tot = self._gt.read_row(k, key)
+                except Exception:
+                    continue
+                if float(tot) <= 0:
+                    continue
+                tok = int(trow[int(crow.argmax())])
+                if tok >= 0:
+                    nxt = tok
+                    break
+            if nxt < 0:
+                nxt = int(self._uni.argmax())
+            out.append(nxt)
+            hist.append(nxt)
+        return out
+
     def generate(self, prompt_ids, max_new: int = 64,
                  temperature: float = 0.0, top_p: float = 1.0,
                  learn: bool = True, tag: str = "gen",
+                 speculate: int = 0,
                  generator: torch.Generator | None = None,
                  atype: str | None = None,
                  w_boost: dict | None = None
@@ -3512,7 +3559,11 @@ class _PredictMixin:
         scoped override (EXP-2: Hedge weights tuned for next-token
         rewards are not optimal generation weights - rev floored at
         prediction yet exactly what decode needs).  Weights restore in
-        ``finally``.  Returns the generated token ids."""
+        ``finally``.  ``speculate=K`` (GPU, learn=True, temperature=0)
+        enables self-speculative decode: draft K-1 tokens read-only,
+        learn the row in one _fused_seq, keep the verified prefix -
+        emits identical tokens to sequential argmax, ~aK+1 tokens per
+        device pass.  Returns the generated token ids."""
         c = self.config
         prompt = [int(t) for t in prompt_ids]
         if prompt:
@@ -3575,8 +3626,48 @@ class _PredictMixin:
             # learn=False keeps the old predict+_push path (fused step
             # writes; it can't observe-only).
             pipeline = bool(learn and getattr(self, "_gpu", False))
+            # self-speculative decode: draft K continuation tokens
+            # read-only, learn [pending_x]+draft in ONE _fused_seq,
+            # keep the longest verified prefix (bc blocks can't split
+            # mid-row, so a rejected tail = whole-row revert + relearn
+            # of the accepted prefix).  Argmax decode only.
+            spec = int(speculate) if (
+                pipeline and temperature <= 0) else 0
             pending_x = None
-            for _step in range(max_new):
+            _step = 0
+            while _step < max_new:
+                if spec and pending_x is not None:
+                    # row length <= tokens still needed -> a fully
+                    # verified row + correction lands exactly on
+                    # max_new, never overshoots
+                    budget = max_new - _step
+                    draft = self._draft_tokens(
+                        pending_x, min(spec - 1, budget - 1))
+                    row = [pending_x] + draft
+                    mark = self._count
+                    lg_seq = self._fused_seq(row)
+                    am = lg_seq.argmax(dim=-1).tolist()
+                    accept = 1
+                    for j in range(len(row) - 1):
+                        if am[j] == row[j + 1]:
+                            accept += 1
+                        else:
+                            break
+                    if len(row) > accept:
+                        self.revert_since(seq_pos=mark)
+                        self._fused_seq(row[:accept])
+                    # row[0]==pending_x is already emitted - new tokens
+                    # are the verified continuation + the correction
+                    new_toks = (row[1:accept]
+                                + [int(am[accept - 1])])
+                    for t in new_toks[:-1]:
+                        out.append(t)
+                        self._dom_tick(t)
+                    pending_x = new_toks[-1]
+                    out.append(pending_x)
+                    self._dom_tick(pending_x)
+                    _step += len(new_toks)
+                    continue
                 if pipeline:
                     if pending_x is None:
                         lg = torch.as_tensor(
@@ -3660,6 +3751,7 @@ class _PredictMixin:
                     x = int(torch.multinomial(probs, 1,
                                               generator=generator)[0])
                 out.append(x)
+                _step += 1
                 if pipeline:
                     pending_x = x        # learned by next fused step
                 elif learn:
