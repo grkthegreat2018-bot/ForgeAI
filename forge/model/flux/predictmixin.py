@@ -3200,7 +3200,8 @@ class _PredictMixin:
                  temperature: float = 0.0, top_p: float = 1.0,
                  learn: bool = True, tag: str = "gen",
                  generator: torch.Generator | None = None,
-                 atype: str | None = None
+                 atype: str | None = None,
+                 w_boost: dict | None = None
                  ) -> list[int]:
         """Autoregressive decode with support-restricted sampling.
 
@@ -3211,13 +3212,41 @@ class _PredictMixin:
         i.e. some channel must have actually voted for it, which keeps
         temperature sampling off the unigram escape floor in thin
         contexts (measured: plain temp .8 derails to char-salad, masked
-        stays fluent).  Returns the generated token ids."""
+        stays fluent).  ``w_boost`` = {channel: target_weight} decode-
+        scoped override (EXP-2: Hedge weights tuned for next-token
+        rewards are not optimal generation weights - rev floored at
+        prediction yet exactly what decode needs).  Weights restore in
+        ``finally``.  Returns the generated token ids."""
         c = self.config
         prompt = [int(t) for t in prompt_ids]
         if prompt:
             self.ingest(prompt, tag=tag, learn=learn)
         prev_tag = self.tag
         self.tag = tag
+        saved_w = saved_wR = saved_wg = saved_wgR = None
+        if w_boost:
+            saved_w = self._w.copy()
+            saved_wR = self._wR.copy()
+            if getattr(self, "_wg", None) is not None:
+                saved_wg = self._wg.clone()
+            if getattr(self, "_wgR", None) is not None:
+                saved_wgR = self._wgR.clone()
+            for ch, wt in w_boost.items():
+                i = self._chix.get(ch)
+                if i is None:
+                    continue
+                self._w[i] = float(wt)
+                self._w /= self._w.sum()
+                for r in range(self._wR.shape[0]):
+                    self._wR[r][i] = float(wt)
+                    self._wR[r] /= self._wR[r].sum()
+                if saved_wg is not None:
+                    self._wg[i] = float(wt)
+                    self._wg /= self._wg.sum()
+                if saved_wgR is not None:
+                    self._wgR[:, i] = float(wt)
+                    self._wgR /= self._wgR.sum(
+                        dim=1, keepdim=True)
         V = self.vocab_size
         out: list[int] = []
         amask = None
@@ -3323,6 +3352,13 @@ class _PredictMixin:
                     self._push(x)
         finally:
             self.tag = prev_tag
+            if saved_w is not None:
+                self._w[:] = saved_w
+                self._wR[:] = saved_wR
+                if saved_wg is not None:
+                    self._wg.copy_(saved_wg)
+                if saved_wgR is not None:
+                    self._wgR.copy_(saved_wgR)
         return out
 
     # -- revert / audit --------------------------------------------------

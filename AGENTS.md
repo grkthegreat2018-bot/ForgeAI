@@ -1222,8 +1222,13 @@ Measured (two corpora, `scripts/exp_fluxrev.py`):
   uncontested), not where the mixture is uncertain.  Deeper
   implication: Hedge weights optimized for next-token rewards are not
   optimal generation weights — a channel mediocre at prediction can be
-  exactly what decode needs.  Two-regime weighting (predict-time vs
-  generate-time) is the open upgrade.
+  exactly what decode needs.
+- `generate(w_boost={ch: w})` (predictmixin): decode-scoped channel-
+  weight override, restored in finally — the two-regime mechanism as
+  API.  Verified: rev boost 0.5 on docs bytes cuts gen prev_nll
+  3.05→2.68 (native, saturates w≥0.5); sidecar rerank α=1 reaches
+  1.335 (pure rescore, no mixture dilution) — currently the strongest
+  decode-consistency mechanism.
 
 ## Build & Test Commands
 

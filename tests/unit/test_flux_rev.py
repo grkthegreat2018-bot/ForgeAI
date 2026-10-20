@@ -127,6 +127,34 @@ def test_rev_snapshot_and_revert():
     assert 4 not in m._rev1
 
 
+def test_generate_w_boost_restores_weights():
+    import numpy as np
+    m = _mk(True)
+    m.ingest([1, 2] * 30, tag="t")
+    w0 = m._w.copy()
+    wR0 = m._wR.copy()
+    m.generate([1], max_new=8, learn=False,
+               w_boost={"rev": 0.5, "uni": 0.1})
+    np.testing.assert_allclose(m._w, w0, atol=0)
+    np.testing.assert_allclose(m._wR, wR0, atol=0)
+
+
+def test_generate_w_boost_changes_output():
+    """Ambiguous stream: rev boost steers decode toward the successor
+    that provably follows the last token (empirically validated on
+    docs bytes: w_boost>=0.5 cut gen prev_nll 3.05->2.68)."""
+    m = _mk(True)
+    # token 1 is followed by 2 (x20) and 3 (x5); rev strongly prefers 2
+    m.ingest([1, 2] * 20 + [1, 3] * 5 + [1], tag="t")
+    g = m.generate([1], max_new=1, learn=False,
+                   w_boost={"rev": 0.95, "uni": 0.001})
+    assert g == [2]
+    # unknown channel names are ignored, weights still restored
+    g2 = m.generate([1], max_new=1, learn=False,
+                    w_boost={"nonexistent": 0.9})
+    assert len(g2) == 1
+
+
 def test_rev_default_off_lossless():
     """rev_channel=False must not touch logits vs a baseline build."""
     a = FluxLM(FluxConfig(vocab_size=16, orders=(2, 3), device="cpu",
