@@ -1404,6 +1404,73 @@ masked, lane-specific follower wins the logit.  Tests:
 `test_flux_domains.py` (7) — masked-key reads, lane isolation,
 spill/snapshot round-trip, lane'd prior, router reward.
 
+## EXP-7 FluxLM decode speed — the wall was Python, not GPU
+
+Profiled the hot decode loop (V=151936, cuda_primary, 100K tokens):
+graph replay costs 0.05ms; everything else was host overhead.
+
+- `generate(learn=True)` ran `_predict` + `_learn_token` per token —
+  two device passes while `_fused_step` already returns post-learn
+  next-position logits.  Now pipelined: each emitted token is learned
+  by the NEXT iteration's fused call (one pass/token, trailing learn
+  flushed, `_dom_tick` preserved for the deferred learn).
+- `_sparse_lift_vec_dev` built two `[V]` fp64 arrays + np.nonzero
+  scans per predict (~1ms) while real support is ~hundreds of
+  followers — now (idx, contrib) pair lists summed by the device
+  `index_add_`; flv clip moved device-side post-accumulate.
+- `_knn_write` spent ~5 scalar D2H reads/call (dedup check + journal
+  prev-state) — batched into two stacked `.tolist()` transfers.
+
+Measured (warm, 300-token greedy): observe `predict+push`
+198→**990 tok/s**; `generate(learn=False)` ~200/s→~330/s;
+`generate(learn=True)` 29.5→~70-240/s (pipelined, key-warmed).
+Cold-start caveat: first ~6 steps per (lite, bucket) graph key run
+eager warmups + capture — measure decode warm only.
+Next lever (design in scratchpad): self-speculative batched decode —
+`_fused_seq` returns [T,V] logits for a drafted row, verify-and-
+revert; needs a write-free `_observe_seq` variant for the
+learn=False path to reach >1000/s.
+
+## EXP-8 FluxLM "tch" — static Qwen teacher as the generalization floor
+
+The hybrid the spec asked for: Qwen2.5-0.5B fp16 as a **static,
+read-only Hedge channel** — no training, nothing journaled (its
+state derives from the token stream, which IS journaled).  Memory
+channels supply recall boosts above the teacher's dense floor.
+`forge/model/flux/teacher.py` `TeacherChannel`; config `teacher_*`.
+Lazy (`_tch()` on first query; excluded from snapshots by
+construction — snapshot is a hand-built dict).
+
+- Predict: `_tch_lift` blends the post-lift row toward the teacher:
+  `row <- (1-w_t)*row + w_t*log p_tch` (convex, self-bounding — at
+  w_t→1 the mixture IS the teacher).  Device path only.
+- Rewards: `bulk_logprobs` teacher-forces each ingest block →
+  `real_r`; `tch` stays in `_pmask` for the fused step (no HF
+  forward in-graph) but channels with a `real_r` entry are excluded
+  from the closed-form abstention fill (`pm_fill`).
+- Stream tracking: incremental KV via `sync_to`; `DynamicCache`
+  (newer transformers requires it — a raw tuple dies).  Truncation
+  is a HAND tail-slice — `DynamicCache.crop()` keeps the FIRST
+  tokens, not the tail (~3.4 nats lost to that alone), and the
+  cache must keep the first `teacher_sink=8` positions (attention
+  sinks) plus pass ABSOLUTE `position_ids` since retained keys hold
+  the RoPE rotations they were written at (StreamingLLM semantics).
+
+Measured (docs190k, Qwen-BPE held slice):
+`flux-only 6.69 | teacher-only ~4.33 | HYBRID 4.5457 NLL / 0.2825
+top1 | Qwen-0.5B reference 4.298` — mixture beats the teacher alone
+at equal context (4.317 vs 4.330 on the 2K-token probe).  Bug chain
+to that result (each measured): log-vs-prob rewards, `_pmask`
+abstention overwriting real_r, prefix-vs-tail crop, RoPE position
+corruption past crop, missing sinks, len*w clip flattening teacher
+ordering (NLL 62.9), lp-uni reference leaking mass (mixture 6.47).
+`teacher_decode=False` skips the HF forward per generated token
+(~20 tok/s cap) — memory-only decode stays ~200-990.
+Tests: `test_flux_teacher.py` (7: lift math, abstention, CPU abstain,
+GPU bulk rewards, tail-crop + sink pinning, snapshot exclusion).
+Peak VRAM at 190K tokens: 12.4GB — teacher ~1.4GB incl. 4K KV;
+memory work continues (the 2-6GB gold stat still open).
+
 ## Build & Test Commands
 
 ```powershell

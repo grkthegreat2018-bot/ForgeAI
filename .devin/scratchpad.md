@@ -174,3 +174,116 @@ FLUXSCALE (same held=2291 critique tail, Qwen-BPE):
 - Bank disk tier shipped: rows_cap overflow seals .fluxbank shards behind
   per-shard bloom (bounded index); RAM+disk union in cell(); post-restart
   load_disk_index(). 9 bank tests + 6 domain tests green.
+
+## Self-speculative decode design (queued, 2026-10-20)
+
+Goal: thousands of tok/s decode. Current: ~200-990/s observe,
+~70-240/s learn. Wall = per-step Python+sync (~1-3ms), NOT GPU work
+(graph replay alone = 0.05ms).
+
+Measured profile (100 steps, V=151936, cuda_primary):
+- _fused_step 2.6ms: bookkeep 1.27 + tolist 0.9 + rl_write 0.77 +
+  lift 0.26. Now pipelined (1 pass/token learn=True).
+- predict+push was 2.9ms: sparse-lift dense[V] arrays + nonzero +
+  5 knn D2H reads killed -> 1.0ms.
+
+Speculation blocker: verification needs model logits AT each drafted
+position = per-position forward. _fused_seq already batches T
+learn-steps with ONE readback and returns [T,V] logits -> the
+verification pass exists for learn=True.
+
+learn=True spec design:
+  1. draft K tokens cheaply (order-2 argmax via _gt probe ~0.15ms ea,
+     or top-1 of last logits + bigram continuation)
+  2. mark = journal pos; logits = _fused_seq(draft)  [K,V]
+  3. accepted = longest prefix argmax(logit_j)==draft[j+1]; emit
+     accepted + argmax at divergence
+  4. revert_since(mark) unlearns the whole row, re-learn accepted
+     prefix+corrected via _fused_seq
+  Cost model K=8, accept a=0.8: emit ~7.4, cost ~18ms -> ~410/s
+  (~1.6x over pipelined). The revert+relearn duplicate caps gains.
+
+learn=False spec needs a write-free observe-row primitive
+(_observe_seq: push row to ring, per-position logits, no writes) -
+a new _step_dev variant (skip all write sections). Rejected tail =
+ring-slot restore (bounded: save _count, ring/H slots, device
+mirrors, dom EMA). Same math on logits.
+  This is THE path to >1000/s: observe steps skip writes entirely,
+  per-step device cost ~0.3ms, one readback per row.
+  Est: draft 1.5ms + observe_seq(K) ~K*0.4+1ms + host 1ms -> 
+  emit ~aK+1 in ~5ms at K=8,a=0.8 -> ~1500/s.
+
+Risk notes: revert fidelity at block granularity (partial-row revert
+undoes whole block -> re-learn accepted prefix); dom-EMA state must
+restore with ring; _fused_seq's epi-eviction granularity note (stale
+votes <=T steps) already documented.
+
+Alternative 'free' speedup already shipped: pipeline fused_step for
+learn=True + sparse-lift pair-collection + knn sync batching.
+
+## Teacher channel ("tch") — hybrid Qwen floor + Flux recall (2026-10-2x)
+
+Architecture: Qwen2.5-0.5B fp16 as a STATIC read-only Hedge channel.
+- No training, nothing journaled (state derives from the token stream,
+  which IS journaled). Lazy: _tch() builds on first query; sync_to
+  feeds ring tokens the teacher missed (incremental KV; rebuild tail
+  after revert/load/ring-overflow).
+- Predict path: _tch_lift adds w_rel*(log p_tch - log p_uni), clipped
+  4*lift_clip — same additive contract as gsyn/bank lifts; device-only
+  (CPU predict + a HF forward per token is unusable).
+- Rewards: teacher-forced bulk_logprobs over each ingest block ->
+  real_r (fires everywhere -> teacher competes on its OWN predictions).
+- tch stays in _pmask for the FUSED device step (no HF in-graph) but
+  is excluded from the bulk loop's closed-form abstention fill when a
+  real_r entry exists (pm_fill = _pmask & ~real_r).
+
+Bugs found+fixed (test_flux_teacher.py, 6 tests):
+1. bulk_logprobs stored LOG-probs into a probs array (missing .exp)
+   -> real_r went negative, tch decayed to floor. The unit test caught
+   this class of bug (w must RISE when teacher predicts 0.9 on noise).
+2. _pmask closed-form fill ran AFTER real_r -> clobbered tch rewards
+   every block. Fixed via pm_fill exclusion.
+3. [8192,151936] fp32 logits materialization = 5GB OOM -> sliced
+   logsumexp+gather at PB=1024.
+4. transformers >=4.5x needs DynamicCache not tuple; crop() native.
+5. SDPA math backend [H,S,S] at 32K chunks = 56GB -> chunk 8192.
+
+Cost: teacher bulk-forced pass ~1 forward/8192 tok (seconds);
+eval-time learn feeds 1 HF fwd/token (~30-50ms) — teacher decode is
+~20-30 tok/s vs flux-only ~200-990. Disable tch lift for fast gen.
+
+Open: hybrid NLL on docs190k running; teacher-only baseline ~= Qwen
+4.30 (known); flux-only 6.69 (known). Success = hybrid < 5.0.
+
+## Teacher channel — RESULTS (same-session followup)
+
+Bug chain fixed to get the floor working (each measured):
+1. bulk_logprobs stored log-probs where rewards need probs (.exp)
+2. _pmask closed-form abstention fill overwrote tch's real_r every
+   bulk block -> pm_fill exclusion
+3. DynamicCache.crop() keeps the FIRST tokens (prefix!) not the tail -
+   hand tail-slice required; alone worth ~3.4 nats (8.89->5.45)
+4. crop breaks RoPE: model derives positions from cache length -> pass
+   absolute position_ids so retained keys' rotations stay correct
+5. sliding window needs sinks: keep first 	eacher_sink=8 positions +
+   newest window-sink (StreamingLLM semantics); _has_sink flag disables
+   pinning after mid-stream rebuilds
+6. lift semantics: wt*(lp - row) row-relative geometric blend,
+   NO clip, NOT len*w, NOT lp-uni reference. At wt->1 mixture=teacher.
+   (w_rel clip flattened ordering -> NLL 62.9; lp-uni reference leaked
+   mass -> mixture 6.47 vs teacher 5.45; row-relative -> mixture BEATS
+   teacher: 5.42 vs 5.45 @2048, 4.3167 vs 4.3300 @4096)
+7. _rebuild pos=ep_start left pos<count -> double-fed tail; now
+   pos=count-n absolute.
+
+MEASURED (60K-token train, 2000-token held docs slice, Qwen-BPE):
+- teacher@w4096+sink8: NLL 4.3300 ~= standalone Qwen 4.298 baseline
+- mixture:              NLL 4.3167  top1 .3022  (memory adds signal)
+- docs190k full eval running.
+
+teacher_decode=False flag shipped (generate bypasses the HF fwd/token
+cap ~20-30 tok/s; memory-only decode stays ~200-990).
+Open: pool_dom-scale ingest; whether tch dominates Hedge rewards so
+hard memory channels starve (w_tch~0.98 on docs - correct but leaves
+little share for recall channels; consider teacher_w0 cap or reward
+normalization if recall quality suffers).
