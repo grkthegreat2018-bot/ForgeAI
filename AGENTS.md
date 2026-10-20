@@ -249,7 +249,13 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   jsonl records, and --dict-flatten kaikki entries; corpus-scale flags
   --hf/--wiki-filter/--max-tokens/--ckpt-every; GUI live-learn via
   EngineService.learn + POST /engine/learn (sliced ingest under the
-  generation lease).  R52-9: `--training-mode flux` in
+  generation lease).  Chat/QA corpora ingest as NATURAL LANGUAGE
+  (c5fcd23): `_render_chat` maps roles to Question:/Answer:/Context:
+  blocks — the model echoes memorized surface form, so ChatML markup
+  would be reproduced at decode; `--chat-style natural|chatml|plain`,
+  HF streams auto-detect messages/conversations + dolly/alpaca/squad
+  schemas via `_auto_qa` (--hf-template still wins), `--domains`/
+  `--domain` ingest under a named lane.  R52-9: `--training-mode flux` in
   `forge/self_play/infinite_loop.py` — RSI on _concise_qa_pairs:
   tagged attempts, immediate revert on fail, reinforce on success,
   teach_text(Q:/A:) on fail, consolidate, fixed-set eval gate
