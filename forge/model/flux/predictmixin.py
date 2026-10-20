@@ -102,6 +102,16 @@ class _PredictMixin:
         c = self.config
         if ch == "uni":
             return self._uni_p(x, denom), True
+        if ch == "tch":
+            if not self._gpu:
+                # cuda_primary-only vote (dense lift lives in
+                # _apply_sparse_lift_dev); abstain so host learns
+                # take the neutral pmix reward, not uni-fallback decay
+                return self._uni_p(x, denom), False
+            self._tch_sync()
+            p = self._tch().prob(x)
+            return (p if p is not None else self._uni_p(x, denom),
+                    p is not None)
         if ch == "knn":
             if not kvotes:
                 return self._uni_p(x, denom), False
@@ -2054,6 +2064,31 @@ class _PredictMixin:
             self._gv_lift_dev(row, warm)
         if self._banks:
             self._bank_lift_dev(row, warm)
+        if c.teacher_channel:
+            tl = self._tch_lift(row, warm)
+            if tl is not None:
+                row.add_(tl)
+
+    def _tch_lift(self, row: torch.Tensor,
+                  warm: int) -> torch.Tensor | None:
+        """Dense teacher blend: row <- (1-wt)*row + wt*log p_tch.
+        Row-relative geometric interpolation - at wt->1 the mixture
+        IS the teacher; at wt->0 it's untouched.  (The earlier
+        lp - log p_uni reference cancelled unigram mass the base row
+        doesn't contain - the flat prior floor inflated teacher-weak
+        tails: measured mixture 6.47 vs teacher-only 5.45.)"""
+        c = self.config
+        wsrc = self._wR[warm] if c.cond_hedge else self._w
+        wt = float(wsrc[self._chix["tch"]])
+        if wt <= 1e-4 or getattr(self, "_no_tch", False):
+            return None
+        self._tch_sync()
+        lp = self._tch().logp_row()
+        if lp is None:
+            return None
+        dev = lp.device
+        # convex blend is self-bounding - no lift_clip needed
+        return wt * (lp.to(dev) - row.to(dev))
 
     def _cold_cell(self, k: int, key: int):
         """Cold-tier lookup: (followers {tok: cnt}, tot) for context
@@ -2234,6 +2269,7 @@ class _PredictMixin:
                             or self.config.gcell or self.config.gsyn
                             or self.config.gsyn_deep or self.config.dnet
                             or self.config.gen_variants
+                            or self.config.teacher_channel
                             or self._banks):
                         self._apply_sparse_lift_dev(
                             lg, int(self._dthin_g.item()))
@@ -2255,6 +2291,7 @@ class _PredictMixin:
                 or self.config.hybrid_taps or self.config.gcell
                 or self.config.gsyn or self.config.gsyn_deep
                 or self.config.dnet or self.config.gen_variants
+                or self.config.teacher_channel
                 or self._banks):
             self._apply_sparse_lift_dev(
                 lg, int(self._dthin_g.item()))
@@ -3476,6 +3513,8 @@ class _PredictMixin:
             self.ingest(prompt, tag=tag, learn=learn)
         prev_tag = self.tag
         self.tag = tag
+        prev_no_tch = getattr(self, "_no_tch", False)
+        self._no_tch = not c.teacher_decode
         saved_w = saved_wR = saved_wg = saved_wgR = None
         if w_boost:
             saved_w = self._w.copy()
@@ -3632,6 +3671,7 @@ class _PredictMixin:
                 self._learn_token(pending_x)
         finally:
             self.tag = prev_tag
+            self._no_tch = prev_no_tch
             if saved_w is not None:
                 self._w[:] = saved_w
                 self._wR[:] = saved_wR

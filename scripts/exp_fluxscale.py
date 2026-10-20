@@ -77,8 +77,10 @@ def pool_segments(tok):
     return segs, held
 
 
-def tf(model_proto, ids, w_override=None):
-    m = model_proto.clone()
+def tf(model_proto, ids, w_override=None, clone=True):
+    # clone=False for models whose snapshot exceeds host RAM - eval
+    # learns the held ids into m (only safe when m is discarded after)
+    m = model_proto.clone() if clone else model_proto
     if w_override is not None:
         m._w = w_override.copy()
         m._wg.copy_(torch.from_numpy(w_override).to(m._dev))

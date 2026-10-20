@@ -2986,7 +2986,7 @@ class _LearnMixin:
         col = {ch: i for i, ch in enumerate(self.channels)}
         nonord = [col[ch] for ch in
                   ("deep", "topic", "sem", "csem", "knn", "backoff",
-                   "gcell", "gsyn", "gsd", "dnet") if ch in col]
+                   "gcell", "gsyn", "gsd", "dnet", "tch") if ch in col]
         uni_d = uni_pre.double()
         uni_np = uni_pre.cpu().numpy()
 
@@ -3047,6 +3047,17 @@ class _LearnMixin:
             real_r[col["deep"]] = (deep_r, deep_fire)
             if knn_r is not None:
                 real_r[col["knn"]] = (knn_r, knn_fire)
+            if (c.teacher_channel and c.teacher_bulk_rewards
+                    and "tch" in col):
+                # teacher-forced over the whole block: teacher stays
+                # synced to the pre-block stream, feeds ids itself
+                t = self._tch()
+                t.sync_to(base, self._ring, self._ep_start)
+                tp = t.bulk_logprobs(
+                    ids_np, chunk=c.teacher_bulk_chunk).numpy()
+                real_r[col["tch"]] = (
+                    tp.astype(np.float64),
+                    np.ones(n, dtype=bool))
             # fuzzy lift channels: prob of the observed token under
             # each channel's own log-softmax readout, evaluated on
             # POST-block state (documented approximation - matching
@@ -3220,10 +3231,16 @@ class _LearnMixin:
                 if self._pidx and not c.sleeping_experts:
                     # host-resident channels abstain in bulk too:
                     # neutral reward = mixture prob over the other
-                    # arms (closed form - rw[p] = p_mix is implicit)
-                    aw = ~self._pmask
+                    # arms (closed form - rw[p] = p_mix is implicit).
+                    # Channels that received a real_r reward this
+                    # block (e.g. tch via teacher-forced probs) vote
+                    # normally - they are NOT abstaining.
+                    pm_fill = self._pmask.copy()
+                    for ci_ in real_r:
+                        pm_fill[ci_] = False
+                    aw = ~pm_fill
                     wsum = float((wv * aw).sum())
-                    rw[self._pmask] = float((wv * rw * aw).sum()) \
+                    rw[pm_fill] = float((wv * rw * aw).sum()) \
                         / max(wsum, 1e-12)
                 p_mix = float((wv * rw).sum())
                 # no "h" journal entry: blk["w"]/["wR"] snapshots already

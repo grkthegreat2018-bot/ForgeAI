@@ -173,6 +173,26 @@ class _StateMixin:
         self._dom_n = 0
         return self._dom_id
 
+    # -- teacher channel (static pretrained LM, read-only) --------------
+
+    def _tch(self):
+        """Lazy TeacherChannel - the 1GB HF model only loads when the
+        channel is actually queried."""
+        t = getattr(self, "_tch_obj", None)
+        if t is None:
+            from .teacher import TeacherChannel
+            c = self.config
+            t = TeacherChannel(
+                c.teacher_path,
+                device=str(self._dev) if self._gpu else "cpu",
+                window=c.teacher_window)
+            self._tch_obj = t
+        return t
+
+    def _tch_sync(self) -> None:
+        """Advance the teacher to the current stream position."""
+        self._tch().sync_to(self._count, self._ring, self._ep_start)
+
     def _dom_tick(self, x: int = -1) -> None:
         """Per-token router cadence - refresh every
         ``domain_route_every`` tokens (cheap: D probes + row gather)."""

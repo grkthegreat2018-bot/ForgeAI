@@ -65,6 +65,7 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
             + [f"h{j}" for j in range(len(c.hybrid_taps))] \
             + (["rev"] if c.rev_channel else []) \
             + (["gv"] if c.gen_variants else []) \
+            + (["tch"] if c.teacher_channel else []) \
             + [ch for ch, on in (("gcell", c.gcell), ("gsyn", c.gsyn),
                                  ("gsd", c.gsyn_deep),
                                  ("dnet", c.dnet)) if on]
@@ -83,8 +84,11 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
         # fallback, which would decay them to hedge_min over training.
         # Fuzzy channels are excluded: their bulk rewards arrive via
         # real_r (overwriting them here would kill that signal).
+        # "tch" abstains inside the fused device step too (no HF
+        # forward in-graph) - its REAL rewards arrive via the bulk
+        # teacher-forced pass and the host learn path
         self._pmask = np.array([(ch.startswith(("p", "g", "w", "h"))
-                                 or ch in ("rev", "gv"))
+                                 or ch in ("rev", "gv", "tch"))
                                 and ch not in self._fset
                                 for ch in self.channels], dtype=bool)
         self._pidx = np.nonzero(self._pmask)[0].tolist()
@@ -96,6 +100,12 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
                         if ch in self._chix]
         self._w = np.ones(len(self.channels), dtype=np.float64)
         self._w /= self._w.sum()
+        if c.teacher_channel and c.teacher_w0 > 0:
+            # teacher enters at an elevated share - a generalization
+            # floor the memory channels only outvote where they fire
+            self._w[self._chix["tch"]] = c.teacher_w0 / len(
+                self.channels)
+            self._w /= self._w.sum()
         self._hedge_mix = 0.0        # AdaHedge cumulative mix gap
         # conditioned hedge: per-regime weight sets + mix-gaps
         # (regime 0 = thin context, 1 = order-evidence warm context);

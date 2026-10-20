@@ -634,6 +634,26 @@ class FluxConfig:
     bloom_admit: int = 0
     bloom_bits: int = 1 << 22   # int16 counters per filter (8MB)
 
+    # -- teacher channel (hybrid LLM+recall) --------------------------
+    # Static pretrained causal LM as a read-only Hedge channel: the
+    # generalization floor under the memory channels.  No training, no
+    # journaled state - the teacher derives from the journaled token
+    # stream, so revert/load just re-sync it from the ring.  Voting is
+    # the additive-logit form w*(log p_tch - log p_uni); rewards are
+    # real teacher probabilities (bulk ingest computes them teacher-
+    # forced over the block when teacher_bulk_rewards).
+    teacher_channel: bool = False
+    teacher_path: str = ""            # "" -> local Qwen2.5-0.5B snapshot
+    teacher_window: int = 4096        # KV prefix-eviction window
+    teacher_w0: float = 0.0           # >0 overrides initial weight share
+    teacher_bulk_rewards: bool = True # per-position rewards during bulk
+    # capped at 8192: no flash-attn on this Windows box, so SDPA takes
+    # the math path and materializes [H,S,S] - 32K contexts OOM (56GB)
+    teacher_bulk_chunk: int = 8192    # positions per teacher forward
+    teacher_decode: bool = True       # teacher lift during generate()
+                                      # (False: ~20 tok/s HF-fwd cap
+                                      # removed - memory-only decode)
+
     # AdaHedge-style adaptive lr: eta_t = ln(C) / mix_cum where mix_cum
     # accumulates the per-token mixability gap (max reward - p_mix).
     # Constant regret on easy streams, worst-case safe.
