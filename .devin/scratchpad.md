@@ -287,3 +287,31 @@ Open: pool_dom-scale ingest; whether tch dominates Hedge rewards so
 hard memory channels starve (w_tch~0.98 on docs - correct but leaves
 little share for recall channels; consider teacher_w0 cap or reward
 normalization if recall quality suffers).
+
+## 2026-10-20 — wt15m flux-only baseline + self-play wiring
+
+### wt15m+docs (FLUX-ONLY — snapshot had teacher_channel=False)
+- Run loaded a stale flux-only snapshot (n=-1 bug); evaluated honest flux-only@15M:
+  held_wt NLL 7.2258 / top1 0.1238 | held_docs NLL 8.3676 / top1 0.1371
+  vram 7.03GB, ingest 457s (13.77M tok ˜ 30K tok/s)
+- Flux@15M on wikitext is WORSE than docs190k 6.82 — wikitext is
+  hapax-heavy; bloom_admit=2 + bank spilling lose one-shot contexts.
+- THE generalization gap (7.2 vs Qwen 4.3) is exactly what tch covers —
+  hybrid 15M re-ingest relaunched (dfac94) with teacher_channel=True.
+- Artifact kept: .tmp\wt15m_fluxonly.flux (7.66GB).
+
+### Self-play loop audit + wiring (commit afcc357)
+- Gaps found: flux mode has NO self-prompting (goals = procedural QA +
+  web-extractive builders only); no file read tool; no sandbox
+  enforcement at loop level (ToolSecurityManager exists engine-side,
+  never consulted); per-epoch gate is a no-regression ratchet, not an
+  advancement proof; distill_from not wired into loop.
+- Implemented: `file` read-only tool (component-exact denylist,
+  256KB cap, offline OK), `note` sandbox-journal tool (fixed path,
+  text-only => cannot redirect writes), flux_file_root/flux_note_file
+  config, flux_teacher_channel/flux_teacher_decode wiring.
+- Denylist bug found+fixed: substring matching denied any path under a
+  dir containing "secrets" (pytest test dirs!) — now exact-component.
+- Still missing vs spec: model self-prompting (AZR proposal machinery
+  is transformer-only), write-to-sandbox file editing, stop-on-
+  advancement, execution sandbox for model code.

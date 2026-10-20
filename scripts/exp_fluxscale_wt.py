@@ -31,7 +31,7 @@ def run_wt(name, segs, held_wt, held_docs, chunk=1 << 20,
     if snap and Path(snap).exists():
         # resume: skip re-ingest, eval the saved model
         m = FluxLM.load(snap)
-        n = -1
+        n = int(getattr(m, "_count", -1))
     else:
         cfg = dict(vocab_size=V, device="cuda", cuda_primary=True,
                    sparse_taps=(), class_orders=(), word_orders=(),
