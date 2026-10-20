@@ -1245,6 +1245,56 @@ Measured (two corpora, `scripts/exp_fluxrev.py`):
   predecessor entropy, not pair existence, is the right consistency
   signal.  rev stays as substrate; not a recommended default.
 
+## EXP-3 FluxLM "gv" channel (stateless live generalizer)
+
+Read-time generalization over the LIVE order tables — generalization
+as a query transformation, not a stored augmentation.  Motivation:
+class tables (`g<k>`) keep independent copies of order evidence, so
+deleted/decayed order cells persist through them; gv owns NO state,
+so removed weight information can never persist through it.
+
+- `FluxConfig.gen_variants` (default False, lossless off): adds "gv".
+  `gen_fix_tail` rightmost suffix positions stay verbatim (0 = all
+  positions vary), `gen_min_tot` exact-cell mass that silences gv
+  (thin-gate), `gen_var_w` per-count vote weight, `gen_max_probes`
+  host budget, `gen_orders` restricts the order set, `gen_cls_cap`
+  bounds device members/position (first-N by token id).
+- Mechanism (`_gen_votes`, predictmixin): for each order k whose
+  exact cell is missing or thin (< gen_min_tot), replace one suffix
+  token x_p with each same-class v and probe
+  `key + (v-x_p)*P^(end-p)` — rolling-hash linearity makes each
+  variant key O(1), no re-fold.  Class membership `_cls_members` is
+  static vocab metadata, not learned state.  Votes merge
+  `gen_var_w*cnt` per hit cell; channel prob = count-scale
+  `(v_x + a·p_uni)/(vt + a)` (same semantics as order channels, so
+  Hedge can weigh generalization against verbatim memory).
+- `_pmask` abstains gv for device rewards (neutral reward, weight-
+  preserving).  cuda_primary prediction path: `_gv_lift_dev` runs
+  post-graph inside `_apply_sparse_lift_dev` — probes `_gt` with one
+  batched `probe_fixed` + one cell gather + 2 syncs per predict.
+- Contract tests `tests/unit/test_flux_gv.py` (10): variant firing,
+  thin-gate sleep, **delete → votes vanish**, journaled revert →
+  votes shrink by exactly the reverted evidence, clone determinism,
+  off==lossless, CUDA lift + GPU-row clear → lift dies.
+- Driver `scripts/exp_fluxgv.py` (synth class-structured + docs
+  bytes, cuda_primary): synth NLL 1.5777→1.5762, top1 +0.0003 —
+  small positive where true class structure exists.  Text bytes:
+  NLL 2.5422→2.5575 (+0.015, small NEGATIVE) — byte classes are too
+  coarse for natural text (one-edit same-class variants mostly fire
+  noise cells); eval ~20x slower (thin contexts common → probes
+  fire often, 2 syncs/predict).
+- Verdict (honest, negative-leaning like rev): the CONTRACT works
+  (zero-state, deletion-propagating generalization — proven by
+  tests) but byte-class 1-edits are the wrong variant space for
+  natural text.  Two fixes would change the verdict: (a) semantic
+  variant classes (embedding neighborhoods — but that reintroduces
+  stored state), or (b) keep gv CPU-side where Hedge floors its
+  weight on evidence it can't use — on cuda_primary gv abstains
+  from rewards so its weight stays at init and can't self-limit.
+  Kept default-off + tested as the generalization substrate; the
+  invariant to preserve in any successor: generalization reads live
+  weights, never caches them.
+
 ## Build & Test Commands
 
 ```powershell

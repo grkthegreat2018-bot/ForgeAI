@@ -166,6 +166,27 @@ class FluxConfig:
     rev_uni_mix: float = 0.1        # predecessor-unigram smoothing share
     rev_floor: float = 0.01         # absolute floor, never -inf
 
+    # generalized-variant channel "gv" - READ-TIME generalization over
+    # the live order tables.  When an order-k exact cell is missing or
+    # thin, probe same-class 1-edit suffix variants: replace one suffix
+    # token x_p with each same-class token v and read the cell at
+    # key + (v - x_p)*P^(end-p) (rolling-hash linearity -> O(1) per
+    # probe).  The channel owns NO state of its own: every vote comes
+    # straight out of _tables[k], so a deleted/decayed cell can never
+    # persist through the generalizer (unlike g<k>/h<j> tables, which
+    # hold independent copies of the same evidence).  Sleeps when the
+    # exact cell has >= gen_min_tot mass.
+    gen_variants: bool = False
+    gen_fix_tail: int = 1           # rightmost positions kept verbatim
+    gen_min_tot: float = 2.0        # exact-cell mass that silences gv
+    gen_var_w: float = 1.0          # vote weight per variant-cell count
+    gen_max_probes: int = 96        # dict-lookup budget per predict
+    gen_orders: tuple = ()          # empty = all configured orders
+    gen_cls_cap: int = 32           # device: same-class members probed
+                                    # per position (first-N by token
+                                    # id; bounds the probe batch for
+                                    # vocab classes with many members)
+
     # sparse/noncontiguous order channels (PAQ8-style gapped contexts):
     # each entry is a tuple of offsets below the context end, e.g.
     # ((0,2),(0,2,4),(1,3),(1,3,5)) - keys skip every-other byte, so a

@@ -37,6 +37,56 @@ class _PredictMixin:
         return float(u) if self.config.ppm_escape_c else \
             self.config.alpha
 
+    def _gen_votes(self, end: int, keys: dict[int, int]
+                   ) -> dict[int, float]:
+        """Merged successor votes from same-class 1-edit variants of
+        the order-k suffixes - READ-TIME generalization over the live
+        order tables.  The rolling hash is linear in each position's
+        token, so a variant's key is the exact key plus
+        ``(v - x_p) * P^(end-p)``: O(1) per probe, no re-fold.
+
+        The channel owns no state: every vote comes out of
+        ``_tables[k]`` cells, so deleted/decayed/decaying writes can
+        never persist through the generalizer.  Probes only orders
+        whose exact cell is missing or below ``gen_min_tot`` - asleep
+        in warm contexts."""
+        c = self.config
+        votes: dict[int, float] = {}
+        if not c.gen_variants or end < 0:
+            return votes
+        cap = c.ring_capacity
+        ords = c.gen_orders or c.orders
+        cls, cls_m = self._cls, self._cls_members
+        ring, pows = self._ring, self._pows
+        probes = 0
+        for k in ords:
+            if k not in self._tables:
+                continue
+            key = keys.get(k)
+            if key is None:
+                continue
+            tab, tots = self._tables[k], self._totals[k]
+            if tots.get(key, 0.0) >= c.gen_min_tot:
+                continue                    # exact memory suffices
+            # suffix positions are [end-k+1, end]; the rightmost
+            # gen_fix_tail of them stay verbatim
+            for p in range(end - k + 1, end - c.gen_fix_tail + 1):
+                xp = int(ring[p % cap])
+                pw = int(pows[end - p])
+                dk0 = -xp * pw
+                for v in cls_m[int(cls[xp])]:
+                    if v == xp or probes >= c.gen_max_probes:
+                        continue
+                    kv = (key + dk0 + v * pw) % (1 << 64)
+                    cell = tab.get(kv)
+                    probes += 1
+                    if not cell:
+                        continue
+                    for t, cnt in cell.items():
+                        votes[t] = votes.get(t, 0.0) \
+                            + c.gen_var_w * cnt
+        return votes
+
     def _channel_prob(self, ch: str, x: int, keys: dict[int, int],
                       votes: dict[int, float] | None,
                       denom: float,
@@ -168,6 +218,20 @@ class _PredictMixin:
             a_r = c.alpha
             return (vx + a_r * self._uni_p(x, denom)) \
                 / (vt + a_r), True
+        if ch == "gv":
+            # generalized-variant channel: order-channel semantics on
+            # merged variant-cell votes (see _gen_votes) - rewards are
+            # count-scale like the order channels, so Hedge can weigh
+            # generalization against verbatim memory.
+            end = self._count - 1
+            if end < 0:
+                return self._uni_p(x, denom), False
+            vts = self._gen_votes(end, keys)
+            if not vts:
+                return self._uni_p(x, denom), False
+            vt = sum(vts.values())
+            return (vts.get(x, 0.0) + c.alpha
+                    * self._uni_p(x, denom)) / (vt + c.alpha), True
         if ch in ("gcell", "gsyn", "gsd", "dnet"):
             # fuzzy lift channels: real probs so hedge can punish them.
             # prob = exp(channel log-softmax at x) - one readout row.
@@ -1973,6 +2037,84 @@ class _PredictMixin:
         dn = self._dnet_lift_vec(warm, q=gsyn_q)
         if dn is not None:
             row.add_(_masked(dn))
+        if c.gen_variants:
+            self._gv_lift_dev(row, warm)
+
+    def _gv_lift_dev(self, row: torch.Tensor, warm: int) -> None:
+        """Device gv lift: same-class 1-edit suffix variants probed
+        against the LIVE ``_gt`` order tables, scatter-added onto the
+        logit row.  Read-time only - zero owned state, so deletes and
+        reverts propagate identically to the exact channel.  Runs
+        post-graph in ``_apply_sparse_lift_dev``: ALL variant keys for
+        the context batch into one ``probe_fixed`` + one cell gather;
+        two syncs total (thin mask, vote stats)."""
+        c = self.config
+        wsrc = self._wR[warm] if c.cond_hedge else self._w
+        wg = float(wsrc[self._chix["gv"]])
+        if wg <= 1e-4 or self._count < 2:
+            return
+        gt = self._gt
+        dev = self._dev
+        cap = c.ring_capacity
+        end = self._count - 1
+        end_t = torch.tensor(end, dtype=torch.int64, device=dev)
+        keys, live_k = self._keys_dev(end_t)            # [O] raw keys
+        # thin gate: exact-cell total < gen_min_tot (or cell absent)
+        pk_e = _mix64(keys * _MIX1 + gt._salt[:keys.numel()])
+        sl_e, fd_e = gt.probe_fixed(pk_e)
+        tot_e = torch.where(
+            fd_e, gt.ttot[gt._ordx[:keys.numel()], sl_e],
+            keys.new_zeros(()))
+        thin_l = (live_k & (tot_e < c.gen_min_tot)).tolist()  # sync 1
+        if not any(thin_l):
+            return
+        gords = c.gen_orders or c.orders
+        ar_m = torch.arange(self._clsM_g.shape[1], device=dev)
+        pks, rows_l, mvs = [], [], []
+        ep0 = self._ep_start
+        for i, k in enumerate(c.orders):
+            if not thin_l[i] or k not in gords:
+                continue
+            for d in range(c.gen_fix_tail, k):
+                if end - d < ep0:
+                    continue
+                xp = self._ringg[(end - d) % cap].to(torch.int64)
+                ci = self._cls_g[xp]
+                mem = self._clsM_g[ci]                  # [Ccap]
+                mvs.append((ar_m < self._clsLen_g[ci])
+                           & (mem != xp))
+                pks.append(_mix64(
+                    (keys[i] + (mem - xp) * self._pows_g[d])
+                    * _MIX1 + gt._salt[i]))
+                rows_l.append(torch.full_like(mem, i))
+        if not pks:
+            return
+        pk = torch.cat(pks)
+        rows = torch.cat(rows_l)
+        mv = torch.cat(mvs)
+        slot, fnd = gt.probe_fixed(pk, rows=rows)
+        tt = gt.ttoks[rows, slot]                       # [N, M]
+        tc = gt.tcnt[rows, slot]
+        V = self.vocab_size
+        m2 = (fnd & mv)[:, None] & (tt >= 0) & (tt < V) & (tc > 0)
+        votes = torch.zeros(V, dtype=torch.float32, device=dev)
+        if bool(m2.any()):                              # sync (cheap
+            votes.index_add_(0, tt[m2].long(),          # path usually
+                             tc[m2].float() * c.gen_var_w)  # taken)
+        s3 = torch.stack([votes.sum(), (votes > 0).sum().float(),
+                          self._tot_g]).tolist()        # sync 2
+        vt, nnz, tot = s3
+        if vt <= 0:
+            return
+        a_g = nnz if c.ppm_escape_c else c.alpha
+        denom = tot + c.uni_alpha * V
+        uni = self._unig.float()
+        p = (votes + a_g * (uni + c.uni_alpha) / denom) \
+            / (vt + a_g)
+        lp = torch.log(torch.clamp(p, min=1e-12)) - \
+            (torch.log(uni + c.uni_alpha) - math.log(denom))
+        row.add_(torch.where(votes > 0, wg * lp,
+                             row.new_zeros(())))
 
     def _predict_gpu(self) -> torch.Tensor:
         """Standalone predict (no learn) - CUDA-graph captured like
@@ -2001,7 +2143,8 @@ class _PredictMixin:
                             or self.config.word_orders
                             or self.config.hybrid_taps
                             or self.config.gcell or self.config.gsyn
-                            or self.config.gsyn_deep or self.config.dnet):
+                            or self.config.gsyn_deep or self.config.dnet
+                            or self.config.gen_variants):
                         self._apply_sparse_lift_dev(
                             lg, int(self._dthin_g.item()))
                     return self._finite_lg(lg)
@@ -2021,7 +2164,7 @@ class _PredictMixin:
                 or self.config.word_orders
                 or self.config.hybrid_taps or self.config.gcell
                 or self.config.gsyn or self.config.gsyn_deep
-                or self.config.dnet):
+                or self.config.dnet or self.config.gen_variants):
             self._apply_sparse_lift_dev(
                 lg, int(self._dthin_g.item()))
         return self._finite_lg(lg)
@@ -2263,6 +2406,22 @@ class _PredictMixin:
                             / (vt + a_r)
                         acc(t, wr * (math.log(max(p, 1e-12))
                                      - log_uni(t)), "rev")
+
+        # generalized-variant channel "gv": 1-edit same-class suffix
+        # variants read off the live order tables (asleep wherever the
+        # exact cells already carry the context)
+        if c.gen_variants and end >= 0:
+            wg = w["gv"]
+            if wg > 1e-4:
+                gv = self._gen_votes(end, keys)
+                if gv:
+                    vt = sum(gv.values())
+                    a_g = self._esc_alpha(len(gv))
+                    for t, cnt in gv.items():
+                        p = (cnt + a_g * self._uni_p(t, denom)) \
+                            / (vt + a_g)
+                        acc(t, wg * (math.log(max(p, 1e-12))
+                                     - log_uni(t)), "gv")
 
         # sparse-tap channels "p<j>": gapped-suffix keys skip single
         # corrupted/novel positions that break every contiguous key.

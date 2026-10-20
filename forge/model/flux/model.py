@@ -63,6 +63,7 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
             + [f"w{j}" for j in range(len(c.word_orders))] \
             + [f"h{j}" for j in range(len(c.hybrid_taps))] \
             + (["rev"] if c.rev_channel else []) \
+            + (["gv"] if c.gen_variants else []) \
             + [ch for ch, on in (("gcell", c.gcell), ("gsyn", c.gsyn),
                                  ("gsd", c.gsyn_deep),
                                  ("dnet", c.dnet)) if on]
@@ -82,7 +83,7 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
         # Fuzzy channels are excluded: their bulk rewards arrive via
         # real_r (overwriting them here would kill that signal).
         self._pmask = np.array([(ch.startswith(("p", "g", "w", "h"))
-                                 or ch == "rev")
+                                 or ch in ("rev", "gv"))
                                 and ch not in self._fset
                                 for ch in self.channels], dtype=bool)
         self._pidx = np.nonzero(self._pmask)[0].tolist()
@@ -126,6 +127,13 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
         # 4 newline, 5 punct, 6 other ascii, 7 high/bpe
         self._cls = np.array([_byte_class(t) for t in range(V)],
                              dtype=np.int32)
+        # class -> member tokens: static vocab property for the gv
+        # channel's same-class variant probes (not learned state -
+        # carries no information about the memory contents)
+        self._cls_members: list[list[int]] = [
+            [] for _ in range(8)]
+        for _t in range(V):
+            self._cls_members[int(self._cls[_t])].append(_t)
         # word-order tables: keys fold the last-w word hashes +
         # current-word length bucket (derived via ring scan - no extra
         # state); "w<j>" channels, "W" journal entries
@@ -441,6 +449,19 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
                 dtype=torch.int64, device=self._dev)
             self._orders_g = torch.tensor(
                 list(c.orders), dtype=torch.int64, device=self._dev)
+            # gv device probes: static class membership (padded to
+            # gen_cls_cap per class) - vocab property, not learned state
+            _cc = max(1, int(c.gen_cls_cap))
+            _cm = torch.zeros(8, _cc, dtype=torch.int64)
+            _cl = torch.zeros(8, dtype=torch.int64)
+            for _i, _mem in enumerate(self._cls_members):
+                _n = min(len(_mem), _cc)
+                _cm[_i, :_n] = torch.tensor(_mem[:_n])
+                _cl[_i] = _n
+            self._cls_g = torch.from_numpy(self._cls.astype(
+                np.int64)).to(self._dev)
+            self._clsM_g = _cm.to(self._dev)
+            self._clsLen_g = _cl.to(self._dev)
             self._cert_g = torch.tensor(
                 list(c.cert_orders) or [0], dtype=torch.int64,
                 device=self._dev)
