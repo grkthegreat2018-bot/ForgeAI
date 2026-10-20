@@ -1295,6 +1295,83 @@ so removed weight information can never persist through it.
   invariant to preserve in any successor: generalization reads live
   weights, never caches them.
 
+## EXP-4 FluxLM on Qwen-BPE tokens (same-unit LLM comparison)
+
+Byte-level NLL can't be compared to a BPE LM.  Driver
+`scripts/exp_fluxtok.py` runs FluxLM (V=151936, cuda_primary) on
+Qwen2.5's OWN token stream of the docs corpus (190K train / 2.3K
+held tokens), so NLL/token is directly comparable.  No gradient
+training anywhere — ingest is the whole "training".
+
+Measured (held-out docs text, Qwen2.5-0.5B NLL = **4.298**):
+
+| variant | top1 | NLL |
+|---|---|---|
+| Qwen2.5-0.5B (pretrained) | ~0.45 | **4.298** |
+| bpe orders(1..32) only | 0.176 | **6.692** |
+| +knn | 0.1725 | 6.815 |
+| deep orders(3..64)+knn | 0.1205 | 7.616 |
+| +sparse taps | 0.176 | 6.811 |
+| +BPE surface classes g2-4 | 0.1699 | 7.055 |
+| +surface-cls gv | 0.1707 | 7.056 |
+| +emb-cluster classes g2-3 | 0.1773 | 6.830 |
+| +emb-cluster gv | 0.1742 | 6.840 |
+
+- New infra: `FluxConfig.cls_table`/`cls_members` overrides +
+  `helpers.bpe_class_table` (surface classes) and
+  `helpers.emb_class_table` (k-means partition of a pretrained
+  embedding table -> semantic classes; members centroid-sorted so
+  `gen_cls_cap` probes prototypical variants).  Both are static
+  metadata — no fitting to the corpus.
+- Honest verdict: at 190K train tokens EVERY auxiliary channel
+  dilutes the mixture — plain order mixture wins.  The binding
+  constraint vs Qwen is *coverage*, not channels: an associative
+  memory generalizes only where it has cells.  Next lever = corpus
+  scale (`scripts/exp_fluxscale.py`) — 12MB local text pool
+  (~3.5M BPE tokens) vs docs-only.
+
+## EXP-5 FluxLM memory rework + cold-tier weight banks
+
+Bulk ingest OOMed past ~1M BPE tokens.  Root cause was transient
+geometry, not resident state: the probe/reward/write pass ran
+unchunked over all n — `[O,n]` and `[O,n,M]` tensors (~20GB at
+n=3.5M, O=12, M=16) plus a 5.4GB `free_cols` argsort in
+`_GPUCellTables.add_multi`.  Fixes in `learnmixin._ingest_bulk`:
+
+- probe/reward/write pass now slices by `gpu_bulk_chunk` (8192);
+  only light `[O,n]` buffers needed by downstream reward/hedge/
+  regime logic stay whole-block.
+- journal-bound matrices (`kk_all`, `write_o`, `surprise`,
+  eviction/col snapshots) are pinned HOST buffers filled by async
+  D2H copies; one stream sync before host reads.
+- csem projection `_A[ids] @ _Pcsem` chunked — `[n,192]` transient
+  (3.6GB at n=3.5M) dies; only `[n,64]` result persists.
+- `blk["deltas"]` stays fp32 host (exact-undo requirement).
+- Smoke: 60K-token cuda_primary ingest peak 0.62GB.
+
+`grow()` no longer hard-raises on structural overflow (>2 keys per
+slot pair): the weakest contestant retargets to its alternate slot,
+drops only when both anchors are taken, and reports `dropped` —
+auto-grow mid-ingest can't crash the model.
+
+FluxBank (`forge/model/flux/bank.py`, `FluxConfig.bank_*`) — cold-tier
+weight bank, the "MoE for weight data" tier: spilled order rows
+(toks/cnt/tot/occ) live host-side, still vote through the SAME
+order-channel prob (`_cold_cell` + `_union_cell` merges hot+cold
+counts — disjoint write sets sum exactly).  Re-spill dedups/merges
+by key.  `_spill_order` fires when a table crosses
+`bank_spill_hi`·slots instead of decaying; `regulate()` runs at
+ingest seal (`bank_regulate`) — hot tables shed cold rows, banks
+purge coldest past `bank_rows_cap`.  Device path: `_bank_lift_dev`
+probes banks for hot-missed contexts post-graph.  Persisted in
+`.flux` snapshots and standalone `.fluxbank` npz files.  Undo is
+approximate-but-safe: reverts probe hot keys, spilled rows skip
+cleanly.  `len(bank)` = live rows (`_n`), not capacity.
+
+Tests: `tests/unit/test_flux_bank.py` (7) — spill keeps votes,
+hot/cold union merge, regulate, snapshot round-trip, live-length.
+Suite: 195 flux tests green.
+
 ## Build & Test Commands
 
 ```powershell

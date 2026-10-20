@@ -324,9 +324,12 @@ class _PredictMixin:
         k = int(ch[1:])
         key = keys.get(k, -1)
         cell = self._tables[k].get(key)
+        tot = self._totals[k].get(key, 0.0) if cell else 0.0
+        bc = self._cold_cell(k, key)             # weight bank tier
+        if bc is not None:
+            cell, tot = self._union_cell(cell, tot, *bc)
         if not cell:
             return self._uni_p(x, denom), False
-        tot = self._totals[k].get(key, 0.0)
         a_c = self._esc_alpha(len(cell))
         return (cell.get(x, 0.0) + a_c * self._uni_p(x, denom)) \
             / (tot + a_c), tot > 0
@@ -2039,6 +2042,82 @@ class _PredictMixin:
             row.add_(_masked(dn))
         if c.gen_variants:
             self._gv_lift_dev(row, warm)
+        if self._banks:
+            self._bank_lift_dev(row, warm)
+
+    def _cold_cell(self, k: int, key: int):
+        """Cold-tier lookup: (followers {tok: cnt}, tot) for context
+        ``key`` in order k's weight bank, else None.  Banked rows are
+        the SAME cells the hot table evicted - counts merge as the
+        union of disjoint write sets, no resurrection needed."""
+        b = self._banks.get(k)
+        return b.cell(key) if b is not None else None
+
+    @staticmethod
+    def _union_cell(hot, hot_tot, cold, cold_tot):
+        """Merge a hot cell and its cold-tier row into the true
+        (followers, tot) union.  The two sets are disjoint by
+        construction (hot holds only post-spill mass), so counts and
+        totals sum; a hot-only or cold-only cell passes through."""
+        if not hot:
+            return cold, cold_tot
+        merged = dict(cold)
+        for t, cn in hot.items():
+            merged[t] = merged.get(t, 0.0) + cn
+        return merged, cold_tot + hot_tot
+
+    def _bank_lift_dev(self, row: torch.Tensor, warm: int) -> None:
+        """Device cold-tier votes: order contexts the hot table missed
+        get probed against the banks; each hit votes with the order's
+        own formula (cnt + a*uni)/(tot + a) and weight - a sparse
+        lift on the logit row, same contract as _sparse_lift_vec's
+        order acc().  Cost: one [O] probe + [O]-key D2H + dict
+        lookups + one H2D scatter (only on cold hits)."""
+        c = self.config
+        if self._gt is None or self._count < 2:
+            return
+        dev = self._dev
+        end_t = torch.tensor(self._count - 1, dtype=torch.int64,
+                             device=dev)
+        keys, live_k = self._keys_dev(end_t)        # [O] raw keys
+        pk_e = _mix64(keys * _MIX1
+                      + self._gt._salt[:keys.numel()])
+        sl_e, fd_e = self._gt.probe_fixed(pk_e)
+        miss_l = (live_k & ~fd_e).tolist()          # sync 1
+        if not any(miss_l):
+            return
+        pk_h = pk_e.cpu().numpy()
+        wsrc = self._wR[warm] if c.cond_hedge else self._w
+        V = self.vocab_size
+        denom = float(self._total) + c.uni_alpha * V
+        acc: dict[int, float] = {}
+        for i, k in enumerate(c.orders):
+            if not miss_l[i]:
+                continue
+            b = self._banks.get(k)
+            cell = b.cell(int(pk_h[i])) if b is not None else None
+            if cell is None:
+                continue
+            followers, tot = cell
+            if tot <= 0:
+                continue
+            wk = float(wsrc[self._chix[f"o{k}"]])
+            if wk <= 1e-4:
+                continue
+            a_c = float(len(followers)) \
+                if c.ppm_escape_c else c.alpha
+            for t, cnt in followers.items():
+                uni_p = (self._uni[t] + c.uni_alpha) / denom
+                p = (cnt + a_c * uni_p) / (tot + a_c)
+                acc[t] = acc.get(t, 0.0) + wk * (
+                    math.log(max(p, 1e-12)) - math.log(uni_p))
+        if not acc:
+            return
+        ti = torch.tensor(list(acc.keys()), dtype=torch.int64,
+                          device=dev)
+        tv = torch.tensor(list(acc.values()), dtype=torch.float32,
+                          device=dev)
+        row.index_add_(0, ti, tv)
 
     def _gv_lift_dev(self, row: torch.Tensor, warm: int) -> None:
         """Device gv lift: same-class 1-edit suffix variants probed
@@ -2144,7 +2223,8 @@ class _PredictMixin:
                             or self.config.hybrid_taps
                             or self.config.gcell or self.config.gsyn
                             or self.config.gsyn_deep or self.config.dnet
-                            or self.config.gen_variants):
+                            or self.config.gen_variants
+                            or self._banks):
                         self._apply_sparse_lift_dev(
                             lg, int(self._dthin_g.item()))
                     return self._finite_lg(lg)
@@ -2164,7 +2244,8 @@ class _PredictMixin:
                 or self.config.word_orders
                 or self.config.hybrid_taps or self.config.gcell
                 or self.config.gsyn or self.config.gsyn_deep
-                or self.config.dnet or self.config.gen_variants):
+                or self.config.dnet or self.config.gen_variants
+                or self._banks):
             self._apply_sparse_lift_dev(
                 lg, int(self._dthin_g.item()))
         return self._finite_lg(lg)
@@ -2355,9 +2436,12 @@ class _PredictMixin:
             if key is None:
                 continue
             cell = self._tables[k].get(key)
+            tot = self._totals[k].get(key, 0.0) if cell else 0.0
+            bc = self._cold_cell(k, key)         # weight bank tier
+            if bc is not None:
+                cell, tot = self._union_cell(cell, tot, *bc)
             if not cell:
                 continue
-            tot = self._totals[k].get(key, 0.0)
             wk = w[f"o{k}"]
             if c.evidence_lift:
                 kap = (c.backoff_kappa * (o_min / k)

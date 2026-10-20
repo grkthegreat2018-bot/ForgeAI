@@ -1446,7 +1446,94 @@ class _StateMixin:
         self._csem_rows = cs
         c.gpu_table_slots = newS
         self._graphs.clear()
-        return {"grown": True, "slots": newS}
+        return {"grown": True, "slots": newS,
+                "dropped": self._gt._grow_dropped}
+
+    # -- cold-tier weight banks ----------------------------------------
+
+    def _spill_order(self, k: int, n_spill: int) -> int:
+        """Move the ``n_spill`` coldest live rows of order ``k`` into
+        its FluxBank and free their hot slots.  Cold rows keep voting
+        through the order channel (see _cold_cell) - this shrinks hot
+        footprint without forgetting."""
+        c = self.config
+        bank = self._banks.get(k)
+        if bank is None or n_spill <= 0:
+            return 0
+        floor_keep = 16               # always keep a live hot floor
+        if self._gt is not None:
+            oi = self._gt.kidx[k]
+            idx = torch.nonzero(self._gt.tkeys[oi] != 0).squeeze(1)
+            if idx.numel() <= floor_keep:
+                return 0
+            n_spill = min(n_spill, idx.numel() - floor_keep)
+            pick = idx[torch.argsort(
+                self._gt.tocc[oi][idx], stable=True)[:n_spill]]
+            bank.add_rows(
+                self._gt.tkeys[oi][pick].cpu().numpy(),
+                self._gt.traw[oi][pick].cpu().numpy(),
+                self._gt.ttoks[oi][pick].cpu().numpy(),
+                self._gt.tcnt[oi][pick].cpu().numpy(),
+                self._gt.ttot[oi][pick].cpu().numpy(),
+                self._gt.tocc[oi][pick].cpu().numpy(),
+                np.full(pick.numel(), self._count, dtype=np.int64))
+            self._gt.tkeys[oi][pick] = 0
+            self._gt.traw[oi][pick] = 0
+            self._gt.ttoks[oi][pick] = -1
+            self._gt.tcnt[oi][pick] = 0.0
+            self._gt.ttot[oi][pick] = 0.0
+            self._gt.tocc[oi][pick] = 0.0
+            self._gt.used[oi] -= int(pick.numel())
+            return int(pick.numel())
+        # host dict path: _tables[k]/{_totals[k]}
+        tab, tots = self._tables[k], self._totals[k]
+        if len(tab) <= floor_keep:
+            return 0
+        n_spill = min(n_spill, len(tab) - floor_keep)
+        keys = sorted(tots, key=tots.get)[:n_spill]
+        M = bank.M
+        ka = np.zeros(len(keys), dtype=np.int64)
+        ta = np.zeros((len(keys), M), dtype=np.int32) - 1
+        ca = np.zeros((len(keys), M), dtype=np.float32)
+        tt = np.zeros(len(keys), dtype=np.float32)
+        for i, key in enumerate(keys):
+            cell = tab.pop(key)
+            tot = tots.pop(key, 0.0)
+            top = sorted(cell.items(), key=lambda kv: -kv[1])[:M]
+            for j, (t, cn) in enumerate(top):
+                ta[i, j] = int(t)
+                ca[i, j] = cn
+            ka[i] = int(key)
+            tt[i] = tot
+        return bank.add_rows(
+            ka, ka, ta, ca, tt, tt.copy(),
+            np.full(len(keys), self._count, dtype=np.int64))
+
+    def regulate(self) -> dict:
+        """Self-regulating head - rule-based, reads only the model's
+        own stats (used/S, totals, bank rows).  Hot order tables past
+        the spill watermark shed their coldest rows into the banks;
+        banks past rows_cap purge their coldest entries (the only true
+        forgetting left).  Runs at ingest seal when bank_regulate."""
+        c = self.config
+        rep: dict = {"spilled": {}, "purged": 0}
+        if not self._banks:
+            return rep
+        for k in c.orders:
+            n_live = (self._gt.used[self._gt.kidx[k]]
+                      if self._gt is not None else len(self._tables[k]))
+            cap = (self._gt.S if self._gt is not None
+                   else c.max_cells_per_order)
+            if n_live > c.bank_spill_hi * cap:
+                rep["spilled"][k] = self._spill_order(
+                    k, int(c.bank_spill_frac * n_live))
+        if c.bank_rows_cap > 0:
+            for k, b in self._banks.items():
+                over = len(b) - c.bank_rows_cap
+                if over > 0:
+                    b.drop_rows(b.coldest(over))
+                    rep["purged"] += int(over)
+        return rep
 
     def grow_knn(self, factor: int = 0) -> dict:
         """Extend the fingerprint bank in place - rows keep their

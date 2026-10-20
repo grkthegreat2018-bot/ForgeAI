@@ -1904,9 +1904,9 @@ class _LearnMixin:
                "wR": self._wR.copy(), "hmxR": self._hmxR.copy(),
                "regime": self._regime,
                "last_seen": dict(self._last_seen),
-               "seen_g": self._seen_g.clone(),
-               "unig": self._unig.clone(),
-               "log_uni_num": self._log_uni_num.clone(),
+               "seen_g": self._seen_g.cpu(),
+               "unig": self._unig.cpu(),
+               "log_uni_num": self._log_uni_num.cpu(),
                "recent_len": len(self._recent),
                "gaps": len(self._gaps),
                "epi": [], "csem": [], "writes": {}}
@@ -1967,87 +1967,63 @@ class _LearnMixin:
         self._H[np_idx] = H_blk.cpu().numpy().astype(np.uint64)
 
         # -- per-order context keys + table writes ----------------------
-        # ONE batched read probe over [O,n] keys (pre-write state for
-        # hedge rewards + gap detection), then sync-free per-order adds.
-        i64 = torch.arange(n, dtype=torch.int64, device=dev)
+        # Chunked along positions by gpu_bulk_chunk: the [O,n] and
+        # [O,n,M] intermediates (probes, reward matrices, add_multi's
+        # sorted placement workspace) are O(n*O*M) VRAM - an
+        # unchunked multi-M-token ingest OOMs the card (measured:
+        # ~20GB transient at n=3.5M).  Each slice probes AFTER the
+        # earlier slices' writes commit, so cross-slice same-key
+        # repeats see real post-write state - closer to sequential
+        # semantics than the flat pre-block probe this replaces;
+        # in-slice repeats keep the group-prefix correction.
+        CH = max(1, min(n, int(c.gpu_bulk_chunk)))
         O = len(c.orders)
         kvec = self._orders_g                                     # [O]
-        posb = pos[None, :].expand(O, n)
-        # context for token at pos ENDS at pos-1 (matches live
-        # _keys_dev(end=pos-1)): key = suffix of tokens pos-k..pos-1
-        valid_o = (posb - kvec[:, None] >= self._ep_start) \
-            & (posb >= kvec[:, None])                             # [O,n]
-        kk_all = Hfull[(posb - base + Kmax)] - Hfull[
-            (posb - kvec[:, None] - base + Kmax).clamp(min=0)] \
-            * self._pows_g[kvec][:, None]                         # [O,n]
-        pk_all = _mix64(kk_all * _MIX1
-                        + self._gt._salt[:O, None])
-        rows_f = self._gt._ordx[:, None].expand(O, n).reshape(-1)
-        slot_f, found_f = self._gt.probe_fixed(
-            pk_all.reshape(-1), rows=rows_f)
-        # bloom doorkeeper: first-sighting context keys set counter
-        # bits instead of materializing rows - hapax-heavy streams
-        # would otherwise flood the tables with cells that never fire
-        # again.  write_o is the WRITE mask only: found_f/p_o/rewards
-        # still see true pre-block state.
-        write_o = valid_o
-        if self._bloom_ready():
-            pf = pk_all.reshape(-1)
-            vf = valid_o.reshape(-1)
-            miss = vf & ~found_f
-            BM = self._bloom_g.numel()
-            b1 = pf.remainder(BM)
-            b2 = _mix64(pf * _MIX2 + _MIX1).remainder(BM)
-            thr = c.bloom_admit - 1
-            hit = (self._bloom_g.index_select(0, b1) >= thr) \
-                & (self._bloom_g.index_select(0, b2) >= thr)
-            # intra-block repeats: a key's 2nd+ sighting in this same
-            # block promotes - the first sighting just set its bits
-            ordb = torch.argsort(pf)
-            pfs = pf[ordb]
-            dup = torch.zeros_like(miss)
-            dup[ordb[1:]] = pfs[1:] == pfs[:-1]
-            admit = found_f | hit | (miss & dup)
-            drop = vf & ~admit
-            # count every miss sighting (saturating int16 counters)
-            midx = torch.nonzero(miss).squeeze(1)
-            if midx.numel():
-                ones = torch.ones(midx.numel(), dtype=torch.int16,
-                                  device=dev)
-                self._bloom_g.index_add_(0, b1[midx], ones)
-                self._bloom_g.index_add_(0, b2[midx], ones)
-                self._bloom_g.clamp_(0, 32767)
-            write_o = (vf & ~drop).reshape(O, n)
+        i64 = torch.arange(n, dtype=torch.int64, device=dev)
         denom0 = float(self._total) + c.uni_alpha * V
         uni_pre = (self._unig[ids_t] + c.uni_alpha) / denom0  # [n]
-        uni_rep = uni_pre[None, :].expand(O, n).reshape(-1)
-        ids_f = ids_t[None, :].expand(O, n).reshape(-1)
-        rt_f = self._gt.ttoks[rows_f, slot_f]                     # [On,M]
-        rc_f = self._gt.tcnt[rows_f, slot_f]
-        tots_f = self._gt.ttot[rows_f, slot_f]
-        cnt_x = (rc_f * (rt_f == ids_f[:, None].to(torch.int32))
-                 ).sum(dim=1)                                     # [On]
-        if c.ppm_escape_c:
-            a_f = (((rt_f >= 0) & (rt_f < V)) & found_f[:, None]) \
-                .sum(dim=1).clamp(min=1e-9)                       # [On]
-        else:
-            a_f = float(c.alpha)           # python float - H2D-free
-        p_o = torch.where(
-            found_f & (tots_f > 0),
-            (cnt_x + a_f * uni_rep) / (tots_f + a_f),
-            uni_rep)
-        # per-token surprise: 1 - p_mix under the (constant-w) chunk
-        # mixture - order probs are exact; non-order channels fall back
-        # to the unigram prior, same as the bulk reward approximation
         w_o = torch.from_numpy(
             self._w[:O].astype(np.float32)).to(dev)[:, None]
-        awake_o = valid_o & found_f.reshape(O, n) \
-            & (tots_f.reshape(O, n) > 0)               # [O,n]
+        # whole-block outputs (journal stash + downstream consumers:
+        # bulk_channel_rewards kstar-gather, cond_hedge reg_np, gen
+        # warm_c, write_gate epi thinning).  The heavy [O,n,M]
+        # probe-cell reads stay per-slice; journal-bound matrices and
+        # reward history live in pinned HOST buffers (blk copies were
+        # taking them host anyway - 700MB+ of device RAM freed);
+        # probe-state rows are retained only when a downstream
+        # consumer actually reads them.
+        pin = dict(device="cpu", pin_memory=True) \
+            if dev.type == "cuda" else dict(device="cpu")
+        kk_all = torch.zeros(O, n, dtype=torch.int64, **pin)
+        write_o = torch.zeros(O, n, dtype=torch.bool, **pin)
+        rw_o = torch.zeros(O, n, dtype=torch.float64, **pin)
+        s_v = torch.zeros(n, dtype=torch.float32, device=dev)
+        s_eff = torch.zeros(n, dtype=torch.float32, device=dev)
+        need_rows = bool(c.bulk_channel_rewards or c.cond_hedge
+                         or c.write_gate
+                         or (c.gen_recall > 0 and
+                             (c.gcell or c.gsyn or c.gsyn_deep
+                              or c.dnet or c.r_live)
+                             and not self._predict_only))
+        need_cell = bool(c.bulk_channel_rewards)
+        valid_o = torch.zeros(O, n, dtype=torch.bool, device=dev) \
+            if need_rows else None
+        found_f = torch.zeros(O, n, dtype=torch.bool, device=dev) \
+            if need_rows else None
+        tots_f = torch.zeros(O, n, dtype=torch.float32, device=dev) \
+            if need_rows else None
+        cnt_x = torch.zeros(O, n, dtype=torch.float32, device=dev) \
+            if need_cell else None
+        p_o = torch.zeros(O, n, dtype=torch.float32, device=dev) \
+            if need_cell else None
+        pmix_i = torch.zeros(n, dtype=torch.float32, device=dev)
+        ins_tot = None
+        ev_l, col_l = [], []
         if c.sleeping_experts == 2:
             # renormalized pmix: asleep channels abstain entirely, so
             # the mixture prob comes only from channels that responded.
-            # uni/recency/fatigue are always awake - their rewards are
-            # hoisted here (same math as the tail block below).
+            # uni/recency/fatigue are always awake - position-wise
+            # rows computed once over the block (cheap, host-side).
             seen_pre = self._seen_g[ids_t].cpu().numpy()
             enc = ids_np * (n + 1) + np.arange(n)
             order = np.argsort(enc, kind="stable")
@@ -2067,149 +2043,237 @@ class _LearnMixin:
             col = {ch: i for i, ch in enumerate(self.channels)}
             waw = float(self._w[col["uni"]] + self._w[col["recency"]]
                         + self._w[col["fatigue"]])
-            tail_np = (self._w[col["uni"]] * uni_pre.cpu().numpy()
-                       + self._w[col["recency"]] * rec_r
-                       + self._w[col["fatigue"]] * fat_r)
-            pmix_i = (((w_o * p_o.reshape(O, n) * awake_o).sum(0)
-                       + torch.from_numpy(tail_np).to(dev))
-                      / ((w_o * awake_o).sum(0) + waw)
-                      .clamp(min=1e-12)).float()
-        else:
-            w_rest = float(1.0 - self._w[:O].sum())
-            pmix_i = (w_o * p_o.reshape(O, n)).sum(0) \
-                + w_rest * uni_pre
-        s_v = (torch.clamp(1.0 - pmix_i, min=c.surprise_floor)
-               if c.surprise_gate
-               else torch.ones(n, device=dev))          # [n]
-        # a NaN mixture (dead tables, fp blowup) must not propagate
-        # into every downstream write - treat as fully surprising
-        s_v = torch.nan_to_num(s_v, nan=1.0)
-        # in-block recurrence correction for the WRITE deltas: the
-        # eager path's surprise decays live as a repeated (context,
-        # token) sighting lands in the cell, so counts grow
-        # sublinearly (~log n).  A flat pre-block s_v writes ~full
-        # deltas on every in-block repeat -> counts grow linearly in
-        # frequency and a hot low-order cell swamps the deeper orders
-        # that carry the actual answer.  Exclusive group prefix sums
-        # give each position the mass earlier same-block positions
-        # already wrote under its context (m_ctx) and its context+
-        # token pair (m_pair); p_post recomputes the mixture under
-        # that evidence.  Doorkeeper-dropped positions contribute no
-        # mass (write_o mask).
-        sv_flat = torch.where(
-            write_o.reshape(-1),
-            s_v[None, :].expand(O, n).reshape(-1),
-            torch.zeros((), device=dev))
-        m_ctx = _group_prefix(pk_all.reshape(-1), sv_flat)
-        m_pair = _group_prefix(pk_all.reshape(-1), sv_flat, ids_f)
-        tot_p = tots_f + m_ctx
-        cnt_p = cnt_x + m_pair
-        p_post = torch.where(
-            tot_p > 0,
-            (cnt_p + a_f * uni_rep) / (tot_p + a_f),
-            uni_rep)
-        # effective surprise for WRITE deltas: awake-renormalized
-        # mixture - a channel that fires with real evidence votes at
-        # full strength regardless of the (frozen within-block) hedge
-        # weight, matching what the converged sequential mixture would
-        # predict.  Without this, uniform early weights keep every
-        # position maximally surprising -> gen matrices (gsyn/dnet)
-        # blow up to 300x their eager norms.
-        awake_p = awake_o.reshape(-1) | (
-            valid_o.reshape(-1) & (m_ctx > 0))
-        _num = (w_o * p_post.reshape(O, n)
-                * awake_p.reshape(O, n)).sum(0)
-        _den = (w_o * awake_p.reshape(O, n)).sum(0)
-        pmix_e = torch.where(_den > 1e-9,
-                             _num / _den.clamp(min=1e-9),
-                             uni_pre)
-        s_eff = torch.clamp(1.0 - pmix_e, min=c.surprise_floor) \
-            if c.surprise_gate else s_v
-        s_eff = torch.nan_to_num(s_eff, nan=1.0)
-        # per-position order rewards kept for the chunked hedge update
-        # below (weights evolve within the block, not one flat update).
-        # sleeping experts: asleep positions take pmix (neutral reward)
-        # instead of the unigram fallback.
-        if c.sleeping_experts:
-            pmix_o = pmix_i[None, :].expand(O, n).reshape(-1)
-            rw_o = (torch.where(awake_o.reshape(-1), p_o, pmix_o)
-                    .double().reshape(O, n))
-        else:
-            rw_o = (torch.where(valid_o.reshape(-1), p_o, uni_rep)
-                    .double().reshape(O, n))           # [O, n]
-
-        # gap detect: unseen context OR high surprise -> teacher target
-        if c.track_gaps and c.gap_probe_order in self._gt.kidx:
-            gk_i = self._gt.kidx[c.gap_probe_order]
-            thin = valid_o[gk_i] & (
-                ~found_f.reshape(O, n)[gk_i]
-                | (s_v > c.gap_surprise))
-            gp = pos[thin]
-            if gp.numel():
-                self._gaps.extend(gp.cpu().tolist())
-
-        # ONE batched write across all orders, surprise-scaled with
-        # the in-block-corrected deltas (distinct-column
-        # disambiguation makes it equivalent to sequential adds)
-        d_all = s_eff[None, :].expand(O, n)
-        ins_rows, ev_snap, col_snap = self._gt.add_multi(
-            kk_all, ids_t[None, :].expand(O, n), d_all, write_o)
-        # reward fix-up: the pre-block probe misses every context on a
-        # fresh first pass, which left order channels at uniform reward
-        # for entire corpora - hedge could never differentiate.  Re-
-        # probe the POST-write table: a key that recurred within the
-        # block now sees the real cell.  Each position's own delta is
-        # subtracted back out (self-leak); later same-key writes stay
-        # in - a mild forward leak vs sequential semantics, bounded.
-        slot2, found2 = self._gt.probe_fixed(
-            pk_all.reshape(-1), rows=rows_f)
-        new_cell = ~found_f & found2
-        if bool(new_cell.any()):
-            wrote = write_o.reshape(-1)
-            rt2 = self._gt.ttoks[rows_f, slot2]
-            rc2 = self._gt.tcnt[rows_f, slot2]
-            tot2 = self._gt.ttot[rows_f, slot2]
-            cnt2 = (rc2 * (rt2 == ids_f[:, None].to(torch.int32))
-                    ).sum(dim=1)
-            d_flat = s_eff[None, :].expand(O, n).reshape(-1)
-            # writers remove their own delta (self-leak); positions
-            # gated by the doorkeeper read the sibling-built cell clean
-            cnt_eff = torch.where(wrote, (cnt2 - d_flat).clamp(min=0),
-                                  cnt2)
-            tot_eff = torch.where(wrote, (tot2 - d_flat).clamp(min=0),
-                                  tot2)
-            p_post = (cnt_eff + a_f * uni_rep) / (tot_eff + a_f)
-            p_eff = torch.where(new_cell, p_post, p_o)
-            if c.sleeping_experts:
-                # under sequential ingest the cell would exist by this
-                # position - the channel was effectively awake
-                awake_eff = awake_o.reshape(-1) | (
-                    valid_o.reshape(-1) & new_cell & (tot_eff > 0))
-                rw_o = torch.where(awake_eff, p_eff, pmix_o
-                                   ).double().reshape(O, n)
+            tail_g = torch.from_numpy(
+                (self._w[col["uni"]] * uni_pre.cpu().numpy()
+                 + self._w[col["recency"]] * rec_r
+                 + self._w[col["fatigue"]] * fat_r).astype(np.float32)
+            ).to(dev)
+        for c0 in range(0, n, CH):
+            c1 = min(n, c0 + CH)
+            m = c1 - c0
+            pos_s = pos[c0:c1]
+            ids_s = ids_t[c0:c1]
+            posb = pos_s[None, :].expand(O, m)
+            # context for token at pos ENDS at pos-1 (matches live
+            # _keys_dev(end=pos-1)): key = suffix of tokens pos-k..pos-1
+            valid_s = (posb - kvec[:, None] >= self._ep_start) \
+                & (posb >= kvec[:, None])                         # [O,m]
+            if valid_o is not None:
+                valid_o[:, c0:c1] = valid_s
+            kk_s = Hfull[(posb - base + Kmax)] - Hfull[
+                (posb - kvec[:, None] - base + Kmax).clamp(min=0)] \
+                * self._pows_g[kvec][:, None]                     # [O,m]
+            pk_s = _mix64(kk_s * _MIX1
+                          + self._gt._salt[:O, None])
+            rows_f = self._gt._ordx[:, None].expand(O, m) \
+                .reshape(-1)
+            slot_f, found_s = self._gt.probe_fixed(
+                pk_s.reshape(-1), rows=rows_f)
+            if found_f is not None:
+                found_f[:, c0:c1] = found_s.reshape(O, m)
+            # bloom doorkeeper: first-sighting context keys set counter
+            # bits instead of materializing rows - hapax-heavy streams
+            # would otherwise flood the tables with cells that never
+            # fire again.  write_o is the WRITE mask only:
+            # found_f/p_o/rewards still see true pre-write state.
+            write_s = valid_s
+            if self._bloom_ready():
+                pf = pk_s.reshape(-1)
+                vf = valid_s.reshape(-1)
+                miss = vf & ~found_s
+                BM = self._bloom_g.numel()
+                b1 = pf.remainder(BM)
+                b2 = _mix64(pf * _MIX2 + _MIX1).remainder(BM)
+                thr = c.bloom_admit - 1
+                hit = (self._bloom_g.index_select(0, b1) >= thr) \
+                    & (self._bloom_g.index_select(0, b2) >= thr)
+                # intra-slice repeats promote; cross-slice repeats
+                # promote via the counters earlier slices already set
+                ordb = torch.argsort(pf)
+                pfs = pf[ordb]
+                dup = torch.zeros_like(miss)
+                dup[ordb[1:]] = pfs[1:] == pfs[:-1]
+                admit = found_s | hit | (miss & dup)
+                drop = vf & ~admit
+                midx = torch.nonzero(miss).squeeze(1)
+                if midx.numel():
+                    ones = torch.ones(midx.numel(), dtype=torch.int16,
+                                      device=dev)
+                    self._bloom_g.index_add_(0, b1[midx], ones)
+                    self._bloom_g.index_add_(0, b2[midx], ones)
+                    self._bloom_g.clamp_(0, 32767)
+                write_s = (vf & ~drop).reshape(O, m)
+            write_o[:, c0:c1].copy_(write_s, non_blocking=True)
+            kk_all[:, c0:c1].copy_(kk_s, non_blocking=True)
+            uni_rep = uni_pre[c0:c1][None, :].expand(O, m).reshape(-1)
+            ids_f = ids_s[None, :].expand(O, m).reshape(-1)
+            rt_s = self._gt.ttoks[rows_f, slot_f]                 # [Om,M]
+            rc_s = self._gt.tcnt[rows_f, slot_f]
+            tots_s = self._gt.ttot[rows_f, slot_f]
+            if tots_f is not None:
+                tots_f[:, c0:c1] = tots_s.reshape(O, m)
+            cnt_s = (rc_s * (rt_s == ids_f[:, None].to(torch.int32))
+                     ).sum(dim=1)                                 # [Om]
+            if cnt_x is not None:
+                cnt_x[:, c0:c1] = cnt_s.reshape(O, m)
+            if c.ppm_escape_c:
+                a_f = (((rt_s >= 0) & (rt_s < V))
+                       & found_s[:, None]).sum(dim=1) \
+                    .clamp(min=1e-9)                              # [Om]
             else:
-                rw_o = torch.where(valid_o.reshape(-1), p_eff,
-                                   uni_rep).double().reshape(O, n)
+                a_f = float(c.alpha)       # python float - H2D-free
+            p_s = torch.where(
+                found_s & (tots_s > 0),
+                (cnt_s + a_f * uni_rep) / (tots_s + a_f),
+                uni_rep)
+            if p_o is not None:
+                p_o[:, c0:c1] = p_s.reshape(O, m)
+            awake_s = valid_s & found_s.reshape(O, m) \
+                & (tots_s.reshape(O, m) > 0)                      # [O,m]
+            if c.sleeping_experts == 2:
+                pmix_s = (((w_o * p_s.reshape(O, m) * awake_s).sum(0)
+                           + tail_g[c0:c1])
+                          / ((w_o * awake_s).sum(0) + waw)
+                          .clamp(min=1e-12)).float()
+            else:
+                w_rest = float(1.0 - self._w[:O].sum())
+                pmix_s = (w_o * p_s.reshape(O, m)).sum(0) \
+                    + w_rest * uni_pre[c0:c1]
+            pmix_i[c0:c1] = pmix_s
+            s_v[c0:c1] = torch.nan_to_num(
+                (torch.clamp(1.0 - pmix_s, min=c.surprise_floor)
+                 if c.surprise_gate
+                 else torch.ones(m, device=dev)), nan=1.0)
+            # in-block recurrence correction for WRITE deltas (group
+            # prefix over THIS slice): doorkeeper-dropped positions
+            # contribute no mass (write_s mask).
+            sv_flat = torch.where(
+                write_s.reshape(-1),
+                s_v[c0:c1][None, :].expand(O, m).reshape(-1),
+                torch.zeros((), device=dev))
+            m_ctx = _group_prefix(pk_s.reshape(-1), sv_flat)
+            m_pair = _group_prefix(pk_s.reshape(-1), sv_flat, ids_f)
+            tot_p = tots_s + m_ctx
+            cnt_p = cnt_s + m_pair
+            p_post = torch.where(
+                tot_p > 0,
+                (cnt_p + a_f * uni_rep) / (tot_p + a_f),
+                uni_rep)
+            awake_p = awake_s.reshape(-1) | (
+                valid_s.reshape(-1) & (m_ctx > 0))
+            _num = (w_o * p_post.reshape(O, m)
+                    * awake_p.reshape(O, m)).sum(0)
+            _den = (w_o * awake_p.reshape(O, m)).sum(0)
+            pmix_e = torch.where(_den > 1e-9,
+                                 _num / _den.clamp(min=1e-9),
+                                 uni_pre[c0:c1])
+            s_eff[c0:c1] = torch.nan_to_num(
+                (torch.clamp(1.0 - pmix_e, min=c.surprise_floor)
+                 if c.surprise_gate else s_v[c0:c1]), nan=1.0)
+            # per-position order rewards kept for the chunked hedge
+            # update below (weights evolve within the block, not one
+            # flat update); asleep positions take pmix (neutral).
+            if c.sleeping_experts:
+                pmix_o = pmix_s[None, :].expand(O, m).reshape(-1)
+                rw_o[:, c0:c1].copy_(torch.where(
+                    awake_s.reshape(-1), p_s, pmix_o).double()
+                    .reshape(O, m), non_blocking=True)
+            else:
+                rw_o[:, c0:c1].copy_(torch.where(
+                    valid_s.reshape(-1), p_s, uni_rep).double()
+                    .reshape(O, m), non_blocking=True)
+
+            # gap detect: unseen context OR high surprise -> teacher
+            if c.track_gaps and c.gap_probe_order in self._gt.kidx:
+                gk_i = self._gt.kidx[c.gap_probe_order]
+                thin = valid_s[gk_i] & (
+                    ~found_s.reshape(O, m)[gk_i]
+                    | (s_v[c0:c1] > c.gap_surprise))
+                gp = pos_s[thin]
+                if gp.numel():
+                    self._gaps.extend(gp.cpu().tolist())
+
+            # batched write for the slice, surprise-scaled with the
+            # corrected deltas (distinct-column disambiguation makes
+            # it equivalent to sequential adds)
+            d_s = s_eff[c0:c1][None, :].expand(O, m)
+            ins_i, ev_i, col_i = self._gt.add_multi(
+                kk_s, ids_s[None, :].expand(O, m), d_s, write_s)
+            ins_tot = (ins_i if ins_tot is None
+                       else ins_tot + ins_i)
+            ev_l.append(tuple(t.cpu() for t in ev_i))
+            col_l.append(tuple(t.cpu() for t in col_i))
+            # reward fix-up: re-probe the POST-write table - a key
+            # that recurred within the slice (or was built by earlier
+            # slices) now sees the real cell.  Each position's own
+            # delta is subtracted back out (self-leak); later same-key
+            # writes stay in - bounded forward leak vs sequential.
+            slot2, found2 = self._gt.probe_fixed(
+                pk_s.reshape(-1), rows=rows_f)
+            new_cell = ~found_s & found2
+            if bool(new_cell.any()):
+                wrote = write_s.reshape(-1)
+                rt2 = self._gt.ttoks[rows_f, slot2]
+                rc2 = self._gt.tcnt[rows_f, slot2]
+                tot2 = self._gt.ttot[rows_f, slot2]
+                cnt2 = (rc2 * (rt2 == ids_f[:, None].to(torch.int32))
+                        ).sum(dim=1)
+                d_flat = s_eff[c0:c1][None, :].expand(O, m) \
+                    .reshape(-1)
+                cnt_eff = torch.where(wrote,
+                                      (cnt2 - d_flat).clamp(min=0),
+                                      cnt2)
+                tot_eff = torch.where(wrote,
+                                      (tot2 - d_flat).clamp(min=0),
+                                      tot2)
+                p_post2 = (cnt_eff + a_f * uni_rep) \
+                    / (tot_eff + a_f)
+                p_eff = torch.where(new_cell, p_post2, p_s)
+                if c.sleeping_experts:
+                    awake_eff = awake_s.reshape(-1) | (
+                        valid_s.reshape(-1) & new_cell
+                        & (tot_eff > 0))
+                    rw_o[:, c0:c1].copy_(torch.where(
+                        awake_eff, p_eff, pmix_o).double()
+                        .reshape(O, m), non_blocking=True)
+                else:
+                    rw_o[:, c0:c1].copy_(torch.where(
+                        valid_s.reshape(-1), p_eff,
+                        uni_rep).double().reshape(O, m),
+                        non_blocking=True)
         # stash the full key/valid/delta matrices - undo re-derives.
-        # HOST copies: keeping GPU tensors here would pin VRAM for the
-        # journal's lifetime (blocks accumulate during corpus ingest)
-        blk["writes_all"] = (kk_all.cpu(), ids_t.cpu(),
-                             write_o.cpu())
+        # kk_all/write_o/rw_o are pinned HOST buffers filled by async
+        # per-slice D2H copies - sync once before any host reads.
+        if dev.type == "cuda":
+            torch.cuda.current_stream().synchronize()
+        blk["writes_all"] = (kk_all, ids_t.cpu(), write_o)
         blk["surprise"] = s_v.cpu()
         blk["surprise_eff"] = s_eff.cpu()   # actual written deltas
+        ev_snap = tuple(torch.cat([s[i] for s in ev_l])
+                        for i in range(len(ev_l[0]))) if ev_l else ()
+        col_snap = tuple(torch.cat([s[i] for s in col_l])
+                         for i in range(len(col_l[0]))) if col_l else ()
         blk["evicted"] = tuple(
             t.cpu() for t in ev_snap)      # victim rows (undo)
         blk["col_evicted"] = tuple(
             t.cpu() for t in col_snap)     # displaced follower cols
-        for oi, cnt in enumerate(ins_rows.tolist()):
+        for oi, cnt in enumerate(ins_tot.tolist()):
             if cnt:
                 self._gt.used[oi] += cnt
                 if oi < O and self._gt.used[oi] \
                         > 0.85 * c.gpu_table_slots:
                     grew = (self.grow_tables() if c.auto_grow else {})
                     if not grew.get("grown"):
-                        self._gt.decay(c.orders[oi])
-                        self._gt.rehash(c.orders[oi])
+                        if self._banks:
+                            # cold-tier spill before forgetting -
+                            # banked rows keep voting
+                            self._spill_order(
+                                c.orders[oi],
+                                int(c.bank_spill_frac
+                                    * self._gt.used[oi]))
+                        else:
+                            self._gt.decay(c.orders[oi])
+                            self._gt.rehash(c.orders[oi])
 
         # -- unigram (host + mirror) ------------------------------------
         uniq, cnts = np.unique(ids_np, return_counts=True)
@@ -2789,13 +2853,13 @@ class _LearnMixin:
                 if bool(ev.any()):
                     sv = slot[ev]
                     blk["csem_ev"] = (
-                        sv,
+                        sv.cpu(),
                         self._gt.traw[rcs].index_select(
-                            0, sv).clone(),
+                            0, sv).cpu(),
                         self._csem_rows.index_select(
-                            0, sv).clone(),
+                            0, sv).cpu(),
                         self._gt.tocc[rcs].index_select(
-                            0, sv).clone())
+                            0, sv).cpu())
                 if bool(newm.any()):
                     ckr[slot[newm]] = pk[newm]
                     self._gt.traw[rcs][slot[newm]] = ck[newm]
@@ -2806,7 +2870,15 @@ class _LearnMixin:
                 # follower feature sums (project AFTER gathering -
                 # nxdim matvec, not Vxdim).  Effective lr per slot =
                 # csem_lr * mean-surprise (chunk approximation).
-                Ac = self._A[ids_t[ci]] @ self._Pcsem     # [n, csem_dim]
+                # sliced gather+project: the [n,192] intermediate was
+                # a multi-GB transient at corpus scale; only the
+                # [n,csem_dim] projection is retained for group sums.
+                Ac = torch.empty(ci.numel(), self._Pcsem.shape[1],
+                                 dtype=torch.float32, device=dev)
+                for q0 in range(0, ci.numel(), CH):
+                    q1 = min(ci.numel(), q0 + CH)
+                    Ac[q0:q1] = self._A[
+                        ids_t[ci[q0:q1]]] @ self._Pcsem
                 s_ci = s_v[ci].float()
                 uniq_s, inv = torch.unique(slot, return_inverse=True)
                 m_per = torch.bincount(inv).float()
@@ -3302,6 +3374,8 @@ class _LearnMixin:
         self._blk_journal = None
         self.journal.seal_bc(blk)         # payload budget + evict
         self._blk_active = None
+        if self._banks and c.bank_regulate:
+            blk["regulate"] = self.regulate()
         self._epi_flush_sync()            # batched GPU row resync
         self._count += n
         # device scalars + hedge weights mirrors

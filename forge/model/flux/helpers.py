@@ -33,6 +33,94 @@ def _byte_class(t: int) -> int:
 
 
 
+def bpe_class_table(decode_one, V: int,
+                    special_ids: frozenset | set = frozenset()
+                    ) -> list[int]:
+    """Static BPE surface-class LUT [V] for cls_table - 8 classes in
+    the same slots as _byte_class so g<k>/gv code is unchanged:
+
+      0 digit-initial   1 Capitalized-word   2 word (bare)
+      3 word (space-prefixed, 'Ġ...')       4 whitespace-only
+      5 punctuation     6 special/control    7 other/byte-fallback
+
+    Metadata only: derived from the tokenizer's decode map once -
+    carries no corpus information.  BPE ids are emitted roughly in
+    merge (frequency) order, so ``_cls_members`` first-N-by-id is a
+    reasonable frequent-token probe subset for gen_cls_cap."""
+    out = []
+    for t in range(V):
+        if t in special_ids:
+            out.append(6)
+            continue
+        s = decode_one(t)
+        if not s:
+            out.append(7)
+            continue
+        ws = s[0] in " \tĠ"                     # Ġ = space marker
+        body = s.strip()
+        if not body:
+            out.append(4)                        # whitespace only
+            continue
+        c0 = body[0]
+        if c0.isdigit():
+            out.append(0)
+        elif body.isalpha():
+            if c0.isupper():
+                out.append(1)
+            else:
+                out.append(3 if ws else 2)
+        elif all(ch in ".,;:!?'\"-()[]{}<>/\\|@#$%^&*+=~`"
+                 for ch in body):
+            out.append(5)
+        else:
+            out.append(3 if ws else 7)
+    return out
+
+
+def emb_class_table(emb: torch.Tensor, n_cls: int = 256,
+                    iters: int = 15, seed: int = 0,
+                    special_ids: frozenset | set = frozenset()
+                    ) -> tuple[list[int], list[list[int]]]:
+    """K-means partition of a PRETRAINED embedding table ->
+    (cls_ids [V], members-per-class sorted by centroid distance).
+
+    The variant space byte classes can't provide: semantic classes.
+    Tokens that mean similar things land in one class, so a
+    same-class 1-edit suffix variant generalizes *meaning*, not
+    orthography.  Static metadata derived from pretrained weights -
+    no fitting to the corpus, no gradient training.  ``n_cls``
+    classes (ids 0..n_cls-1); special/control tokens pinned to the
+    last class.  members sorted by centrality -> ``gen_cls_cap``
+    first-N probes the most prototypical variants."""
+    V, D = emb.shape
+    dev = emb.device
+    g = torch.Generator(device=dev).manual_seed(seed)
+    X = emb.float()
+    X = X / X.norm(dim=1, keepdim=True).clamp_min(1e-6)
+    cen = X[torch.randperm(V, generator=g, device=dev)[:n_cls]].clone()
+    for _ in range(iters):
+        a = X @ cen.T                       # [V, n_cls]
+        lab = a.argmax(dim=1)
+        for c in range(n_cls):
+            m = lab == c
+            if bool(m.any()):
+                cen[c] = X[m].mean(0)
+        cen = cen / cen.norm(dim=1, keepdim=True).clamp_min(1e-6)
+    a = X @ cen.T
+    lab = a.argmax(dim=1)
+    cls = lab.cpu().tolist()
+    members = [[] for _ in range(n_cls + 1)]
+    for t in range(V):
+        members[cls[t]].append(t)
+    for c in range(n_cls):
+        members[c].sort(key=lambda t: -float(a[t, c]))
+    for t in special_ids:
+        if 0 <= t < V:
+            cls[t] = n_cls
+            members[n_cls].append(t)
+    return cls, members
+
+
 def _load_teacher_embedding(path) -> torch.Tensor:
     """Load a teacher's embedding table from a checkpoint file -
     safetensors (slice-read, no full load) or torch .pt.  The target is

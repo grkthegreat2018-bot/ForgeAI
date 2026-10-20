@@ -309,6 +309,14 @@ class _IOMixin:
             # learned routing patterns exactly
             "head": (self._head.state_dict()
                      if self._head is not None else None),
+            # cold-tier weight banks: spilled order rows are learned
+            # state - persisted as packed arrays (bank.save() exists
+            # for standalone .fluxbank files)
+            "banks": ({k: (b.keys[:b._n], b.raws[:b._n],
+                           b.toks[:b._n], b.cnt[:b._n], b.tot[:b._n],
+                           b.occ[:b._n], b.pos[:b._n])
+                       for k, b in self._banks.items()}
+                      if self._banks else None),
         }
         return state
 
@@ -478,6 +486,19 @@ class _IOMixin:
         if state.get("rev1") is not None:
             model._rev1 = {int(k): v
                            for k, v in state["rev1"].items()}
+        # cold-tier weight banks (older snapshots lack the key)
+        if state.get("banks") is not None:
+            from .bank import FluxBank
+            for k, (keys, raws, toks, cnt, tot, occ, pos) in \
+                    state["banks"].items():
+                b = FluxBank(int(k), toks.shape[1])
+                b.keys, b.raws = keys, raws
+                b.toks, b.cnt = toks, cnt
+                b.tot, b.occ, b.pos = tot, occ, pos
+                b._n = int(keys.shape[0])
+                b._ix = {int(kk): i
+                         for i, kk in enumerate(keys)}
+                model._banks[int(k)] = b
         # GPU backend: prefer decoded triplets; fall back to converting
         # CPU dicts (recompute pair keys + rebuild tot slots)
         if model._gpu:

@@ -20,6 +20,7 @@ from .helpers import (_HASH_P, _MASK64, _MIX1, _MIX2,
 from .config import FluxConfig
 from .journal import FluxJournal
 from .tables import _GPUCellTables
+from .bank import FluxBank
 from .kernels import HAS_TRITON
 
 if HAS_TRITON:
@@ -110,6 +111,13 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
         # per-cell follower totals (cache - avoids O(followers) sums)
         self._totals: dict[int, dict[int, float]] = {
             k: {} for k in c.orders}
+        # cold-tier weight banks: order rows spilled off the hot
+        # tables live here (host, .fluxbank-persistable); reads merge
+        # through the same order-channel prob (see _cold_cell).
+        _bw = c.bank_row_width or c.gpu_row_width
+        self._banks: dict[int, "FluxBank"] = (
+            {k: FluxBank(k, _bw) for k in c.orders}
+            if c.bank_enable else {})
         # sparse-tap tables: same cell semantics as _tables but keyed
         # by the taps tuple (noncontiguous suffix contexts)
         self._ptabs: dict[tuple, dict[int, dict[int, float]]] = {
@@ -123,17 +131,26 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
             k: {} for k in c.class_orders}
         self._gtots: dict[int, dict[int, float]] = {
             k: {} for k in c.class_orders}
-        # byte->class LUT [V]: 0 digit, 1 upper, 2 lower, 3 space/tab,
-        # 4 newline, 5 punct, 6 other ascii, 7 high/bpe
-        self._cls = np.array([_byte_class(t) for t in range(V)],
-                             dtype=np.int32)
+        # token->class LUT [V]: byte classes by default (0 digit,
+        # 1 upper, 2 lower, 3 space/tab, 4 newline, 5 punct, 6 other
+        # ascii, 7 high/bpe); c.cls_table overrides for non-byte
+        # vocabularies (e.g. BPE surface classes) - static metadata
+        self._cls = (np.asarray(c.cls_table, dtype=np.int32)
+                     if c.cls_table else
+                     np.array([_byte_class(t) for t in range(V)],
+                              dtype=np.int32))
         # class -> member tokens: static vocab property for the gv
         # channel's same-class variant probes (not learned state -
-        # carries no information about the memory contents)
-        self._cls_members: list[list[int]] = [
-            [] for _ in range(8)]
-        for _t in range(V):
-            self._cls_members[int(self._cls[_t])].append(_t)
+        # carries no information about the memory contents).
+        # c.cls_members overrides (e.g. centroid-sorted members from
+        # emb_class_table -> gen_cls_cap probes prototypical variants)
+        _ncls = int(self._cls.max()) + 1 if V else 1
+        self._cls_members: list[list[int]] = (
+            [list(m) for m in c.cls_members]
+            if c.cls_members else [[] for _ in range(_ncls)])
+        if not c.cls_members:
+            for _t in range(V):
+                self._cls_members[int(self._cls[_t])].append(_t)
         # word-order tables: keys fold the last-w word hashes +
         # current-word length bucket (derived via ring scan - no extra
         # state); "w<j>" channels, "W" journal entries
@@ -452,8 +469,10 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
             # gv device probes: static class membership (padded to
             # gen_cls_cap per class) - vocab property, not learned state
             _cc = max(1, int(c.gen_cls_cap))
-            _cm = torch.zeros(8, _cc, dtype=torch.int64)
-            _cl = torch.zeros(8, dtype=torch.int64)
+            _cm = torch.zeros(len(self._cls_members), _cc,
+                              dtype=torch.int64)
+            _cl = torch.zeros(len(self._cls_members),
+                              dtype=torch.int64)
             for _i, _mem in enumerate(self._cls_members):
                 _n = min(len(_mem), _cc)
                 _cm[_i, :_n] = torch.tensor(_mem[:_n])

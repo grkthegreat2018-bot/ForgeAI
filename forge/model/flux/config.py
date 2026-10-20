@@ -214,6 +214,14 @@ class FluxConfig:
     # deeper class orders (4,6) fill 8^k cells but vote coarse-wrong on
     # genuinely novel contexts (nat regressed +0.3).
     class_orders: tuple = (3,)
+    # explicit class LUT override [V]: when set (e.g. BPE surface
+    # classes from helpers.bpe_class_table), replaces the byte-class
+    # LUT for _cls - static vocab metadata, not learned state.
+    cls_table: tuple = ()
+    # explicit class->members override: centroid-sorted member lists
+    # (emb_class_table) - _cls_members built in token-id order unless
+    # set; first-N-by-list probes for gen_cls_cap.
+    cls_members: tuple = ()
     class_thin_only: bool = True
     # min cell total before a g<k> channel votes - coarse keys fill
     # fast but low-evidence cells predict worse than the unigram
@@ -660,6 +668,20 @@ class FluxConfig:
     # 16 starved deep coverage; 32 = -19% NLL on GPU bench for +0.23GB
     # (sweep S8; 64 showed no further gain).  CPU keeps 512-key deques.
     epi_row: int = 32                # positions per seed key
+
+    # -- cold-tier weight banks (weights as files) --------------------
+    # When a hot order table passes the spill watermark, the coldest
+    # live rows move to a FluxBank (host/disk) instead of evicting or
+    # unbounded growth: hot VRAM stays capped, cold evidence still
+    # votes through the order channels (merged counts = the true union
+    # of disjoint write sets), and banks persist as .fluxbank files.
+    bank_enable: bool = False
+    bank_regulate: bool = True       # run regulate() at ingest seal
+    bank_spill_hi: float = 0.85      # used/S fraction that triggers
+    bank_spill_frac: float = 0.30    # live-row fraction spilled per pass
+    bank_rows_cap: int = 0           # 0 = unbounded; >0 -> coldest purge
+    bank_row_width: int = 0          # 0 = inherit gpu_row_width
+    bank_dir: str = ""               # dir for .fluxbank persistence
 
     # csem: per-CONTEXT semantic fingerprint (contextual recombination -
     # the per-key version of the global `sem` channel).  Own hash table
