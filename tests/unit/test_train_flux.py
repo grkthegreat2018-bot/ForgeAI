@@ -167,6 +167,13 @@ class TestChatRender:
                             {"role": "gpt", "value": "hello"}])
         assert "Question: hi" in out and "Answer: hello" in out
 
+    def test_sharegpt_from_key(self):
+        # OpenHermes / ShareGPT schema: 'from'/'value', not role/content
+        out = _render_chat([{"from": "system", "value": "ctx"},
+                            {"from": "human", "value": "q"},
+                            {"from": "gpt", "value": "a"}])
+        assert out == "Context: ctx\nQuestion: q\nAnswer: a\n"
+
     def test_malformed_turns_skipped(self):
         out = _render_chat(["junk", {"role": "user", "content": "  "},
                             {"role": "user", "content": "ok"}])

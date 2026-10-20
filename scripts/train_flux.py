@@ -56,7 +56,7 @@ def _render_chat(turns, style: str = "natural") -> str:
     for t in turns:
         if not isinstance(t, dict):
             continue
-        role = str(t.get("role") or "user").lower()
+        role = str(t.get("role") or t.get("from") or "user").lower()
         v = t.get("content", t.get("value", ""))
         if not isinstance(v, str) or not v.strip():
             continue
@@ -281,8 +281,9 @@ def _auto_qa(row: dict) -> str | None:
     alpaca, squad-style): 'Context: ...\\nQuestion: ...\\nAnswer: ...'
     — plain words only, never special-token markup."""
     q = row.get("instruction") or row.get("question") \
-        or row.get("prompt")
-    a = row.get("response") or row.get("answer") or row.get("output")
+        or row.get("prompt") or row.get("query") or row.get("problem")
+    a = row.get("response") or row.get("answer") or row.get("output") \
+        or row.get("solution") or row.get("completion")
     ctx = row.get("context") or row.get("input")
     if not (isinstance(q, str) and q.strip()
             and isinstance(a, str) and a.strip()):
