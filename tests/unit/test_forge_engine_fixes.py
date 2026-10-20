@@ -491,3 +491,238 @@ class TestLogitsLastOnly:
         logits, loss = out[0], out[1]
         assert logits.shape[1] == ids.shape[1]
         assert loss is not None
+
+
+class TestContinuationForwardCausalMask:
+    """T>1 forward over a cached prefix must see the full prefix.
+
+    Regression for: SDPA ``is_causal=True`` anchors the mask TOP-LEFT on
+    non-square (T < S) shapes � a continuation forward (prefix-cache hit
+    suffix, chunked prefill, spec verify) silently masked out the entire
+    cached prefix.  GroupedQueryAttention now builds an explicit
+    bottom-right causal mask when total_len > T.
+    """
+
+    @pytest.mark.parametrize("device", ["cpu"] + (
+        ["cuda"] if torch.cuda.is_available() else []))
+    def test_continuation_matches_full_prefill(self, tiny_model, device):
+        model = tiny_model.to(device)
+        ids = torch.randint(0, 256, (1, 12), device=device)
+        with torch.no_grad():
+            full = model(ids, use_cache=True)
+            _, _, kv = model(ids[:, :5], use_cache=True)
+            cont = model(ids[:, 5:], past_key_values=kv,
+                         use_cache=True)
+        full_logits = full[0]
+        cont_logits = cont[0]
+        # Last-position logits (what decode actually samples) must match.
+        d_last = (cont_logits[:, -1] - full_logits[:, -1]).abs().max()
+        assert d_last < 1e-4, f"continuation last logits drift {d_last}"
+        # Every continuation position must be causal-correct, not just last.
+        d_all = (cont_logits - full_logits[:, 5:]).abs().max()
+        assert d_all < 1e-4, f"continuation positions drift {d_all}"
+
+
+class TestPrefillLogitsLastOnly:
+    """Prefill forwards must not materialize [B,T,V] logits (VRAM spike)."""
+
+    def test_standard_decoding_prefill_last_only(self, tiny_model):
+        from forge.engine.decoding import StandardDecoding
+        calls = []
+        orig = tiny_model.forward
+        def spy(*a, **k):
+            calls.append(k)
+            return orig(*a, **k)
+        tiny_model.forward = spy
+        ids = torch.tensor([[1, 2, 3, 4]])
+        StandardDecoding().generate(tiny_model, ids, max_new_tokens=2,
+                                    temperature=0.0)
+        assert calls, "no model calls recorded"
+        assert calls[0].get("logits_last_only") is True, (
+            f"prefill missing logits_last_only: {calls[0]}")
+
+    def test_prefill_kv_boundary_stored(self, tiny_model):
+        """_forge_prefill_kv captures prompt-end state, not end-of-gen."""
+        from forge.engine.decoding import StandardDecoding
+        ids = torch.tensor([[1, 2, 3, 4]])
+        StandardDecoding().generate(tiny_model, ids, max_new_tokens=3,
+                                    temperature=0.0)
+        pk = tiny_model._forge_prefill_kv
+        assert pk is not None
+        # boundary KV covers exactly the prompt (4 tokens), while
+        # _forge_last_kv covers prompt + generated
+        pk_len = next(
+            e[0].shape[-2] for e in pk
+            if isinstance(e, tuple) and e is not None)
+        assert pk_len == 4
+
+
+class TestFinishToStopNoDoubleFeed:
+    """The last emitted token is already in past_kv � re-feeding it
+    appended a duplicate cache entry and corrupted the continuation."""
+
+    def test_no_spurious_last_token_forward(self, tiny_model):
+        from forge.engine.forge_engine import ForgeEngine
+        from forge.engine.engine_common import SamplingParams
+        from forge.model_loader import unpack_output_with_kv
+        tok = MagicMock()
+        tok.eos_token_id = 0
+        tok.return_value.input_ids = torch.tensor([[1, 2, 3, 4]])
+        tok.decode = MagicMock(return_value="x")
+        eng = ForgeEngine(tiny_model, tok, device="cpu")
+        eng._library_enabled = False
+
+        ids = torch.tensor([[1, 2, 3, 4]])
+        logits, past_kv = eng._prefill(ids)
+        # Simulate a decode step already consuming token 7.
+        with torch.no_grad():
+            out = tiny_model(torch.tensor([[7]]),
+                             past_key_values=past_kv, use_cache=True)
+            logits, past_kv = unpack_output_with_kv(out)
+        output_ids = torch.cat([ids, torch.tensor([[7]])], dim=-1)
+        tiny_model._forge_last_logits = logits
+
+        fed = []
+        orig = tiny_model.forward
+        def spy(x, *a, **k):
+            fed.append((x.clone(), k.get("past_key_values")))
+            return orig(x, *a, **k)
+        tiny_model.forward = spy
+        # Zero decode steps � any model call here is the old re-feed bug.
+        eng._decode_tokens = MagicMock(return_value=iter(()))
+        eng._finish_to_stop(output_ids, ids.shape[1],
+                            SamplingParams(), past_kv=past_kv)
+        assert fed == [], (
+            f"_finish_to_stop re-fed tokens: "
+            f"{[t.tolist() for t, _ in fed]}")
+
+    def test_prefill_fallback_when_no_stored_logits(self, tiny_model):
+        from forge.engine.forge_engine import ForgeEngine
+        from forge.engine.engine_common import SamplingParams
+        tok = MagicMock()
+        tok.eos_token_id = 0
+        tok.return_value.input_ids = torch.tensor([[1, 2, 3, 4]])
+        tok.decode = MagicMock(return_value="x")
+        eng = ForgeEngine(tiny_model, tok, device="cpu")
+        eng._library_enabled = False
+
+        ids = torch.tensor([[1, 2, 3, 4]])
+        logits, past_kv = eng._prefill(ids)
+        tiny_model._forge_last_logits = None  # decoder never stored them
+
+        fed = []
+        orig = tiny_model.forward
+        def spy(x, *a, **k):
+            fed.append(x.clone())
+            return orig(x, *a, **k)
+        tiny_model.forward = spy
+        eng._decode_tokens = MagicMock(return_value=iter(()))
+        eng._finish_to_stop(ids, ids.shape[1],
+                            SamplingParams(), past_kv=past_kv)
+        # Correct fallback: one full re-prefill of output_ids, no re-feed.
+        assert len(fed) == 1 and fed[0].shape[1] == ids.shape[1]
+
+
+class TestStaleDecodeCapturesCleared:
+    """A decoding strategy that never sets _forge_last_kv must not
+    inherit the previous request's captures (stale-state pairing)."""
+
+    def test_captures_cleared_on_request_start(self, tiny_model):
+        from forge.engine.forge_engine import ForgeEngine
+        tok = MagicMock()
+        tok.eos_token_id = 0
+        tok.return_value.input_ids = torch.tensor([[1, 2, 3, 4]])
+        tok.decode = MagicMock(return_value="x")
+        eng = ForgeEngine(tiny_model, tok, device="cpu")
+        eng._library_enabled = False
+
+        eng.model._forge_last_kv = "stale"
+        eng.model._forge_last_logits = "stale"
+        eng.model._forge_prefill_kv = "stale"
+        eng.decoding.generate = MagicMock(
+            return_value=torch.tensor([[1, 2, 3, 4]]))
+        eng.generate("hi", max_new_tokens=1, finish_sentence=False)
+        assert eng.model._forge_last_kv is None
+        assert eng.model._forge_prefill_kv is None
+
+
+class TestCachePromptPrefixBoundary:
+    """cache_prompt_prefix must store prompt-boundary KV, not the
+    end-of-generation state that happens to be in _forge_last_kv."""
+
+    def test_prefers_forge_prefill_kv(self, tiny_model):
+        from forge.engine.forge_engine import ForgeEngine
+        from forge.engine.prefix_cache import (
+            cache_prompt_prefix, cache_key, _PREFIX_CACHE_KEY_LENGTH)
+        tok = MagicMock()
+        tok.eos_token_id = 0
+        eng = ForgeEngine(tiny_model, tok, device="cpu")
+        eng._prefix_cache = {}
+
+        ids = torch.arange(40).unsqueeze(0)
+        boundary = [(torch.full((1, 1, 40, 4), 1.0),
+                     torch.full((1, 1, 40, 4), 1.0))]
+        end_of_gen = [(torch.full((1, 1, 50, 4), 2.0),
+                       torch.full((1, 1, 50, 4), 2.0))]
+        tiny_model._forge_prefill_kv = boundary
+        cache_prompt_prefix(eng, ids, end_of_gen)
+
+        key_len, kv = eng._prefix_cache[cache_key(ids)]
+        assert key_len == min(_PREFIX_CACHE_KEY_LENGTH, 40)
+        assert kv[0][0].shape[-2] == key_len
+        # Values must come from the boundary tensors (1.0), not the
+        # end-of-generation tensors (2.0).
+        assert (kv[0][0] == 1.0).all()
+
+
+class TestSlicePastKvOwnsMemory:
+    """_slice_past_kv must return owning copies, not seq-axis views —
+    a 32-token slice that shares the parent's storage pins the entire
+    prompt+generation KV buffer (~1 GB at 8k ctx) per cache entry."""
+
+    def test_slices_do_not_share_storage(self):
+        from forge.engine.prefix_cache import _slice_past_kv
+        k = torch.randn(1, 8, 512, 128)
+        v = torch.randn(1, 8, 512, 128)
+        sliced = _slice_past_kv([(k, v)], 32)
+        sk, sv = sliced[0]
+        assert sk.shape == (1, 8, 32, 128)
+        # Owning copy: storage is only the slice's own, not the parent's.
+        assert sk.untyped_storage().nbytes() == sk.nbytes
+        assert sv.untyped_storage().nbytes() == sv.nbytes
+        # Mutating the parent must not affect the cached slice.
+        k.fill_(0.0)
+        assert not (sk == 0).all()
+
+    def test_dict_entries_cloned(self):
+        from forge.engine.prefix_cache import _slice_past_kv
+        state = {"conv_state": torch.ones(4, 4)}
+        sliced = _slice_past_kv([state], 32)
+        assert sliced[0]["conv_state"] is not state["conv_state"]
+        state["conv_state"].fill_(9.0)
+        assert (sliced[0]["conv_state"] == 1.0).all()
+
+
+class TestCapturesClearedAtRequestEnd:
+    """_generate_impl must release _forge_last_kv/_forge_prefill_kv after
+    caching — otherwise the request's full KV stays pinned on the model
+    until the next request (~1 GB at 8k ctx per outstanding request)."""
+
+    def test_captures_cleared_after_generate(self, tiny_model):
+        from forge.engine.forge_engine import ForgeEngine
+        tok = MagicMock()
+        tok.eos_token_id = 0
+        tok.return_value.input_ids = torch.tensor([[1, 2, 3, 4]])
+        tok.decode = MagicMock(return_value="x")
+        eng = ForgeEngine(tiny_model, tok, device="cpu")
+        eng._library_enabled = False
+        eng._prefix_cache = None  # skip cache path; captures still set
+        tiny_model._forge_last_kv = "leftover"
+        eng.decoding.generate = MagicMock(
+            side_effect=lambda *a, **kw: (
+                setattr(tiny_model, "_forge_last_kv", "kv") or
+                torch.tensor([[1, 2, 3, 4]])))
+        eng.generate("hi", max_new_tokens=1, finish_sentence=False)
+        assert eng.model._forge_last_kv is None
+        assert eng.model._forge_prefill_kv is None
+        assert eng.model._forge_last_logits is None

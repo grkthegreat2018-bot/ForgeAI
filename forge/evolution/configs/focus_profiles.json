@@ -52,6 +52,27 @@
         "convergence_bonus": 1.5
       }
     },
+    "micro_format": {
+      "description": "Brute-force discovery of the micro live-learning LM format (MicroLiveLM only). Combine with --fixate for single-topic fixation.",
+      "categories": ["live_format"],
+      "extra_domains": [],
+      "exclude_domains": [],
+      "score_weights": {}
+    },
+    "fluxlm": {
+      "description": "FluxLM self-tuning (FluxTune only). Combine with --fixate for single-topic fixation.",
+      "categories": ["fluxlm"],
+      "extra_domains": [],
+      "exclude_domains": [],
+      "score_weights": {}
+    },
+    "evolver": {
+      "description": "Meta-evolution (EvolverTune only). Combine with --fixate for single-topic fixation.",
+      "categories": ["evolver"],
+      "extra_domains": [],
+      "exclude_domains": [],
+      "score_weights": {}
+    },
     "all": {
       "description": "All domains (default, no filtering).",
       "categories": [],

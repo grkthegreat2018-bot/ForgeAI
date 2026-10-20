@@ -40,6 +40,96 @@ import torch.nn.functional as F
 from forge.training.training_utils import oom_guard
 
 
+class ExGRPOReplayBuffer:
+    """ExGRPO experience-replay buffer (ICLR'26 "ExGRPO").
+
+    Stores past GRPO *rollout groups* — {prompt, completions, rewards,
+    mean_token_entropy} — and scores each by the paper's value signal::
+
+        value = correctness_flag * mean_token_entropy
+
+    i.e. groups that contain at least one verified-correct rollout AND
+    were produced with high policy entropy carry the most reusable
+    experience (correct reasoning paths the policy is still uncertain
+    about).  Updates draw from the top-valued entries; the buffer is
+    capacity-bounded and evicts the *lowest-value* entry when full.
+
+    Mixed-policy note: replayed groups are off-policy by construction —
+    they reuse the same group-relative advantage machinery (no new
+    objective); the paper's win is *which* experiences get replayed.
+    """
+
+    def __init__(self, capacity: int = 512):
+        self.capacity = max(1, int(capacity))
+        self.entries: list[dict] = []
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    @staticmethod
+    def value_of(rewards: list[float], entropy: float) -> tuple[float, float]:
+        """(correctness_flag, value) — flag=1 iff any rollout verified."""
+        correctness = 1.0 if any(r >= 0.99 for r in rewards) else 0.0
+        return correctness, correctness * float(entropy)
+
+    def add(self, prompt: str, completions: list[str],
+            rewards: list[float], entropy: float) -> dict | None:
+        """Insert/update a rollout group.  Dedupes by prompt (keeps the
+        higher-value entry); evicts the lowest-value entry at capacity.
+        Returns the stored entry, or None if it was not worth keeping."""
+        correctness, value = self.value_of(rewards, entropy)
+        # Dedupe by prompt — replace only when the new rollout is more
+        # valuable (keeps stale-but-better experiences).
+        for e in self.entries:
+            if e["prompt"] == prompt:
+                if value > e["value"]:
+                    e.update(completions=list(completions),
+                             rewards=list(rewards), entropy=float(entropy),
+                             correctness=correctness, value=value)
+                    return e
+                return None
+        if len(self.entries) >= self.capacity:
+            min_i, min_e = min(enumerate(self.entries),
+                               key=lambda t: t[1]["value"])
+            if value <= min_e["value"]:
+                return None  # buffer full of strictly better entries
+            self.entries.pop(min_i)
+        entry = {"prompt": prompt, "completions": list(completions),
+                 "rewards": list(rewards), "entropy": float(entropy),
+                 "correctness": correctness, "value": value}
+        self.entries.append(entry)
+        return entry
+
+    def top(self, n: int) -> list[dict]:
+        """The n highest-value entries (deterministic priority order)."""
+        return sorted(self.entries, key=lambda e: e["value"],
+                      reverse=True)[:max(0, n)]
+
+    def sample(self, n: int, rng=None) -> list[dict]:
+        """Value-weighted sample without replacement (top-valued entries
+        dominate; uniform when all values are 0)."""
+        import random as _random
+        rng = rng or _random
+        pool = list(self.entries)
+        picked = []
+        n = min(n, len(pool))
+        for _ in range(n):
+            total = sum(max(e["value"], 0.0) for e in pool)
+            if total <= 0:
+                i = rng.randrange(len(pool))
+            else:
+                r = rng.random() * total
+                acc = 0.0
+                i = len(pool) - 1
+                for j, e in enumerate(pool):
+                    acc += max(e["value"], 0.0)
+                    if r < acc:
+                        i = j
+                        break
+            picked.append(pool.pop(i))
+        return picked
+
+
 @dataclass
 class GRPOConfig:
     """GRPO hyperparameters optimized for 1-3B models."""
@@ -147,6 +237,17 @@ class GRPOConfig:
     repetition_penalty: float = -0.5    # penalty value (negative reward)
     repetition_warmup_steps: int = 50   # only apply penalty after N steps
 
+    # ExGRPO (experience-replay GRPO, ICLR'26): each epoch's rollout
+    # groups are scored by correctness_flag * mean-token-entropy and
+    # stored in a persistent buffer; each update batch draws
+    # exgrpo_replay_fraction of its groups from the top-valued entries.
+    # The replayed groups reuse the standard group-relative advantage
+    # machinery — the paper's win is WHICH experiences get replayed.
+    # Flag-gated: default OFF keeps prior behavior bit-identical.
+    use_exgrpo: bool = False            # opt-in experience replay
+    exgrpo_replay_size: int = 512       # max stored rollout groups
+    exgrpo_replay_fraction: float = 0.25  # fraction of each update batch
+
     def __post_init__(self):
         """Validate critical hyperparameters to catch config errors early."""
         if self.learning_rate <= 0:
@@ -163,6 +264,13 @@ class GRPOConfig:
             raise ValueError(f"repetition_n must be >= 2, got {self.repetition_n}")
         if not 0 <= self.replay_ratio <= 1:
             raise ValueError(f"replay_ratio must be in [0, 1], got {self.replay_ratio}")
+        if not 0 <= self.exgrpo_replay_fraction <= 1:
+            raise ValueError(
+                f"exgrpo_replay_fraction must be in [0, 1], "
+                f"got {self.exgrpo_replay_fraction}")
+        if self.exgrpo_replay_size < 1:
+            raise ValueError(
+                f"exgrpo_replay_size must be >= 1, got {self.exgrpo_replay_size}")
 
 
 @dataclass
@@ -1046,6 +1154,42 @@ class GRPOTrainer:
                     group_lps.append(torch.tensor([], device=self.device))
                 all_log_probs.append(group_lps)
         return all_log_probs
+
+    def exgrpo_group_entropy(self, prompt: str,
+                             completions: list[str]) -> float:
+        """Mean policy entropy over the group's solution tokens (ExGRPO).
+
+        One logits-only forward per completion; the per-token Shannon
+        entropy of the policy distribution over the solution span is
+        averaged across the group.  Used as the experience-value signal
+        (correctness * entropy) for ExGRPO replay ordering — the rollout
+        data itself records no per-token logprobs, so this is the cheap
+        recomputation path.
+
+        Returns 0.0 when no completion is long enough to score.
+        """
+        try:
+            prompt_len = self.tokenizer(
+                prompt, return_tensors="pt").input_ids.shape[1]
+        except Exception:
+            return 0.0
+        entropies = []
+        with torch.inference_mode():
+            for completion in completions:
+                enc = self.tokenizer(
+                    prompt + completion, return_tensors="pt",
+                    truncation=True, max_length=self.config.max_seq_len)
+                input_ids = enc.input_ids.to(self.device)
+                if input_ids.shape[1] <= prompt_len + 1:
+                    continue
+                logits, _ = self.model(input_ids)
+                sol_logits = logits[0, prompt_len - 1:-1, :]
+                if sol_logits.shape[0] == 0:
+                    continue
+                lp = F.log_softmax(sol_logits.float(), dim=-1)
+                ent = -(lp.exp() * lp).sum(dim=-1).mean()
+                entropies.append(float(ent.item()))
+        return sum(entropies) / len(entropies) if entropies else 0.0
 
     def get_stats(self) -> dict:
         """Return cumulative training stats for monitoring."""

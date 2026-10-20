@@ -1,6 +1,6 @@
-"""Schedule-Free spectral optimizers: SF-NorMuon, AMUSE, MONA.
+"""Schedule-Free / spectral optimizers: SF-NorMuon, AMUSE, MONA, SAMuon-lite.
 
-Based on three 2026 papers:
+Based on four 2026 papers:
   1. SF-NorMuon (arXiv 2605.23061): schedule-free spectral optimizer with
      per-neuron normalization. Matches tuned AdamW across 1-8× Chinchilla horizons.
   2. AMUSE (arXiv 2605.22432): Anytime Muon + Stable gradient Evaluation.
@@ -10,8 +10,12 @@ Based on three 2026 papers:
      Adds acceleration term from EMA of gradient differences.
      Escapes sharp minima while preserving spectral-norm regularization.
      SOTA on MoE pretraining 1B-68B.
+  4. SAMuon-lite (arXiv 2608.25990): Spectral-Aware Muon. Splits the
+     orthogonalized update into the momentum buffer's top singular
+     direction ("head") and the residual "bulk", then amplifies the bulk
+     by bulk_gain ≈ 1.5. Reports 13–24% fewer tokens to the same loss.
 
-All three eliminate learning-rate schedules (anytime training):
+The first three eliminate learning-rate schedules (anytime training):
   - No warmup-stable-decay needed
   - Checkpoint quality is high at ANY point during training
   - 31% faster to target loss at 1000 TPP (ScheduleFree+)
@@ -21,6 +25,7 @@ For our 1.2B model:
   - SF-NorMuon: no schedule, matches tuned AdamW, anytime checkpoints
   - AMUSE: Muon speed + Schedule-Free stability, no schedule
   - MONA: Muon + Nesterov, escapes sharp minima, SOTA on MoE
+  - SAMuon-lite: drop-in Muon variant, 13–24% token savings via bulk gain
 """
 from __future__ import annotations
 
@@ -64,6 +69,30 @@ def _per_neuron_normalize(G: torch.Tensor) -> torch.Tensor:
         return G
     norms = G.norm(dim=-1, keepdim=True).clamp(min=1e-8)
     return G / norms
+
+
+def _top_singular_pair(G: torch.Tensor, iters: int = 3):
+    """Top singular vectors (u1, v1) of a 2D matrix via power iteration.
+
+    Alternating iteration u ← G v / ‖G v‖, v ← Gᵀ u / ‖Gᵀ u‖ converges to
+    the leading singular pair. 3 iterations suffice for SAMuon-lite's
+    spectral split — the directions only select which components of the
+    orthogonalized update are reweighted, so a rough pair is enough.
+    Runs in bf16 like _newton_schulz_5.
+
+    Returns (u1, v1): unit vectors of shape (m,) and (n,), bf16.
+    """
+    assert G.ndim == 2
+    Gb = G.bfloat16()
+    v = torch.randn(G.shape[1], device=G.device, dtype=torch.bfloat16)
+    v = v / (v.norm() + 1e-8)
+    u = torch.zeros(G.shape[0], device=G.device, dtype=torch.bfloat16)
+    for _ in range(iters):
+        u = Gb @ v
+        u = u / (u.norm() + 1e-8)
+        v = Gb.T @ u
+        v = v / (v.norm() + 1e-8)
+    return u, v
 
 
 class SFNorMuon(Optimizer):
@@ -345,3 +374,207 @@ class MONA(Optimizer):
                 p.add_(update, alpha=-lr)
 
         return loss
+
+
+class SAMuonLite(Optimizer):
+    """SAMuon-lite: Spectral-Aware Muon (arXiv 2608.25990).
+
+    Standard Muon step (momentum → Newton-Schulz orthogonalization → O),
+    then a spectral split of the update:
+
+      - (u1, v1): top singular pair of the momentum buffer, estimated with
+        a few power-iteration steps (bf16, cheap — no full SVD).
+      - head = c · u1 v1ᵀ with c = u1ᵀ O v1  (scalar overlap of O with the
+        dominant momentum direction).
+      - bulk = O − head  (all remaining spectral directions).
+      - update = head + bulk_gain · bulk.
+
+    Rationale: orthogonalization already fully scales the head direction,
+    while the bulk directions carry most of the long-tail progress —
+    amplifying them (bulk_gain ≈ 1.5) reaches the same loss in 13–24%
+    fewer tokens. bulk_gain = 1.0 reduces to plain Muon up to bf16
+    rounding.
+
+    Args:
+        params: model parameters
+        lr: learning rate
+        momentum: Muon momentum
+        bulk_gain: gain on the non-head (bulk) part of the update
+        power_iters: power-iteration steps for the top singular pair
+        weight_decay: decoupled decay applied to the parameter
+        ns_steps: Newton-Schulz iterations
+    """
+
+    def __init__(self, params: Iterable, lr=0.02, momentum=0.95,
+                 bulk_gain=1.5, power_iters=3, weight_decay=0.0,
+                 ns_steps=5):
+        defaults = dict(lr=lr, momentum=momentum, bulk_gain=bulk_gain,
+                        power_iters=power_iters, weight_decay=weight_decay,
+                        ns_steps=ns_steps)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group['lr']
+            momentum = group['momentum']
+            bulk_gain = group['bulk_gain']
+            power_iters = group['power_iters']
+            wd = group['weight_decay']
+            ns_steps = group['ns_steps']
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad
+                state = self.state[p]
+
+                if len(state) == 0:
+                    state['momentum'] = torch.zeros_like(p)
+
+                mom = state['momentum']
+
+                # SAMuon-lite update (for 2D matrix params)
+                if grad.ndim == 2 and grad.shape[0] > 1 and grad.shape[1] > 1:
+                    # Standard Muon: momentum → orthogonalize.
+                    mom.mul_(momentum).add_(grad, alpha=1 - momentum)
+                    O = _newton_schulz_5(mom, ns_steps)
+                    # Spectral split on the momentum buffer's head.
+                    u1, v1 = _top_singular_pair(mom, power_iters)
+                    c = u1 @ O @ v1  # scalar: u1ᵀ O v1
+                    head = c * torch.outer(u1, v1)
+                    bulk = O - head
+                    update = head + bulk_gain * bulk
+                    update *= max(1, grad.shape[0] / grad.shape[1]) ** 0.5
+                else:
+                    # Momentum for non-matrix params (vectors, scalars).
+                    mom.mul_(momentum).add_(grad, alpha=1 - momentum)
+                    update = mom
+
+                # Decoupled weight decay, then parameter update.
+                if wd > 0:
+                    p.mul_(1 - lr * wd)
+                p.add_(update.to(p.dtype), alpha=-lr)
+
+        return loss
+
+
+class SAMuonLiteWithAuxAdam:
+    """SAMuon-lite for 2D hidden weights + AdamW for embeddings/scalars.
+
+    Duck-typed composite mirroring MuonScheduleFree (muon_sf_blockwise.py):
+    param groups carry a ``use_samuon`` flag — flagged groups go to an
+    internal SAMuonLite, the rest to an internal AdamW. Only the SAMuon
+    param groups are exposed via ``.param_groups`` (same convention as
+    MuonScheduleFree, so the trainer's flat LR rewrite hits the Muon
+    groups, not the AdamW auxiliaries).
+    """
+
+    def __init__(self, param_groups):
+        samuon_groups, adam_groups = [], []
+        for g in param_groups:
+            g = dict(g)
+            use_samuon = g.pop('use_samuon', False)
+            if not g.get('params'):
+                continue
+            (samuon_groups if use_samuon else adam_groups).append(g)
+        self._samuon = SAMuonLite(samuon_groups) if samuon_groups else None
+        self._adam = (torch.optim.AdamW(adam_groups) if adam_groups else None)
+
+    @property
+    def param_groups(self):
+        return self._samuon.param_groups if self._samuon is not None else []
+
+    def step(self, closure=None):
+        loss = self._samuon.step(closure) if self._samuon is not None else None
+        if self._adam is not None:
+            self._adam.step()
+        return loss
+
+    def zero_grad(self, set_to_none=True):
+        if self._samuon is not None:
+            self._samuon.zero_grad(set_to_none=set_to_none)
+        if self._adam is not None:
+            self._adam.zero_grad(set_to_none=set_to_none)
+
+    def state_dict(self):
+        return {
+            'samuon': (self._samuon.state_dict()
+                       if self._samuon is not None else None),
+            'adam': (self._adam.state_dict()
+                     if self._adam is not None else None),
+        }
+
+    def load_state_dict(self, state_dict):
+        if self._samuon is not None and state_dict.get('samuon') is not None:
+            self._samuon.load_state_dict(state_dict['samuon'])
+        if self._adam is not None and state_dict.get('adam') is not None:
+            self._adam.load_state_dict(state_dict['adam'])
+
+
+def build_samuon_lite(model, max_lr: float, weight_decay: float = 0.1,
+                      bulk_gain: float = 1.5) -> SAMuonLiteWithAuxAdam:
+    """Build a SAMuonLiteWithAuxAdam optimizer for a ForgeAI model.
+
+    Same parameter split as build_muon_sf_plain (muon_sf_blockwise.py):
+      - SAMuon-lite: 2D hidden matrices (not embeddings/head)
+      - AdamW: embeddings, head, scalars (<2D)
+
+    LR scaling follows the NanoGPT speedrun ratios, normalized to max_lr.
+    """
+    matrix_params = [p for p in model.parameters() if p.ndim >= 2 and p.requires_grad]
+    other_params = [p for p in model.parameters() if p.ndim < 2 and p.requires_grad]
+
+    embed_ids = set()
+    for n, p in model.named_parameters():
+        if "embed" in n or "head" in n:
+            embed_ids.add(id(p))
+
+    hidden_params = [p for p in matrix_params if id(p) not in embed_ids]
+    embed_params = [p for p in matrix_params if id(p) in embed_ids]
+    scalar_params = other_params
+
+    scale = max_lr / 0.003
+    muon_lr = 0.05 * scale
+    embed_lr = 0.6 * scale
+    scalar_lr = 0.04 * scale
+
+    param_groups = [
+        {
+            "params": embed_params,
+            "lr": embed_lr,
+            "betas": (0.8, 0.95),
+            "eps": 1e-10,
+            "use_samuon": False,
+            "weight_decay": 0.0,
+        },
+        {
+            "params": hidden_params,
+            "lr": muon_lr,
+            "momentum": 0.95,
+            "use_samuon": True,
+            "bulk_gain": bulk_gain,
+            "weight_decay": weight_decay,
+        },
+        {
+            "params": scalar_params,
+            "lr": scalar_lr,
+            "betas": (0.8, 0.95),
+            "eps": 1e-10,
+            "use_samuon": False,
+            "weight_decay": 0.0,
+        },
+    ]
+    print(
+        f"Using SAMuon-lite (lr={muon_lr:.4f}, bulk_gain={bulk_gain}) for "
+        f"{len(hidden_params)} hidden matrices + AdamW (embed={embed_lr:.4f}, "
+        f"scalar={scalar_lr:.4f}) for {len(embed_params)} embed + "
+        f"{len(scalar_params)} scalar params."
+    )
+    return SAMuonLiteWithAuxAdam(param_groups)

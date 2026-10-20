@@ -44,6 +44,17 @@ def _resolve_path(path: str) -> str:
     """
     if path in _LEGACY_REDIRECTS and not os.path.isdir(path):
         return CANONICAL_TOKENIZER_PATH
+    # HF repo-ids ("org/name") are not local paths — never redirect them to
+    # the canonical tokenizer. A repo-id has exactly one "/" separating two
+    # path segments and doesn't live under a repo-root dir. Without this
+    # guard, e.g. "Qwen/Qwen2.5-0.5B" was silently replaced by the 65k-vocab
+    # ForgeLM tokenizer while loading a 151936-vocab model.
+    p = path.replace("\\", "/")
+    first = p.split("/")[0]
+    if (p.count("/") == 1 and ":" not in p
+            and first not in {"research", "forge", "scripts", "tests",
+                              ".", ".."}):
+        return path
     # Generic fallback: if the requested dir doesn't exist, try canonical.
     if not os.path.isdir(path) and os.path.isdir(CANONICAL_TOKENIZER_PATH):
         return CANONICAL_TOKENIZER_PATH

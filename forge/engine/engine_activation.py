@@ -134,7 +134,7 @@ class _ActivationMixin:
                       "vtoken", "auto_context"
             decoding: "standard", "speculative", "ngram_speculative",
                       "external_draft_speculative", "medusa", "dspark", "eagle3",
-                      "mtp_selfspec", "self_speculative_sparse"
+                      "mtp_selfspec", "self_speculative_sparse", "specbound"
             quantize: None, "int8", "int4", "fp8", "w8a8", "nvfp4",
                       "forge_quant", "grinqh", "mixllm", "acbq", "quamba2",
                       "awq_fp4", "nanoquant", "btc", "ternary_ptq"
@@ -267,6 +267,10 @@ class _ActivationMixin:
         "capture": ["cpu_offload", "s4r", "standard"],
         "vtoken": ["paged_eviction", "snapkv", "standard", "cpu_offload"],
         "auto_context": ["s4r", "standard", "cpu_offload"],
+        "beacon": ["s4r", "standard", "cpu_offload"],
+        "flux": ["beacon", "s4r", "standard", "cpu_offload"],
+        "anchor": ["s4r", "standard", "cpu_offload"],
+        "metakv": ["s4r", "standard", "cpu_offload"],
         "s4r": ["standard", "cpu_offload"],
         "standard": ["cpu_offload"],
         "cpu_offload": [],
@@ -346,6 +350,53 @@ class _ActivationMixin:
             context={"requested": kv_cache, "tried": chain},
             suggestion="Try kv_cache='cpu_offload' or reduce max_seq_len.")
 
+    # ── R65: SuffixMemory sidecar ──────────────────────────────────────
+
+    def enable_suffix_memory(self, gate: float = 1.0,
+                             orders=(4, 8, 16, 32, 64),
+                             max_cells_per_order: int = 200_000,
+                             order_weight: float = 0.7):
+        """Attach a FluxLM-style exact-suffix memory to generation.
+
+        Per-order rolling-suffix-hash → successor-count tables observe
+        the full token stream (prompt + generated) and add an additive
+        logit lift before sampling — verbatim recall of content the KV
+        window already evicted.  Bounded host RAM (sparse rows +
+        decay-halving cap), O(orders) write per token, one dense (V,)
+        lift build per step (~µs).
+
+        The companion to ``kv_cache="flux"``: the cache bounds attention
+        context; this preserves recall of what fell out of the window.
+        """
+        from forge.model.ngram_mem import SuffixMemory
+        vocab = getattr(getattr(self.model, "config", None),
+                        "vocab_size", None)
+        if vocab is None:
+            vocab = getattr(self.tokenizer, "vocab_size", 0) or 0
+        self._suffix_mem = SuffixMemory(
+            int(vocab), orders=orders, gate=gate,
+            order_weight=order_weight,
+            max_cells_per_order=max_cells_per_order)
+        self._log(f"SuffixMemory on: {self._suffix_mem.info()}")
+        return self._suffix_mem
+
+    def disable_suffix_memory(self):
+        """Detach the suffix sidecar (context lift off; state dropped)."""
+        self._suffix_mem = None
+
+    def _suffix_mem_for(self, params):
+        """Resolve the sidecar for one request: ``params.suffix_gate``
+        overrides the engine-level gate (<=0 disables for the request)."""
+        mem = getattr(self, "_suffix_mem", None)
+        if mem is None:
+            return None
+        gate = getattr(params, "suffix_gate", None)
+        if gate is not None:
+            if gate <= 0:
+                return None
+            mem.gate = gate
+        return mem
+
     def _activate_decoding(self, decoding):
         decode_kwargs = {}
         if decoding == "mtp_selfspec":
@@ -389,6 +440,26 @@ class _ActivationMixin:
             decode_kwargs.setdefault("early_layer", None)
             decode_kwargs.setdefault("early_candidates", None)
             decode_kwargs.setdefault("candidate_top_k", 64)
+        elif decoding == "specbound":
+            # R60-5: SpecBound adaptive bounded self-speculation — the same
+            # model drafts via early-exit (layer_indices partial forward),
+            # ONE full forward verifies.  Per-exit-layer acceptance EMA
+            # picks the deepest confident exit; draft_len adapts in
+            # [min_draft, max_draft].  Greedy output is bit-identical to
+            # standard decode.  Overrides:
+            # engine.activate(decoding="specbound", exit_layer=7,
+            #                 draft_len=6, conf_threshold=0.7).
+            decode_kwargs.setdefault("exit_layer", None)
+            decode_kwargs.setdefault("exit_candidates", None)
+            decode_kwargs.setdefault("conf_threshold", 0.6)
+            decode_kwargs.setdefault("draft_len", 4)
+            decode_kwargs.setdefault("min_draft", 2)
+            decode_kwargs.setdefault("max_draft", 8)
+            decode_kwargs.setdefault("ema_alpha", 0.3)
+            # ReplaySSM is optional — SpecBound's own snapshot+replay
+            # repair covers rollback correctness without it.
+            decode_kwargs.setdefault(
+                "replay_ssm_cache", getattr(self, "_replay_ssm", None))
         self.decoding = build_decoding(decoding, **decode_kwargs)
         self._log(f"Decoding: {self.decoding.name}")
 

@@ -64,8 +64,12 @@ class RotaryEmbedding(nn.Module):
         self.rope_scaling = rope_scaling
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
 
-        if rope_scaling and rope_scaling.get("type") == "yarn":
-            inv_freq = self._yarn_inv_freq(inv_freq, rope_scaling, max_seq_len)
+        if rope_scaling:
+            rope_type = rope_scaling.get("type") or rope_scaling.get("rope_type")
+            if rope_type == "yarn":
+                inv_freq = self._yarn_inv_freq(inv_freq, rope_scaling, max_seq_len)
+            elif rope_type in ("llama3", "llama3.1"):
+                inv_freq = self._llama3_inv_freq(inv_freq, rope_scaling)
 
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -110,6 +114,29 @@ class RotaryEmbedding(nn.Module):
         # Bands fully below low_freq_wavelen extrapolate (scale=1).
         scale = torch.where(wavelens < low_freq_wavelen, torch.ones_like(scale), scale)
         return inv_freq / scale
+
+    @staticmethod
+    def _llama3_inv_freq(inv_freq, cfg):
+        """Apply Llama-3/3.1 wavelength-aware RoPE scaling (HF _compute_llama3).
+
+        Low-frequency bands (long wavelengths) are divided by `factor`,
+        high-frequency bands pass through unchanged, and a linear ramp blends
+        the boundary — matching transformers.models.llama.modeling_llama.
+        """
+        factor = cfg.get("factor", 8.0)
+        low_f = cfg.get("low_freq_factor", 1.0)
+        high_f = cfg.get("high_freq_factor", 4.0)
+        orig_len = cfg.get("original_max_position_embeddings", 8192)
+
+        low_wl = orig_len / low_f
+        high_wl = orig_len / high_f
+        wavelens = 2.0 * math.pi / inv_freq
+
+        scaled = torch.where(wavelens > low_wl, inv_freq / factor, inv_freq)
+        smooth = (orig_len / wavelens - low_f) / (high_f - low_f)
+        smoothed = (1.0 - smooth) * inv_freq / factor + smooth * inv_freq
+        mid = (wavelens <= low_wl) & (wavelens >= high_wl)
+        return torch.where(mid, smoothed, scaled)
 
     _rotate_half = staticmethod(_rotate_half)
 
@@ -315,13 +342,22 @@ class GroupedQueryAttention(nn.Module):
             if T == 1 and total_len > 1:
                 bias = sink_bias.to(q.dtype).expand(B, self.n_heads, 1, total_len)
             else:
-                causal = _causal_mask(T, total_len, 0, q.device, q.dtype)
+                causal = _causal_mask(T, total_len, total_len - T,
+                                      q.device, q.dtype)
                 bias = causal + sink_bias.to(q.dtype).expand(B, self.n_heads, T, total_len)
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
         elif T == 1 and total_len > 1:
             out = flash_attention(q, k, v, is_causal=False)
-        else:
+        elif total_len == T:
             out = flash_attention(q, k, v, is_causal=True)
+        else:
+            # Continuation forward (T>1 over a cached prefix): SDPA's
+            # is_causal anchors the mask TOP-LEFT on non-square shapes,
+            # which would hide the entire cached prefix — anchor the
+            # causal mask bottom-right via an explicit mask instead.
+            mask = _causal_mask(T, total_len, total_len - T,
+                                q.device, q.dtype)
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         out = out.transpose(1, 2).reshape(B, T, self.n_heads * self.head_dim)
         return self.out_proj(out), new_kv
 
@@ -469,11 +505,20 @@ class DoubleGatedConvLayer(nn.Module):
             # hit supplies _conv_state_prefix (the stored gated-input context
             # at the reuse boundary), use it as the left context instead of
             # zero-padding — otherwise the first kernel_size-1 suffix
-            # positions get corrupted conv outputs.
-            if prefix_ctx is not None and T > 1:
+            # positions get corrupted conv outputs.  A LIVE _conv_state serves
+            # the same role for mid-sequence T>1 forwards (chunked prefill,
+            # speculative verify): it holds the last kernel_size-1 gated
+            # inputs of the committed span, which is exactly the left context
+            # a continuation chunk needs.  _conv_state is None at a fresh
+            # prefill (the model-level reset flag cleared it), so this only
+            # engages on genuine continuations.
+            left_ctx = prefix_ctx
+            if left_ctx is None and self._conv_state is not None:
+                left_ctx = self._conv_state
+            if left_ctx is not None and T > 1:
                 Bx_t = Bx.transpose(1, 2)  # (B, D, T)
                 full = torch.cat(
-                    [prefix_ctx.to(device=Bx_t.device, dtype=Bx_t.dtype),
+                    [left_ctx.to(device=Bx_t.device, dtype=Bx_t.dtype),
                      Bx_t], dim=-1)
                 conv_out = self.conv(full).transpose(1, 2)  # (B, T, D)
             else:
@@ -676,6 +721,19 @@ class ModularBlock(nn.Module):
                 decay_floor=getattr(config, 'kda_decay_floor', 0.0),
                 layer_idx=layer_idx)
 
+        # R60-1 GDN2: decoupled erase/write gated delta side-path (strict
+        # KDA superset; gate=0 → lossless). Mutually exclusive with use_kda.
+        self._gdn2 = None
+        self._gdn2_gate_zero: bool | None = None  # cached eval gate state
+        if getattr(config, 'use_gdn2', False):
+            from forge.keys.attention.gdn2_key import GDN2Layer
+            gdn2_heads = getattr(config, 'gdn2_n_heads', 0) or config.n_heads
+            self._gdn2 = GDN2Layer(
+                config.d_model, gdn2_heads,
+                head_dim=getattr(config, 'gdn2_head_dim', 0) or None,
+                decay_floor=getattr(config, 'gdn2_decay_floor', 0.0),
+                layer_idx=layer_idx)
+
         # Selective checkpoint strategy: "all" (full block), "ffn" (recompute
         # only FFN — biggest activation consumer, ~2-4x VRAM savings on
         # intermediates with minimal compute penalty), "attn" (recompute only
@@ -708,7 +766,14 @@ class ModularBlock(nn.Module):
             from forge.keys.architecture.titan_memory_key import TitanMemory
             self._memory = TitanMemory(
                 config.d_model,
-                rank=getattr(config, 'titan_memory_rank', 0))
+                rank=getattr(config, 'titan_memory_rank', 0),
+                update_lr=getattr(config, 'titan_update_lr', 0.5),
+                forget=getattr(config, 'titan_forget', 0.99),
+                momentum=getattr(config, 'titan_momentum', 0.9),
+                surprise_cap=getattr(config, 'titan_surprise_cap', 4.0),
+                solver=getattr(config, 'titan_solver', 'gd'),
+                ridge=getattr(config, 'titan_ridge', 1.0),
+                cg_iters=getattr(config, 'titan_cg_iters', 8))
         if getattr(config, 'use_mod', False):
             from forge.keys.architecture.mod_router_key import ModRouter
             self._mod = ModRouter(
@@ -960,6 +1025,14 @@ class ModularBlock(nn.Module):
                 self._kda_gate_zero = (self._kda.gate.item() == 0.0)
             if not self._kda_gate_zero:
                 x = x + self._kda(x0, use_cache=use_cache)
+
+        # R60-1 GDN2: decoupled erase/write delta-rule branch (same
+        # gate-zero skip convention as KDA).
+        if self._gdn2 is not None:
+            if self._gdn2_gate_zero is None:
+                self._gdn2_gate_zero = (self._gdn2.gate.item() == 0.0)
+            if not self._gdn2_gate_zero:
+                x = x + self._gdn2(x0, use_cache=use_cache)
 
         return x, present
 

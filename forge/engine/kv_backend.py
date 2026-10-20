@@ -419,6 +419,20 @@ def build_kv_cache(strategy: str = "standard", **kwargs) -> KVCacheStrategy:
         return MatryoshkaKVCache()
     if strategy == "filler":
         return FillerKVCacheStrategy()
+    # R60: paper-faithful KV compression trio — all expose
+    # compact_past_kv(past_kv) so the decode loop can call them live.
+    if strategy == "beacon":
+        from forge.engine.kv.beacon_kv import BeaconKVCache
+        return BeaconKVCache()
+    if strategy == "flux":
+        from forge.engine.kv.flux_kv import FluxKVCache
+        return FluxKVCache()
+    if strategy == "anchor":
+        from forge.engine.kv.anchor_kv import AnchorKVCache
+        return AnchorKVCache()
+    if strategy == "metakv":
+        from forge.engine.kv.metakv import MetaKVCache
+        return MetaKVCache()
     cls = strategies.get(strategy, StandardKVCache)
     if cls is None:
         return StandardKVCache()

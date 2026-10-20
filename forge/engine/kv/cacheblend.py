@@ -422,7 +422,7 @@ class CacheBlend:
         if ids.shape[1] == 0:
             return 0
         with torch.inference_mode():
-            out = engine.model(ids, use_cache=True)
+            out = engine.model(ids, use_cache=True, logits_last_only=True)
         from forge.model_loader import unpack_output_with_kv
         _, past_kv = unpack_output_with_kv(out)
         return self.store.register_chunk(ids[0].cpu().tolist(), past_kv)
@@ -521,7 +521,8 @@ class CacheBlend:
             region_ids = ids[:, rs:re_]
             with torch.inference_mode():
                 out = engine.model(
-                    region_ids, past_key_values=past, use_cache=True)
+                    region_ids, past_key_values=past, use_cache=True,
+                    logits_last_only=True)
             _, region_kv = unpack_output_with_kv(out)
             # Splice the recomputed KV back into the assembled buffer.
             rlen = re_ - rs

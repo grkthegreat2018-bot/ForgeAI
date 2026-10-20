@@ -516,7 +516,16 @@ class Mamba3Block(nn.Module):
         else:
             # Full sequence
             x = x_ssm.transpose(1, 2)  # (B, d_inner, T)
-            x = self.conv1d(x)[:, :, :T]  # causal: trim right padding
+            cont = (past_key_value or {}).get("conv_state")
+            if cont is not None and T > 1:
+                # Continuation chunk: prepend committed conv context rather
+                # than relying on the causal zero left-pad (same fix as
+                # MambaLayer — chunked prefill / speculative verify).
+                full = torch.cat([cont.to(x.device, x.dtype), x], dim=-1)
+                x = F.conv1d(full, self.conv1d.weight, self.conv1d.bias,
+                             groups=self.d_inner)
+            else:
+                x = self.conv1d(x)[:, :, :T]  # causal: trim right padding
             x = x.transpose(1, 2)  # (B, T, d_inner)
             if use_cache:
                 # Save conv state (last d_conv-1 pre-conv inputs)

@@ -663,6 +663,170 @@ class ForgeLoader:
         logger.info("Downloaded to %s", dest)
 
 
+# ── GGUF tekken tokenizer adapter ────────────────────────────────────────────
+
+class _BatchEnc:
+    """Minimal stand-in for transformers BatchEncoding (``.input_ids``)."""
+
+    def __init__(self, ids):
+        self.input_ids = ids
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+
+class GGUFTekkenTokenizer:
+    """HF-compatible tokenizer facade over a GGUF file's embedded tokenizer.
+
+    Nemo-family GGUFs carry a tekken BPE that neither ``tokenizers`` nor
+    ``transformers`` can load without ``mistral_common``.  ``llama_cpp`` is
+    already a project dependency; ``Llama(vocab_only=True)`` loads just the
+    tokenizer (~0.6s) and gives byte-exact encode/decode — the same
+    tokenization llama.cpp/LM Studio apply to the same file.
+
+    Truncation note: ``truncation=True`` keeps ``[BOS] + last max_length-1``
+    tokens (recent context) rather than HF's head truncation — for a
+    generation engine the tail is what matters, and the suffix-memory
+    sidecar sees the untruncated stream regardless.
+    """
+
+    def __init__(self, gguf_path: str):
+        self._gguf_path = str(gguf_path)
+        self._llm = None          # lazy — llama_cpp import is heavyweight
+        self._special_ids: set[int] | None = None
+
+    def _lazy(self):
+        if self._llm is None:
+            from llama_cpp import Llama
+            self._llm = Llama(model_path=self._gguf_path, vocab_only=True,
+                              n_ctx=512, verbose=False)
+        return self._llm
+
+    # ── HF-ish surface ───────────────────────────────────────────────────
+
+    @property
+    def vocab_size(self) -> int:
+        return self._lazy().n_vocab()
+
+    @property
+    def eos_token_id(self) -> int:
+        return self._lazy().token_eos()
+
+    @property
+    def bos_token_id(self) -> int:
+        return self._lazy().token_bos()
+
+    @property
+    def pad_token_id(self) -> int:
+        # Nemo/tekken has no dedicated PAD — EOS doubles as pad (HF convention).
+        return self.eos_token_id
+
+    @property
+    def eos_token(self) -> str:
+        return self.decode([self.eos_token_id], skip_special_tokens=False)
+
+    @property
+    def bos_token(self) -> str:
+        return self.decode([self.bos_token_id], skip_special_tokens=False)
+
+    @property
+    def pad_token(self) -> str:
+        return self.eos_token
+
+    def _chat_template(self) -> str | None:
+        """The GGUF's embedded jinja chat template (``tokenizer.chat_template``),
+        or None when the file doesn't carry one."""
+        if not hasattr(self, "_chat_tpl"):
+            try:
+                info = GGUFInfo(self._gguf_path)
+                self._chat_tpl = info.metadata.get("tokenizer.chat_template")
+                info.close()
+            except Exception:
+                self._chat_tpl = None
+        return self._chat_tpl
+
+    def apply_chat_template(self, messages, tokenize=False,
+                            add_generation_prompt=True, **_):
+        """Render the GGUF's embedded jinja chat template if present.
+
+        ``tokenizer.chat_template`` metadata ships in most merged GGUFs —
+        rendered here with jinja2 using HF's calling convention (``messages``
+        list of ``{role, content}`` dicts + bos/eos strings in scope).
+        Falls back to a minimal ChatML-ish layout when the file carries
+        no template.
+        """
+        tmpl = self._chat_template()
+        text = None
+        if tmpl:
+            try:
+                import jinja2
+                env = jinja2.Environment(trim_blocks=True,
+                                         lstrip_blocks=True)
+                text = env.from_string(tmpl).render(
+                    messages=messages,
+                    add_generation_prompt=add_generation_prompt,
+                    bos_token=self.bos_token,
+                    eos_token=self.eos_token)
+            except Exception:
+                text = None
+        if text is None:
+            parts = []
+            for m in messages:
+                parts.append(f"<|{m.get('role','user')}|>\n"
+                             f"{m.get('content','')}<|end|>")
+            if add_generation_prompt:
+                parts.append("<|assistant|>\n")
+            text = "\n".join(parts)
+        return (self.encode(text, add_special_tokens=False)
+                if tokenize else text)
+
+    def encode(self, text: str, add_special_tokens: bool = True, **_) -> list[int]:
+        return self._lazy().tokenize(
+            text.encode("utf-8", "replace"), add_bos=add_special_tokens,
+            special=True)
+
+    def __call__(self, text, return_tensors=None, add_special_tokens=True,
+                 truncation=False, max_length=None, **_):
+        ids = self.encode(text, add_special_tokens=add_special_tokens)
+        if truncation and max_length is not None and len(ids) > max_length:
+            head = ids[:1] if ids and ids[0] == self.bos_token_id else []
+            ids = head + ids[-(max_length - len(head)):]
+        ids_t = torch.tensor([ids], dtype=torch.long)
+        return _BatchEnc(ids_t)
+
+    def _special_set(self) -> set[int]:
+        """Token ids of CONTROL/UNKNOWN/UNUSED GGUF types — the tokens
+        ``skip_special_tokens=True`` should strip.  Read straight from the
+        GGUF ``tokenizer.ggml.token_type`` metadata (no llama_cpp internals
+        needed)."""
+        if self._special_ids is None:
+            try:
+                info = GGUFInfo(self._gguf_path)
+                types = info.metadata.get("tokenizer.ggml.token_type", [])
+                # llama.cpp token types: 3=control, 5=unused, 2=unknown
+                self._special_ids = {i for i, t in enumerate(types)
+                                     if t in (2, 3, 5)}
+                info.close()
+            except Exception:
+                self._special_ids = {self.bos_token_id, self.eos_token_id}
+        return self._special_ids
+
+    def decode(self, ids, skip_special_tokens: bool = True, **_) -> str:
+        ids = [int(t) for t in ids]
+        if skip_special_tokens:
+            ids = [t for t in ids if t not in self._special_set()]
+        return self._lazy().detokenize(ids).decode("utf-8", "replace")
+
+    def convert_ids_to_tokens(self, ids):
+        if isinstance(ids, int):
+            ids = [ids]
+        return [self._lazy().detokenize([int(i)]).decode("utf-8", "replace")
+                for i in ids]
+
+    def __len__(self):
+        return self.vocab_size
+
+
 # ── Quick test ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

@@ -469,10 +469,13 @@ class _EngineModel(torch.nn.Module):
         self.eos_token_id = 7
         self.next_token = next_token
 
-    def forward(self, input_ids, past_key_values=None, use_cache=False):
+    def forward(self, input_ids, past_key_values=None, use_cache=False,
+                logits_last_only=False, **kwargs):
         batch, seq_len = input_ids.shape
         logits = torch.full((batch, seq_len, self.config.vocab_size), -10.0)
         logits[..., self.next_token] = 10.0
+        if logits_last_only:
+            logits = logits[:, -1:, :]
         key = torch.zeros(batch, 1, seq_len, self.config.head_dim)
         value = torch.zeros_like(key)
         return logits, None, ((key, value),)

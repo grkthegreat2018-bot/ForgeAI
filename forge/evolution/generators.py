@@ -94,26 +94,55 @@ class BatchedGenerator(nn.Module):
         self.register_buffer("age", torch.zeros(n, device=self.device))
 
     def _layer_norm(self, x: torch.Tensor) -> torch.Tensor:
-        """Per-generator LayerNorm: x: (N, h) → normalized (N, h)."""
+        """Per-generator LayerNorm: x: (N, h) or (N, k, h) → normalized."""
         mean = x.mean(dim=-1, keepdim=True)
         var = x.var(dim=-1, keepdim=True, unbiased=False)
         x_norm = (x - mean) / (var + 1e-6).sqrt()
+        if x.dim() == 3:
+            return x_norm * self.ln_gamma.unsqueeze(1) + \
+                self.ln_beta.unsqueeze(1)
         return x_norm * self.ln_gamma + self.ln_beta
 
     def forward(self, noise: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
         """Batched forward pass for all N generators.
 
         Args:
-            noise: (N, noise_dim) — different noise per generator
+            noise: (M, noise_dim) — M = n_generators * n_per_gen; rows are
+                   grouped by generator (row i -> generator i // k)
             context: (context_dim,) — shared context (current best)
 
         Returns:
-            (N, output_dim) outputs in [0, 1] (sigmoid)
+            (M, output_dim) outputs in [0, 1] (sigmoid)
         """
-        # Expand context to (N, context_dim)
+        # Context shapes: (ctx,) shared — expand; (N, ctx) per-generator —
+        # repeat per sample; (M, ctx) per-row — use as-is.
+        m = noise.shape[0]
         n = self.cfg.n_generators
-        ctx = context.unsqueeze(0).expand(n, -1)  # (N, context_dim)
-        x = torch.cat([noise, ctx], dim=-1)        # (N, in_dim)
+        if context.dim() == 1:
+            ctx = context.unsqueeze(0).expand(m, -1)
+        elif context.dim() == 2 and context.shape[0] == n and m != n:
+            ctx = context.repeat_interleave(m // n, dim=0)
+        else:
+            ctx = context
+        x = torch.cat([noise, ctx], dim=-1)        # (M, in_dim)
+
+        if m != n:
+            # Multi-sample per generator: group rows as (N, k, in_dim) so
+            # per-generator weights broadcast without materializing them.
+            k = m // n
+            xg = x.view(n, k, -1)
+            h0 = torch.tanh(self._layer_norm(
+                torch.einsum("nki,nih->nkh", xg, self.W0)
+                + self.b0.unsqueeze(1)))
+            h1 = torch.tanh(self._layer_norm(
+                torch.einsum("nki,nih->nkh", h0, self.W1)
+                + self.b1.unsqueeze(1)))
+            h2 = torch.tanh(self._layer_norm(
+                torch.einsum("nki,nih->nkh", h1, self.W2)
+                + self.b2.unsqueeze(1)))
+            out = torch.einsum("nki,nih->nkh", h2, self.W3) \
+                + self.b3.unsqueeze(1)
+            return torch.sigmoid(out.reshape(m, -1))
 
         # 4-layer batched MLP with LayerNorm + tanh
         h0 = torch.bmm(x.unsqueeze(1), self.W0).squeeze(1) + self.b0
@@ -258,15 +287,23 @@ class GeneratorPopulation:
         print(f"[Generators] {cfg.n_generators} batched generators on {self.device}, "
               f"{total_params/1e6:.1f}M total params, {mem_mb:.1f} MB{compile_tag}")
 
-    def generate(self, n_per_gen: int = 1) -> list[dict[str, Any]]:
-        """Generate candidates from all generators in one batched forward pass."""
+    def generate(self, n_per_gen: int = 1,
+                 contexts: torch.Tensor | None = None) -> list[dict[str, Any]]:
+        """Generate candidates from all generators in one batched forward pass.
+
+        Args:
+            n_per_gen: samples per generator (row i -> generator i // n_per_gen)
+            contexts: optional (n_generators, context_dim) per-generator
+                      conditioning — archive-sampled parents per generator
+                      instead of one shared elite (emitter-style QD).
+        """
         n = self.cfg.n_generators
         total = n * n_per_gen
 
         # Single batched noise tensor for all generators
         noise = torch.randn(total, self.cfg.noise_dim, device=self.device)
-        # Repeat context for all
-        ctx = self.context
+        # Per-generator contexts if provided, else shared context
+        ctx = contexts if contexts is not None else self.context
 
         # One batched forward pass — all generators at once
         with torch.no_grad():
@@ -293,7 +330,10 @@ class GeneratorPopulation:
 
         return candidates
 
-    def evolve(self, scores: list[float], generator_indices: list[int]) -> list[int]:
+    def evolve(self, scores: list[float], generator_indices: list[int],
+               novelties: list[float] | None = None,
+               explore_frac: float = 0.2,
+               extra_explore: set[int] | None = None) -> list[int]:
         """Evolve population: kill worst, clone+mutate best, update fitness.
         Returns list of generator indices that were mutated (for optimizer reset).
 
@@ -302,14 +342,25 @@ class GeneratorPopulation:
         - diversity burst triggers when population variance drops below threshold
           (anti-plateau: injects noise to escape local optima)
         - Every 10 generations: standard diversity burst on 30% of mid-tier
+        - explore emitters (first explore_frac of generators) are credited on
+          proposal NOVELTY not score (MEMES-style explore emitters — a
+          generator exploring a low-scoring niche isn't culled for it)
         """
         self.generation += 1
 
-        # Update fitness EMA per generator
+        # Update fitness EMA per generator. Explore emitters accumulate
+        # (rank-shaped) novelty; everyone else accumulates (rank-shaped) score.
+        n_explore = int(len(self.batched_gen.fitness_ema) * explore_frac)
+        extra = extra_explore or set()
+        nov_iter = novelties if novelties is not None else scores
         gen_scores: dict[int, list[float]] = {}
-        for score, idx in zip(scores, generator_indices):
+        for score, nov, idx in zip(scores, nov_iter, generator_indices):
             if idx >= 0:
-                gen_scores.setdefault(idx, []).append(score)
+                # Explore emitters (first explore_frac) and explicit
+                # extra_explore slots (wild gens) accrue novelty/local-
+                # quality fitness — never raw score.
+                val = nov if (idx < n_explore or idx in extra) else score
+                gen_scores.setdefault(idx, []).append(val)
 
         with torch.no_grad():
             for idx, sc_list in gen_scores.items():

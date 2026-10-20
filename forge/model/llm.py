@@ -526,9 +526,12 @@ class ConfigurableResearchLLM(nn.Module):
                 if hasattr(block, 'attn') and hasattr(block.attn, '_ssm_state_real'):
                     block.attn._ssm_state_real = None
                     block.attn._ssm_state_imag = None
-                # R49-2 KDA + ForgeHybrid side-paths: same new-sequence reset
+                # R49-2 KDA + R60-1 GDN2 + ForgeHybrid side-paths: same
+                # new-sequence reset
                 if getattr(block, '_kda', None) is not None:
                     block._kda._state_reset = True
+                if getattr(block, '_gdn2', None) is not None:
+                    block._gdn2._state_reset = True
                 if getattr(block, '_forge_hybrid_ssm', None) is not None:
                     if hasattr(block._forge_hybrid_ssm, '_ssm_state'):
                         block._forge_hybrid_ssm._ssm_state = None
@@ -597,6 +600,11 @@ class ConfigurableResearchLLM(nn.Module):
                     kda_snap = kda.snapshot_state()
                     if any(v is not None for v in kda_snap.values()):
                         st['kda'] = kda_snap
+                gdn2 = getattr(block, '_gdn2', None)
+                if gdn2 is not None:
+                    gdn2_snap = gdn2.snapshot_state()
+                    if any(v is not None for v in gdn2_snap.values()):
+                        st['gdn2'] = gdn2_snap
                 if st:
                     snap[i] = st
             self._last_prefill_recurrent = snap

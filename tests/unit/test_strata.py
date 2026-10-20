@@ -299,6 +299,72 @@ def test_params_seeded_derive(tmp_path):
     assert torch.equal(p2.get("w_mix"), p.get("w_mix"))
 
 
+# ---- sub-bit packed params -------------------------------------------------
+
+
+def test_param_pack_int4_roundtrip(tmp_path):
+    g = torch.Generator().manual_seed(0)
+    w = torch.randn(1000, 256, generator=g) * 0.02
+    p = ParamSet()
+    p.set_packed("gsyn.wq", w, bits=4, group=64)
+    back = p.get("gsyn.wq")
+    rel = (back - w).norm() / w.norm()
+    # fp4 E2M1 PTQ floor on gaussian weights ~0.10-0.11; QAT at
+    # distill time is what recovers quality, not tighter rounding.
+    assert rel < 0.12
+    # byte check: 256k params -> 4bit = 8/word -> 32k words + scales
+    assert p.tensors["gsyn.wq::w0"].numel() == 1000 * 256 // 8
+    f = tmp_path / "q.iq"
+    p.save(f)
+    p2 = ParamSet.load(f)
+    assert torch.equal(p2.get("gsyn.wq"), back)
+
+
+def test_param_pack_bits_1_and_2():
+    g = torch.Generator().manual_seed(1)
+    w = torch.randn(4096, generator=g)
+    # measured PTQ floors (gaussian, group=64): fp4 ~0.106,
+    # ternary ~0.51, binary ~0.60 - asserts are mechanics + boundedness,
+    # quality recovery is QAT/distill's job
+    for bits, bound in ((4, 0.12), (2, 0.55), (1, 0.65)):
+        p = ParamSet()
+        p.set_packed("w", w, bits=bits, group=64)
+        back = p.get("w")
+        rel = (back - w).norm() / w.norm()
+        assert rel < bound, f"bits={bits} rel={rel:.3f}"
+    # byte math: 4096 params @1bit -> 128 words = 512B (~0.125B/param)
+    p = ParamSet()
+    p.set_packed("w", w, bits=1)
+    assert p.tensors["w::w0"].numel() == 128
+
+
+def test_param_pack_residual_nullifies_error():
+    """Residual levels compound the quant error down: fp4 x2 must land
+    ~10x tighter than fp4 x1 (~0.106 -> ~0.01) at 1B/param."""
+    g = torch.Generator().manual_seed(2)
+    w = torch.randn(64, 4096, generator=g)
+    p = ParamSet()
+    p.set_packed("w", w, bits=4, residual=1)
+    e1 = ((p.get("w") - w).norm() / w.norm()).item()
+    p2 = ParamSet()
+    p2.set_packed("w", w, bits=4, residual=2)
+    e2 = ((p2.get("w") - w).norm() / w.norm()).item()
+    p3 = ParamSet()
+    p3.set_packed("w", w, bits=4, residual=3)
+    e3 = ((p3.get("w") - w).norm() / w.norm()).item()
+    assert e1 < 0.12 and e2 < 0.03 and e3 < 0.01, (e1, e2, e3)
+    assert e2 < 0.3 * e1 and e3 < 0.3 * e2   # multiplicative decay
+
+
+def test_param_packed_names_and_bytes():
+    p = ParamSet()
+    p.set_packed("big", torch.randn(8192), bits=4)
+    p.set("scalars", torch.ones(4))
+    assert set(p.names()) == {"big", "scalars"}
+    # 8192 * 4b/32 = 1024 words*4B + 128 fp16 scales + 16B scalars
+    assert p.stored_bytes() == 1024 * 4 + 128 * 2 + 4 * 4
+
+
 def test_cell_bytes_density():
     """The compression claim, in bytes: FLUX ~152B/cell vs STRATA."""
     assert cell_bytes(8, raw=True) == 48        # ~3.2x denser

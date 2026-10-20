@@ -99,6 +99,14 @@ class ModelConfig:
     # TITAN neural memory: gated long-term memory, zero-init gate = lossless.
     use_titan_memory: bool = False
     titan_memory_rank: int = 0  # 0 = d_model
+    # v2 inner-loop knobs (LiveT): surprise-gated fast-weight updates.
+    titan_update_lr: float = 0.5      # inner-loop lr η on fast weights
+    titan_forget: float = 0.99        # per-update decay γ
+    titan_momentum: float = 0.9       # inner-loop momentum μ
+    titan_surprise_cap: float = 4.0   # clip on normalized surprise weight
+    titan_solver: str = "gd"          # "gd" | "cg" | "solve" (ridge solve)
+    titan_ridge: float = 1.0          # λ prior-strength for cg/solve
+    titan_cg_iters: int = 8           # conjugate-gradient iters per chunk
     # Mixture-of-Depths: per-block token routing; keep_fraction=1.0 = lossless
     # (all tokens processed). <1.0 skips tokens in training (FLOPs ceiling).
     use_mod: bool = False
@@ -481,6 +489,19 @@ class ModelConfig:
     kda_beta_gt1: bool = False      # N3: allow beta in (0,2) — off (destabilization risk)
     kda_decay_floor: float = 0.0    # optional lower bound on per-key-dim decay
 
+    # === R60-1: GDN2 — Gated DeltaNet-2 (arXiv:2605.22791) side-path ===
+    # Strict KDA superset: decouples erase (b_t, per key-dim) from write
+    # (w_t, per value-dim) — KDA ties both to scalar beta_t. gate=0 warm
+    # start (bit-exact); kda.* checkpoints convert function-exactly via
+    # GDN2Key (tiled scalar gate = channel-wise broadcast). Mutually
+    # exclusive with use_kda (GDN2 subsumes it). VRAM: ~39M params/layer
+    # at d_model=2560,H=20 (bf16 ~78MB/layer) — heavier than KDA's 25M
+    # because e/w projections are channel-wise.
+    use_gdn2: bool = False
+    gdn2_n_heads: int = 0           # 0 = inherit n_heads
+    gdn2_head_dim: int = 0          # 0 = inherit d_model // n_heads
+    gdn2_decay_floor: float = 0.0   # optional lower bound on per-key-dim decay
+
     # === Preset lineage (critique F2 — machine-enforced lineage) ===
     # parent: name of the parent preset this one is derived from (or None for
     #   root presets). When set, get_config() validates that every field in
@@ -526,6 +547,14 @@ class ModelConfig:
         if head_dim < 1:
             raise ValueError(
                 f"head_dim ({head_dim}) must be >= 1."
+            )
+        # GDN2 strictly subsumes KDA (b=w collapse) — both side-paths on
+        # one block is redundant; refuse rather than silently double-pay.
+        if getattr(self, "use_gdn2", False) and getattr(self, "use_kda", False):
+            raise ValueError(
+                "use_gdn2 and use_kda are mutually exclusive — GDN2 is a "
+                "strict superset of KDA; port kda.* checkpoints via "
+                "GDN2Key (function-exact) instead of enabling both."
             )
 
 
@@ -704,6 +733,34 @@ MODEL_CONFIGS["forgelm_v12_jamba"] = ModelConfig(
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
+# ForgeLM V13-GDN2: V12-Jamba + Gated DeltaNet-2 side-paths (R60-1).
+#
+# Derived from forgelm_v12_jamba (carries forward ALL V12 keys + V2 base).
+# Adds GDN2 (arXiv:2605.22791): decoupled channel-wise erase/write gates —
+# a strict KDA superset (collapses to KDA when b_t=w_t). At gate=0 the
+# forward pass is bit-exact vs. V12/V2; a kda-ported checkpoint upgrades
+# function-exactly via GDN2Key.convert_model_state (tiled scalar gates).
+# use_kda stays False — GDN2 subsumes it.
+# ──────────────────────────────────────────────────────────────────────────────
+MODEL_CONFIGS["forgelm_v13_gdn2"] = ModelConfig(
+    **{
+        **MODEL_CONFIGS["forgelm_v12_jamba"].__dict__,
+        "parent": "forgelm_v12_jamba",  # lineage: derived from V12 (critique F2)
+        "dropped_keys": (  # V13 divergences from V12 (all NEW keys)
+            "use_gdn2",            # R60-1: GDN2 decoupled erase/write delta rule
+            "gdn2_n_heads",
+            "gdn2_head_dim",
+            "gdn2_decay_floor",
+        ),
+        # ── V13 NEW: GDN2 side-paths (R60-1) ──
+        "use_gdn2": True,
+        "gdn2_n_heads": 0,          # inherit n_heads (20)
+        "gdn2_head_dim": 0,         # inherit d_model // n_heads (128)
+        "gdn2_decay_floor": 0.0,
+    }
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Qwen2.5-0.5B (HF compat, R49) — native shapes for HF-style checkpoints.
 #
 # Matches Qwen/Qwen2.5-0.5B exactly: GQA 14Q/2KV (head_dim 64), QKV bias,
@@ -725,7 +782,7 @@ MODEL_CONFIGS["qwen25_05b"] = ModelConfig(
     rope_base=1_000_000.0,         # Qwen2.5 rope_theta
     max_seq_len=32768,
     use_qk_norm=False,             # Qwen2.5 has no q_norm/k_norm (Qwen3 only)
-    tie_word_embeddings=False,     # separate lm_head in checkpoint
+    tie_word_embeddings=True,      # 0.5B ties embed/head (no lm_head.weight in ckpt)
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -759,6 +816,115 @@ MODEL_CONFIGS["qwen3_4b"] = ModelConfig(
     use_qk_norm=True,              # Qwen3 q_norm/k_norm on each head
     use_final_norm=True,
     tie_word_embeddings=True,      # tied embed/lm_head in checkpoint
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Llama-3.1-8B family (HF compat) — native shapes for HF-style checkpoints.
+#
+# Matches meta-llama/Llama-3.1-8B(-Instruct) and derived tunes exactly:
+# GQA 32Q/8KV, no attn/MLP bias, SwiGLU intermediate 14336, RMSNorm eps 1e-5,
+# RoPE base 500K + llama3 frequency scaling (factor 8 over orig 8K ctx),
+# untied embed/head, vocab 128256.
+# First consumer: Hermes-3-Llama-3.1-8B-lorablated (uncensored ChatML tune;
+# eos = 128040 = im_end, im_start = 128039 — both in _DEFAULT_EOS_TOKEN_IDS).
+# Used by ForgeEngine._detect_config_from_header to auto-pair checkpoints
+# (embed 128256x4096, q_proj 4096x4096, kv_proj 1024x4096).
+# ──────────────────────────────────────────────────────────────────────────────
+MODEL_CONFIGS["llama31_8b"] = ModelConfig(
+    vocab_size=128256,
+    d_model=4096,
+    n_layers=32,
+    n_heads=32,
+    n_kv_heads=8,
+    intermediate_size=14336,
+    attn_type="gqa",
+    attn_bias=False,               # Llama has no QKV/o bias
+    ffn_type="swiglu",
+    norm_type="rmsnorm",
+    norm_eps=1e-5,                 # Llama rms_norm_eps
+    rope_base=500_000.0,           # Llama-3.1 rope_theta
+    rope_scaling={                 # Llama-3.1 frequency scaling (8x over 8K base)
+        "type": "llama3",
+        "factor": 8.0,
+        "low_freq_factor": 1.0,
+        "high_freq_factor": 4.0,
+        "original_max_position_embeddings": 8192,
+    },
+    max_seq_len=32768,             # capped for 12GB VRAM KV budget (native 131072)
+    use_qk_norm=False,
+    use_final_norm=True,
+    tie_word_embeddings=False,     # untied lm_head
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Llama-3.2-3B family (HF compat) — native shapes for HF-style checkpoints.
+#
+# Matches meta-llama/Llama-3.2-3B(-Instruct) and derived tunes exactly:
+# GQA 24Q/8KV (head_dim=128), no attn/MLP bias, SwiGLU intermediate 8192,
+# RMSNorm eps 1e-5, RoPE base 500K + llama3 scaling (factor 32 — 3.2 scales
+# 32x over the 8K base vs 3.1's 8x), TIED embed/lm_head, vocab 128256.
+# First consumer: NousResearch/Hermes-3-Llama-3.2-3B (ChatML, tool calls —
+# same format family as the 8B, ~3x faster decode, ~2GB at int4).
+# ──────────────────────────────────────────────────────────────────────────────
+MODEL_CONFIGS["llama32_3b"] = ModelConfig(
+    vocab_size=128256,
+    d_model=3072,
+    n_layers=28,
+    n_heads=24,
+    n_kv_heads=8,
+    head_dim=128,
+    intermediate_size=8192,
+    attn_type="gqa",
+    attn_bias=False,
+    ffn_type="swiglu",
+    norm_type="rmsnorm",
+    norm_eps=1e-5,
+    rope_base=500_000.0,
+    rope_scaling={
+        "type": "llama3",
+        "factor": 32.0,
+        "low_freq_factor": 1.0,
+        "high_freq_factor": 4.0,
+        "original_max_position_embeddings": 8192,
+    },
+    max_seq_len=32768,             # capped for 12GB VRAM KV budget (native 131072)
+    use_qk_norm=False,
+    use_final_norm=True,
+    tie_word_embeddings=True,      # 3.2 ties embed/lm_head (unlike 8B/70B)
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rocinante-X-12B (Mistral-Nemo arch, GGUF compat, R65) — native shapes for
+# GGUF-converted checkpoints of Mistral-Nemo-family merges.
+#
+# Matches TheDrummer/Rocinante-X-12B-v1 (and any Mistral-Nemo-12B derivative)
+# exactly: GQA 32Q/8KV with an explicit head_dim=128 (d_model/n_heads=160,
+# decoupled — GGUF key_length/value_length=128), no biases, SwiGLU
+# intermediate 14336, RMSNorm eps 1e-5, RoPE base 1M (NO scaling — Nemo is
+# native 128K), untied embed/head, vocab 131072 (tekken BPE).
+# First consumer: Rocinante-X-12B-v1b-Q4_K_M.gguf ported via
+# scripts/convert_gguf_forge.py (dequant bf16 → HF-name safetensors).
+# Used by ForgeEngine._detect_config_from_header to auto-pair checkpoints
+# (embed 131072x5120, q_proj 5120x4096, kv_proj 5120x1024).
+# ──────────────────────────────────────────────────────────────────────────────
+MODEL_CONFIGS["rocinante_12b"] = ModelConfig(
+    vocab_size=131072,
+    d_model=5120,
+    n_layers=40,
+    n_heads=32,
+    n_kv_heads=8,
+    head_dim=128,                  # explicit: 5120/32=160 would be wrong
+    intermediate_size=14336,
+    attn_type="gqa",
+    attn_bias=False,               # Nemo has no QKV/o bias
+    ffn_type="swiglu",
+    norm_type="rmsnorm",
+    norm_eps=1e-5,                 # llama.attention.layer_norm_rms_epsilon
+    rope_base=1_000_000.0,         # llama.rope.freq_base
+    max_seq_len=131072,            # native ctx; flux KV keeps positions bounded
+    use_qk_norm=False,
+    use_final_norm=True,
+    tie_word_embeddings=False,     # untied lm_head (output.weight in GGUF)
 )
 
 

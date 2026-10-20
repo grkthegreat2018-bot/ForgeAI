@@ -74,6 +74,9 @@ KV_CACHE_OPTIONS = (
     Option("kvzip", "KVZip", "KVZip compression"),
     Option("hqe_kv", "HQE KV", "Hyper-precision-quality entropy KV"),
     Option("xquant", "XQuant KV", "XQuant quantized KV"),
+    Option("beacon", "BeaconKV", "Beacon-centroid KV eviction — online k-means over keys, live during decode (R60)"),
+    Option("anchor", "AnchorKV", "Farthest-point anchors + residual-coverage eviction, live during decode (R60)"),
+    Option("metakv", "MetaKV", "Feature-based dispatcher over KV strategies (R60)"),
     Option("cpu_offload", "CPU offload", "KV lives in pinned CPU RAM (32GB) — near-zero VRAM"),
     Option("disk_offload", "Disk offload", "KV spilled to local disk"),
     Option("streaming", "Streaming", "AirLLM-style: no KV, layer-streamed inference"),
@@ -89,6 +92,7 @@ DECODING_OPTIONS = (
     Option("ngram_speculative", "N-gram speculative", "Prompt-lookup n-gram drafting — no draft model needed"),
     Option("external_draft_speculative", "External draft", "Speculative decoding with an external draft model"),
     Option("uno", "Uno (Psi-Spec)", "Lossless block diffusion decoding — n-gram drafts, AR verify (R49)"),
+    Option("specbound", "SpecBound", "Adaptive bounded self-speculation — early-exit drafts, EMA-calibrated (R60)"),
     Option("batched", "Batched", "Batched continuous decoding (generate_batch)"),
 )
 

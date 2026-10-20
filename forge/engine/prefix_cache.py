@@ -123,6 +123,11 @@ def capture_recurrent_state(model) -> dict:
             kda_snap = kda.snapshot_state()
             if any(v is not None for v in kda_snap.values()):
                 st["kda"] = kda_snap
+        gdn2 = getattr(block, "_gdn2", None)
+        if gdn2 is not None:
+            gdn2_snap = gdn2.snapshot_state()
+            if any(v is not None for v in gdn2_snap.values()):
+                st["gdn2"] = gdn2_snap
         if st:
             snap[i] = st
     return snap
@@ -150,6 +155,9 @@ def apply_recurrent_state_prefix(model, snap) -> None:
         kda = getattr(block, "_kda", None)
         if kda is not None and "kda" in st:
             kda.set_state_prefix(st["kda"])
+        gdn2 = getattr(block, "_gdn2", None)
+        if gdn2 is not None and "gdn2" in st:
+            gdn2.set_state_prefix(st["gdn2"])
 
 
 def cache_prompt_prefix(engine, ids: torch.Tensor) -> None:
@@ -243,6 +251,14 @@ def cache_prompt_prefix(engine, ids: torch.Tensor,
     prefix_cache = engine._prefix_cache
     if prefix_cache is None or ids.shape[1] <= 16 or past_kv is None:
         return
+    # Prefer the prompt-boundary KV captured right after prefill: the
+    # ``past_kv`` argument is end-of-generation state — attention tuples
+    # slice back to the key length fine, but dict recurrent entries
+    # (mamba/SSM state) are not seq-indexed and would leak future
+    # (generated) tokens into an entry keyed under the prompt alone.
+    boundary_kv = getattr(engine.model, "_forge_prefill_kv", None)
+    if boundary_kv is not None:
+        past_kv = boundary_kv
     conv_snap = getattr(engine.model, "_last_prefill_recurrent", None)
     if isinstance(prefix_cache, ChunkedPrefixCache):
         token_ids = ids[0].cpu().tolist()
@@ -287,8 +303,12 @@ def generate_from_prefix_cache(
         apply_recurrent_state_prefix(engine.model, conv_snap)
         with torch.inference_mode():
             out = engine.model(
-                suffix_ids, past_key_values=cached_past_kv, use_cache=True)
+                suffix_ids, past_key_values=cached_past_kv, use_cache=True,
+                logits_last_only=True)
             logits, past_kv = unpack_output_with_kv(out)
+        # Prefix+suffix now fully prefilled — this is the prompt-boundary
+        # KV state that cache_prompt_prefix should store.
+        engine.model._forge_prefill_kv = past_kv
         output_ids = engine._decode_with_kv(
             ids, logits, past_kv, params)
         logger.info(f"  [PrefixCache] HIT + REUSE (prefix len={cached_len}, "
@@ -337,6 +357,11 @@ def _slice_past_kv(past_kv, length: int):
     per layer (or ``None`` for conv layers with no KV).  Each k/v tensor
     is ``[batch, n_kv, seq, head_dim]``; we slice the seq axis.  Returns
     a *new* list of sliced tuples — the original cache is untouched.
+
+    Slices are cloned: a seq-axis slice shares the parent's
+    storage, so a 32-token entry would pin the *entire* prompt+generation
+    KV buffer (~1 GB at 8k ctx) — 256 entries grew VRAM to the limit.
+    Cloned entries own only their slice (~4 MB each).
     """
     if past_kv is None:
         return None
@@ -349,11 +374,14 @@ def _slice_past_kv(past_kv, length: int):
             # Recurrent (mamba/SSM) state is fixed-size, not seq-indexed —
             # pass it through untouched.  (It is only position-correct when
             # the hit boundary equals the stored entry length, which is the
-            # case for every real ChunkedPrefixCache hit.)
-            sliced.append(layer)
+            # case for every real ChunkedPrefixCache hit.)  Clone tensor
+            # values so the entry can't be mutated by later decode.
+            sliced.append({
+                kk: (vv.clone() if torch.is_tensor(vv) else vv)
+                for kk, vv in layer.items()})
             continue
         k, v = layer
-        sliced.append((k[:, :, :length], v[:, :, :length]))
+        sliced.append((k[:, :, :length].clone(), v[:, :, :length].clone()))
     return sliced
 
 

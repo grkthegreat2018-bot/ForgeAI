@@ -73,11 +73,13 @@ class ChunkedPrefiller:
                         chunk_ids,
                         past_key_values=past_kv,
                         use_cache=True,
+                        logits_last_only=True,
                     )
                 else:
                     out = self.model(
                         chunk_ids,
                         use_cache=True,
+                        logits_last_only=True,
                     )
 
                 # Unpack output
@@ -175,7 +177,8 @@ class HybridChunkedPrefiller(ChunkedPrefiller):
             # Continuous prefill: single forward pass (maximum throughput)
             with torch.inference_mode():
                 if T > 0:
-                    out = self.model(input_ids, use_cache=use_cache)
+                    out = self.model(input_ids, use_cache=use_cache,
+                                     logits_last_only=True)
                     if isinstance(out, tuple):
                         logits = out[0]
                         past_kv = out[1] if len(out) > 1 else None

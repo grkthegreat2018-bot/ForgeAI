@@ -32,14 +32,16 @@ class _CheckpointLoadingMixin:
                         device: str = "cuda",
                         auto_activate: bool = True,
                         config_overrides: dict | None = None,
+                        load_quantize: str | None = None,
                         **kwargs) -> "ForgeEngine":
         """Build engine from a KeyStack checkpoint.
 
         Auto-checks VRAM capacity and picks the best loading strategy:
           1. Pre-quantized BitNet → int8 direct load
-          2. Fits in VRAM → fast meta-init load
-          3. Fits with hybrid offload → conv on CPU, attention on GPU
-          4. Too large → AirLLM layer-streaming (meta device + shard loading)
+          2. ``load_quantize`` set → CPU build + packed-weight quantize + GPU
+          3. Fits in VRAM → fast meta-init load
+          4. Fits with hybrid offload → conv on CPU, attention on GPU
+          5. Too large → AirLLM layer-streaming (meta device + shard loading)
 
         Args:
             auto_activate: If True (default), automatically calls
@@ -49,15 +51,53 @@ class _CheckpointLoadingMixin:
             config_overrides: Optional dict of config field overrides applied
                 to the base config before model construction (e.g.
                 ``{"use_mamba3": True}`` to enable Mamba-3 warm start).
+            load_quantize: Optional packed-weight quantization applied during
+                load — ``"auto"`` (best mode that fits), ``"int4"`` (torchao
+                W4 tile-packed, ~0.5B/param), ``"fp8"`` (~1B/param), or
+                ``"int8"``/``"w8a8"``. Unlike the post-load ``quantize``
+                strategy, the model never touches VRAM at bf16 size, so
+                checkpoints larger than free VRAM still load GPU-resident.
         """
         from forge.config import get_config
         from research.tokenizer_cache import get_tokenizer
         from forge.runtime.configure import configure
+        from forge.engine.activation import ActivationConfig
+        from dataclasses import fields as _dc_fields
+
+        # Split kwargs: ActivationConfig field names are activation
+        # overrides (kv_cache_tokens, use_*, quantize, ...) merged into
+        # _auto_activate_optimal; everything else goes to the engine
+        # constructor. Without this split, an activation kwarg like
+        # kv_cache_tokens would hit ForgeEngine.__init__ and TypeError.
+        _act_fields = {f.name for f in _dc_fields(ActivationConfig)}
+        act_kwargs = {k: kwargs.pop(k) for k in list(kwargs)
+                      if k in _act_fields}
 
         # Env-side runtime config (CUDA alloc conf etc.) — must run before
         # the first CUDA allocation below, else expandable_segments is a
         # no-op (previously set in __init__, which runs after weight load).
         configure()
+
+        # Converted-checkpoint sidecar: a directory checkpoint carrying
+        # forge_convert.json names its own preset — shape auto-detect only
+        # inspects bare .safetensors files, so without this a dir of shards
+        # would silently build under the default config and size-mismatch.
+        if Path(checkpoint).is_dir():
+            conv = Path(checkpoint) / "forge_convert.json"
+            if conv.exists():
+                try:
+                    import json as _json
+                    named = _json.loads(conv.read_text()).get("forge_config")
+                    if named:
+                        if config_name not in (None, "forgelm_v2", named):
+                            logger.info(
+                                "forge_convert.json names preset '%s' "
+                                "(overriding default '%s')", named,
+                                config_name)
+                        if config_name in (None, "forgelm_v2"):
+                            config_name = named
+                except Exception:
+                    pass
 
         cfg = get_config(config_name, device=device,
                          **(config_overrides or {}))
@@ -67,13 +107,38 @@ class _CheckpointLoadingMixin:
         # on the config's vocab so HF-style checkpoints get a matching
         # tokenizer (explicit tokenizer_path always wins).
         tok_path = tokenizer_path or _tokenizer_for_vocab(cfg.vocab_size)
+
+        # GGUF-embedded tokenizer: "gguf:<path>" asks for the tekken/BPE
+        # tables embedded in a GGUF file (llama_cpp vocab-only wrapper).
+        # Auto-resolve for converted checkpoints: a sibling forge_convert.json
+        # records the source .gguf — keeps `from_checkpoint(dir)` one-call.
+        gguf_tok_src: str | None = None
+        if isinstance(tok_path, str) and tok_path.startswith("gguf:"):
+            gguf_tok_src = tok_path[5:]
+        elif tokenizer_path is None and cfg.vocab_size == 131072:
+            ckpt_dir = (Path(checkpoint) if Path(checkpoint).is_dir()
+                        else Path(checkpoint).parent)
+            conv = ckpt_dir / "forge_convert.json"
+            if conv.exists():
+                try:
+                    import json as _json
+                    src = _json.loads(conv.read_text()).get("source_gguf")
+                    if src and Path(src).exists():
+                        gguf_tok_src = src
+                except Exception:
+                    pass
+
         # Resolve the tokenizer lazily on a daemon thread — the ~0.4s fast-path
         # load overlaps with weight I/O instead of serializing before it.
         _tok_box: dict = {}
 
         def _load_tok():
             try:
-                _tok_box["t"] = get_tokenizer(tok_path)
+                if gguf_tok_src is not None:
+                    from forge.engine.forge_loader import GGUFTekkenTokenizer
+                    _tok_box["t"] = GGUFTekkenTokenizer(gguf_tok_src)
+                else:
+                    _tok_box["t"] = get_tokenizer(tok_path)
             except Exception as e:
                 _tok_box["e"] = e
 
@@ -138,6 +203,10 @@ class _CheckpointLoadingMixin:
             if is_prequant:
                 engine = cls._load_prequant(
                     cfg, checkpoint, _tokenizer(), device, metadata, **kwargs)
+            elif load_quantize:
+                engine = cls._load_quantized(
+                    cfg, checkpoint, _tokenizer(), device,
+                    mode=load_quantize, vram_free=vram_free, **kwargs)
             elif fits:
                 engine = cls._load_standard(
                     cfg, checkpoint, _tokenizer(), device, **kwargs)
@@ -165,6 +234,9 @@ class _CheckpointLoadingMixin:
             engine = cls._load_streaming(
                 cfg, checkpoint, _tokenizer(), device,
                 ckpt_size, vram_free, **kwargs)
+
+        if act_kwargs:
+            engine._user_activation_overrides = act_kwargs
 
         if auto_activate and engine is not None:
             engine._auto_activate_optimal()
@@ -255,7 +327,49 @@ class _CheckpointLoadingMixin:
         _lt = getattr(self.config, "layer_types", None) or []
         is_mamba_hybrid = any(lt in ("mamba", "mamba3") for lt in _lt)
 
-        if "bitnet_prequant" in self.keystack_features:
+        if getattr(self, "_load_quantize", None):
+            # Weights were already packed at load time (e.g. torchao W4
+            # tile-packed); a second quantize pass would try to re-quantize
+            # packed tensors and lose precision.
+            overrides["quantize"] = None
+            # Packed tensor-subclass weights (Int4TilePackedTo4dTensor)
+            # dispatch through __torch_function__ — inductor hangs tracing
+            # them, and CUDA-graph capture through the subclass is fragile.
+            # W4A16 tinygemm is already fused; compile gains nothing here.
+            overrides["use_compile"] = False
+            overrides["use_breakable_cuda_graph"] = False
+            overrides["use_block_fusion"] = False
+            # Compatible features for packed pure-attention models —
+            # everything safe ON by default:
+            #   prefix reuse (learned eviction beats LRU for long shared
+            #   RP/system prefixes), training-free speculative decoding
+            #   (n-gram adaptive + suffix + FASER length control +
+            #   lookahead acceptance), prefill-decode overlap, adaptive
+            #   chunked prefill, hot prefix promotion.
+            # Excluded on purpose:
+            #   - compile/graph paths (inductor + capture hang on
+            #     packed subclasses): compile, compile_autotune,
+            #     block_fusion, breakable_cuda_graph, corun, foundry
+            #   - output-altering pruners/compressors: wavelength, cosa,
+            #     compact_attn, mosa, triroute, aoh, kara/moment/kvpop/
+            #     conf/matryoshka KV, progressive_kv, cache_blend
+            #   - RoPE replacers (Llama-3 scaling already correct):
+            #     jet_long, lerope, lampe, rope_id
+            #   - needs a trained draft head (random weights = wasted
+            #     compute): peagle
+            #   - arch-specific: triton_conv, quamba2, replay_ssm, MoE
+            #     flags, fa4 kernels
+            #   - extra weight quant (already packed): adamx, sharq,
+            #     mosaic_quant, quamba2
+            overrides.setdefault("use_learned_prefix_cache", True)
+            overrides.setdefault("use_adaptive_spec", True)
+            overrides.setdefault("use_suffix_spec", True)
+            overrides.setdefault("use_faser", True)
+            overrides.setdefault("use_lookahead_gate", True)
+            overrides.setdefault("use_pod_attention", True)
+            overrides.setdefault("use_hybrid_prefill", True)
+            overrides.setdefault("use_hotprefix", True)
+        elif "bitnet_prequant" in self.keystack_features:
             # Weights are already ternary int8 — no quantize needed
             overrides["quantize"] = None
         elif is_mamba_hybrid:
@@ -289,6 +403,24 @@ class _CheckpointLoadingMixin:
                 # Tight VRAM — skip graph features, keep RotorQuant + 4-bit
                 overrides["use_block_fusion"] = False
                 overrides["use_breakable_cuda_graph"] = False
+
+        # Caller-requested activation options (ActivationConfig-named
+        # kwargs to from_checkpoint, e.g. --kv-tokens -> kv_cache_tokens).
+        overrides.update(getattr(self, "_user_activation_overrides", None)
+                         or {})
+
+        if getattr(self, "_load_quantize", None):
+            # Hard guards for load-time packed weights — these must win
+            # over BOTH auto-selection and caller overrides: inductor
+            # hangs tracing Int4TilePackedTo4dTensor subclasses, and
+            # CUDA-graph capture through them is fragile.
+            overrides["quantize"] = None
+            overrides["use_compile"] = False
+            overrides["use_breakable_cuda_graph"] = False
+            overrides["use_block_fusion"] = False
+            overrides["use_corun"] = False
+            overrides["use_foundry"] = False
+            overrides["use_compile_autotune"] = False
 
         # Don't activate if model is on meta (streaming mode)
         if self._needs_streaming:
@@ -842,6 +974,75 @@ class _CheckpointLoadingMixin:
             cfg, checkpoint_path=checkpoint, dtype=torch.bfloat16)
         return cls(model, tokenizer, device=device,
                    checkpoint_path=checkpoint, **kwargs)
+
+    @classmethod
+    def _load_quantized(cls, cfg, checkpoint, tokenizer, device,
+                        mode: str = "int4", vram_free: float = 0.0,
+                        **kwargs):
+        """Load a checkpoint that only fits in VRAM once quantized.
+
+        The model is built on CPU (bf16, mmap'd shards stay host-side), the
+        target projections are quantized in place to packed storage, then the
+        model is moved to the GPU — peak device memory is the *packed* size,
+        never the bf16 checkpoint size. For an 8B Llama at int4-g128 that is
+        ~5.6GB total (vs ~16GB bf16) on the RTX 5070's 12GB.
+
+        ``mode="auto"`` picks the highest-fidelity packing that fits free
+        VRAM (fp8 > int4); explicit modes are "int4" (torchao tile-packed
+        W4A16 fused kernel), "fp8", "int8"/"w8a8".
+        """
+        import time
+
+        from forge.config import ModelConfig
+        from forge.model_loader import ModelLoader
+
+        t0 = time.time()
+        cpu_cfg = ModelConfig(**{**cfg.__dict__, "device": "cpu"})
+        model = ModelLoader.build_model_fast(
+            cpu_cfg, checkpoint_path=checkpoint, dtype=torch.bfloat16)
+        n_params = sum(p.numel() for p in model.parameters())
+
+        mode_eff = mode
+        if mode == "auto":
+            # fp8 ~1.05 B/param, int4 ~0.55 B/param; keep ~20% headroom.
+            budget = (vram_free or _DEFAULT_CPU_MEMORY_BYTES) * 0.8
+            mode_eff = "fp8" if n_params * 1.05 < budget else "int4"
+            logger.info("load_quantize=auto -> %s "
+                        "(%.1fB params, %.1fGB budget)",
+                        mode_eff, n_params / 1e9, budget / 1e9)
+
+        if mode_eff in ("int4", "int4_g128", "w4"):
+            if torch.device(device).type == "cuda":
+                # Incremental GPU quantize — one Linear's bf16 weight in
+                # VRAM at a time (int4pack is a CUDA-only op).
+                from forge.quant.inference_quant import quantize_model_w4
+                n = quantize_model_w4(model, device=device)
+            else:
+                from forge.quant.inference_quant import quantize_model_int4
+                n = quantize_model_int4(model)
+        elif mode_eff == "fp8":
+            from forge.quant.fp8_infer import quantize_model_fp8
+            n = quantize_model_fp8(model)
+        elif mode_eff in ("int8", "w8a8"):
+            from forge.quant.inference_quant import quantize_model_int8
+            n = quantize_model_int8(model, fast=True)
+        else:
+            raise CheckpointError(
+                f"Unknown load_quantize mode '{mode}'",
+                context={"mode": mode},
+                suggestion="Use 'auto', 'int4', 'fp8', or 'int8'.")
+        logger.info("load_quantize=%s: %d layers packed in %.1fs",
+                    mode_eff, n, time.time() - t0)
+
+        model = model.to(device)
+        model.eval()
+        engine = cls(model, tokenizer, device=device,
+                     checkpoint_path=checkpoint, **kwargs)
+        engine._load_quantize = mode_eff
+        engine.keystack_features = [f"load_quant_{mode_eff}"]
+        engine._log(f"load_quantize={mode_eff}: "
+                    f"{n_params / 1e9:.1f}B params, weights packed pre-GPU")
+        return engine
 
     @classmethod
     def _load_with_fallback(cls, cfg, checkpoint, tokenizer, device,

@@ -249,6 +249,7 @@ def build_config(profile: str, overrides: dict, domain_name: str, db_path: str,
         "time_budget_s": overrides.get("time_budget_s", p.get("time_budget_s", 0)),
         "convergence_patience": p.get("convergence_patience", 0),
         "enable_compute_split": overrides.get("enable_compute_split", False),
+        "fixate": overrides.get("fixate", p.get("fixate", False)),
     }
     return ForgeEvolveConfig(**cfg_kwargs)
 
@@ -433,6 +434,12 @@ def main():
     parser.add_argument("--compute-split", action="store_true", default=False,
                         help="Enable compute split: foreground gen model + background checker. "
                              "Also enables train-first on unapplied DB discoveries.")
+    parser.add_argument("--fixate", action="store_true", default=False,
+                        help="Fixate on ONE topic: run only the first resolved domain "
+                             "(use --domains or --focus to pick it), disables "
+                             "auto-discover/revisit/parallel waves, and pins the "
+                             "engine: no cross-domain transfer, no refinement "
+                             "spawning, plateaus re-diversify in place.")
     args = parser.parse_args()
 
     # --set-focus: save persistent default and exit
@@ -477,12 +484,24 @@ def main():
             print(f"  [Focus] Using default focus: '{effective_focus}' (from configs/default_focus.txt)")
 
     names = resolve_domains(args.category, args.domains, focus=effective_focus)
+    if args.fixate:
+        if len(names) > 1:
+            print(f"  [Fixate] {len(names)} domains resolved — pinning to "
+                  f"'{names[0]}' only (narrow with --domains/--focus)")
+        names = names[:1]
+        args.auto_discover = False
+        args.revisit_stale = False
+        args.parallel = 1
+        args.adaptive_parallel = False
+        overrides_pre = {"fixate": True}
+    else:
+        overrides_pre = {}
     focus_weights = get_focus_weights(effective_focus)
     profiles = load_json("run_profiles.json")
     db_suffix = profiles["profiles"][args.profile]["db_suffix"]
     db_path = str(RESULTS_DIR / f"forge_evolve{db_suffix}.db")
 
-    overrides = {}
+    overrides = dict(overrides_pre)
     if args.gens is not None:
         overrides["gens"] = args.gens
     if args.gen_pop is not None:

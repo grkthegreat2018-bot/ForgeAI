@@ -143,9 +143,12 @@ class CPUKVCache(KVCacheStrategy):
         self.cpu_v[:, :, self.cpu_len:self.cpu_len + n_tokens] = self.gpu_v[:, :, :n_tokens].to("cpu", non_blocking=True)
         self.cpu_len += n_tokens
 
-        # Shift GPU cache left (remove offloaded tokens)
-        self.gpu_k[:, :, :self.gpu_len - n_tokens] = self.gpu_k[:, :, n_tokens:self.gpu_len]
-        self.gpu_v[:, :, :self.gpu_len - n_tokens] = self.gpu_v[:, :, n_tokens:self.gpu_len]
+        # Shift GPU cache left (remove offloaded tokens).  Clone the
+        # source first — an in-place overlapping copy_ is UB on CUDA
+        # (elementwise kernels have no ordering guarantee) and can
+        # corrupt the retained tail.
+        self.gpu_k[:, :, :self.gpu_len - n_tokens] = self.gpu_k[:, :, n_tokens:self.gpu_len].clone()
+        self.gpu_v[:, :, :self.gpu_len - n_tokens] = self.gpu_v[:, :, n_tokens:self.gpu_len].clone()
         self.gpu_len -= n_tokens
 
     def _fetch_from_cpu(self, start: int, end: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -425,9 +428,9 @@ class DiskKVCache(KVCacheStrategy):
             self.gpu_v[:, :, :n_tokens].to("cpu", non_blocking=True)
         self.cpu_len += n_tokens
         self._cpu_last_access = time.time()
-        # Shift GPU window left
-        self.gpu_k[:, :, :self.gpu_len - n_tokens] = self.gpu_k[:, :, n_tokens:self.gpu_len]
-        self.gpu_v[:, :, :self.gpu_len - n_tokens] = self.gpu_v[:, :, n_tokens:self.gpu_len]
+        # Shift GPU window left — clone source (overlapping copy_ is UB)
+        self.gpu_k[:, :, :self.gpu_len - n_tokens] = self.gpu_k[:, :, n_tokens:self.gpu_len].clone()
+        self.gpu_v[:, :, :self.gpu_len - n_tokens] = self.gpu_v[:, :, n_tokens:self.gpu_len].clone()
         self.gpu_len -= n_tokens
 
     def _offload_cpu_to_disk(self, n_tokens: int):
@@ -438,8 +441,8 @@ class DiskKVCache(KVCacheStrategy):
         # Disk overflow → drop oldest disk tokens (LRU, lost)
         if self.disk_len + n_tokens > self.disk_capacity:
             drop = self.disk_len + n_tokens - self.disk_capacity
-            self.disk_k[:, :, :-drop] = self.disk_k[:, :, drop:self.disk_len]
-            self.disk_v[:, :, :-drop] = self.disk_v[:, :, drop:self.disk_len]
+            self.disk_k[:, :, :-drop] = self.disk_k[:, :, drop:self.disk_len].clone()
+            self.disk_v[:, :, :-drop] = self.disk_v[:, :, drop:self.disk_len].clone()
             self.disk_len -= drop
         self.disk_k[:, :, self.disk_len:self.disk_len + n_tokens] = \
             self.cpu_k[:, :, :n_tokens]
@@ -447,9 +450,9 @@ class DiskKVCache(KVCacheStrategy):
             self.cpu_v[:, :, :n_tokens]
         self.disk_len += n_tokens
         self._disk_last_access = time.time()
-        # Shift CPU window left
-        self.cpu_k[:, :, :self.cpu_len - n_tokens] = self.cpu_k[:, :, n_tokens:self.cpu_len]
-        self.cpu_v[:, :, :self.cpu_len - n_tokens] = self.cpu_v[:, :, n_tokens:self.cpu_len]
+        # Shift CPU window left — clone source (overlapping copy_ is UB)
+        self.cpu_k[:, :, :self.cpu_len - n_tokens] = self.cpu_k[:, :, n_tokens:self.cpu_len].clone()
+        self.cpu_v[:, :, :self.cpu_len - n_tokens] = self.cpu_v[:, :, n_tokens:self.cpu_len].clone()
         self.cpu_len -= n_tokens
 
     def _offload_gpu_to_disk(self, n_tokens: int):
@@ -459,16 +462,17 @@ class DiskKVCache(KVCacheStrategy):
         self._materialize_disk()
         if self.disk_len + n_tokens > self.disk_capacity:
             drop = self.disk_len + n_tokens - self.disk_capacity
-            self.disk_k[:, :, :-drop] = self.disk_k[:, :, drop:self.disk_len]
-            self.disk_v[:, :, :-drop] = self.disk_v[:, :, drop:self.disk_len]
+            self.disk_k[:, :, :-drop] = self.disk_k[:, :, drop:self.disk_len].clone()
+            self.disk_v[:, :, :-drop] = self.disk_v[:, :, drop:self.disk_len].clone()
             self.disk_len -= drop
         self.disk_k[:, :, self.disk_len:self.disk_len + n_tokens] = \
             self.gpu_k[:, :, :n_tokens].to("cpu")
         self.disk_v[:, :, self.disk_len:self.disk_len + n_tokens] = \
             self.gpu_v[:, :, :n_tokens].to("cpu")
         self.disk_len += n_tokens
-        self.gpu_k[:, :, :self.gpu_len - n_tokens] = self.gpu_k[:, :, n_tokens:self.gpu_len]
-        self.gpu_v[:, :, :self.gpu_len - n_tokens] = self.gpu_v[:, :, n_tokens:self.gpu_len]
+        # clone source (overlapping copy_ is UB)
+        self.gpu_k[:, :, :self.gpu_len - n_tokens] = self.gpu_k[:, :, n_tokens:self.gpu_len].clone()
+        self.gpu_v[:, :, :self.gpu_len - n_tokens] = self.gpu_v[:, :, n_tokens:self.gpu_len].clone()
         self.gpu_len -= n_tokens
 
     def _fetch_disk_to_cpu(self, start: int, end: int):

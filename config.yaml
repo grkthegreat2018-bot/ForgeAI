@@ -1,0 +1,8 @@
+proxy_port: 8080
+forge_base_url: http://localhost:8000/v1
+force_model: ''
+timeout: 300
+debug: true
+max_context_length: 16384
+max_length: 4096
+default_repeat_penalty: 1.1

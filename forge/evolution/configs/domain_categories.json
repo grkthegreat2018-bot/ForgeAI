@@ -64,6 +64,30 @@
         "FfnSkip", "FactorizedEmbed", "ModConfig"
       ]
     },
+    "live_format": {
+      "description": "Live-learning micro-LM format search (journaled state + FluxLM-compat surfaces)",
+      "domains": [
+        "MicroLiveLM"
+      ]
+    },
+    "fluxlm": {
+      "description": "FluxLM self-tuning: FluxConfig knobs vs real speed/memory/NLL/reasoning metrics",
+      "domains": [
+        "FluxTune"
+      ]
+    },
+    "evolver": {
+      "description": "Meta-evolution: ForgeEvolve searches its own engine config on inner runs",
+      "domains": [
+        "EvolverTune"
+      ]
+    },
+    "mech": {
+      "description": "Mechanism discovery: composable live-learning/attention surfaces for the FluxLM dev plan (R67)",
+      "domains": [
+        "MechSearch"
+      ]
+    },
     "all": {
       "description": "All registered domains (auto-populated at runtime)",
       "domains": []

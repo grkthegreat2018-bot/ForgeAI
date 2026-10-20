@@ -303,6 +303,92 @@ def quantize_model_int4(model, target_modules=None, group_size=128, verbose=True
     return n_quantized
 
 
+_W4_TARGET_SUFFIXES = (
+    'q_proj', 'k_proj', 'v_proj', 'o_proj', 'out_proj',
+    'w1', 'w2', 'w3', 'w_gate', 'w_up', 'w_down',
+    'fc1', 'fc2', 'qkv_proj', 'in_proj',
+)
+
+
+def quantize_model_w4(model, target_modules=None, group_size=128,
+                      device=None, verbose=True):
+    """Pack Linear weights to true INT4 via torchao's tile-packed W4A16 kernel.
+
+    Unlike :class:`QuantizedLinear` (which caches a dequantized bf16 weight at
+    first forward, restoring full VRAM cost), this path keeps weights packed
+    and runs the fused ``torch._weight_int4pack_mm`` tinygemm kernel — storage
+    stays ~0.5 byte/param for the whole session. On the RTX 5070 this is the
+    only weight-quant path that lets an 8B model stay GPU-resident
+    (~5.6GB total vs ~16GB bf16) *and* decode faster than bf16.
+
+    The ``nn.Linear`` modules are kept in place; only ``weight`` is swapped to
+    a packed ``Int4TilePackedTo4dTensor``, so the rest of the stack sees
+    ordinary modules. Requires ``torchao`` — already in the ForgeAI venv.
+
+    Note: ``aten::_convert_weight_to_int4pack`` is CUDA-only in torch 2.11,
+    so when ``device`` is CUDA and matched weights are still on CPU this
+    function moves *one Linear at a time* to the GPU, quantizes there, and
+    frees the bf16 source — peak VRAM is packed total + a single layer's
+    bf16 weight (~150MB), never the full model.
+
+    Args:
+        model: the model (typically CPU-resident when pre-GPU-placement).
+        target_modules: module-name substrings to quantize. Default: all
+            attention/FFN projections (lm_head and embeddings stay bf16).
+        group_size: int4 quantization group size (128 = standard W4G128).
+        device: quantize on this device ("cuda" enables the incremental
+            GPU path; None/CPU quantizes in place — requires an int4pack
+            CPU kernel, absent in torch 2.11).
+        verbose: print stats.
+
+    Returns:
+        number of layers quantized
+    """
+    from torchao.quantization import quantize_
+    from torchao.quantization.quant_api import (
+        Int4WeightOnlyConfig, Int4PackingFormat)
+
+    targets = target_modules or _W4_TARGET_SUFFIXES
+
+    def _filter(module, fqn):
+        return (isinstance(module, nn.Linear)
+                and any(t in fqn for t in targets))
+
+    cfg = Int4WeightOnlyConfig(
+        group_size=group_size,
+        int4_packing_format=Int4PackingFormat.TILE_PACKED_TO_4D,
+        set_inductor_config=False)
+
+    # Int4TilePackedTo4dTensor only accepts bf16 source weights — cast fp32
+    # sources in place first (also halves peak host RAM mid-conversion).
+    matched = [m for n, m in model.named_modules() if _filter(m, n)]
+    for m in matched:
+        if m.weight.dtype != torch.bfloat16:
+            m.weight.data = m.weight.data.to(torch.bfloat16)
+
+    on_cuda = (device is not None
+               and torch.device(device).type == "cuda"
+               and any(m.weight.device.type != "cuda" for m in matched))
+
+    if on_cuda:
+        # Incremental path: one Linear's bf16 weight on GPU at a time.
+        for m in matched:
+            m.to(device)
+            quantize_(m, cfg)  # root module is the Linear itself
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    else:
+        quantize_(model, cfg, filter_fn=_filter, device=device)
+
+    if verbose:
+        packed = sum(
+            m.weight.numel() for n, m in model.named_modules()
+            if isinstance(m, nn.Linear) and any(t in n for t in targets))
+        print(f"  [InferQuant] W4-int4pack (group={group_size}): "
+              f"{len(matched)} layers -> ~{packed * 0.5 / 1024**3:.2f} GB packed")
+    return len(matched)
+
+
 def benchmark_quantization(model, tokenizer, prompts, device="cuda"):
     """Benchmark inference speed before and after INT8 quantization.
     

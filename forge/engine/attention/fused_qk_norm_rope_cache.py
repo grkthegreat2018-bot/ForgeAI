@@ -291,6 +291,16 @@ class FusedQKNormRopeCacheWrapper:
             # Attention
             if attention_bias is not None:
                 out = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=attention_bias)
+            elif T > 1 and k_full.shape[-2] > T:
+                # Continuation forward over a cached prefix: is_causal
+                # anchors top-left on non-square shapes — use an
+                # explicit bottom-right causal mask instead.
+                from forge.model.attention_ops import _causal_mask
+                mask = _causal_mask(T, k_full.shape[-2],
+                                    k_full.shape[-2] - T,
+                                    q.device, q.dtype)
+                out = F.scaled_dot_product_attention(
+                    q, k_full, v_full, attn_mask=mask)
             else:
                 out = F.scaled_dot_product_attention(q, k_full, v_full, is_causal=T > 1)
             out = out.transpose(1, 2).reshape(B, T, -1)

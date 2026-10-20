@@ -36,6 +36,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from forge.decoding.acceptance_losses import eal_loss, wtv_loss
+
 
 class DSparkHead(nn.Module):
     """DSpark semi-autoregressive speculative decoding head.
@@ -439,7 +441,7 @@ class DSparkHead(nn.Module):
 class DSparkTrainer:
     """Trains a DSpark head with the three-term objective from Section 3.3.
 
-    Loss = L_ce + L_tv + L_conf, position-weighted by w_k = exp(-(k-1)/gamma).
+    Loss = L_pred + L_tv + L_conf, position-weighted by w_k = exp(-(k-1)/gamma).
 
     Args:
         model: the main LLM (frozen during DSpark training)
@@ -447,14 +449,26 @@ class DSparkTrainer:
         lr: learning rate
         tv_weight: weight for distribution-matching loss L_tv
         conf_weight: weight for confidence loss L_conf
+        loss_type: draft-prediction term — "ce" (cross-entropy, default,
+            Eq. 9), "eal" (Expected Accepted Length for greedy
+            verification, arXiv 2609.24150), or "wtv" (Window
+            Total-Variation for sampling verification).
+        temperature: softmax temperature for "wtv" (should match the
+            decode-time sampling temperature).
     """
 
     def __init__(self, model, dspark_head, lr=1e-4,
-                 tv_weight=0.2, conf_weight=0.5):
+                 tv_weight=0.2, conf_weight=0.5,
+                 loss_type: str = "ce", temperature: float = 1.0):
+        if loss_type not in ("ce", "eal", "wtv"):
+            raise ValueError(f"unknown loss_type {loss_type!r} "
+                             "(expected 'ce', 'eal', or 'wtv')")
         self.model = model
         self.dspark_head = dspark_head
         self.tv_weight = tv_weight
         self.conf_weight = conf_weight
+        self.loss_type = loss_type
+        self.temperature = temperature
         self.optimizer = torch.optim.AdamW(dspark_head.parameters(), lr=lr)
 
         # Freeze main model.
@@ -469,7 +483,8 @@ class DSparkTrainer:
     def compute_loss(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, dict]:
         """Compute the three-term DSpark training loss.
 
-        L_ce: cross-entropy for draft token prediction (Eq. 9)
+        L_pred: draft token prediction — CE (Eq. 9) when loss_type="ce",
+            eal_loss / wtv_loss (arXiv 2609.24150) when "eal"/"wtv"
         L_tv: total variation distance between draft and target distributions (Eq. 10)
         L_conf: BCE between predicted confidence and analytical acceptance rate (Eq. 8)
 
@@ -526,22 +541,32 @@ class DSparkTrainer:
 
         weights = self._position_weights(gamma).to(device)  # (gamma,)
 
-        # ── L_ce: cross-entropy loss (Eq. 9) ──
-        ce_loss = 0.0
+        # ── L_pred: draft-prediction loss ──
+        # "ce" (default): cross-entropy on ground-truth tokens (Eq. 9).
+        # "eal"/"wtv": acceptance-aware losses (arXiv 2609.24150) on the
+        # (B, T', V) draft/target logits — sequence positions act as the
+        # verification window. See acceptance_losses.py for formulas.
+        pred_loss = 0.0
         for k in range(min(gamma, len(target_logits_list))):
             offset = k + 1
             if offset >= T:
                 break
             pred = logits_list[k][:, :-offset, :].contiguous()
-            target = input_ids[:, offset:].contiguous()
-            loss_k = F.cross_entropy(
-                pred.view(-1, pred.size(-1)),
-                target.view(-1),
-                ignore_index=-100,
-                reduction="none",
-            )
-            loss_k = loss_k.mean() * weights[k]
-            ce_loss = ce_loss + loss_k
+            if self.loss_type == "eal":
+                loss_k = eal_loss(pred, target_logits_list[k])
+            elif self.loss_type == "wtv":
+                loss_k = wtv_loss(pred, target_logits_list[k],
+                                  temperature=self.temperature)
+            else:
+                target = input_ids[:, offset:].contiguous()
+                loss_k = F.cross_entropy(
+                    pred.view(-1, pred.size(-1)),
+                    target.view(-1),
+                    ignore_index=-100,
+                    reduction="none",
+                ).mean()
+            pred_loss = pred_loss + loss_k * weights[k]
+        ce_loss = pred_loss
 
         # ── L_tv + L_conf: combined loop (avoids redundant softmax computation) ──
         # Both losses need draft_probs and target_probs — compute once, reuse.
@@ -579,6 +604,7 @@ class DSparkTrainer:
             "tv_loss": float(tv_loss) if isinstance(tv_loss, float) else tv_loss.item(),
             "conf_loss": float(conf_loss) if isinstance(conf_loss, float) else conf_loss.item(),
             "total_loss": total_loss.item(),
+            "loss_type": self.loss_type,
         }
 
     def train_step(self, input_ids: torch.Tensor) -> dict:

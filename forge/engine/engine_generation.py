@@ -43,7 +43,42 @@ from .prefix_cache import (  # noqa: F401
 from forge.model_loader import unpack_output_with_kv  # noqa: F401
 
 
+# R60: decode-step throttle for the live KV-compaction bridge
+# (_maybe_compact_past_kv).  Strategies exposing compact_past_kv
+# (beacon/anchor/metakv) run when an attention-layer entry grows past
+# the strategy's compact_over watermark, or at least once every N
+# decode steps so EMA-style statistics stay fresh.
+_KV_COMPACT_EVERY = 32
+
+
 class _GenerationMixin:
+
+    # ---------------- controller-head routing (memory models) --------
+
+    def attach_head(self, head) -> None:
+        """Attach a zero-gradient controller head (KnobHead) to a
+        FluxLM model.  Afterwards every prediction — generate, eval,
+        teach probes — routes through ``head.remix(lg, cap)``: the head
+        re-mixes the channel distributions read off the weight tables,
+        keyed by (dominant channel, confidence) pattern cells.
+
+        The head holds counting tables only (knobs layer): inspectable
+        via ``head.report()``, removable via ``head.remove_pattern``,
+        checkpointable, and persisted inside .flux snapshots."""
+        if not _is_memory_model(self.model):
+            raise TypeError("attach_head requires a memory model "
+                            "(FluxLM) — KV-cache models have no channel "
+                            "evidence surface")
+        self.model.attach_head(head)
+
+    def detach_head(self) -> None:
+        if _is_memory_model(self.model):
+            self.model.detach_head()
+
+    def head_report(self) -> str:
+        head = getattr(self.model, "_head", None)
+        return head.report() if head is not None else "(no head)"
+
     @torch.no_grad()
     def generate(self, prompt: str, max_new_tokens: int = 100,
                  temperature: float = 0.0, top_p: float = 1.0,
@@ -60,7 +95,8 @@ class _GenerationMixin:
                  prompt_logprobs: int | None = None,
                  return_logprobs: bool = False,
                  learn: bool | None = None,
-                 mem_bias: float | None = None) -> str | dict:
+                 mem_bias: float | None = None,
+                 suffix_gate: float | None = None) -> str | dict:
         """Generate text from a prompt using active strategies.
 
         Args:
@@ -102,6 +138,9 @@ class _GenerationMixin:
                 gcell/gsyn lift weights for this call — <1 leans on
                 verbatim recall, >1 leans on generalized generation.
                 ``None`` keeps the model default. Ignored by KV-cache models.
+            suffix_gate: per-request override for the SuffixMemory sidecar
+                (``enable_suffix_memory``).  ``None`` = engine default,
+                <=0 disables the lift for this call, >0 scales it.
         """
         params = SamplingParams(
             max_new_tokens=max_new_tokens, temperature=temperature,
@@ -111,7 +150,7 @@ class _GenerationMixin:
             dry_allowed_length=dry_allowed_length,
             dry_penalty_last_n=dry_penalty_last_n, stop=stop,
             skip_special_tokens=skip_special_tokens, learn=learn,
-            mem_bias=mem_bias)
+            mem_bias=mem_bias, suffix_gate=suffix_gate)
         with self._gen_lock:
             if params.learn is False and _is_memory_model(self.model):
                 prev = self.model.learning
@@ -157,6 +196,14 @@ class _GenerationMixin:
         self._require_awake()
         self._validate_generation_params(prompt, params)
         self._check_vram_and_offload_if_needed()
+
+        # Clear per-request decode captures — a strategy that never sets
+        # these must not pair this request's prompt with the previous
+        # request's KV/logits (stale-state corruption on cache miss).
+        if self.model is not None:
+            self.model._forge_last_kv = None
+            self.model._forge_last_logits = None
+            self.model._forge_prefill_kv = None
 
         # Apply pending hot-swap changes before generation
         self.hotswap.apply_pending()
@@ -260,7 +307,9 @@ class _GenerationMixin:
                     dry_multiplier=params.dry_multiplier,
                     dry_base=params.dry_base,
                     dry_allowed_length=params.dry_allowed_length,
-                    dry_penalty_last_n=params.dry_penalty_last_n)
+                    dry_penalty_last_n=params.dry_penalty_last_n,
+                    kv_compact=self._maybe_compact_past_kv,
+                    suffix_mem=self._suffix_mem_for(params))
 
         # Capture KV cache from decoding step for fast finish-to-stop path
         captured_kv = getattr(self.model, '_forge_last_kv', None)
@@ -275,6 +324,15 @@ class _GenerationMixin:
         # Store prefix KV cache for future reuse — reuse the KV captured
         # during decoding instead of paying a second full prefill.
         _cache_prompt_prefix(self, ids, captured_kv)
+
+        # Free per-request decode captures — _forge_last_kv/_forge_prefill_kv
+        # pin the entire prompt+generation KV (~1 GB at 8k ctx) on the model
+        # between requests.  Their consumers (_finish_to_stop,
+        # _cache_prompt_prefix) have already run.
+        if self.model is not None:
+            self.model._forge_last_kv = None
+            self.model._forge_last_logits = None
+            self.model._forge_prefill_kv = None
 
         n_gen = output_ids.shape[1] - ids.shape[1]
         self._record_generation(n_gen)
@@ -315,7 +373,10 @@ class _GenerationMixin:
                         token_pos=ids.shape[1],  # approximate
                         text_pos=a["text_pos"],
                         anchor_type=a["type"],
-                        kv_state=captured_kv,
+                        # kv_state=None: storing captured_kv pinned the
+                        # full request KV per anchor (16 anchors ≈ GBs)
+                        # and nothing reads it back.
+                        kv_state=None,
                         source_text=prompt,
                     )
         except Exception:
@@ -922,7 +983,60 @@ class _GenerationMixin:
         """
         with torch.inference_mode():
             out = self.model(ids, use_cache=True, logits_last_only=True)
-            return unpack_output_with_kv(out)
+            logits, past_kv = unpack_output_with_kv(out)
+            self.model._forge_prefill_kv = past_kv
+            # R60: the prompt just landed in the cache — compact once if
+            # it already exceeds the strategy's budget (force bypasses
+            # the every-N decode throttle; the strategy still no-ops
+            # when T fits).
+            past_kv = self._maybe_compact_past_kv(past_kv, force=True)
+            return logits, past_kv
+
+    def _maybe_compact_past_kv(self, past_kv, *, force=False):
+        """Run the active KV strategy's ``compact_past_kv`` hook, if any.
+
+        R60 live bridge: the strategy zoo (``beacon``/``anchor``/
+        ``metakv``) is registry-visible but was previously dead — decode
+        never called the strategies' append/get.  Strategies that work
+        on the model's per-layer ``presents`` list instead expose
+        ``compact_past_kv(past_kv) -> past_kv``, which evicts positions
+        from attention-layer ``(k, v)`` tuple entries only; ``None``,
+        dicts and other conv/SSM state pass through untouched.
+
+        No-op unless ``self.kv_cache`` exists and exposes the hook.
+        Non-forced calls are throttled: the hook runs when any tuple
+        entry's T exceeds the strategy's ``compact_over`` watermark, or
+        every ``_KV_COMPACT_EVERY`` steps (keeps EMA/FPS statistics
+        fresh under the watermark).  ``force=True`` — used once after
+        prefill — skips the throttle; the strategy still decides
+        internally whether T warrants eviction.
+
+        Never raises: a compact failure is warn-logged and the
+        unmodified cache returned, so generation continues.
+        """
+        cache = getattr(self, "kv_cache", None)
+        compact = getattr(cache, "compact_past_kv", None)
+        if compact is None or past_kv is None:
+            return past_kv
+        try:
+            if not force:
+                ctr = getattr(self, "_kv_compact_ctr", 0) + 1
+                self._kv_compact_ctr = ctr
+                watermark = getattr(cache, "compact_over", None)
+                over = (watermark is not None
+                        and isinstance(past_kv, (list, tuple)) and any(
+                    isinstance(e, tuple) and len(e) == 2
+                    and torch.is_tensor(e[0]) and e[0].dim() >= 3
+                    and e[0].shape[-2] > watermark
+                    for e in past_kv))
+                due = (ctr % _KV_COMPACT_EVERY) == 0
+                if not (over or due):
+                    return past_kv
+            return compact(past_kv)
+        except Exception as e:
+            self._log(f"KV compaction skipped (strategy error): {e}",
+                      level="warn")
+            return past_kv
 
     def _sample_next_token(self, logits: torch.Tensor, temperature: float,
                            top_k: int, top_p: float,
@@ -1048,6 +1162,13 @@ class _GenerationMixin:
     ):
         generated_ids = generated_ids if generated_ids is not None else []
         dry_ctx = context_ids if context_ids is not None else []
+        # R65: suffix sidecar — ingest the prompt, then lift logits +
+        # observe each accepted token.  Reset per generation: the table
+        # describes THIS context stream, not a persistent store.
+        suffix_mem = self._suffix_mem_for(params)
+        if suffix_mem is not None:
+            suffix_mem.reset_state()
+            suffix_mem.feed(dry_ctx)
         try:
             for _ in range(params.max_new_tokens):
                 raw_logits = logits[:, -1, :]
@@ -1056,6 +1177,9 @@ class _GenerationMixin:
                 # Constrained decoding: apply logits processor BEFORE sampling
                 if logits_processor is not None:
                     next_logits = logits_processor(next_logits, generated_ids)
+                if suffix_mem is not None:
+                    next_logits = next_logits + suffix_mem.lift_last(
+                        device=next_logits.device, dtype=next_logits.dtype)
 
                 dry_pen = (
                     _dry_penalties(
@@ -1070,6 +1194,8 @@ class _GenerationMixin:
                     params.min_p, params.min_k, dry_penalties=dry_pen)
                 token_id = next_token.item()
                 generated_ids.append(token_id)
+                if suffix_mem is not None:
+                    suffix_mem.feed_one(token_id)
                 if step_observer is not None:
                     # Raw (pre-processor, pre-temperature) logits + the
                     # actually-sampled id — logprobs capture needs both.
@@ -1098,6 +1224,11 @@ class _GenerationMixin:
                         kw["return_hidden"] = True
                     out = self.model(next_token, **kw)
                     logits, past_kv = unpack_output_with_kv(out)
+                    # R60 live bridge: give the active KV strategy a
+                    # chance to compact the per-layer (k, v) tuples
+                    # (throttled inside the helper — ~zero cost when the
+                    # cache is under its watermark).
+                    past_kv = self._maybe_compact_past_kv(past_kv)
                     if hidden_observer is not None:
                         # hidden of the just-consumed token (the state that
                         # will produce the next logits); generated_ids
@@ -1107,6 +1238,7 @@ class _GenerationMixin:
         finally:
             if self.model is not None:
                 self.model._forge_last_kv = past_kv
+                self.model._forge_last_logits = logits
 
     def _build_xgrammar_processor(self, schema: dict):
         """Build an XGrammar logits processor from a JSON schema.
@@ -1488,6 +1620,12 @@ class _GenerationMixin:
                             "for OOM recovery, or reduce max_new_tokens."),
             ) from e
         finally:
+            # Free per-request decode captures — they pin the request's
+            # full KV on the model until the next request clears them.
+            if self.model is not None:
+                self.model._forge_last_kv = None
+                self.model._forge_last_logits = None
+                self.model._forge_prefill_kv = None
             self._gen_lock.release()
 
     def _record_generation(self, n_gen: int):
@@ -1659,6 +1797,8 @@ class _GenerationMixin:
                 out = self.model(ids, past_key_values=past_kv,
                                  use_cache=True, logits_last_only=True)
                 logits, past_kv = unpack_output_with_kv(out)
+                past_kv = self._maybe_compact_past_kv(
+                    past_kv, force=True)
             return logits, past_kv
 
         # Process in chunks
@@ -1673,6 +1813,9 @@ class _GenerationMixin:
                                  use_cache=True, logits_last_only=True)
                 logits, kv = unpack_output_with_kv(out)
                 offset = end
+            # R60: compact once after the last chunk lands — long
+            # chunked prompts can exceed the strategy budget mid-prefill.
+            kv = self._maybe_compact_past_kv(kv, force=True)
         # Return logits from the last chunk (last position)
         return logits, kv
 
@@ -1853,11 +1996,13 @@ class _GenerationMixin:
         stop_tokens = self._get_stop_tokens()
         generated_ids = output_ids[0, prompt_len:].tolist()
 
-        if past_kv is not None:
-            last_token = output_ids[:, -1:]
-            with torch.inference_mode():
-                out = self.model(last_token, past_key_values=past_kv, use_cache=True)
-                logits, past_kv = unpack_output_with_kv(out)
+        # The decode loop already consumed the last emitted token into
+        # past_kv — its next-position logits were captured alongside.
+        # Re-feeding the token would append its KV a second time
+        # (duplicate position → corrupted continuation).
+        last_logits = getattr(self.model, "_forge_last_logits", None)
+        if past_kv is not None and last_logits is not None:
+            logits = last_logits
         elif _is_memory_model(self.model) and \
                 hasattr(self.model, "_predict"):
             # Memory models already learned every generated token during

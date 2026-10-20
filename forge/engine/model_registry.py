@@ -291,6 +291,12 @@ class ModelRegistry:
             entry.last_used = time.time()
             return entry.engine
 
+    def config_name_for(self, model_id: str) -> str | None:
+        """Return the registered config preset name for a model_id."""
+        with self._lock:
+            entry = self._entries.get(model_id)
+            return entry.config_name if entry is not None else None
+
     def stats(self) -> dict:
         """Aggregate registry statistics."""
         with self._lock:

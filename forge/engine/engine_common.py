@@ -33,9 +33,12 @@ def _fast_load_vram_required(ckpt_size: int) -> int:
 
 
 # EOS token IDs for all supported parent models:
-#   LFM2.5: 7 (<|im_end|>), 151643/151645 (Qwen-style)
-#   Jamba Reasoning 3B: 2 (<|endoftext|>), 519 (<|im_end|>)
-_DEFAULT_EOS_TOKEN_IDS = frozenset({2, 7, 519, 151643, 151645})
+#   LFM2.5: 7 (im_end), 151643/151645 (Qwen-style)
+#   Jamba Reasoning 3B: 2 (endoftext), 519 (im_end)
+#   Llama 3.x: 128001 (end_of_text), 128009 (eot_id)
+#   Hermes-3 (ChatML on Llama-3.1 vocab): 128039 (im_start), 128040 (im_end)
+_DEFAULT_EOS_TOKEN_IDS = frozenset(
+    {2, 7, 519, 151643, 151645, 128001, 128009, 128039, 128040})
 
 
 def _is_memory_model(model) -> bool:
@@ -77,6 +80,10 @@ class SamplingParams:
     # gsyn channel lift weights.  None = model default (1.0); <1 leans
     # on verbatim recall, >1 leans on generalized generation.
     mem_bias: float | None = None
+    # R65: per-request gate override for the SuffixMemory sidecar
+    # (KV-cache models).  None = engine default; <=0 disables the lift
+    # for this request; >0 scales it.
+    suffix_gate: float | None = None
 
     @classmethod
     def from_kwargs(cls, **kw) -> "SamplingParams":

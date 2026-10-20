@@ -153,6 +153,9 @@ class ForgeEngine(_CheckpointLoadingMixin, _ActivationMixin,
         self.acceleration: str | None = None
         self._active_kv_bits = 8  # default; updated by _activate_kv_cache
         self._active_kv_cache_name: str | None = None
+        # R65: FluxLM-style exact-suffix sidecar — verbatim recall of
+        # evicted context for KV-cache models (enable_suffix_memory).
+        self._suffix_mem = None
 
         # Innovation slots
         self.mrl_adapter: MRLAdaptiveContext | None = None

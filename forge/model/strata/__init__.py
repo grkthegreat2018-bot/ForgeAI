@@ -25,11 +25,13 @@ from .blocks import CellBlock, BlockStore, BlockMeta
 from .io import (save_container, load_container, save_store,
                  load_store, MAGIC)
 from .knobs import KnobSet, DEFAULT_KNOBS
-from .params import ParamSet
+from .params import ParamSet, quantize_param, dequantize_param
+from .model import StrataLM
 
 __all__ = [
     "StrataConfig", "CellBlock", "BlockStore", "BlockMeta",
-    "KnobSet", "DEFAULT_KNOBS", "ParamSet",
+    "KnobSet", "DEFAULT_KNOBS", "ParamSet", "StrataLM",
+    "quantize_param", "dequantize_param",
     "save_container", "load_container", "save_store", "load_store",
     "count_lut", "quantize_counts", "decode_counts", "pack_follower",
     "foll_tok", "foll_cntq", "foll_aux", "foll_valid", "pack_meta",

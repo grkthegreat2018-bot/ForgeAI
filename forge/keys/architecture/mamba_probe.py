@@ -242,7 +242,17 @@ class MambaLayer(nn.Module):
         else:
             # Full sequence
             x = x.transpose(1, 2)  # (B, d_inner, T)
-            x = self.conv1d(x)[:, :, :T]  # causal: trim right padding
+            cont = (past_key_value or {}).get("conv_state")
+            if cont is not None and T > 1:
+                # Continuation chunk (chunked prefill / speculative verify):
+                # prepend the committed conv context instead of relying on
+                # the causal zero left-pad — otherwise the first d_conv-1
+                # positions of the chunk convolve against zeros.
+                full = torch.cat([cont.to(x.device, x.dtype), x], dim=-1)
+                x = F.conv1d(full, self.conv1d.weight, self.conv1d.bias,
+                             groups=self.d_inner)
+            else:
+                x = self.conv1d(x)[:, :, :T]  # causal: trim right padding
             x = x.transpose(1, 2)  # (B, T, d_inner)
             # Save conv state (last d_conv-1 inputs) for incremental
             if use_cache:

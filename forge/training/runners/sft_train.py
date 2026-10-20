@@ -877,7 +877,7 @@ def main():
     p.add_argument("--warmup-steps", type=int, default=20)  # warmup needed for stability (evolution 0 was synthetic-only)
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--grad-clip", type=float, default=1.0)
-    p.add_argument("--optimizer", default="muon_sf", choices=["fused", "bnb", "lion", "muon", "muon_sf", "muon_sf_plain", "flash_adamw", "flash_lion", "forge", "sf_normuon", "amuse", "mona", "cpu_offload", "badam", "fira_nlrq", "apollo", "flashoptim", "galore", "nvme_muon_4bit"])
+    p.add_argument("--optimizer", default="muon_sf", choices=["fused", "bnb", "lion", "muon", "muon_sf", "muon_sf_plain", "samuon_lite", "flash_adamw", "flash_lion", "forge", "sf_normuon", "amuse", "mona", "cpu_offload", "badam", "fira_nlrq", "apollo", "flashoptim", "galore", "nvme_muon_4bit"])
     p.add_argument("--qk-clip-tau", type=float, default=0.0,
                    help="QK-Clip tau (Kimi K2 MuonClip): cap per-head max attention "
                         "logit after each optimizer step. 0 = disabled (default). "

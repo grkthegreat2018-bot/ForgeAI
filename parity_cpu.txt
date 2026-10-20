@@ -1,0 +1,6 @@
+fwd 481.4s
+llama top10 [1785, 1067, 1784, 1065, 3237, 1071, 71231, 1438, 6711, 10512]
+forge top10 [1073, 1784, 1042, 11745, 1035, 1785, 1438, 69957, 22177, 1110]
+overlap 3
+llama logit stats mean-0.22 std2.02 max18.25
+forge logit stats mean-1.15 std1.94 max15.06

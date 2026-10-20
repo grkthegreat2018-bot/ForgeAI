@@ -92,14 +92,18 @@ def render_messages_for_config(messages: list[dict],
                                tools: list[dict] | None = None,
                                add_generation_prompt: bool = True,
                                thinking: bool = True) -> str:
-    """Render messages in the canonical Jamba ChatML format.
+    """Render messages in the canonical ChatML format for a config preset.
 
-    All ForgeLM V2-family configs (forgelm_v2, forgelm_v12_jamba) share the
-    same Jamba-Reasoning-3B tokenizer + chat_template, so every config gets
-    the identical canonical rendering. ``config_name`` is accepted for
-    back-compat and future per-config dispatch.
+    ForgeLM V2-family configs (forgelm_v2, forgelm_v12_jamba) share the
+    Jamba-Reasoning-3B chat_template — including its trained thinking
+    prefix + open ``<think>`` block in the generation prompt.
+
+    Llama/Hermes-family presets (``llama31_8b``) use plain ChatML — the
+    same im_start/im_end skeleton but NO thinking prefix and NO open
+    think block (Hermes-3 was not trained on Jamba's thinking protocol).
     """
-    del config_name  # one canonical format for all current presets
+    if config_name and config_name.startswith("llama"):
+        thinking = False
     return qwen_render_messages(messages, tools, add_generation_prompt,
                                 thinking=thinking)
 

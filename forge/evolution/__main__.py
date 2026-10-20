@@ -131,6 +131,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Suppress per-generation logging.",
     )
     parser.add_argument(
+        "--fixate",
+        action="store_true",
+        help="Pin the run to this single domain: no cross-domain transfer, "
+             "no refinement spawning, plateaus re-diversify in place "
+             "instead of stopping.",
+    )
+    parser.add_argument(
         "--list-domains",
         action="store_true",
         help="List all available domain names and exit.",
@@ -176,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
         device=args.device,
         db_path=args.db_path,
         verbose=not args.quiet,
+        fixate=args.fixate,
     )
 
     engine = ForgeEvolve(cfg)

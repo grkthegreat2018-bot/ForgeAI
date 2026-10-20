@@ -745,6 +745,30 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   Measured (4K trivia+evidence): seen_qa 0.86-0.96; paraphrase
   generalization 54-80%; held_qa ~5% — corpus-knowledge bound
   (answers absent from the docs), not a mechanism bound.
+  R70 storage/scale pass (30K-doc corpus): fingerprints NEED the
+  write-side set (`knn_window=16`+`knn_idf`+`knn_residual` +
+  `--doc-eos` episode boundaries) or the bank collapses to a flat
+  ~0.72 cos space (v10 seen_qa 0.15 -> v11 0.80, v12 +`knn_idf`
+  numeric-bool parse fix = 0.825).  `_ingest_bulk` EOS split needed a
+  reentrancy flag (terminal marker recursed).  Elastic storage:
+  `auto_grow` grows order tables (lossless dedup-claim migration in
+  `_GPUCellTables.grow`, anchored-force placement kills eviction
+  ping-pong), knn bank, and ring at 85% pressure/wrap - journaled +
+  snapshot-compatible, `grow_max_slots` bounds it.  `_epi_pos`/
+  `_knn_pos` int32 (-272MB on the v12 layout; `index_put_`/`cat`/
+  `index_copy_` sites need explicit `.long()`/`.to(int32)`).
+  `knn_dedup_sim`/`knn_dedup_win` merge near-verbatim bank writes vs
+  the recency window (redundant when `write_gate` is on - it already
+  suppresses repeats).  `gpu_row_width=8` is quality-free at 30K
+  (halves ttoks/tcnt: -1.28GB; M=12 slightly *helps*: 0.85).
+  held_qa=0.0 at 30K is retrieval/extraction-bound, not coverage
+  (63/80 held answers exist in corpus); `knn_atype`/`knn_span`/
+  `knn_subq` + self-play are the open lever.  LFM2's 64400 tokenizer
+  is NOT flux's 65536 vocab - only ForgeLM V2 is a same-vocab
+  teacher, and w8a8/int8 quant hits a CUBLAS scaled_mm limit on this
+  box (fp16 works).  Tests: `test_grow_*` (3), `test_knn_dedup_*`,
+  `test_teach_writes_all_gen_stores`, `test_teach_generalize_flag_*`,
+  `test_gen_head_holds_no_params`.
 - `forge/model/strata/` — STRATA (R60): FluxLM's successor as a
   three-artifact format — WEIGHTS `.strata` (labeled CellBlocks of
   packed 48B cells: tag32+meta+8×u32 followers+raw64, log-quantized
@@ -1100,6 +1124,57 @@ Promoted after validation against evolution data (39,631 discoveries scanned):
 
 > Detailed evolution domain scoring fixes, DB rescores, focus profiles, and R&D round
 > documentation have been moved to `docs/CHANGELOG.md`.
+
+## EXP-1 Experiment Surface (broad LLM arch experiments on Qwen2.5-0.5B)
+
+Reusable experiment package + drivers — `forge/exp/` (experiment-only,
+NOT model lineage): `harness.py` (load_engine, wikitext_docs, log_result,
+bench_decode — raw fixed-step decode bench that bypasses early-EOS
+undercounting), `ncm.py` (CfC neural-circuit side-path), `loopdepth.py`
+(recurrent-depth looping, zero-gated extra iterations), `diffdraft.py`
+(parallel draft heads: DDIM denoiser + MedusaDraftHead, greedy
+spec_verify with KV truncate+correction fixup), `dynscale.py`
+(HeadGate/EarlyExitController/DiagTempScaler), `abshead.py`
+(LatentThoughtHead h_t→h_{t+4}), `ndp.py` (exact online-softmax
+attention split across host/GPU KV tiers), `prevtok.py`.
+Drivers: `scripts/exp_{baseline_qwen,matrix,loop,ncm,trainless,
+diffdraft,dynscale,abshead,prevtok,ndp,cxl}.py`. Results:
+`.devin/exp_results.jsonl` (append-only log via `log_result`),
+notes in `.devin/scratchpad.md` "EXP-1" section.
+
+Load pattern (all drivers): `ForgeEngine.from_checkpoint(<HF snapshot
+dir>, config_name="qwen25_05b", device="cuda", quantize=None)`.
+Qwen2.5-0.5B corrected baseline: Forge NLL 2.996 (HF ref 3.042),
+~70-81 tok/s raw decode bf16.
+
+Fixed bugs (keep): `qwen25_05b` now `tie_word_embeddings=True` (checkpoint
+has no lm_head — untied gave NLL=11.94); `research/tokenizer_cache.
+_resolve_path` no longer redirects HF repo-ids (`org/name`) to the 65k
+ForgeLM tokenizer (was NLL=9.99).
+
+Conventions discovered for exp modules:
+- Side-paths: zero-init gate + `blk._X_gate_zero` cached check —
+  lossless attach verified delta=0.0 on every module.
+- bf16 model + fp32 aux modules: cast at the boundary (fp32 aux internals,
+  or `.to(p.dtype)`); `F.mse_loss`/`Linear` reject mixed dtypes in fwd
+  AND backward. `CastTitan` shim in exp_trainless.py for fp32-only
+  TitanMemory.
+- Tokenizer emits int32 — CE targets need `.long()`.
+- Eval forwards don't mutate TitanMemory/NGramMemory state → skip
+  `_snapshot_live` deep-copies (OOM at 151936 vocab: 594KB dense rows
+  per suffix; see `eval_live` in exp_trainless.py).
+
+Headline findings: bf16+standard KV is the fastest config at 0.5B on
+RTX 5070 (all quant modes slower — kernel-bound); train-less
+generalization real but marginal held-out (+0.02 NLL) and strong
+verbatim (+0.4-0.5); ~15% attention heads removable at small NLL cost
+but Python-side gating costs more than it saves; self-speculative
+drafting needs a much better drafter than 300 steps on 6 docs
+(medusa 15-28% accept > diffusion 3-8%, both <1 tok/fwd); prevtok
+self-correction rerank gives joint dNLL -3.26 at ~1.0 forwards/tok;
+CXL tiered KV keeps GPU footprint flat (12.6MB at any ctx, bit-exact)
+at -52% throughput; NDP partials beat page migration only at moderate
+far-context sizes (CPU attention < PCIe transfer below ~8K pages).
 
 ## Build & Test Commands
 

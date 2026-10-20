@@ -20,6 +20,7 @@ from forge_gui.api.status_reader import project_root
 
 OPTIMIZERS = ["muon_sf", "muon_sf_plain", "muon", "fused", "lion",
               "flash_adamw", "flash_lion", "sf_normuon", "amuse", "mona",
+              "samuon_lite",
               "bnb", "forge", "cpu_offload", "badam", "fira_nlrq"]
 LOSSES = ["ce", "focal", "label_smoothing", "lovasz", "dynamic_focal",
           "mixture"]

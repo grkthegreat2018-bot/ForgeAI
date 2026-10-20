@@ -402,9 +402,15 @@ class ModelLoader:
                 inv_freq = 1.0 / (base ** (
                     torch.arange(0, module.dim, 2, device=target_device,
                                  dtype=torch.float32) / module.dim))
-                if rope_scaling and rope_scaling.get("type") == "yarn":
-                    inv_freq = RotaryEmbedding._yarn_inv_freq(
-                        inv_freq, rope_scaling, max_seq_len)
+                if rope_scaling:
+                    rope_type = (rope_scaling.get("type")
+                                 or rope_scaling.get("rope_type"))
+                    if rope_type == "yarn":
+                        inv_freq = RotaryEmbedding._yarn_inv_freq(
+                            inv_freq, rope_scaling, max_seq_len)
+                    elif rope_type in ("llama3", "llama3.1"):
+                        inv_freq = RotaryEmbedding._llama3_inv_freq(
+                            inv_freq, rope_scaling)
                 t = torch.arange(max_seq_len, device=target_device,
                                  dtype=torch.float32)
                 freqs = torch.outer(t, inv_freq)

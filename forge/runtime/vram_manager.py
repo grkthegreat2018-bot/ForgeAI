@@ -265,8 +265,10 @@ class VRAMManager:
             n_layers, n_heads, head_dim, dtype_bytes)
         max_tokens = int(usable_mb * 1e6 / bytes_per_token)
 
-        # Cap at reasonable maximum
-        max_tokens = min(max_tokens, 2048)
+        # Cap at a sanity ceiling — VRAM (not the constant) is the real
+        # limit. Was 2048, which needlessly truncated context for models
+        # that fit larger KV budgets (e.g. quantized 8B on 12GB ~28K tok).
+        max_tokens = min(max_tokens, 1_048_576)
         max_tokens = max(max_tokens, 64)  # floor
 
         print(f"  [VRAM] KV budget: {usable_mb:.0f} MB / {bytes_per_token} bytes/token "

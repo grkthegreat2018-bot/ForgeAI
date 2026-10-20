@@ -381,6 +381,21 @@ def configure_optimizer(model, max_lr, weight_decay, optimizer_name="fused",
             print(f"MuonScheduleFree unavailable ({e}); falling back to fused AdamW.")
             return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
 
+    if optimizer_name == "samuon_lite":
+        # SAMuon-lite (arXiv 2608.25990): spectral split of the Muon update —
+        # top singular component kept verbatim, bulk amplified by bulk_gain
+        # (~13-24% fewer tokens to the same loss). Same param split as
+        # build_muon_sf_plain: hidden 2D matrices → SAMuon-lite, embeddings/
+        # head/scalars → AdamW.
+        try:
+            from forge.training.optim.sf_spectral_optimizers import build_samuon_lite
+            bulk_gain = getattr(getattr(model, 'config', getattr(model, '_config', None)),
+                                'samuon_bulk_gain', 1.5) or 1.5
+            return build_samuon_lite(model, max_lr, weight_decay, bulk_gain=bulk_gain)
+        except Exception as e:
+            print(f"SAMuonLite unavailable ({e}); falling back to fused AdamW.")
+            return torch.optim.AdamW(param_groups, lr=max_lr, fused=torch.cuda.is_available())
+
     if optimizer_name == "flash_adamw":
         try:
             from forge.training.optim.flash_optim import FlashAdamW

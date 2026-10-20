@@ -54,7 +54,7 @@ from forge.self_play.discovery.qwen_adapter import (
     TOOL_CALL_END,
     TOOL_CALL_START,
     qwen_parse_tool_calls,
-    qwen_render_messages,
+    render_messages_for_config,
 )
 from research.paths import FORGE_TOKENIZER_DIR, V2_CHECKPOINT
 
@@ -693,6 +693,7 @@ class ForgeServer:
     def _build_prompt(self, req: ChatCompletionRequest) -> str:
         """Build prompt from chat messages, using qwen_adapter when tools are present."""
         messages = [m.model_dump() for m in req.messages]
+        cfg_name = self.registry.config_name_for(req.model)
         if req.tools:
             tools = [
                 {
@@ -702,9 +703,12 @@ class ForgeServer:
                 }
                 for t in req.tools
             ]
-            return qwen_render_messages(messages, tools=tools, add_generation_prompt=True)
+            return render_messages_for_config(
+                messages, config_name=cfg_name, tools=tools,
+                add_generation_prompt=True)
         # No tools: simple chat template
-        return qwen_render_messages(messages, add_generation_prompt=True)
+        return render_messages_for_config(
+            messages, config_name=cfg_name, add_generation_prompt=True)
 
     def _build_anthropic_prompt(self, req) -> str:
         """Build a text prompt from Anthropic-style messages."""
@@ -1407,6 +1411,7 @@ class ForgeServer:
             messages.append({"role": "user", "content": req.content})
 
             # Render with tools if present
+            cfg_name = self.registry.config_name_for(session.model_id)
             if req.tools:
                 tools = [
                     {
@@ -1416,11 +1421,13 @@ class ForgeServer:
                     }
                     for t in req.tools
                 ]
-                prompt = qwen_render_messages(
-                    messages, tools=tools, add_generation_prompt=True)
+                prompt = render_messages_for_config(
+                    messages, config_name=cfg_name, tools=tools,
+                    add_generation_prompt=True)
             else:
-                prompt = qwen_render_messages(
-                    messages, add_generation_prompt=True)
+                prompt = render_messages_for_config(
+                    messages, config_name=cfg_name,
+                    add_generation_prompt=True)
 
             # Record user message in session
             self.session_manager.append_message(task_id, "user", req.content)
@@ -2063,6 +2070,15 @@ def main():
                         help="Maximum requests per batch (default 8)")
     parser.add_argument("--max-sessions", type=int, default=64,
                         help="Maximum concurrent task sessions (default 64)")
+    parser.add_argument("--load-quantize", type=str, default=None,
+                        choices=["auto", "int4", "fp8", "int8", "w8a8"],
+                        help="Pack weights during load so oversized "
+                        "checkpoints stay GPU-resident (int4 ~0.5B/param, "
+                        "fp8 ~1B/param). 'auto' picks the best that fits.")
+    parser.add_argument("--kv-tokens", type=int, default=None,
+                        help="Cap KV cache at N tokens instead of letting "
+                        "activation size it to free VRAM. Frees VRAM for "
+                        "other apps at the cost of shorter max context.")
     args = parser.parse_args()
 
     server = ForgeServer(
@@ -2080,12 +2096,16 @@ def main():
                 mid, spec["checkpoint"], spec["config"],
                 tokenizer_path=spec.get("tokenizer"),
                 vram_budget_gb=args.vram_gb or spec.get("vram_gb", 0),
+                load_quantize=args.load_quantize,
+                kv_cache_tokens=args.kv_tokens,
             )
         elif args.checkpoint:
             server.register(
                 mid, args.checkpoint, args.config,
                 tokenizer_path=args.tokenizer,
                 vram_budget_gb=args.vram_gb,
+                load_quantize=args.load_quantize,
+                kv_cache_tokens=args.kv_tokens,
             )
         else:
             logger.warning("No checkpoint for '%s', skipping. "

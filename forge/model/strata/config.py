@@ -35,5 +35,13 @@ class StrataConfig:
     # undo arenas (per active block)
     undo_cap: int = 200_000       # batched undo entries kept per block
 
+    # ---- M1 model dynamics (StrataLM) ---------------------------------
+    ring_capacity: int = 1 << 20  # token ring for rolling suffix keys
+    recency_span: int = 64        # recency window (tokens)
+    fatigue_span: int = 16        # anti-repeat window (tokens)
+    auto_episode: bool = False    # eos_token_id starts a fresh episode
+    learn_prefill: bool = False   # bulk forwards observe-only
+    journal_cap: int = 200_000    # model journal entries kept for undo
+
     device: str = "cpu"           # "cuda" puts hot blocks on GPU
     seed: int = 0x57A7A
