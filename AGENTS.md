@@ -1230,13 +1230,20 @@ Measured (two corpora, `scripts/exp_fluxrev.py`):
   1.335 (pure rescore, no mixture dilution).
 - o1-boost probe (.tmp/o1_boost_probe.py): an o1 model generates
   1.335-consistent text even with o1 floored at w=0.001 — no boost
-  needed.  Reframed theory: consistency pressure needs almost NO
-  weight because it works by breaking DEGENERATE ATTRACTORS —
-  repetition loops are high-confidence basins (hence margin gating
-  fails) and a tiny lift at a near-tie escapes the basin and changes
-  the whole continuation.  Any pair-consistency channel (o1, rev,
-  sidecar) supplies the escape torque; the marginal differences
-  between them are second-order.
+  needed.  Consistency pressure needs almost no weight: it works by
+  nudging near-tie steps, not out-voting the mixture.
+- Precision check (.tmp/gen_inspect.py): the "inconsistent" base
+  generation is actually FLUENT markdown prose with zero novel
+  byte-pairs — prev_nll 3.049 doesn't measure degeneration, it
+  measures the asymmetry of language: p(prev|succ) is systematically
+  low for common successors (every predecessor is atypical when the
+  successor has thousands).  The "consistency win" of rev/o1-rerank
+  biases decode toward cliché transitions (strongly-associated
+  pairs), not toward objectively better text.  FINAL verdict: the
+  reverse channel fights the generative direction of language — the
+  trained prevtok head on the transformer beat it because learned
+  predecessor entropy, not pair existence, is the right consistency
+  signal.  rev stays as substrate; not a recommended default.
 
 ## Build & Test Commands
 
