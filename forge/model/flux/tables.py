@@ -61,6 +61,7 @@ class _GPUCellTables:
                  for k in self.orders]
         salts += [self.ROW_CSEM_SALT, self.ROW_EPI_SALT]
         self._salt = torch.tensor(salts, dtype=torch.int64, device=dev)
+        self._grow_dropped = 0        # keys dropped by last grow()
 
     def ctx_hash(self, k: int, ctx_keys: torch.Tensor) -> torch.Tensor:
         return _mix64(ctx_keys * _MIX1 + _s64(
@@ -761,24 +762,40 @@ class _GPUCellTables:
                     win_i = srt[first]
                     win_i = win_i[can[win_i]]
                     forced = not bool(win_i.numel())
+                    w_all = win_i
                     if forced:
                         # forced placement: nobody can win a slot ->
                         # evict min-tocc candidates unconditionally;
                         # winners anchor so their victims cannot
                         # re-evict them (kills the X<->V ping-pong)
                         win_i = srt[first]
+                        w_all = win_i
                         tgt = slot[win_i]
                         if bool(anch[tgt].any()):
-                            raise RuntimeError(
-                                "grow(): >2 keys on one slot pair - "
-                                "structural overflow, cannot place "
-                                "losslessly")
+                            # >2 keys contest one slot pair (target
+                            # already anchored by a forced winner):
+                            # retarget colliders to their OTHER
+                            # candidate slot when it is unanchored;
+                            # keys with both slots anchored are the
+                            # weakest contestants - drop them instead
+                            # of crashing (grow must never abort a
+                            # long ingest).
+                            s1w, s2w = s1[win_i], s2[win_i]
+                            alt = torch.where(tgt == s1w, s2w, s1w)
+                            bad = anch[tgt]
+                            tgt = torch.where(bad & ~anch[alt],
+                                              alt, tgt)
+                            keep = ~anch[tgt]
+                            self._grow_dropped += int(
+                                (~keep).sum())
+                            win_i = win_i[keep]
+                            tgt = tgt[keep]
                         anch[tgt] = True
                     else:
                         tgt = slot[win_i]
                     loser_m = torch.ones(n_p, dtype=torch.bool,
                                          device=dev)
-                    loser_m[win_i] = False
+                    loser_m[w_all] = False
                     # evicted occupants re-enter the pending pool -
                     # nothing is dropped on growth
                     ev_t = tgt[self.tkeys[r][tgt] != 0]
@@ -814,8 +831,10 @@ class _GPUCellTables:
                     raise RuntimeError(
                         f"grow(): {pend.numel()} entries unplaced "
                         f"on row {r} after 64 rounds")
-                slot_f, _ = self._probe(self.tkeys[r], pk[:oi.numel()])
-                smap[oi] = slot_f
+                slot_f, found_f = self._probe(
+                    self.tkeys[r], pk[:oi.numel()])
+                smap[oi] = torch.where(
+                    found_f, slot_f, torch.full_like(slot_f, -1))
             smaps.append(smap)
         self.used = [int((self.tkeys[r] != 0).sum())
                      for r in range(self.R)]
