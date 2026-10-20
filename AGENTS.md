@@ -1372,6 +1372,38 @@ Tests: `tests/unit/test_flux_bank.py` (7) — spill keeps votes,
 hot/cold union merge, regulate, snapshot round-trip, live-length.
 Suite: 195 flux tests green.
 
+## EXP-6 FluxLM domain lanes — mixed-corpus isolation
+
+Adding a 3.1M-token code-heavy pool to a prose-eval model made it
+WORSE (nll 7.13 vs docs-only 6.82).  Attribution (evaluating the
+pool model under docs-adapted/uniform `_w`): hedge weights are NOT
+the cause — learned ≈ uniform ≈ 7.13, docs-w = 7.38.  The damage
+is in shared low-order cells ("the"/"ing" collect code+prose
+followers) and global unigram dilution.
+
+Domain-mixed keys (`FluxConfig.domains`, `dom_order_max≤2`,
+`dommix_w`): `ingest(domain="code")` XORs `dom_id` into suffix keys
+for low orders only — code-"the" and prose-"the" are distinct
+cells, zero extra memory.  All reads route through `_keys_dev` /
+`_keys_at` (single insertion points → fused graph, probes, bank
+spill/merge see identical masked keys).  Router: AdaHedge over
+lanes refreshed every `dom_route_every` positions from reward
+(p(actual) under each lane's cell view), not coverage — v1 scored
+raw hits and the 16×-bigger code lane won everything.
+Lane'd priors: `_uniL[d]`/`_totalL[d]` per-lane unigram mass;
+`_uni_p` and device `_unig` mirror swap to the active lane on
+`_set_domain` (graph-safe input-tensor pattern, same as `_dommix_g`).
+`blk["dom"]` journals the lane; revert decrements lane totals.
+
+Measured (same held-out prose slice): pool_dom **nll 6.7878,
+top1 0.148, 7.16GB VRAM** — now BEATS docs-only 6.82; the 16×
+mixed corpus costs zero prose regression.  Progression:
+undifferentiated 7.13 → coverage-routed 6.99 → reward-routed +
+lane priors 6.79.  CUDA smoke: lanes isolated on GPU, lane-1 cells
+masked, lane-specific follower wins the logit.  Tests:
+`test_flux_domains.py` (7) — masked-key reads, lane isolation,
+spill/snapshot round-trip, lane'd prior, router reward.
+
 ## Build & Test Commands
 
 ```powershell

@@ -160,3 +160,17 @@ CXL (E-cxl, subagent): forge/exp/cxlmem.py — TieredKV rolling GPU hot window (10
 Qwen2.5-Coder-0.5B: snapshot was an empty stub (.no_exist markers) — engine silently built ALL-RANDOM weights (NLL 11.94, second silent-fallback trap after the tokenizer). Downloaded real weights (HF_HUB_DISABLE_SYMLINKS=1 on Windows); NLL(code)=0.617, fib generation coherent. TODO later: engine should refuse load when snapshot dir has no safetensors.
 
 PREVTOK v2 (agent a942c50a, post-fix rerun): root cause of original failure = bnb AdamW8bit diverged (~1e5) AND 136M untied head memorized train docs (held-out top1 0.127). Fix: tied-embed head (2.3M params, ckpt 544MB->12MB) + early-layer taps (x_{t-1} most decodable from early blocks: L2 top1 ~0.45 vs final ~0.17; rms(L2)+rms(L9) concat -> 0.55). Final: held-out prev_top1=0.531, prev_nll=3.81 (was 8.35); rerank djoint -0.896 (stronger head -> less room to correct; still positive). Peak VRAM 1.84GB. Lesson: prev-token info lives in EARLY layers, not the final hidden.
+
+FLUXSCALE (same held=2291 critique tail, Qwen-BPE):
+- docs190k: NLL 6.82, top1 0.172 (consistent across runs)
+- pool 3.1M mixed-domain: NLL 7.13, top1 0.145 - 16x corpus WORSE
+- LEAKED first run (eval files in pool): NLL 1.12 - verbatim recall, discarded
+- Attribution: docs_w 7.38 / unif_w 7.13 / pool_w 7.13 -> hedge w NOT the cause
+- docs_last (re-ingest): 6.96 -> recency recovers only partially
+- Mechanism: LOW-ORDER cells are domain-SHARED (code-'the' + prose-'the' same row)
+- Fix built: domain lanes - key ^= dommask[k] for orders<=4; ingest(tag/domain=)
+  selects write lane; reads route via EMA probe-hit at probe order. _dommix_g is
+  a [O] device input tensor (graph-safe lane swap, zero re-capture).
+- Bank disk tier shipped: rows_cap overflow seals .fluxbank shards behind
+  per-shard bloom (bounded index); RAM+disk union in cell(); post-restart
+  load_disk_index(). 9 bank tests + 6 domain tests green.
