@@ -1677,7 +1677,12 @@ class _StateMixin:
         if c.bank_rows_cap > 0:
             for k, b in self._banks.items():
                 over = len(b) - c.bank_rows_cap
-                if over > 0:
+                # hysteresis: each seal spills ~30% of a hot table, so
+                # a strict cap purged on EVERY seal — O(bank) argsort+
+                # dict rebuild per chunk (the 15M-scale wall-time
+                # bottleneck).  Let the bank ride to 2xcap, then drop
+                # back to cap; coldest rows barely vote either way.
+                if over > c.bank_rows_cap:
                     if b.disk_dir is not None:
                         # coldest rows seal to .fluxbank shards -
                         # they still vote through bloom-gated probes

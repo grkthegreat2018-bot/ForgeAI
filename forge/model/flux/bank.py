@@ -310,15 +310,22 @@ class FluxBank:
         self.occ = _cut(self.occ)
         self.pos = _cut(self.pos)
         self._n = int(keep.sum())
-        self._ix = {int(k): i
-                    for i, k in enumerate(self.keys[:self._n])}
+        self._ix = dict(zip(self.keys[:self._n].tolist(),
+                            range(self._n)))
 
     def coldest(self, n: int) -> np.ndarray:
-        """Row indices of the n lowest-occ entries (shrink victims)."""
+        """Row indices of the n lowest-occ entries (shrink victims).
+
+        argpartition, not argsort: victims are unordered anyway, so
+        this is O(N) instead of O(N log N) — at 4M+ bank rows the
+        sort dominated regulate() wall time per ingest seal."""
         if not self._n:
             return np.zeros(0, dtype=np.int64)
         n = min(n, self._n)
-        return np.argsort(self.occ[:self._n], kind="stable")[:n]
+        if n >= self._n:
+            return np.arange(self._n, dtype=np.int64)
+        return np.argpartition(self.occ[:self._n],
+                               kth=n - 1)[:n].astype(np.int64)
 
     # -- persistence ----------------------------------------------------
 
