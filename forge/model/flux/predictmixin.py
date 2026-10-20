@@ -3512,8 +3512,27 @@ class _PredictMixin:
             seen_q = bool((_f[:n_ord].bool()
                            & (ord_t >= int(c.knn_lift_deep))).any())
         try:
+            # pipelined decode on GPU+learn: _fused_step(x_prev) learns
+            # x_prev AND returns next-position logits on device - one
+            # pass per token instead of predict+learn (two).  The
+            # initial _predict seeds logits for the prompt-end context;
+            # each emitted token is learned by the NEXT step's call.
+            # learn=False keeps the old predict+_push path (fused step
+            # writes; it can't observe-only).
+            pipeline = bool(learn and getattr(self, "_gpu", False))
+            pending_x = None
             for _step in range(max_new):
-                lg = torch.as_tensor(self._predict()).float().clone()
+                if pipeline:
+                    if pending_x is None:
+                        lg = torch.as_tensor(
+                            self._predict()).float().clone()
+                    else:
+                        self._dom_tick(pending_x)
+                        lg = self._fused_step(
+                            pending_x).float().clone()
+                else:
+                    lg = torch.as_tensor(
+                        self._predict()).float().clone()
                 if (c.knn_lift > 0 and c.use_knn
                         and self._knn_cur > 0
                         and _step < int(c.knn_lift_steps)
@@ -3586,13 +3605,21 @@ class _PredictMixin:
                     x = int(torch.multinomial(probs, 1,
                                               generator=generator)[0])
                 out.append(x)
-                # decode-step learn path (same as forward's len-1 rows):
-                # fused step on GPU, token learn on CPU - bulk ingest
-                # is for multi-token prompts, not per-step decode
-                if learn:
+                if pipeline:
+                    pending_x = x        # learned by next fused step
+                elif learn:
+                    # decode-step learn path (same as forward's len-1
+                    # rows): fused step on GPU, token learn on CPU -
+                    # bulk ingest is for multi-token prompts, not
+                    # per-step decode
                     self._learn_token(x)
                 else:
                     self._push(x)
+            # pipeline defers each emitted token's learn to the next
+            # fused step - flush the trailing one so every emitted
+            # token is learned exactly once, same as the old path
+            if pipeline and pending_x is not None:
+                self._learn_token(pending_x)
         finally:
             self.tag = prev_tag
             if saved_w is not None:

@@ -2461,7 +2461,12 @@ class _LearnMixin:
         pd = c.proto_decay
         blk["ids"] = ids_np
         blk["deltas"] = []
-        knn_fps = []
+        # one preallocated [n,d] fingerprint buffer filled per slice -
+        # was a list of [CH,d] chunks torch.cat'd twice (~1.6GB
+        # transient at n=3.1M)
+        fp_buf = (torch.empty(n, int(self._Pcsem.shape[1]),
+                              dtype=torch.float32, device=dev)
+                  if c.use_knn else None)
         for c0 in range(0, n, CH):
             xchunk = ids_t[c0:c0 + CH]
             s_chunk = s_v[c0:c0 + CH]
@@ -2495,9 +2500,10 @@ class _LearnMixin:
                             / w_.sum(1, keepdim=True).clamp(min=1e-8)
                     else:
                         xw = rw_.mean(1)
-                    knn_fps.append(self._knn_fp_of(xw))
+                    fp_buf[c0:c0 + m_c] = self._knn_fp_of(xw)
                 else:
-                    knn_fps.append(self._knn_fp_of(cprev))
+                    fp_buf[c0:c0 + xchunk.shape[0]] = \
+                        self._knn_fp_of(cprev)
             if c.delta_rule:
                 chat = cprev / (cprev.norm(dim=1, keepdim=True)
                                 + 1e-8)
@@ -2744,9 +2750,9 @@ class _LearnMixin:
         # -- real knn hedge rewards on the PRE-WRITE bank --------------
         # (the write below would let positions match their own rows)
         knn_r = None
-        if c.bulk_channel_rewards and c.use_knn and knn_fps \
+        if c.bulk_channel_rewards and c.use_knn and fp_buf is not None \
                 and self._knn_cur > 0:
-            fpq = torch.cat(knn_fps).float()                 # [n, d]
+            fpq = fp_buf                                     # [n, d]
             kb = min(int(self._knn_cur), c.knn_capacity)
             # query-blocked top-k: a full [n, kb] sim matrix is
             # n*kb*4B - 37GB at kb~0.5M on a 12GB card.  topk only
@@ -2782,8 +2788,8 @@ class _LearnMixin:
             knn_fire = (kvt > 0).cpu().numpy()
 
         # -- knn bank bulk write: (fp of ctx end pos-1) -> succ ids[i] --
-        if c.use_knn and knn_fps:
-            fpall = torch.cat(knn_fps)                       # [n, d]
+        if c.use_knn and fp_buf is not None:
+            fpall = fp_buf                                   # [n, d]
             # surprise gate: covered/unsurprising tokens don't earn a
             # bank row - keep only the newest P of the REAL writes
             keep = (s_v >= c.write_gate_knn_s if c.write_gate
