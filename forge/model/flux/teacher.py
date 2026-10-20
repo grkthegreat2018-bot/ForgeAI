@@ -18,9 +18,25 @@ Contract:
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
+
+
+@contextmanager
+def _sdpa_pref():
+    """Prefer the memory-efficient kernel - the math backend
+    materializes [H, S, S] attention (~5.5GB at 8K+4K context); HF
+    picks math whenever an explicit 4D mask is built."""
+    try:
+        from torch.nn.attention import sdpa_kernel, SDPBackend
+        with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION,
+                          SDPBackend.FLASH_ATTENTION,
+                          SDPBackend.MATH]):
+            yield
+    except (ImportError, AttributeError):
+        yield
 
 
 _DEFAULT_QWEN = (
@@ -74,7 +90,7 @@ class TeacherChannel:
             return
         t = torch.as_tensor(ids, dtype=torch.long,
                             device=self.device)[None, :]
-        with torch.inference_mode():
+        with torch.inference_mode(), _sdpa_pref():
             out = self.model(input_ids=t, position_ids=self._pos_ids(
                 len(ids)), past_key_values=self.past, use_cache=True)
         self.past = out.past_key_values
@@ -177,8 +193,10 @@ class TeacherChannel:
             seg = ids[i:i + chunk]
             t = torch.as_tensor(seg, dtype=torch.long,
                                 device=self.device)[None, :]
-            o = self.model(input_ids=t, position_ids=self._pos_ids(
-                len(seg)), past_key_values=self.past, use_cache=True)
+            with _sdpa_pref():
+                o = self.model(input_ids=t, position_ids=self._pos_ids(
+                    len(seg)), past_key_values=self.past,
+                    use_cache=True)
             self.past = o.past_key_values
             # logits[j] predicts seg[j+1]; pos 0 uses prior _next.
             # p(x) = logit[x] - logsumexp(row) - gather before any

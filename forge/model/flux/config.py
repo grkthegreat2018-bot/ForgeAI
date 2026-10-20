@@ -649,7 +649,9 @@ class FluxConfig:
     teacher_bulk_rewards: bool = True # per-position rewards during bulk
     # capped at 8192: no flash-attn on this Windows box, so SDPA takes
     # the math path and materializes [H,S,S] - 32K contexts OOM (56GB)
-    teacher_bulk_chunk: int = 8192    # positions per teacher forward
+    teacher_bulk_chunk: int = 4096    # positions per teacher forward
+                                      # (math SDPA is [H,S,S] fp32:
+                                      # 8192+4Kpast ~= 5.5GB transient)
     teacher_decode: bool = True       # teacher lift during generate()
                                       # (False: ~20 tok/s HF-fwd cap
                                       # removed - memory-only decode)
