@@ -2032,13 +2032,27 @@ class _PredictMixin:
                                 ).indices] = True
             return torch.where(keep, v, v.new_zeros(()))
 
+        # teacher FIRST on the pre-sparse row, then residual-scaled
+        # memory lifts: the blend row<-lerp(row,lp,wt*(1-gate)) can
+        # only shrink already-added lifts to (1-wt) - a +20-nat
+        # jargon lift trained on the docs corpus still wins argmax at
+        # wt=0.9.  Intended semantics: confident memory owns gated
+        # positions; the teacher owns ungated ones - so memory lifts
+        # vote at (1-wt_eff) scale, full strength only when the
+        # confident-cell gate fires.
+        mem_scale = 1.0
+        if c.teacher_channel:
+            tl = self._tch_lift(row, warm)
+            if tl is not None:
+                row.add_(tl)
+                mem_scale = 1.0 - getattr(self, "_tch_wt_eff", 0.0)
         res = self._sparse_lift_vec_dev(warm, gc_code=gc_code)
         if res is not None:
             (li, lv), (fi, fv) = res
             if li is not None:
                 row.index_add_(0, torch.from_numpy(li).to(
                     self._dev, torch.int64), torch.from_numpy(
-                    lv).to(self._dev, torch.float32))
+                    lv * mem_scale).to(self._dev, torch.float32))
             if fi is not None:
                 _ws = self._wR[warm] if c.cond_hedge else self._w
                 _fc = c.lift_clip * min(
@@ -2050,24 +2064,20 @@ class _PredictMixin:
                     self._dev, torch.int64), torch.from_numpy(
                     fv).to(self._dev, torch.float32))
                 ft.clamp_(-_fc, _fc)
-                row.add_(_masked(ft))
+                row.add_(_masked(ft) * mem_scale)
         gl = self._gsyn_lift_vec(warm, q=gsyn_q)
         if gl is not None:
-            row.add_(_masked(gl))
+            row.add_(_masked(gl) * mem_scale)
         gd = self._gsd_lift_vec(warm, q=gsyn_q)
         if gd is not None:
-            row.add_(_masked(gd))
+            row.add_(_masked(gd) * mem_scale)
         dn = self._dnet_lift_vec(warm, q=gsyn_q)
         if dn is not None:
-            row.add_(_masked(dn))
+            row.add_(_masked(dn) * mem_scale)
         if c.gen_variants:
-            self._gv_lift_dev(row, warm)
+            self._gv_lift_dev(row, warm, scale=mem_scale)
         if self._banks:
-            self._bank_lift_dev(row, warm)
-        if c.teacher_channel:
-            tl = self._tch_lift(row, warm)
-            if tl is not None:
-                row.add_(tl)
+            self._bank_lift_dev(row, warm, scale=mem_scale)
 
     def _tch_lift(self, row: torch.Tensor,
                   warm: int) -> torch.Tensor | None:
@@ -2082,10 +2092,16 @@ class _PredictMixin:
         c = self.config
         wsrc = self._wR[warm] if c.cond_hedge else self._w
         wt = float(wsrc[self._chix["tch"]])
+        gate = 0.0
         if c.teacher_arbitrate:
             g = getattr(self, "_dconf_g", None)
             if g is not None:
-                wt *= (1.0 - float(g.reshape(-1)[0]))
+                gate = float(g.reshape(-1)[0])
+                wt *= (1.0 - gate)
+        if c.teacher_hard_arb and gate < 0.5 \
+                and not getattr(self, "_no_tch", False):
+            wt = 1.0               # ungated: teacher owns outright
+        self._tch_wt_eff = wt
         if wt <= 1e-4 or getattr(self, "_no_tch", False):
             return None
         self._tch_sync()
@@ -2117,7 +2133,8 @@ class _PredictMixin:
             merged[t] = merged.get(t, 0.0) + cn
         return merged, cold_tot + hot_tot
 
-    def _bank_lift_dev(self, row: torch.Tensor, warm: int) -> None:
+    def _bank_lift_dev(self, row: torch.Tensor, warm: int,
+                       scale: float = 1.0) -> None:
         """Device cold-tier votes: order contexts the hot table missed
         get probed against the banks; each hit votes with the order's
         own formula (cnt + a*uni)/(tot + a) and weight - a sparse
@@ -2164,13 +2181,16 @@ class _PredictMixin:
                     math.log(max(p, 1e-12)) - math.log(uni_p))
         if not acc:
             return
+        if scale != 1.0:
+            acc = {t: v * scale for t, v in acc.items()}
         ti = torch.tensor(list(acc.keys()), dtype=torch.int64,
                           device=dev)
         tv = torch.tensor(list(acc.values()), dtype=torch.float32,
                           device=dev)
         row.index_add_(0, ti, tv)
 
-    def _gv_lift_dev(self, row: torch.Tensor, warm: int) -> None:
+    def _gv_lift_dev(self, row: torch.Tensor, warm: int,
+                     scale: float = 1.0) -> None:
         """Device gv lift: same-class 1-edit suffix variants probed
         against the LIVE ``_gt`` order tables, scatter-added onto the
         logit row.  Read-time only - zero owned state, so deletes and
@@ -2243,7 +2263,7 @@ class _PredictMixin:
             / (vt + a_g)
         lp = torch.log(torch.clamp(p, min=1e-12)) - \
             (torch.log(uni + c.uni_alpha) - math.log(denom))
-        row.add_(torch.where(votes > 0, wg * lp,
+        row.add_(torch.where(votes > 0, wg * scale * lp,
                              row.new_zeros(())))
 
     def _predict_gpu(self) -> torch.Tensor:
@@ -3568,6 +3588,27 @@ class _PredictMixin:
         prompt = [int(t) for t in prompt_ids]
         if prompt:
             self.ingest(prompt, tag=tag, learn=learn)
+            if self.config.domains:
+                # route NOW: the every-16-tokens cadence means a
+                # short prompt never refreshes and the lane from the
+                # last ingest/snapshot persists - a prose prompt then
+                # probes CODE-lane cells and jargon cells hijack the
+                # mixture (measured: dom stayed 1 on an 11-token
+                # prompt, output = docs-corpus recall verbatim)
+                self._dom_refresh()
+            if c.teacher_channel and c.teacher_decode:
+                # serve semantics: the teacher's KV window must hold
+                # THIS REQUEST, not the ingest stream's tail.  The
+                # window is only `teacher_window` tokens - after a 15M
+                # corpus ingest it is entirely research-notes register
+                # and every prompt decodes as corpus continuation
+                # (measured: same model, prompt-only teacher context
+                # gives clean Qwen output vs jargon drift otherwise)
+                t = self._tch()
+                t.reset()
+                t.pos = self._count - len(prompt)
+                t._has_sink = True
+                t._feed(prompt)
         prev_tag = self.tag
         self.tag = tag
         prev_no_tch = getattr(self, "_no_tch", False)
@@ -3676,6 +3717,18 @@ class _PredictMixin:
                         self._dom_tick(pending_x)
                         lg = self._fused_step(
                             pending_x).float().clone()
+                        # _fused_step returns the IN-GRAPH row: the
+                        # post-graph lifts (teacher, banks, taps, gen
+                        # variants) must be applied here too, else
+                        # teacher_decode silently decodes memory-only
+                        if (c.sparse_taps or c.class_orders
+                                or c.word_orders or c.hybrid_taps
+                                or c.gcell or c.gsyn or c.gsyn_deep
+                                or c.dnet or c.gen_variants
+                                or c.teacher_channel or self._banks):
+                            self._apply_sparse_lift_dev(
+                                lg, int(self._dthin_g.item()))
+                            lg = self._finite_lg(lg)
                 else:
                     lg = torch.as_tensor(
                         self._predict()).float().clone()

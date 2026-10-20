@@ -667,6 +667,14 @@ class FluxConfig:
                                       # removed - memory-only decode)
     teacher_arbitrate: bool = True    # confident order cells veto the
                                       # teacher lift (recall > floor)
+    teacher_hard_arb: bool = False    # ungated positions adopt the
+                                      # teacher row OUTRIGHT (wt=1),
+                                      # memory lifts scale to 0 - the
+                                      # blend form can't reach teacher
+                                      # argmax below ~0.95 when trained
+                                      # cells lift +20..40 nats; decode
+                                      # needs hard arbitration, eval
+                                      # (blend) is the softer default
 
     # AdaHedge-style adaptive lr: eta_t = ln(C) / mix_cum where mix_cum
     # accumulates the per-token mixability gap (max reward - p_mix).
