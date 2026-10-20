@@ -239,11 +239,26 @@ class LoopConfig:
     flux_dict_file: str = ""       # optional kaikki.org wiktionary jsonl
     flux_obs_chars: int = 240      # tool observation truncation
     flux_context_chars: int = 700  # source text ingested on teach-fail
+    # `file` tool: READ-ONLY local file access (spec: the loop may read
+    # anything, including its own source; writes stay sandbox-only).
+    # Root for relative paths; "" disables the tool.
+    flux_file_root: str = ""
+    # `note` tool: the ONLY model-writable surface — appends the query
+    # text (never a path) to this single journal file inside the
+    # sandbox.  "" disables -> status_dir/flux_notes.md.
+    flux_note_file: str = ""
     # teacher-embedding graft for a FRESH flux model (snapshots restore
     # their own _R).  "auto" = ForgeLM V2 checkpoint if present — the
     # single biggest lever toward V2-quality recall (semantic features
     # feed topic/csem/knn channels). "" disables.
     flux_teacher_embed: str = "auto"
+    # EXP-8 teacher channel: static pretrained LM (Qwen2.5-0.5B) as a
+    # read-only Hedge channel — generalization floor under FluxLM
+    # recall (docs190k hybrid NLL 4.55 vs 6.69 flux-only).  Teacher
+    # bulk rewards train the mixture; teacher_decode adds dense
+    # teacher votes at decode time (slow — off keeps pure-flux speed).
+    flux_teacher_channel: bool = False
+    flux_teacher_decode: bool = False
 
     # ── GRPO config (only used when training_mode="grpo") ──
     grpo_max_steps: int = 50         # GRPO steps per epoch
@@ -721,6 +736,13 @@ class InfiniteSelfPlayLoop:
             te = cand if os.path.exists(cand) else ""
         if te and not str(self.best_checkpoint).endswith(".flux"):
             fc.teacher_embed = te
+        # EXP-8: static teacher channel (read-only, lazy, never
+        # journaled).  Needs bulk channel rewards so w_tch trains
+        # against the mixture on the host path.
+        if cfg.flux_teacher_channel:
+            fc.teacher_channel = True
+            fc.teacher_decode = cfg.flux_teacher_decode
+            fc.bulk_channel_rewards = True
         ckpt = (self.best_checkpoint
                 if str(self.best_checkpoint).endswith(".flux") else None)
         self._engine = ForgeEngine.from_flux(fc, checkpoint=ckpt,
@@ -773,7 +795,13 @@ class InfiniteSelfPlayLoop:
             cfg = self.config
             t = FluxTools(dict_file=cfg.flux_dict_file,
                           obs_chars=cfg.flux_obs_chars,
-                          fetch_budget=cfg.flux_web_fetch_budget)
+                          fetch_budget=cfg.flux_web_fetch_budget,
+                          file_root=(cfg.flux_file_root or
+                                     os.getcwd()),
+                          sandbox_file=(cfg.flux_note_file or
+                                        os.path.join(
+                                            cfg.status_dir,
+                                            "flux_notes.md")))
             self._flux_tools_obj = t
         return t
 

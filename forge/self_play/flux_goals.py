@@ -45,16 +45,30 @@ from forge import web_primitives as wp
 
 # ── tool surface ────────────────────────────────────────────────────────
 
-TOOL_NAMES = ("wiki", "dict", "paper", "web")
+TOOL_NAMES = ("wiki", "dict", "paper", "web", "file", "note")
 _TOOL_ALIASES = {
     "wikipedia": "wiki", "wp": "wiki",
     "dictionary": "dict", "define": "dict", "wiktionary": "dict",
     "arxiv": "paper", "paper": "paper", "papers": "paper",
     "search": "web", "ddg": "web", "google": "web",
+    "read": "file", "cat": "file", "file_read": "file", "open": "file",
+    "write": "note", "save": "note", "journal": "note",
+    "remember": "note", "memo": "note",
 }
 
 TOOL_HEADER = ("Tools: wiki <topic> | dict <word> | paper <topic> | "
-               "web <query>")
+               "web <query> | file <path> | note <text>")
+
+# the file tool is READ-ONLY (spec: the loop may read anything,
+# including its own source, but writes only inside its sandbox).
+# read denylist = secrets + environments — matched against exact
+# path components (a dir named "secrets" is denied; a file merely
+# containing the word in its name is not).
+_FILE_DENY_NAMES = {".git", ".env", "venv", "venv_train",
+                    "node_modules", "__pycache__", ".ssh", ".aws",
+                    "id_rsa", "credentials", "secrets"}
+_FILE_DENY_SUF = {".pem", ".key"}
+_FILE_MAX_BYTES = 256 << 10
 
 _RE_TOOL_CALL = re.compile(
     r"^\s*\[?\s*([A-Za-z]+)\s*[:\]]?\s+(.+?)\s*\]?$")
@@ -74,7 +88,8 @@ def parse_tool_call(text: str) -> tuple[str, str] | None:
         return None
     name = _TOOL_ALIASES.get(m.group(1).lower(), m.group(1).lower())
     query = m.group(2).strip().strip('"\'')
-    if name not in TOOL_NAMES or not query or len(query) > 120:
+    cap = 400 if name in ("file", "note") else 120
+    if name not in TOOL_NAMES or not query or len(query) > cap:
         return None
     return name, query
 
@@ -115,15 +130,48 @@ class FluxTools:
     """
 
     def __init__(self, dict_file: str = "", obs_chars: int = 240,
-                 timeout: float = 6.0, fetch_budget: int = 8):
+                 timeout: float = 6.0, fetch_budget: int = 8,
+                 file_root: str = "", sandbox_file: str = ""):
         self.dict_file = dict_file
         self.obs_chars = obs_chars
         self.timeout = timeout
         self.fetch_budget = fetch_budget
+        self.file_root = file_root          # "" disables the file tool
+        # `note` writes ONLY here — a fixed sandbox path the caller
+        # picks; the model's query text can never redirect it.
+        self.sandbox_file = sandbox_file
         self._fetches = 0
         self._cache: dict[tuple[str, str], str] = {}
         self._doc_cache: dict[tuple[str, str], dict | None] = {}
         self._online: bool | None = None
+
+    def _read_file(self, query: str) -> str:
+        """Read a local path as an observation (read-only surface)."""
+        if not self.file_root:
+            return "file tool disabled"
+        q = query.strip().strip('"\'')
+        rel = q.lstrip("/\\")
+        p = Path(q) if Path(q).is_absolute() else (
+            Path(self.file_root) / rel)
+        try:
+            p = p.resolve()
+        except OSError:
+            return "bad path"
+        parts = {part.lower() for part in p.parts}
+        if (parts & _FILE_DENY_NAMES or
+                p.suffix.lower() in _FILE_DENY_SUF):
+            return "denied"
+        if not p.is_file():
+            return "not a file"
+        try:
+            if p.stat().st_size > _FILE_MAX_BYTES:
+                return "too large"
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return "unreadable"
+        if "\x00" in text[:8192]:
+            return "binary"
+        return text
 
     # ── plumbing ──
     def begin_epoch(self, budget: int | None = None) -> None:
@@ -349,6 +397,26 @@ class FluxTools:
     def call(self, name: str, query: str) -> str:
         """Execute a parsed tool call -> one-line observation string."""
         name = _TOOL_ALIASES.get(name.lower(), name.lower())
+        if name == "file":
+            obs = re.sub(r"\s+", " ",
+                         self._read_file(query)).strip() \
+                [: max(self.obs_chars * 5, 600)] or "empty"
+            return obs
+        if name == "note":
+            if not self.sandbox_file:
+                return "note tool disabled"
+            text = re.sub(r"\s+", " ", query).strip()[:1000]
+            if not text:
+                return "empty"
+            try:
+                Path(self.sandbox_file).parent.mkdir(
+                    parents=True, exist_ok=True)
+                with open(self.sandbox_file, "a",
+                          encoding="utf-8") as f:
+                    f.write(text + "\n")
+            except OSError:
+                return "write failed"
+            return "noted"
         if name not in TOOL_NAMES or not self.online():
             return "offline"
         key = (name, query.strip().lower())

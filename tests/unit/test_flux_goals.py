@@ -146,6 +146,45 @@ class TestFluxTools:
         assert t._get("http://x") == "{}"
         assert t._get("http://x") == ""   # budget spent
 
+    def test_file_tool_reads_offline(self, tmp_path):
+        f = tmp_path / "src.py"
+        f.write_text("def hello():\n    return 42\n")
+        t = FluxTools(file_root=str(tmp_path))
+        t._online = False               # file works with no network
+        obs = t.call("file", "src.py")
+        assert "def hello" in obs
+        obs = t.call("file", str(f))    # absolute paths too
+        assert "return 42" in obs
+
+    def test_file_tool_denies_secrets(self, tmp_path):
+        (tmp_path / ".env").write_text("KEY=secret\n")
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".git" / "config").write_text("[core]\n")
+        t = FluxTools(file_root=str(tmp_path))
+        t._online = False
+        assert t.call("file", ".env") == "denied"
+        assert t.call("file", ".git/config") == "denied"
+        assert t.call("file", "missing.py") == "not a file"
+
+    def test_file_tool_disabled_without_root(self):
+        t = FluxTools()
+        t._online = False
+        assert t.call("file", "x.py") == "file tool disabled"
+
+    def test_note_tool_appends_sandbox_file(self, tmp_path):
+        nb = tmp_path / "notes.md"
+        t = FluxTools(file_root=str(tmp_path), sandbox_file=str(nb))
+        t._online = False
+        assert t.call("note", "hypothesis: lanes help") == "noted"
+        assert t.call("note", "result pending") == "noted"
+        lines = nb.read_text().splitlines()
+        assert lines == ["hypothesis: lanes help", "result pending"]
+
+    def test_note_tool_disabled(self):
+        t = FluxTools()
+        t._online = False
+        assert t.call("note", "x") == "note tool disabled"
+
 
 # ── FluxKB persistence ─────────────────────────────────────────────────
 
