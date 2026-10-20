@@ -1176,6 +1176,46 @@ CXL tiered KV keeps GPU footprint flat (12.6MB at any ctx, bit-exact)
 at -52% throughput; NDP partials beat page migration only at moderate
 far-context sizes (CPU attention < PCIe transfer below ~8K pages).
 
+## EXP-2 FluxLM "rev" channel (bidirectional memory)
+
+Native reverse-consistency channel — the EXP-1 prevtok self-correction
+finding as pure memory, no parameters:
+- `FluxConfig.rev_channel` (default False, lossless off): adds "rev" to
+  `self.channels`; `_rev1[last] -> {succ: surprise-scaled cnt}` written
+  free at `_learn_token` (one dict update, journaled "R", snapshot key
+  `rev1`, `_pmask` device abstain).
+- Channel semantics mirror order channels: vote `v_t = uni_t·p(last|t)`
+  (count-scale; `p(last|t)` = smoothed pair count / successor frequency
+  — the Bayes flip of the forward bigram), `p_ch = (v_x + a·p_uni) /
+  (vt + a)`.  First formulation `uni_p·(1-Z+p)` was capped at
+  ~unigram-scale rewards → Hedge floored it at w=0.001; the
+  count-scale vote lets it earn real weight.
+- `forge/model/flux/revmem.py`: standalone sidecar (ReverseMem +
+  `generate_rerank`) for model-agnostic use / decode-only rerank.
+- Driver `scripts/exp_fluxrev.py` (Markov-chain + docs/research bytes
+  corpora): tests `tests/unit/test_flux_rev.py`.
+
+Measured (two corpora, `scripts/exp_fluxrev.py`):
+- Markov V=2048: rev alone earns w=0.971, NLL 3.10→2.70 — but plain
+  `o1` does better (2.50): the generative direction is strictly more
+  predictive; rev+o1 → Hedge de-weights rev to 0.022 (redundant).  Gen
+  prev_nll: rev 1.072 < o1/base 1.117 — rev's one edge.
+- Text bytes V=256 (docs/research ~450KB): base 2.492 NLL; rev 2.490
+  (mild +, weight floored); o1 2.562 (hurts — bigram noise vs deep
+  channels); gen prev_nll: o1 1.335 vs base/rev 3.049 — the FORWARD
+  bigram, not the reverse, is what makes generated text
+  backward-consistent on real prose.
+- Verdict (honest, negative-leaning): as implemented, rev is a weaker
+  o1 — the Bayes flip loses predictive information.  Sidecar rerank
+  also hurts on text (top1 0.456→0.429 @a=2).  Kept default-off +
+  tested as the backward-channel substrate; a useful variant likely
+  needs longer predecessor context (rev over prev-k-grams) or
+  pair-keyed bidirectional cells, not a bigger weight.
+- Corollary worth noting: consistency pressure trades against
+  predictive NLL — o1 maximizes self-consistency while minimizing
+  held-out accuracy.  Consistency is a generation regularizer, not a
+  free accuracy win.
+
 ## Build & Test Commands
 
 ```powershell

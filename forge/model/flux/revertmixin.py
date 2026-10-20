@@ -535,6 +535,18 @@ class _RevertMixin:
                 self._Ac[tok] = row @ self._Pcsem
                 self._Acn[tok] = self._Ac[tok].norm()
             return True
+        if op == "R":
+            # reverse-consistency cell write - host table, same undo
+            _, last, tok, delta = e
+            cell = self._rev1.get(last)
+            if cell is None or tok not in cell:
+                return False
+            cell[tok] -= delta
+            if cell[tok] <= 1e-9:
+                del cell[tok]
+                if not cell:
+                    del self._rev1[last]
+            return True
         if op == "C":
             # sparse-tap cell write - host tables only (GPU paths take
             # the uni fallback and never emit "C")

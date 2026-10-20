@@ -62,6 +62,7 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
             + [f"g{k}" for k in c.class_orders] \
             + [f"w{j}" for j in range(len(c.word_orders))] \
             + [f"h{j}" for j in range(len(c.hybrid_taps))] \
+            + (["rev"] if c.rev_channel else []) \
             + [ch for ch, on in (("gcell", c.gcell), ("gsyn", c.gsyn),
                                  ("gsd", c.gsyn_deep),
                                  ("dnet", c.dnet)) if on]
@@ -80,7 +81,8 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
         # fallback, which would decay them to hedge_min over training.
         # Fuzzy channels are excluded: their bulk rewards arrive via
         # real_r (overwriting them here would kill that signal).
-        self._pmask = np.array([ch.startswith(("p", "g", "w", "h"))
+        self._pmask = np.array([(ch.startswith(("p", "g", "w", "h"))
+                                 or ch == "rev")
                                 and ch not in self._fset
                                 for ch in self.channels], dtype=bool)
         self._pidx = np.nonzero(self._pmask)[0].tolist()
@@ -137,6 +139,10 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
             j: {} for j in range(len(c.hybrid_taps))}
         self._htots: dict[int, dict[int, float]] = {
             j: {} for j in range(len(c.hybrid_taps))}
+        # reverse-consistency map: _rev1[last] -> {succ: cnt} - the
+        # Bayes-flipped bigram the "rev" channel reads (see config).
+        # "R" journal entries; host tables only.
+        self._rev1: dict[int, dict[int, float]] = {}
         self._uni = np.zeros(V, dtype=np.float64)
         self._total = 0
         # bloom doorkeeper (R63): counting-Bloom admission in front of

@@ -140,6 +140,34 @@ class _PredictMixin:
             return conf * (cell.get(x, 0.0)
                            + a_b * self._uni_p(x, denom)) \
                 / (btot + a_b), True
+        if ch == "rev":
+            # reverse-consistency channel: order-channel semantics on
+            # Bayes-flipped evidence.  vote v_t = uni_t·p(last|t) is a
+            # count-scale vote - the expected number of `last`
+            # occurrences under t's empirical predecessor distribution;
+            # p_ch = (v_x + a·p_uni)/(vt + a) keeps rewards competitive
+            # with the order channels instead of capped at unigram.
+            end = self._count - 1
+            if end < 0:
+                return self._uni_p(x, denom), False
+            last = int(self._ring[end % c.ring_capacity])
+            cell = self._rev1.get(last)
+            if not cell:
+                return self._uni_p(x, denom), False
+            sm, fl = c.rev_uni_mix, c.rev_floor
+            pu_last = self._uni_p(last, denom)
+            vx = vt = 0.0
+            for t, ct in cell.items():
+                ux = self._uni[t]
+                pr = (ct + sm * pu_last * ux + fl) \
+                    / (ux * (1.0 + sm) + fl)
+                v = ux * pr
+                vt += v
+                if t == x:
+                    vx = v
+            a_r = c.alpha
+            return (vx + a_r * self._uni_p(x, denom)) \
+                / (vt + a_r), True
         if ch in ("gcell", "gsyn", "gsd", "dnet"):
             # fuzzy lift channels: real probs so hedge can punish them.
             # prob = exp(channel log-softmax at x) - one readout row.
@@ -2208,6 +2236,33 @@ class _PredictMixin:
                     f"o{k}")
             if c.ppm_excl:
                 excluded.update(cell)
+
+        # reverse-consistency channel "rev": order-channel lift on
+        # Bayes-flipped votes v_t = uni_t·p(last|t) - the channel asks
+        # not "what follows last" but "which candidates provably list
+        # last among their predecessors".  Non-member lift is the
+        # uniform constant w·log(a/(vt+a)) - softmax-invariant, dropped.
+        if c.rev_channel and end >= 0:
+            wr = w["rev"]
+            if wr > 1e-4:
+                last = int(self._ring[end % c.ring_capacity])
+                cellr = self._rev1.get(last)
+                if cellr:
+                    sm, fl = c.rev_uni_mix, c.rev_floor
+                    pu_last = self._uni_p(last, denom)
+                    a_r = c.alpha
+                    vs, vt = {}, 0.0
+                    for t, ct in cellr.items():
+                        ux = self._uni[t]
+                        pr = (ct + sm * pu_last * ux + fl) \
+                            / (ux * (1.0 + sm) + fl)
+                        vs[t] = ux * pr
+                        vt += ux * pr
+                    for t, v in vs.items():
+                        p = (v + a_r * self._uni_p(t, denom)) \
+                            / (vt + a_r)
+                        acc(t, wr * (math.log(max(p, 1e-12))
+                                     - log_uni(t)), "rev")
 
         # sparse-tap channels "p<j>": gapped-suffix keys skip single
         # corrupted/novel positions that break every contiguous key.

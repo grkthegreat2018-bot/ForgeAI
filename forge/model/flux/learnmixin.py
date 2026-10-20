@@ -1680,6 +1680,16 @@ class _LearnMixin:
                 self.journal.append(("c", k, key, x, s))
                 if len(tab) > c.max_cells_per_order:
                     self._decay_table(tab, tots)
+            # reverse-consistency map: rev1[last][x] += s - the
+            # Bayes-flipped bigram the "rev" channel reads.  Raw last
+            # token key, no hash; same surprise-scaled write.
+            if c.rev_channel and end >= 0:
+                last = int(self._ring[end % c.ring_capacity])
+                cell = self._rev1.get(last)
+                if cell is None:
+                    cell = self._rev1[last] = {}
+                cell[x] = cell.get(x, 0.0) + s
+                self.journal.append(("R", last, x, s))
             # sparse-tap tables - same surprise-scaled write, journaled
             # as "C" so revert routes to _ptabs/_ptots
             for j, taps in enumerate(c.sparse_taps):

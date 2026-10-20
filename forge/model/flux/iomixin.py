@@ -146,6 +146,8 @@ class _IOMixin:
                        for k, t in st["wtabs"].items()}
         st["htabs"] = {k: self._pack_celltab(t)
                        for k, t in st["htabs"].items()}
+        if st.get("rev1") is not None:
+            st["rev1"] = self._pack_celltab(st["rev1"])
         st["epi"] = self._pack_epi()
         st["epi_fifo"] = self._pack_pairs(self._epi_fifo)
         if st.get("gc") is not None:
@@ -181,6 +183,8 @@ class _IOMixin:
                       for k, p in s["wtabs"].items()}
         s["htabs"] = {k: self._unpack_celltab(p)
                       for k, p in s["htabs"].items()}
+        if s.get("rev1") is not None:
+            s["rev1"] = self._unpack_celltab(s["rev1"])
         s["epi"] = self._unpack_epi(s["epi"])
         fk, fp = s["epi_fifo"]
         s["epi_fifo"] = [(int(k), int(p))
@@ -226,6 +230,7 @@ class _IOMixin:
             "gtabs": self._gtabs, "gtots": self._gtots,
             "wtabs": self._wtabs, "wtots": self._wtots,
             "htabs": self._htabs, "htots": self._htots,
+            "rev1": self._rev1,
             # GPU backend: portable decoded rows {k: (keys, toks, cnts)}
             "table_triplets": (self._gt.triplets() if self._gpu
                                else None),
@@ -469,6 +474,10 @@ class _IOMixin:
         model._htots = state.get("htots") or {
             j: {key: sum(cell.values()) for key, cell in t.items()}
             for j, t in model._htabs.items()}
+        # reverse-consistency map (host-side; older snapshots lack it)
+        if state.get("rev1") is not None:
+            model._rev1 = {int(k): v
+                           for k, v in state["rev1"].items()}
         # GPU backend: prefer decoded triplets; fall back to converting
         # CPU dicts (recompute pair keys + rebuild tot slots)
         if model._gpu:

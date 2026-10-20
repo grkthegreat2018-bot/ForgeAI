@@ -153,6 +153,19 @@ class FluxConfig:
     # binary split - cold contexts want sem/topic, warm want orders.
     cond_hedge: int = 0
 
+    # reverse-consistency channel "rev" (EXP-1 prevtok finding, as
+    # native memory): generated text is measurably backward-INCONSISTENT
+    # - p(x_{t-1}|x_t) under a reverse model is worse than on real text.
+    # _rev1[last] -> {succ: cnt} is written free at ingest (one dict
+    # update, journaled as "R"); the channel scores candidates by the
+    # Bayes-flipped posterior p(last|cand)·p_uni(cand) restricted to the
+    # observed-successor set - consistent candidates lift, the mixture's
+    # own Hedge weight decides how much to trust it.  Host-only lift
+    # for now; the device path abstains via _pmask.
+    rev_channel: bool = False
+    rev_uni_mix: float = 0.1        # predecessor-unigram smoothing share
+    rev_floor: float = 0.01         # absolute floor, never -inf
+
     # sparse/noncontiguous order channels (PAQ8-style gapped contexts):
     # each entry is a tuple of offsets below the context end, e.g.
     # ((0,2),(0,2,4),(1,3),(1,3,5)) - keys skip every-other byte, so a
