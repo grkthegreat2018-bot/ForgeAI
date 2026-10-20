@@ -185,6 +185,27 @@ class TestFluxTools:
         t._online = False
         assert t.call("note", "x") == "note tool disabled"
 
+    def test_write_tool_jailed_to_sandbox(self, tmp_path):
+        box = tmp_path / "sandbox"
+        t = FluxTools(file_root=str(tmp_path),
+                      sandbox_dir=str(box))
+        t._online = False
+        assert t.call("write", "code.py::x = 1") == "wrote code.py"
+        assert (box / "code.py").read_text() == "x = 1\n"
+        t.call("write", "sub/notes.md::line2")
+        assert (box / "sub" / "notes.md").exists()
+        # escapes denied: absolute, .. traversal, missing ::
+        assert "path" in t.call("write", "../evil.txt::x") or \
+            "denied" in t.call("write", "../evil.txt::x")
+        assert "path" in t.call("write", "/tmp/x::x")
+        assert "need" in t.call("write", "noseparator")
+        assert not (tmp_path / "evil.txt").exists()
+
+    def test_write_tool_disabled(self):
+        t = FluxTools()
+        t._online = False
+        assert t.call("write", "a::b") == "write tool disabled"
+
 
 # ── FluxKB persistence ─────────────────────────────────────────────────
 

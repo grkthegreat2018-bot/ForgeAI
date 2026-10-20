@@ -252,6 +252,11 @@ class LoopConfig:
     # text (never a path) to this single journal file inside the
     # sandbox.  "" disables -> status_dir/flux_notes.md.
     flux_note_file: str = ""
+    # `write` tool: sandbox-jailed file append — the model names a
+    # RELATIVE path under this dir ("write code.py::print(1)") and can
+    # never resolve outside it.  "" disables ->
+    # status_dir/flux_sandbox.
+    flux_sandbox_dir: str = ""
     # teacher-embedding graft for a FRESH flux model (snapshots restore
     # their own _R).  "auto" = ForgeLM V2 checkpoint if present — the
     # single biggest lever toward V2-quality recall (semantic features
@@ -806,7 +811,11 @@ class InfiniteSelfPlayLoop:
                           sandbox_file=(cfg.flux_note_file or
                                         os.path.join(
                                             cfg.status_dir,
-                                            "flux_notes.md")))
+                                            "flux_notes.md")),
+                          sandbox_dir=(cfg.flux_sandbox_dir or
+                                       os.path.join(
+                                           cfg.status_dir,
+                                           "flux_sandbox")))
             self._flux_tools_obj = t
         return t
 

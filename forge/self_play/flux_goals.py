@@ -45,19 +45,20 @@ from forge import web_primitives as wp
 
 # ── tool surface ────────────────────────────────────────────────────────
 
-TOOL_NAMES = ("wiki", "dict", "paper", "web", "file", "note")
+TOOL_NAMES = ("wiki", "dict", "paper", "web", "file", "note", "write")
 _TOOL_ALIASES = {
     "wikipedia": "wiki", "wp": "wiki",
     "dictionary": "dict", "define": "dict", "wiktionary": "dict",
     "arxiv": "paper", "paper": "paper", "papers": "paper",
     "search": "web", "ddg": "web", "google": "web",
     "read": "file", "cat": "file", "file_read": "file", "open": "file",
-    "write": "note", "save": "note", "journal": "note",
-    "remember": "note", "memo": "note",
+    "journal": "note", "remember": "note", "memo": "note",
+    "write_file": "write", "save": "write", "append": "write",
 }
 
 TOOL_HEADER = ("Tools: wiki <topic> | dict <word> | paper <topic> | "
-               "web <query> | file <path> | note <text>")
+               "web <query> | file <path> | note <text> | "
+               "write <relpath>::<text>")
 
 # the file tool is READ-ONLY (spec: the loop may read anything,
 # including its own source, but writes only inside its sandbox).
@@ -88,7 +89,8 @@ def parse_tool_call(text: str) -> tuple[str, str] | None:
         return None
     name = _TOOL_ALIASES.get(m.group(1).lower(), m.group(1).lower())
     query = m.group(2).strip().strip('"\'')
-    cap = 400 if name in ("file", "note") else 120
+    cap = 400 if name in ("file", "note") else (
+        2400 if name == "write" else 120)
     if name not in TOOL_NAMES or not query or len(query) > cap:
         return None
     return name, query
@@ -131,7 +133,8 @@ class FluxTools:
 
     def __init__(self, dict_file: str = "", obs_chars: int = 240,
                  timeout: float = 6.0, fetch_budget: int = 8,
-                 file_root: str = "", sandbox_file: str = ""):
+                 file_root: str = "", sandbox_file: str = "",
+                 sandbox_dir: str = ""):
         self.dict_file = dict_file
         self.obs_chars = obs_chars
         self.timeout = timeout
@@ -140,6 +143,9 @@ class FluxTools:
         # `note` writes ONLY here — a fixed sandbox path the caller
         # picks; the model's query text can never redirect it.
         self.sandbox_file = sandbox_file
+        # `write <relpath>::<text>` appends a line inside this dir —
+        # the model names the file but can never leave the jail.
+        self.sandbox_dir = sandbox_dir
         self._fetches = 0
         self._cache: dict[tuple[str, str], str] = {}
         self._doc_cache: dict[tuple[str, str], dict | None] = {}
@@ -417,6 +423,41 @@ class FluxTools:
             except OSError:
                 return "write failed"
             return "noted"
+        if name == "write":
+            # sandbox-jailed file append: "relpath::text".  The path is
+            # resolved and MUST stay under sandbox_dir — no absolute
+            # paths, no .. escapes, deny-listed components blocked.
+            if not self.sandbox_dir:
+                return "write tool disabled"
+            if "::" not in query:
+                return "need <relpath>::<text>"
+            rel, text = query.split("::", 1)
+            rel = rel.strip().strip('"\'')
+            if not rel or Path(rel).is_absolute() or ".." in \
+                    Path(rel).parts:
+                return "bad path"
+            try:
+                target = (Path(self.sandbox_dir)
+                          / rel).resolve()
+                root = Path(self.sandbox_dir).resolve()
+                if root not in target.parents and \
+                        target != root:
+                    return "bad path"
+            except OSError:
+                return "bad path"
+            parts = {p.lower() for p in target.parts}
+            if parts & _FILE_DENY_NAMES:
+                return "denied"
+            line = re.sub(r"\s+", " ", text).strip()[:2000]
+            if not line:
+                return "empty"
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            except OSError:
+                return "write failed"
+            return f"wrote {rel}"
         if name not in TOOL_NAMES or not self.online():
             return "offline"
         key = (name, query.strip().lower())
