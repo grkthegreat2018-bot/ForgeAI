@@ -645,7 +645,17 @@ class FluxConfig:
     teacher_channel: bool = False
     teacher_path: str = ""            # "" -> local Qwen2.5-0.5B snapshot
     teacher_window: int = 4096        # KV prefix-eviction window
-    teacher_w0: float = 0.0           # >0 overrides initial weight share
+    teacher_w0: float = 0.0           # >0: guaranteed teacher weight
+                                      # share - init AND persistent
+                                      # floor (hedge can never starve
+                                      # it below w0).  USE IT at scale:
+                                      # trained-stream rewards always
+                                      # favour memorized recall, so an
+                                      # unfloored teacher decays to
+                                      # ~0.001 by ~15M tokens and the
+                                      # mixture collapses to ~bigram
+                                      # (measured: docs NLL 8.53 vs
+                                      # 5.87 at floor=0.7).
     teacher_bulk_rewards: bool = True # per-position rewards during bulk
     # capped at 8192: no flash-attn on this Windows box, so SDPA takes
     # the math path and materializes [H,S,S] - 32K contexts OOM (56GB)

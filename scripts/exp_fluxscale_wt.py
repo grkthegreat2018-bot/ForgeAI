@@ -101,6 +101,7 @@ def main():
            bank_dir=str(ROOT / ".tmp" / "fluxbanks"),
            teacher_channel=True,
            teacher_window=4096,
+           teacher_w0=0.6,
            bulk_channel_rewards=True,
            snap=str(ROOT / ".tmp" / "wt15m.flux"))
     print("[fluxscale_wt] done")

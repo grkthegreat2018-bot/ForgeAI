@@ -102,9 +102,13 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
         self._w /= self._w.sum()
         if c.teacher_channel and c.teacher_w0 > 0:
             # teacher enters at an elevated share - a generalization
-            # floor the memory channels only outvote where they fire
-            self._w[self._chix["tch"]] = c.teacher_w0 / len(
-                self.channels)
+            # floor the memory channels only outvote where they fire.
+            # teacher_w0 IS the guaranteed weight share (init AND
+            # floor - the hedge can never starve it below w0; at 15M+
+            # scale an unfloored teacher decays to ~0.001 under
+            # trained-stream rewards where memorized recall always
+            # wins, collapsing the mixture to a near-bigram model).
+            self._w[self._chix["tch"]] = c.teacher_w0
             self._w /= self._w.sum()
         self._hedge_mix = 0.0        # AdaHedge cumulative mix gap
         # conditioned hedge: per-regime weight sets + mix-gaps

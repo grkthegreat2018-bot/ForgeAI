@@ -785,6 +785,34 @@ class _LearnMixin:
         self._step_dev(knn_rows, lite=lite)
 
     @torch._dynamo.disable
+    def _teacher_floor_(self, wv) -> None:
+        """Enforce the teacher's guaranteed weight share in place
+        after a hedge update (device tensor or ndarray).  teacher_w0
+        is a FLOOR, not just an init share: trained-stream rewards
+        always favour memorized recall over generalization, so an
+        unfloored teacher decays to ~0 at large scale and the mixture
+        collapses to the strongest order channel (~bigram model)."""
+        c = self.config
+        ti = self._chix.get("tch")
+        if ti is None or c.teacher_w0 <= 0:
+            return
+        if isinstance(wv, np.ndarray):
+            if wv[ti] < c.teacher_w0:
+                others = wv.sum() - wv[ti]
+                wv *= (1.0 - c.teacher_w0) / max(others, 1e-12)
+                wv[ti] = c.teacher_w0
+        else:
+            # exact share floor (graph-safe, no host branch): when
+            # under floor, teacher=floor and the rest rescaled to
+            # 1-floor preserving relative proportions
+            floor_t = wv.new_full((), c.teacher_w0)
+            w_t = wv[ti]
+            under = w_t < floor_t
+            others = (wv.sum() - w_t).clamp(min=1e-12)
+            wv.mul_(torch.where(under, (1.0 - floor_t) / others,
+                                wv.new_ones(())))
+            wv[ti] = torch.where(under, floor_t, w_t)
+
     def _hedge_dev(self, end, x, rw, hit, tots, cnt_x, uni_x, jcur,
                    live_k, awake=None, rows_t=None, rows_c=None):
         """Channel-tail rewards + AdaHedge + surprise/gate flags.
@@ -953,6 +981,7 @@ class _LearnMixin:
             # channel can re-track after a regime switch
             wrow.mul_(1.0 - c.hedge_share).add_(
                 c.hedge_share / len(self.channels))
+        self._teacher_floor_(wrow)
         if c.cond_hedge:
             self._wgR.index_copy_(0, r1, wrow.unsqueeze(0))
             self._hmxRg.index_copy_(0, r1, hmx.reshape(1))
@@ -1614,6 +1643,7 @@ class _LearnMixin:
             # channel can re-track after a regime switch
             wv *= (1.0 - c.hedge_share)
             wv += c.hedge_share / len(self.channels)
+        self._teacher_floor_(wv)
         if c.cond_hedge:
             self._w[:] = wv      # keep the active-row mirror current
 
@@ -3264,6 +3294,7 @@ class _LearnMixin:
                 wv *= np.exp(expo)
                 np.clip(wv, c.hedge_min, c.hedge_max, out=wv)
                 wv /= wv.sum()
+                self._teacher_floor_(wv)
                 if c.cond_hedge:
                     self._w[:] = wv   # mirror = last-updated row
 

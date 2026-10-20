@@ -159,6 +159,30 @@ def test_truncate_keeps_tail_not_prefix():
     assert k2 == [0, 1, 2] + list(range(15, 20))
 
 
+def test_teacher_w0_is_persistent_floor():
+    """teacher_w0 is a guaranteed share, not just an init value.  On a
+    stream memory memorizes perfectly the hedge would drive tch to ~0
+    (the 15M collapse: w_tch hit 0.001 -> mixture degenerated to a
+    bigram model).  The floor must keep it at ~w0 on every update
+    path."""
+    m = FluxLM(_cfg(teacher_w0=0.6))
+    stub = _StubTeacher(m.vocab_size, p_hit=0.9)
+    m._tch_obj = stub
+    ti = m._chix["tch"]
+    m.ingest([i % 7 for i in range(2000)], tag="t")
+    assert float(m._w[ti]) >= 0.59
+    assert abs(float(m._w.sum()) - 1.0) < 1e-5
+    # above floor -> untouched
+    m._w[ti] = 0.9
+    m._teacher_floor_(m._w)
+    assert abs(float(m._w[ti]) - 0.9) < 1e-5
+    # floor=0 -> no enforcement (legacy behaviour)
+    m._w[ti] = 0.01
+    m2 = FluxLM(_cfg(teacher_w0=0.0))
+    m2._teacher_floor_(m._w)
+    assert float(m._w[ti]) == 0.01
+
+
 def test_teacher_excluded_from_snapshot():
     m = FluxLM(_cfg())
     m._tch_obj = _StubTeacher(m.vocab_size)
