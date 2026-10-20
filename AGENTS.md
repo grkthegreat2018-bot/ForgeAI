@@ -1227,8 +1227,16 @@ Measured (two corpora, `scripts/exp_fluxrev.py`):
   weight override, restored in finally — the two-regime mechanism as
   API.  Verified: rev boost 0.5 on docs bytes cuts gen prev_nll
   3.05→2.68 (native, saturates w≥0.5); sidecar rerank α=1 reaches
-  1.335 (pure rescore, no mixture dilution) — currently the strongest
-  decode-consistency mechanism.
+  1.335 (pure rescore, no mixture dilution).
+- o1-boost probe (.tmp/o1_boost_probe.py): an o1 model generates
+  1.335-consistent text even with o1 floored at w=0.001 — no boost
+  needed.  Reframed theory: consistency pressure needs almost NO
+  weight because it works by breaking DEGENERATE ATTRACTORS —
+  repetition loops are high-confidence basins (hence margin gating
+  fails) and a tiny lift at a near-tie escapes the basin and changes
+  the whole continuation.  Any pair-consistency channel (o1, rev,
+  sidecar) supplies the escape torque; the marginal differences
+  between them are second-order.
 
 ## Build & Test Commands
 
