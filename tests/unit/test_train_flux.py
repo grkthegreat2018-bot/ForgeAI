@@ -9,9 +9,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 from train_flux import (  # noqa: E402
+    _auto_qa,
     _flatten_dict_entry,
     _hf_row_text,
     _iter_texts,
+    _render_chat,
     _resolve_topics,
     _topic_scorer,
 )
@@ -138,3 +140,98 @@ class TestHfTemplate:
     def test_missing_key_blank(self):
         out = _hf_row_text({"a": "1"}, "{a}|{missing}")
         assert out == "1|"
+
+
+class TestChatRender:
+    TURNS = [{"role": "system", "content": "You are helpful."},
+             {"role": "user", "content": "What is 2+2?"},
+             {"role": "assistant", "content": "4."}]
+
+    def test_natural_default(self):
+        out = _render_chat(self.TURNS)
+        assert out == ("Context: You are helpful.\n"
+                       "Question: What is 2+2?\nAnswer: 4.\n")
+        assert "im_start" not in out and "im_end" not in out
+
+    def test_chatml_only_when_asked(self):
+        out = _render_chat(self.TURNS, "chatml")
+        assert "im_start" in out and "im_end" in out
+        assert "system" in out
+
+    def test_plain_content_only(self):
+        out = _render_chat(self.TURNS, "plain")
+        assert out == "You are helpful.\nWhat is 2+2?\n4.\n"
+
+    def test_role_aliases(self):
+        out = _render_chat([{"role": "human", "value": "hi"},
+                            {"role": "gpt", "value": "hello"}])
+        assert "Question: hi" in out and "Answer: hello" in out
+
+    def test_malformed_turns_skipped(self):
+        out = _render_chat(["junk", {"role": "user", "content": "  "},
+                            {"role": "user", "content": "ok"}])
+        assert out == "Question: ok\n"
+        assert _render_chat([]) == ""
+
+    def test_jsonl_messages_natural(self, tmp_path):
+        p = tmp_path / "chat.jsonl"
+        p.write_text(json.dumps({"messages": self.TURNS}),
+                     encoding="utf-8")
+        got = list(_iter_texts(p, None, False, None, "natural"))
+        assert len(got) == 1
+        assert "Question: What is 2+2?" in got[0]
+        assert "im_start" not in got[0]
+
+    def test_jsonl_conversations_respected(self, tmp_path):
+        p = tmp_path / "chat.jsonl"
+        row = {"conversations": [{"role": "user", "content": "q1"},
+                                 {"role": "assistant", "content": "a1"}]}
+        p.write_text(json.dumps(row), encoding="utf-8")
+        got = list(_iter_texts(p, None, False, None, "natural"))
+        assert "Question: q1" in got[0] and "Answer: a1" in got[0]
+
+    def test_json_messages_rendered(self, tmp_path):
+        p = tmp_path / "chat.json"
+        p.write_text(json.dumps([{"messages": self.TURNS}]),
+                     encoding="utf-8")
+        got = list(_iter_texts(p, None, False, None, "natural"))
+        assert len(got) == 1 and "Answer: 4." in got[0]
+
+    def test_jsonl_chat_topic_filter(self, tmp_path):
+        sc = _topic_scorer(_resolve_topics("ai"))
+        p = tmp_path / "chat.jsonl"
+        rows = [{"messages": [{"role": "user", "content":
+                               "explain neural networks"},
+                             {"role": "assistant", "content":
+                               "a neural network is a machine "
+                               "learning model"}]},
+                {"messages": [{"role": "user", "content":
+                               "best cake recipe"}]}]
+        p.write_text("\n".join(json.dumps(r) for r in rows),
+                     encoding="utf-8")
+        got = list(_iter_texts(p, None, False, sc, "natural"))
+        assert len(got) == 1 and "neural network" in got[0]
+
+
+class TestAutoQa:
+    def test_instruction_response_context(self):
+        out = _auto_qa({"instruction": "Name a color",
+                        "context": "Pick one", "response": "Blue"})
+        assert out == ("Context: Pick one\n"
+                       "Question: Name a color\nAnswer: Blue")
+
+    def test_alpaca_schema(self):
+        out = _auto_qa({"instruction": "Do x", "input": "with y",
+                        "output": "done"})
+        assert "Context: with y" in out and "Answer: done" in out
+
+    def test_question_answer(self):
+        assert _auto_qa({"question": "Q", "answer": "A"}) == \
+            "Question: Q\nAnswer: A"
+
+    def test_prompt_response(self):
+        assert "Answer: R" in _auto_qa({"prompt": "P", "response": "R"})
+
+    def test_missing_pair_returns_none(self):
+        assert _auto_qa({"text": "x"}) is None
+        assert _auto_qa({"question": "Q"}) is None
