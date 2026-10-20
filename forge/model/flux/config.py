@@ -653,6 +653,8 @@ class FluxConfig:
     teacher_decode: bool = True       # teacher lift during generate()
                                       # (False: ~20 tok/s HF-fwd cap
                                       # removed - memory-only decode)
+    teacher_arbitrate: bool = True    # confident order cells veto the
+                                      # teacher lift (recall > floor)
 
     # AdaHedge-style adaptive lr: eta_t = ln(C) / mix_cum where mix_cum
     # accumulates the per-token mixability gap (max reward - p_mix).

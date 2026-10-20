@@ -66,12 +66,10 @@ def test_tch_lift_math():
     assert lift is not None
     wt = float(m._w[i])
     lp = torch.log_softmax(torch.zeros(m.vocab_size), -1)
-    # row-relative geometric blend: lift = wt*(lp - row)
+    # row-blend: lift = wt*(lp - row); row+lift lerps toward lp
     exp = wt * (lp - row)
     assert torch.allclose(lift, exp, atol=1e-6)
-    # blended row sits between the parents
-    blended = row + lift
-    assert torch.allclose(blended, row.lerp(lp, wt), atol=1e-6)
+    assert torch.allclose(row + lift, row.lerp(lp, wt), atol=1e-6)
 
 
 def test_tch_lift_abstains_on_zero_weight():
@@ -79,6 +77,17 @@ def test_tch_lift_abstains_on_zero_weight():
     m._tch_obj = _StubTeacher(m.vocab_size)
     m._w[m._chix["tch"]] = 0.0
     row = torch.full((m.vocab_size,), -5.0)
+    assert m._tch_lift(row, 0) is None
+
+
+def test_tch_lift_yields_to_confident_cell():
+    """Arbitration: _dconf_g=1 (verbatim context) zeroes the teacher
+    lift so memory owns the position outright."""
+    m = FluxLM(_cfg())
+    m._tch_obj = _StubTeacher(m.vocab_size)
+    m.ingest([1, 2, 3] * 5, tag="t")
+    row = torch.full((m.vocab_size,), -5.0)
+    m._dconf_g = torch.ones(1, dtype=torch.int64)
     assert m._tch_lift(row, 0) is None
 
 

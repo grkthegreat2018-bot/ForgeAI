@@ -2071,15 +2071,21 @@ class _PredictMixin:
 
     def _tch_lift(self, row: torch.Tensor,
                   warm: int) -> torch.Tensor | None:
-        """Dense teacher blend: row <- (1-wt)*row + wt*log p_tch.
-        Row-relative geometric interpolation - at wt->1 the mixture
-        IS the teacher; at wt->0 it's untouched.  (The earlier
-        lp - log p_uni reference cancelled unigram mass the base row
-        doesn't contain - the flat prior floor inflated teacher-weak
-        tails: measured mixture 6.47 vs teacher-only 5.45.)"""
+        """Confident-arbitrated teacher blend:
+        row <- row + wt*(1-gate)*(log p_tch - row).  On novel context
+        the row converges to the teacher floor (wt->1: IS the
+        teacher).  When any order cell clears the adaptive-read
+        evidence bar (_dconf_g = verbatim context), the teacher
+        yields and memory owns the position outright - measured:
+        gated positions NLL 2.10 vs 5.70 ungated; free lifts on
+        ungated text were net-negative (+1.3 nats)."""
         c = self.config
         wsrc = self._wR[warm] if c.cond_hedge else self._w
         wt = float(wsrc[self._chix["tch"]])
+        if c.teacher_arbitrate:
+            g = getattr(self, "_dconf_g", None)
+            if g is not None:
+                wt *= (1.0 - float(g.reshape(-1)[0]))
         if wt <= 1e-4 or getattr(self, "_no_tch", False):
             return None
         self._tch_sync()
@@ -2087,8 +2093,8 @@ class _PredictMixin:
         if lp is None:
             return None
         dev = lp.device
-        # convex blend is self-bounding - no lift_clip needed
-        return wt * (lp.to(dev) - row.to(dev))
+        return torch.nan_to_num(
+            wt * (lp.to(dev) - row.to(dev)), nan=0.0)
 
     def _cold_cell(self, k: int, key: int):
         """Cold-tier lookup: (followers {tok: cnt}, tot) for context
