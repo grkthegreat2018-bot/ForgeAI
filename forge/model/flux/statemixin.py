@@ -1509,13 +1509,21 @@ class _StateMixin:
             bank = self._knn_fp[kb - W:kb].float()
             sims = bank @ fp.float()
             sim, ix = sims.max(dim=0)
-            if float(sim) >= c.knn_dedup_sim and \
-                    int(self._knn_succ[kb - W + int(ix)]) == int(succ):
-                return kb - W + int(ix)     # already covered - merge
-        prev_pos = int(self._knn_pos[slot])
+            # one D2H for the three scalars the merge check + journal
+            # need (was ~3 separate syncs per push)
+            sim_f, ix_f, sc_f = torch.stack([
+                sim, ix.float(),
+                self._knn_succ[kb - W + ix].float()]).tolist()
+            if sim_f >= c.knn_dedup_sim and int(sc_f) == int(succ):
+                return kb - W + int(ix_f)   # already covered - merge
+        if self._gpu:
+            prev_pos, prev_succ = torch.stack([
+                self._knn_pos[slot].long(),
+                self._knn_succ[slot].long()]).tolist()
+        else:
+            prev_pos = int(self._knn_pos[slot])
         if journal:
             if self._gpu:
-                prev_succ = int(self._knn_succ[slot])
                 self._kprev_g[self._jcur] = self._knn_fp[slot]
                 self.journal.append(
                     ("k", slot, prev_pos, prev_succ,

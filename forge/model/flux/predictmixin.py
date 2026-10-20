@@ -1823,12 +1823,16 @@ class _PredictMixin:
         end = self._count - 1
         denom = self._total + c.uni_alpha * self.vocab_size
         wsrc = self._wR[warm] if c.cond_hedge else self._w
-        lift = np.zeros(self.vocab_size, dtype=np.float64)
+        # (idx, contrib) pair lists - dup token indices across cells are
+        # summed by the device index_add_; dense [V] arrays + nonzero
+        # scans were ~1ms/predict at V=151936 while real support is
+        # ~hundreds of followers
+        lift_l: list = []
         # fuzzy channels accumulate separately: candidate-restricted
         # (lift_topk/lift_topm) - they rerank support, not inject mass
-        flift = np.zeros(self.vocab_size, dtype=np.float64)
+        flift_l: list = []
 
-        def acc(cell, tot, wj, into=lift, ev_mul=1.0):
+        def acc(cell, tot, wj, into=lift_l, ev_mul=1.0):
             if c.evidence_lift:
                 wj += ev_mul * tot / (tot + c.backoff_kappa)
             idx = np.fromiter(cell.keys(), dtype=np.int64,
@@ -1839,9 +1843,9 @@ class _PredictMixin:
             a_c = self._esc_alpha(len(cell))
             p = (cnt + a_c * (uni + c.uni_alpha) / denom) \
                 / (tot + a_c)
-            into[idx] += wj * (np.log(np.maximum(p, 1e-12))
-                               - (np.log(uni + c.uni_alpha)
-                                  - math.log(denom)))
+            into.append((idx, wj * (np.log(np.maximum(p, 1e-12))
+                                    - (np.log(uni + c.uni_alpha)
+                                       - math.log(denom)))))
 
         if sparse_ok:
             for j, taps in enumerate(c.sparse_taps):
@@ -1902,8 +1906,16 @@ class _PredictMixin:
                     db = self._gen_bias * c.gcell_neighbor_decay ** dist
                     acc(cell, self._gct.get(cc, 0.0),
                         float(c.gcell_w) * w_rel * db,
-                        into=flift, ev_mul=db)
-        return lift, flift
+                        into=flift_l, ev_mul=db)
+
+        def _cat(lists):
+            if not lists:
+                return None, None
+            ii = np.concatenate([a for a, _ in lists])
+            vv = np.concatenate([b for _, b in lists])
+            return ii, vv
+
+        return _cat(lift_l), _cat(flift_l)
 
     def _gsyn_lift_vec(self, warm: int,
                        q: torch.Tensor | None = None
@@ -2012,24 +2024,22 @@ class _PredictMixin:
 
         res = self._sparse_lift_vec_dev(warm, gc_code=gc_code)
         if res is not None:
-            lv, flv = res
-            nz = np.nonzero(lv)[0]
-            if nz.size:
-                row.index_add_(0, torch.from_numpy(nz).to(
+            (li, lv), (fi, fv) = res
+            if li is not None:
+                row.index_add_(0, torch.from_numpy(li).to(
                     self._dev, torch.int64), torch.from_numpy(
-                    lv[nz]).to(self._dev, torch.float32))
-            nz = np.nonzero(flv)[0]
-            if nz.size:
+                    lv).to(self._dev, torch.float32))
+            if fi is not None:
                 _ws = self._wR[warm] if c.cond_hedge else self._w
                 _fc = c.lift_clip * min(
                     len(self.channels) * float(
                         _ws[self._chix["gcell"]]), 1.0)
-                flv = np.clip(flv, -_fc, _fc)
                 ft = torch.zeros(row.numel(), dtype=torch.float32,
                                  device=self._dev)
-                ft.index_add_(0, torch.from_numpy(nz).to(
+                ft.index_add_(0, torch.from_numpy(fi).to(
                     self._dev, torch.int64), torch.from_numpy(
-                    flv[nz]).to(self._dev, torch.float32))
+                    fv).to(self._dev, torch.float32))
+                ft.clamp_(-_fc, _fc)
                 row.add_(_masked(ft))
         gl = self._gsyn_lift_vec(warm, q=gsyn_q)
         if gl is not None:
