@@ -234,6 +234,11 @@ class LoopConfig:
     flux_web_frac: float = 0.5     # fraction of epoch goals from sources
     flux_tool_frac: float = 0.35   # of web goals: two-phase tool tasks
     flux_rag_frac: float = 0.35    # of remaining web goals: inline context
+    # self-posed goals (knowledge hunting): fraction of epoch goals the
+    # MODEL proposes — it asks a question, then must answer it through
+    # the tool surface; reward = the answer is grounded in the real
+    # observation (extractive faithfulness, no canonical key needed).
+    flux_self_frac: float = 0.0
     flux_web_fetch_budget: int = 8 # new source fetches per epoch
     flux_eval_web_n: int = 16      # frozen web eval size (0 disables)
     flux_dict_file: str = ""       # optional kaikki.org wiktionary jsonl
@@ -887,6 +892,52 @@ class InfiniteSelfPlayLoop:
                 return 0.0
         return 1.0 if self._flux_check_any(output, pair) else 0.0
 
+    # ── self-posed goals (knowledge hunting) ──
+    _SELF_STOP = frozenset(
+        "about which where there their would could should these those "
+        "between after before because through during under over into "
+        "from with have been other more than some such only also very".split())
+
+    def _flux_self_proposals(self, engine, n: int) -> list[str]:
+        """Ask the model to pose questions it wants answered."""
+        prompts = ["Q: Ask one question you want to learn the "
+                   "answer to.\nP:"] * n
+        outs = engine.generate_batch(
+            prompts, max_new_tokens=18,
+            temperatures=[0.9] * n,
+            seeds=[self._flux_rng.randrange(1 << 30)
+                   for _ in range(n)],
+            stops=[["\n"]] * n, cf_topk=0)
+        qs = []
+        for o in outs:
+            line = (o or "").strip().splitlines()
+            if not line:
+                continue
+            q = re.sub(r"^[PpQq]\s*[:.]\s*", "", line[0]).strip(" '\"")
+            q = q.rstrip("?")[:110]
+            if len(q) >= 12 and " " in q:
+                qs.append(q + "?")
+        return qs
+
+    _BAD_OBS = {"", "offline", "no results", "empty", "denied",
+                "not a file", "unreadable", "too large", "binary",
+                "bad path", "file tool disabled", "note tool disabled",
+                "write failed"}
+
+    def _flux_score_self(self, output: str, obs: str) -> float:
+        """Grounded reward for self-posed questions: the answer must
+        carry content words from the real observation — extractive
+        faithfulness instead of a canonical key."""
+        if obs in self._BAD_OBS:
+            return 0.0
+        ow = {w for w in re.findall(r"[a-z']{5,}", obs.lower())
+              if w not in self._SELF_STOP}
+        if not ow:
+            return 0.0
+        out = output.lower()
+        hits = sum(1 for w in ow if w in out)
+        return min(1.0, hits / 2.0)
+
     def _flux_fresh_pairs(self, n: int) -> list[dict]:
         """Draw n verified task pairs, deduped against every prompt this
         run has already attempted (and against the fixed eval sets).
@@ -997,7 +1048,21 @@ class InfiniteSelfPlayLoop:
                          detail=f"epoch {self.epoch}: held-out probe")
         acc_pre = self._flux_eval_acc()
 
-        pairs = self._flux_fresh_pairs(cfg.tasks_per_epoch)
+        n_self = int(round(cfg.tasks_per_epoch * cfg.flux_self_frac))
+        pairs = self._flux_fresh_pairs(cfg.tasks_per_epoch - n_self)
+        if n_self > 0:
+            # knowledge hunting: model-posed questions, answered via
+            # tools; deduped against all seen prompts
+            for q in self._flux_self_proposals(engine, n_self * 2):
+                if len(pairs) >= cfg.tasks_per_epoch:
+                    break
+                if q in self._flux_seen:
+                    continue
+                self._flux_seen.add(q)
+                pairs.append({"kind": "tool", "prompt": q,
+                              "response": "", "accepts": [],
+                              "self": True, "source": "self",
+                              "tool": "web", "query": q})
         G = max(1, cfg.flux_group_size)
         engine.flux_batch_workers = cfg.flux_workers
         engine.flux_workers_device = cfg.flux_workers_device
@@ -1040,6 +1105,7 @@ class InfiniteSelfPlayLoop:
             "source": p.get("source", "procedural"),
             "context": p.get("context", ""),
             "tool": p.get("tool"), "query": p.get("query"),
+            "self": p.get("self", False),
             "ok": False, "best": None, "pkt": None, "pkt_extra": [],
             "tool_ok": False} for p in pairs]
 
@@ -1112,8 +1178,15 @@ class InfiniteSelfPlayLoop:
             pkts_b = getattr(engine, "last_flux_packets", None) or []
             for row, i in enumerate(tool_idx):
                 group = outs_b[row * G:(row + 1) * G]
-                good = [(j, o, self._flux_score(o, pairs[i]))
-                        for j, o in enumerate(group)]
+                if pairs[i].get("self"):
+                    # self-posed: reward = grounded in the observation
+                    # each sample actually received
+                    good = [(j, o, self._flux_score_self(
+                                 o, obs[row * G + j]))
+                            for j, o in enumerate(group)]
+                else:
+                    good = [(j, o, self._flux_score(o, pairs[i]))
+                            for j, o in enumerate(group)]
                 good = [g for g in good if g[2] > 0]
                 good.sort(key=lambda g: -g[2])
                 a = attempts[i]
@@ -1202,6 +1275,10 @@ class InfiniteSelfPlayLoop:
             obs = self._flux_tools().call(tool, query)
             if obs in ("", "offline", "no results"):
                 obs = (a.get("obs") or [""])[0] or "no results"
+            # self-posed questions have no canonical key — the observed
+            # content IS the verified answer to teach
+            resp = a["response"] or (
+                obs if obs not in self._BAD_OBS else "no results")
             # step 1: emit the right tool call for this question
             model.teach_text(
                 f"{_FLUX_TOOL_HEADER}\nQ: {a['prompt']}\nT:",
@@ -1210,12 +1287,12 @@ class InfiniteSelfPlayLoop:
             model.teach_text(
                 f"{_FLUX_TOOL_HEADER}\nQ: {a['prompt']}\n"
                 f"T: {tool} {query}\nO: {obs}\nA:",
-                f" {a['response']}\n", tok, tag=tag)
+                f" {resp}\n", tok, tag=tag)
             # full trajectory into episodic memory
             self._flux_ingest(
                 model, tok,
                 f"{_FLUX_TOOL_HEADER}\nQ: {a['prompt']}\n"
-                f"T: {tool} {query}\nO: {obs}\nA: {a['response']}\n",
+                f"T: {tool} {query}\nO: {obs}\nA: {resp}\n",
                 tag)
             return
 

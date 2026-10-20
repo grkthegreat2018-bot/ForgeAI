@@ -184,6 +184,64 @@ class TestFluxModeBranch:
         assert out["attempts"] == 6
         assert model._count == 123          # canonical model untouched
 
+    def test_self_score_grounded(self):
+        loop = InfiniteSelfPlayLoop(
+            "fake.flux", LoopConfig(training_mode="flux"))
+        obs = ("Photosynthesis is the process by which plants "
+               "convert sunlight into chemical energy")
+        # grounded: answer carries obs content words
+        assert loop._flux_score_self(
+            "plants convert sunlight", obs) == 1.0
+        assert 0.0 < loop._flux_score_self("plants", obs) <= 0.5
+        # ungrounded / bad obs
+        assert loop._flux_score_self("unrelated answer", obs) == 0.0
+        assert loop._flux_score_self("x", "offline") == 0.0
+        assert loop._flux_score_self("x", "no results") == 0.0
+
+    def test_self_proposals_and_pairs(self):
+        """flux_self_frac routes model-posed questions through the
+        tool-task path with obs-grounded scoring."""
+        cfg = LoopConfig(training_mode="flux", tasks_per_epoch=6,
+                         flux_group_size=2, flux_workers=1,
+                         flux_web=False, flux_self_frac=0.5)
+        loop = InfiniteSelfPlayLoop("fake.flux", cfg)
+        model = MagicMock()
+        model._count = 7
+        engine = MagicMock()
+        engine.model = model
+        calls = {"n": 0}
+
+        def gen(prompts, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:             # proposal pass
+                return ["P: What is entropy?",
+                        "P: Why is the sky blue?",
+                        "junk", "x",
+                        "P: What is entropy?",
+                        "P: How do tensors flow?"][:len(prompts)]
+            if "T:" in prompts[0]:          # phase A: tool call
+                return ["web entropy"] * len(prompts)
+            return ["plants energy"] * len(prompts)   # phase B
+
+        engine.generate_batch = MagicMock(side_effect=gen)
+        engine.last_flux_packets = []
+        loop._flux_engine = MagicMock(return_value=engine)
+        loop._flux_eval_acc = MagicMock(return_value=0.0)
+        tools = MagicMock()
+        tools.call = MagicMock(
+            return_value="plants capture energy photons")
+        loop._flux_tools = MagicMock(return_value=tools)
+
+        out = loop._flux_self_play()
+
+        assert out["attempts"] == 6
+        selfs = [a for a in loop._flux_attempts if a.get("self")]
+        assert len(selfs) == 3              # 0.5 * 6, deduped
+        assert all(a["kind"] == "tool" for a in selfs)
+        prompts = {a["prompt"] for a in selfs}
+        assert "What is entropy?" in prompts
+        assert all(q.endswith("?") for q in prompts)
+
 
 class TestGRPOTrajectoryGrouping:
     """_grpo_train groups trajectories correctly for GRPO."""
