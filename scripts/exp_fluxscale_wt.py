@@ -102,6 +102,7 @@ def main():
            teacher_channel=True,
            teacher_window=4096,
            teacher_w0=0.6,
+           teacher_bulk_chunk=2048,
            bulk_channel_rewards=True,
            snap=str(ROOT / ".tmp" / "wt15m.flux"))
     print("[fluxscale_wt] done")
