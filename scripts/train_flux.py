@@ -36,8 +36,43 @@ from research.tokenizer_cache import get_tokenizer  # noqa: E402
 from forge.engine.engine_common import _tokenizer_for_vocab  # noqa: E402
 
 
+_IM_START = chr(60) + "|im_start|" + chr(62)
+_IM_END = chr(60) + "|im_end|" + chr(62)
+_CHAT_ROLE = {"user": "Question", "assistant": "Answer",
+              "system": "Context", "human": "Question",
+              "gpt": "Answer", "bot": "Answer"}
+
+
+def _render_chat(turns, style: str = "natural") -> str:
+    """Role-tagged turns -> ingest text.
+
+    ``natural``: plain-English blocks ("Question: ... Answer: ...") —
+    the model only ever echoes what it memorized, so ChatML markup
+    would be reproduced verbatim at decode (junk tokens the user
+    explicitly does not want).  ``chatml``: the old im_start/im_end
+    markup.  ``plain``: content lines only.
+    """
+    out = []
+    for t in turns:
+        if not isinstance(t, dict):
+            continue
+        role = str(t.get("role") or "user").lower()
+        v = t.get("content", t.get("value", ""))
+        if not isinstance(v, str) or not v.strip():
+            continue
+        if style == "chatml":
+            out.append(_IM_START + role + "\n" + v + _IM_END + "\n")
+        elif style == "plain":
+            out.append(v)
+        else:
+            label = _CHAT_ROLE.get(role, role.capitalize())
+            out.append(f"{label}: {v.strip()}")
+    return ("\n".join(out) if style != "plain" else "\n".join(out)) \
+        + ("\n" if out else "")
+
+
 def _iter_texts(path: Path, field: str | None, dict_flatten: bool = False,
-                topic=None):
+                topic=None, chat_style: str = "natural"):
     """Yield raw text chunks from .txt/.md or .jsonl (field or common keys)."""
     if path.suffix.lower() in (".jsonl", ".ndjson"):
         with path.open("r", encoding="utf-8", errors="replace") as f:
@@ -69,14 +104,14 @@ def _iter_texts(path: Path, field: str | None, dict_flatten: bool = False,
                         yield str(v)
                     continue
                 else:
-                    # chat transcripts: flatten role-tagged turns
+                    # chat transcripts: role-tagged turns -> natural
+                    # language (or chatml/plain per --chat-style)
                     turns = row.get("messages") or row.get("conversations")
                     if isinstance(turns, list):
-                        yield "".join(
-                            f"<|im_start|>{t.get('role', 'user')}\n"
-                            f"{t.get('content', t.get('value', ''))}"
-                            f"<|im_end|>\n" for t in turns
-                            if isinstance(t, dict))
+                        text = _render_chat(turns, chat_style)
+                        if text.strip() and (topic is None or topic(
+                                str(row.get("title") or ""), text)):
+                            yield text
     elif path.suffix.lower() == ".json":
         rows = json.loads(path.read_text(encoding="utf-8",
                                          errors="replace"))
@@ -86,13 +121,13 @@ def _iter_texts(path: Path, field: str | None, dict_flatten: bool = False,
             if isinstance(row, str):
                 yield row
             elif isinstance(row, dict):
-                # chat transcripts: flatten turns in order
+                # chat transcripts: role-tagged turns rendered per
+                # --chat-style (was: bare content lines)
                 turns = row.get("conversations") or row.get("messages")
                 if isinstance(turns, list):
-                    for t in turns:
-                        v = t.get("value") or t.get("content") or ""
-                        if v:
-                            yield str(v)
+                    text = _render_chat(turns, chat_style)
+                    if text.strip():
+                        yield text
                 elif field and field in row:
                     yield str(row[field])
     else:
@@ -118,6 +153,8 @@ def _flatten_dict_entry(row: dict) -> str | None:
         return None
     head = f"{word} ({pos})" if pos else str(word)
     return head + ": " + "; ".join(glosses[:4]) + "."
+
+
 
 
 # ── topic filters ───────────────────────────────────────────────────────
@@ -239,6 +276,25 @@ def _hf_row_text(row: dict, template: str) -> str:
         _Map({k: _hf_scalar(v) for k, v in row.items()}))
 
 
+def _auto_qa(row: dict) -> str | None:
+    """Natural-language render for QA/instruction schemas (dolly,
+    alpaca, squad-style): 'Context: ...\\nQuestion: ...\\nAnswer: ...'
+    — plain words only, never special-token markup."""
+    q = row.get("instruction") or row.get("question") \
+        or row.get("prompt")
+    a = row.get("response") or row.get("answer") or row.get("output")
+    ctx = row.get("context") or row.get("input")
+    if not (isinstance(q, str) and q.strip()
+            and isinstance(a, str) and a.strip()):
+        return None
+    parts = []
+    if isinstance(ctx, str) and ctx.strip():
+        parts.append(f"Context: {ctx.strip()}")
+    parts.append(f"Question: {q.strip()}")
+    parts.append(f"Answer: {a.strip()}")
+    return "\n".join(parts)
+
+
 def _iter_hf(args):
     """Stream rows from an HF dataset — yields (title, text) pairs."""
     from datasets import load_dataset  # late import — heavy dep
@@ -256,8 +312,16 @@ def _iter_hf(args):
     n_scan = n_skip = 0
     for row in ds:
         title = str(row.get("title") or "")
-        text = (_hf_row_text(row, args.hf_template)
-                if args.hf_template else row.get(args.hf_field))
+        turns = row.get("messages") or row.get("conversations")
+        if args.hf_template:
+            text = _hf_row_text(row, args.hf_template)
+        elif isinstance(turns, list):
+            text = _render_chat(turns, args.chat_style)
+        elif isinstance(row.get(args.hf_field), str) \
+                and row.get(args.hf_field):
+            text = row[args.hf_field]
+        else:
+            text = _auto_qa(row)
         if not isinstance(text, str) or not text:
             continue
         n_scan += 1
@@ -285,12 +349,14 @@ def _learn_docs(model, tok, docs, tag, args, t_start, state):
     pack = getattr(args, "pack_docs", 0)
     pending, last_label = "", ""
 
+    dom = getattr(args, "domain", None)
+
     def emit(text, label):
         """One episode: chunked ingest + soft_reset."""
         for i in range(0, len(text), args.chunk_chars):
             ids = tok.encode(text[i:i + args.chunk_chars],
                              add_special_tokens=False)
-            state["tokens"] += model.ingest(ids, tag=tag)
+            state["tokens"] += model.ingest(ids, tag=tag, domain=dom)
             if (args.ckpt_every and
                     state["tokens"] - state["last_ckpt"] >= args.ckpt_every):
                 model.snapshot(args.out)
@@ -374,6 +440,22 @@ def main() -> int:
                          "QA/chat-style datasets (squad, trivia_qa, "
                          "natural_questions); lists join, dicts unwrap "
                          "text/value keys; overrides --hf-field")
+    ap.add_argument("--chat-style", default="natural",
+                    choices=["natural", "chatml", "plain"],
+                    help="role-tagged transcript rendering. 'natural' "
+                         "= Question:/Answer:/Context: blocks — the "
+                         "model echoes what it memorized, so markup "
+                         "styles reproduce markup at decode. Auto-"
+                         "detects messages/conversations lists and "
+                         "instruction/response/question/answer rows")
+    ap.add_argument("--domains", default=None,
+                    help="comma-separated domain-lane names for a NEW "
+                         "model (e.g. shared,prose,code,chat) — "
+                         "ignored when --resume")
+    ap.add_argument("--domain", default=None,
+                    help="domain lane to ingest under (name from "
+                         "--domains/snapshot or numeric id); keeps "
+                         "chat corpora out of the prose lane")
     ap.add_argument("--wiki-filter", action="store_true",
                     help="skip disambiguation/list/stub wiki pages")
     ap.add_argument("--topic", default=None,
@@ -417,7 +499,9 @@ def main() -> int:
                      cuda_primary=args.cuda_primary,
                      gcell=args.gcell, gsyn=args.gsyn,
                      gsyn_deep=args.gsyn_deep, dnet=args.dnet,
-                     gen_recall=args.gen_recall)
+                     gen_recall=args.gen_recall,
+                     domains=tuple(args.domains.split(","))
+                     if args.domains else ())
     model = (FluxLM.load(args.resume, device=args.device,
                          cuda_primary=args.cuda_primary or None)
              if args.resume else FluxLM(cfg))
@@ -447,7 +531,8 @@ def main() -> int:
                 (".jsonl", ".ndjson", ".json") else None
             docs = ((path.name, t)
                     for t in _iter_texts(path, args.field,
-                                         args.dict_flatten, topic))
+                                         args.dict_flatten, topic,
+                                         args.chat_style))
             done = _learn_docs(model, tok, docs, tag, args,
                                t_start, state)
             el = time.perf_counter() - t_start
