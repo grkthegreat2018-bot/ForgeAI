@@ -30,20 +30,27 @@ class _DiagnosticsMixin:
         self._require_awake()
         if n_runs < 1:
             raise ConfigurationError("n_runs must be positive")
-        self.generate(prompt, max_new_tokens=10, finish_sentence=False)  # warmup
-        times = []
-        token_counts = []
-        for _ in range(n_runs):
-            if self.device.type == "cuda":
-                torch.cuda.synchronize(self.device)
-            tokens_before = self.total_tokens_generated
-            start = time.perf_counter()
-            self.generate(
-                prompt, max_new_tokens=max_new_tokens, finish_sentence=False)
-            if self.device.type == "cuda":
-                torch.cuda.synchronize(self.device)
-            times.append(time.perf_counter() - start)
-            token_counts.append(self.total_tokens_generated - tokens_before)
+        # Hold _gen_lock for the whole measurement — without it another
+        # request can interleave between generate() calls and skew the
+        # timings (EC-130). RLock: the inner generate() re-acquires fine.
+        with self._gen_lock:
+            self.generate(prompt, max_new_tokens=10,
+                          finish_sentence=False)  # warmup
+            times = []
+            token_counts = []
+            for _ in range(n_runs):
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                tokens_before = self.total_tokens_generated
+                start = time.perf_counter()
+                self.generate(
+                    prompt, max_new_tokens=max_new_tokens,
+                    finish_sentence=False)
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                times.append(time.perf_counter() - start)
+                token_counts.append(
+                    self.total_tokens_generated - tokens_before)
         total_time = sum(times)
         total_tokens = sum(token_counts)
         average = total_time / n_runs
@@ -76,6 +83,19 @@ class _DiagnosticsMixin:
             "vram": vram_info,
             "active_config": (self.active_config.to_dict()
                               if self.active_config else None),
+            # Subsystems previously invisible to stats()/diagnose()
+            # (EC-133): suffix memory, hotswap settings + last
+            # reactivation error, session cache, tool registry,
+            # OOM-recovery KV downgrade (EC-114).
+            "suffix_mem": (self._suffix_mem.info()
+                           if getattr(self, "_suffix_mem", None) else None),
+            "hotswap": (self.hotswap.get_settings()
+                        if getattr(self, "hotswap", None) else None),
+            "sessions": (self.session_stats()
+                         if hasattr(self, "session_stats") else None),
+            "tools": (len(self.tools._handlers)
+                      if getattr(self, "tools", None) is not None else 0),
+            "kv_downgrade": getattr(self, "_kv_downgrade", None),
         }
 
     # ── Built-in diagnostics ────────────────────────────────────────────

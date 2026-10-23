@@ -153,6 +153,9 @@ class ForgeEngine(_CheckpointLoadingMixin, _ActivationMixin,
         self.acceleration: str | None = None
         self._active_kv_bits = 8  # default; updated by _activate_kv_cache
         self._active_kv_cache_name: str | None = None
+        # Set by _generate_with_oom_recovery when the engine lands on a
+        # downgraded KV strategy — surfaced via stats() (EC-114).
+        self._kv_downgrade: dict | None = None
         # R65: FluxLM-style exact-suffix sidecar — verbatim recall of
         # evicted context for KV-cache models (enable_suffix_memory).
         self._suffix_mem = None
@@ -243,7 +246,10 @@ class ForgeEngine(_CheckpointLoadingMixin, _ActivationMixin,
         lvl = {"debug": logging.DEBUG, "info": logging.INFO,
                "warn": logging.WARNING, "warning": logging.WARNING,
                "error": logging.ERROR}.get(level, logging.INFO)
-        if logging.getLogger().handlers:
+        if logger.hasHandlers():
+            # Covers named-logger handlers, not just root — the old
+            # getLogger().handlers check printed raw to stdout whenever
+            # only a named logger was configured (EC-131).
             logger.log(lvl, "%s%s", line,
                        f" {data}" if data else "")
         else:
@@ -299,7 +305,7 @@ class ForgeEngine(_CheckpointLoadingMixin, _ActivationMixin,
         leaks of CUDA graph pools and megakernel capture buffers.
         """
         for attr in ("_graph_runner", "_megakernel",
-                     "_flex_decoding", "_chunked_prefill"):
+                     "_flex_decoding", "_chunked_prefiller"):
             obj = getattr(self, attr, None)
             if obj is None:
                 continue

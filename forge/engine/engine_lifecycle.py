@@ -55,20 +55,28 @@ class _LifecycleMixin:
                 # FluxLM tensors are plain attrs — nn.Module.to() is a
                 # no-op on them.  Dense readout offloads via to_device();
                 # cuda_primary GPU tables can't be torn down piecemeal,
-                # so they stay resident (level 2 frees via snapshot).
+                # so escalate to the snapshot path: VRAM is actually freed
+                # and live memory survives the sleep (EC-120).
                 if getattr(self.model, "_gpu", False):
-                    self._log("Sleep level 1: cuda_primary tables stay "
-                              "resident — use sleep(level=2) to free "
-                              "VRAM", level="warn")
+                    self._log("Sleep level 1 on cuda_primary FluxLM: GPU "
+                              "tables can't offload piecemeal — "
+                              "escalating to snapshot sleep",
+                              level="warn")
+                    level = 2
                 else:
                     self.model.to_device("cpu")
+                    self._clear_cuda_cache()
+                    self._awake = False
+                    self._sleep_level = 1
+                    self._log("Sleep level 1: weights offloaded to CPU")
+                    return
             else:
                 self.model.to("cpu", non_blocking=True)
-            self._clear_cuda_cache()
-            self._awake = False
-            self._sleep_level = 1
-            self._log("Sleep level 1: weights offloaded to CPU")
-            return
+                self._clear_cuda_cache()
+                self._awake = False
+                self._sleep_level = 1
+                self._log("Sleep level 1: weights offloaded to CPU")
+                return
 
         # Store minimal state, discard model
         self._stored_config = getattr(self.model, "config", None)
@@ -135,12 +143,24 @@ class _LifecycleMixin:
                 suggestion="Load from checkpoint again with from_checkpoint().")
         if getattr(self, "_stored_is_flux", False):
             from forge.model.flux import FluxLM
-            self.model = FluxLM.load(self._stored_checkpoint,
-                                     device=str(self.device))
+            try:
+                self.model = FluxLM.load(self._stored_checkpoint,
+                                         device=str(self.device))
+            except Exception as e:
+                # Keep _stored_checkpoint so a retry can still succeed;
+                # _awake stays False and generate() refuses via
+                # _require_awake — surface the reason instead of
+                # wedging silently (EC-120).
+                self.model = None
+                raise CheckpointError(
+                    f"Level 2 wake failed — FluxLM snapshot load: {e}",
+                    suggestion="Retry wake(); if the temp snapshot is "
+                               "corrupt, reload with from_flux().") from e
             try:
                 os.unlink(self._stored_checkpoint)   # temp sleep snapshot
-            except OSError:
-                pass
+            except OSError as e:
+                self._log(f"Could not remove temp sleep snapshot "
+                          f"{self._stored_checkpoint}: {e}", level="warn")
         else:
             from forge.model_loader import ModelLoader
             self.model = ModelLoader.build_model_fast(
@@ -184,11 +204,21 @@ class _LifecycleMixin:
         used = total - free
         model_bytes = 0
         if self.is_awake and self.model is not None:
-            model_bytes = sum(
-                parameter.numel() * parameter.element_size()
-                for parameter in self.model.parameters()
-                if parameter.device.type == "cuda"
-            )
+            # Memory models (FluxLM) store weights in plain tensor
+            # attrs/GPU tables — parameters() reports ~0 while GBs are
+            # resident. Prefer the model's own accounting hook (EC-128).
+            report = getattr(self.model, "memory_report", None)
+            if callable(report):
+                try:
+                    model_bytes = int(report().get("vram_MB_est", 0) * 1e6)
+                except Exception:
+                    model_bytes = 0
+            if not model_bytes:
+                model_bytes = sum(
+                    parameter.numel() * parameter.element_size()
+                    for parameter in self.model.parameters()
+                    if parameter.device.type == "cuda"
+                )
         return {
             "total_gb": total / 1e9,
             "free_gb": free / 1e9,

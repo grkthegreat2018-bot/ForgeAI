@@ -136,34 +136,62 @@ class PagedKVCacheStrategy(KVCacheStrategy):
 class RotorQuantKVCache(KVCacheStrategy):
     """RotorQuant KV cache — Givens rotation + Lloyd-Max quantization.
 
-    Wraps existing rotorquant.py. 3-4 bit KV cache with 0.94% error.
+    Wraps rotorquant.py. 3-4 bit KV cache with 0.94% error.
+
+    TurboQuant+ params (optional, via ``build_kv_cache(..., **kwargs)``):
+      bits:            K bit-width (V defaults to this when bits_v unset)
+      bits_v:          V bit-width — V tolerates lower precision than K
+      layer_idx/n_layers + boundary_v_bits: first/last ``boundary_layers``
+                       layers keep V at boundary_v_bits
     """
+
+    def __init__(self, bits: int = 4, bits_v: int | None = None,
+                 layer_idx: int | None = None, n_layers: int | None = None,
+                 boundary_v_bits: int | None = None,
+                 boundary_layers: int = 2):
+        self.bits = bits
+        self.bits_v = bits_v
+        self.layer_idx = layer_idx
+        self.n_layers = n_layers
+        self.boundary_v_bits = boundary_v_bits
+        self.boundary_layers = boundary_layers
 
     def init(self, n_heads, head_dim, n_kv_heads, max_seq_len, device, dtype):
         from forge.quant.rotorquant import RotorQuantCache
         self.cache = RotorQuantCache(
             d_model=n_kv_heads * head_dim, n_heads=n_kv_heads,
-            head_dim=head_dim, bits=4, max_seq_len=max_seq_len,
+            head_dim=head_dim, bits=self.bits, max_seq_len=max_seq_len,
             n_kv_heads=n_kv_heads, device=device, dtype=dtype,
+            bits_v=self.bits_v, layer_idx=self.layer_idx,
+            n_layers=self.n_layers,
+            boundary_v_bits=self.boundary_v_bits,
+            boundary_layers=self.boundary_layers,
         )
         self.n_kv = n_kv_heads
         self.head_dim = head_dim
         self.seq_len = 0
 
     def append(self, k, v, position):
-        self.cache.append(k, v, position)
-        self.seq_len = position + 1
+        self.cache.append(k, v)
+        self.seq_len = position + k.shape[2]
 
     def get(self, positions):
-        return self.cache.get(positions)
+        return self.cache.get()
+
+    def get_sparse_v(self, attn_weights, threshold=1e-6):
+        """Sparse-V dequant skip — see RotorQuantCache.get_sparse_v."""
+        return self.cache.get_sparse_v(attn_weights, threshold)
 
     def clear(self):
         self.cache.clear()
         self.seq_len = 0
 
     def info(self):
-        return {"type": "rotorquant", "seq_len": self.seq_len,
-                "bits": 4, "compression": 16 / 4}
+        # Report the EFFECTIVE bit-widths — K and V may differ after
+        # asymmetric / boundary-V resolution (EC honest-state rule).
+        info = self.cache.info()
+        info["seq_len"] = self.seq_len
+        return info
 
 
 class HadamardKVCache(KVCacheStrategy):
@@ -181,13 +209,18 @@ class HadamardKVCache(KVCacheStrategy):
     from double rotation — but we still rotate K (which QuaRot doesn't cover).
     """
 
+    def __init__(self, bits: int = 4):
+        # Configured bit-width — read at init() so diagnostics report the
+        # real width, not a hardcoded 4.
+        self._cfg_bits = bits
+
     def init(self, n_heads, head_dim, n_kv_heads, max_seq_len, device, dtype):
         self.n_kv = n_kv_heads
         self.head_dim = head_dim
         self.device = device
         self.dtype = dtype
         self.max_seq_len = max_seq_len
-        self.bits = 4
+        self.bits = self._cfg_bits
         self.block_size = 64  # Hadamard block size
 
         # Block-diagonal Hadamard via per-block FWHT (O(n log n), no matrix
@@ -207,7 +240,7 @@ class HadamardKVCache(KVCacheStrategy):
         self.k_scale = None
         self.v_scale = None
         self.seq_len = 0
-        self.qmax = (1 << (self.bits - 1)) - 1  # 7 for 4-bit
+        self.qmax = (1 << (self.bits - 1)) - 1  # 7 for 4-bit, 127 for 8-bit
 
     @staticmethod
     def _fwht_stage_indices(n: int, device):
@@ -351,8 +384,25 @@ class CompressedKVCacheStrategy(KVCacheStrategy):
                 "bits": 8, "keep_ratio": 0.5, "compression": 16 / 8 * 2}
 
 
+_LAZY_KV_STRATEGIES = frozenset({
+    "paged_eviction", "xquant", "cpu_offload", "disk_offload", "s4r",
+    "hqe_kv", "kvzip", "spectral", "residual_stream", "hyquant",
+    "hisparse", "evo_sparse", "vegas", "capture", "vtoken",
+    "auto_context", "matryoshka", "filler", "beacon", "flux",
+    "anchor", "metakv",
+})
+
+
 def build_kv_cache(strategy: str = "standard", **kwargs) -> KVCacheStrategy:
-    """Factory: build KV cache by strategy name."""
+    """Factory: build KV cache by strategy name.
+
+    Strict: unknown names raise ActivationError with the valid list —
+    a typo must never silently downgrade to StandardKVCache (EC-019).
+
+    ``**kwargs`` are forwarded to the strategy constructor (e.g.
+    ``bits=``, ``bits_v=`` for rotorquant).  A kwarg the strategy does
+    not accept raises TypeError — an honest failure, not a silent drop.
+    """
     strategies = {
         "standard": StandardKVCache,
         "paged": PagedKVCacheStrategy,
@@ -369,74 +419,78 @@ def build_kv_cache(strategy: str = "standard", **kwargs) -> KVCacheStrategy:
     # Lazy imports for new strategies (avoid circular imports)
     if strategy == "paged_eviction":
         from forge.engine.kv.paged_eviction import PagedEvictionKVCache
-        return PagedEvictionKVCache()
+        return PagedEvictionKVCache(**kwargs)
     if strategy == "xquant":
         from forge.engine.kv.xquant_kv import XQuantKVCache
-        return XQuantKVCache()
+        return XQuantKVCache(**kwargs)
     if strategy == "cpu_offload":
         from forge.engine.kv.cpu_kv_offload import CPUKVCache
-        return CPUKVCache()
+        return CPUKVCache(**kwargs)
     if strategy == "disk_offload":
         from forge.engine.kv.cpu_kv_offload import DiskKVCache
-        return DiskKVCache()
+        return DiskKVCache(**kwargs)
     if strategy == "s4r":
         from forge.engine.kv.s4r_kv import S4RKVCache
-        return S4RKVCache()
+        return S4RKVCache(**kwargs)
     if strategy == "hqe_kv":
         from forge.engine.kv.hqe_kv import HqeKVCache
-        return HqeKVCache()
+        return HqeKVCache(**kwargs)
     if strategy == "kvzip":
-        return KVzipCacheStrategy()
+        return KVzipCacheStrategy(**kwargs)
     if strategy == "spectral":
         from forge.engine.kv.spectral_kv import SpectralKVCache
-        return SpectralKVCache()
+        return SpectralKVCache(**kwargs)
     if strategy == "residual_stream":
         from forge.engine.kv.residual_cache import ResidualStreamCache
-        return ResidualStreamCache()
+        return ResidualStreamCache(**kwargs)
     if strategy == "hyquant":
         from forge.engine.kv.hyquant_kv import HyQuantKVCache
-        return HyQuantKVCache()
+        return HyQuantKVCache(**kwargs)
     if strategy == "hisparse":
         from forge.engine.kv.hisparse_kv import HiSparseKVCache
-        return HiSparseKVCache()
+        return HiSparseKVCache(**kwargs)
     if strategy == "evo_sparse":
         from forge.engine.kv.evo_sparse import EvoSparseKVCache
-        return EvoSparseKVCache()
+        return EvoSparseKVCache(**kwargs)
     if strategy == "vegas":
         from forge.engine.kv.vegas_kv import VegasKVCache
-        return VegasKVCache()
+        return VegasKVCache(**kwargs)
     if strategy == "capture":
         from forge.engine.kv.capture_kv import CaptureKVCache
-        return CaptureKVCache()
+        return CaptureKVCache(**kwargs)
     if strategy == "vtoken":
         from forge.engine.kv.vtoken_kv import VTokenKVCache
-        return VTokenKVCache()
+        return VTokenKVCache(**kwargs)
     if strategy == "auto_context":
         from forge.engine.kv.auto_context import AutoContextKVCache
-        return AutoContextKVCache()
+        return AutoContextKVCache(**kwargs)
     if strategy == "matryoshka":
         from forge.engine.kv.matryoshka_kv import MatryoshkaKVCache
-        return MatryoshkaKVCache()
+        return MatryoshkaKVCache(**kwargs)
     if strategy == "filler":
-        return FillerKVCacheStrategy()
+        return FillerKVCacheStrategy(**kwargs)
     # R60: paper-faithful KV compression trio — all expose
     # compact_past_kv(past_kv) so the decode loop can call them live.
     if strategy == "beacon":
         from forge.engine.kv.beacon_kv import BeaconKVCache
-        return BeaconKVCache()
+        return BeaconKVCache(**kwargs)
     if strategy == "flux":
         from forge.engine.kv.flux_kv import FluxKVCache
-        return FluxKVCache()
+        return FluxKVCache(**kwargs)
     if strategy == "anchor":
         from forge.engine.kv.anchor_kv import AnchorKVCache
-        return AnchorKVCache()
+        return AnchorKVCache(**kwargs)
     if strategy == "metakv":
         from forge.engine.kv.metakv import MetaKVCache
-        return MetaKVCache()
-    cls = strategies.get(strategy, StandardKVCache)
-    if cls is None:
-        return StandardKVCache()
-    return cls()
+        return MetaKVCache(**kwargs)
+    cls = strategies.get(strategy)
+    if cls is not None:
+        return cls(**kwargs)
+    from forge.engine.errors import ActivationError
+    valid = sorted(set(strategies) | _LAZY_KV_STRATEGIES)
+    raise ActivationError(
+        f"Unknown kv_cache strategy {strategy!r}. "
+        f"Valid: {', '.join(valid)}")
 
 
 class StreamingKVCacheStrategy(KVCacheStrategy):

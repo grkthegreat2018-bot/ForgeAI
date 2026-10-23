@@ -108,6 +108,9 @@ class HotSwapManager:
         self._current = EngineSettings()
         self._pending: EngineSettings | None = None
         self._overrides: dict[str, dict] = {}  # per-request overrides by request_id
+        # Set when a reactivation attempt raised — surfaced via
+        # get_settings() so the failure isn't invisible (EC-100).
+        self._last_reactivation_error: str | None = None
 
     @property
     def current(self) -> EngineSettings:
@@ -231,6 +234,10 @@ class HotSwapManager:
                 self._pending = EngineSettings(**asdict(self._current))
             if hasattr(self._pending, flag):
                 setattr(self._pending, flag, enabled)
+            else:
+                self.engine._log(
+                    f"hotswap.set_feature: unknown flag '{flag}' ignored",
+                    level="warn", source="hotswap")
 
     def set_features(self, **flags):
         """Toggle multiple feature flags at once."""
@@ -240,6 +247,10 @@ class HotSwapManager:
             for flag, enabled in flags.items():
                 if hasattr(self._pending, flag):
                     setattr(self._pending, flag, enabled)
+                else:
+                    self.engine._log(
+                        f"hotswap.set_features: unknown flag '{flag}' "
+                        "ignored", level="warn", source="hotswap")
 
     # ── VRAM management ──
 
@@ -285,6 +296,10 @@ class HotSwapManager:
             for key, value in changes.items():
                 if hasattr(self._pending, key):
                     setattr(self._pending, key, value)
+                else:
+                    self.engine._log(
+                        f"hotswap.update: unknown setting '{key}' ignored",
+                        level="warn", source="hotswap")
 
     def update_from_dict(self, d: dict[str, Any]):
         """Update from a dictionary (e.g. JSON API request body)."""
@@ -292,8 +307,14 @@ class HotSwapManager:
             if self._pending is None:
                 self._pending = EngineSettings(**asdict(self._current))
             for key, value in d.items():
-                if hasattr(self._pending, key) and value is not None:
+                if value is None:
+                    continue
+                if hasattr(self._pending, key):
                     setattr(self._pending, key, value)
+                else:
+                    self.engine._log(
+                        f"hotswap.update_from_dict: unknown setting "
+                        f"'{key}' ignored", level="warn", source="hotswap")
 
     # ── Per-request overrides ──
 
@@ -343,10 +364,17 @@ class HotSwapManager:
             needs_reactivation = bool(changes.keys() & reactivation_fields)
 
             if needs_reactivation:
-                self._apply_reactivation(pending)
-            else:
-                # Only generation defaults changed — apply instantly
-                self._current = EngineSettings(**asdict(pending))
+                try:
+                    self._apply_reactivation(pending)
+                except Exception as e:
+                    # A failed reactivation must not leave _pending set —
+                    # apply_pending() runs before EVERY generate(), so the
+                    # known-failing config would retry forever.  Clear it,
+                    # keep _current, record the failure for get_settings().
+                    self._pending = None
+                    self._last_reactivation_error = str(e)
+                    raise
+                self._last_reactivation_error = None
 
             self._current = EngineSettings(**asdict(pending))
             self._pending = None
@@ -357,22 +385,28 @@ class HotSwapManager:
         engine = self.engine
         old_kv = engine.kv_cache
 
-        # Build new ActivationConfig
-        config = ActivationConfig(
-            kv_cache=settings.kv_cache,
-            decoding=settings.decoding,
-            quantize=settings.quantize,
-            acceleration=settings.acceleration,
-            kv_bits=settings.kv_bits,
-            kv_cache_tokens=settings.kv_cache_tokens,
-            use_compile=settings.use_compile,
-            use_triton_conv=settings.use_triton_conv,
-            use_prefix_cache=settings.use_prefix_cache,
-            use_chunked_prefill=settings.use_chunked_prefill,
-            use_fused_qk_norm_rope_cache=settings.use_fused_qk_norm_rope_cache,
-            use_seq_split=settings.use_seq_split,
-            warmup=False,  # don't re-warmup on hot-swap
-        )
+        # Seed from the engine's ACTIVE config so previously-enabled
+        # feature flags (avmp, learned_prefix_cache, ...) survive the
+        # swap — a bare ActivationConfig would silently drop them while
+        # leaving the stale instances half-active (EC-115).
+        base = engine.active_config
+        if base is None:
+            base = ActivationConfig()
+        config = ActivationConfig(**base.to_dict())
+        config.kv_cache = settings.kv_cache
+        config.decoding = settings.decoding
+        config.quantize = settings.quantize
+        config.acceleration = settings.acceleration
+        config.kv_bits = settings.kv_bits
+        config.kv_cache_tokens = settings.kv_cache_tokens
+        config.use_compile = settings.use_compile
+        config.use_triton_conv = settings.use_triton_conv
+        config.use_prefix_cache = settings.use_prefix_cache
+        config.use_chunked_prefill = settings.use_chunked_prefill
+        config.use_fused_qk_norm_rope_cache = (
+            settings.use_fused_qk_norm_rope_cache)
+        config.use_seq_split = settings.use_seq_split
+        config.warmup = False  # don't re-warmup on hot-swap
 
         # Clear old KV cache if strategy changed
         kv_changed = settings.kv_cache != self._current.kv_cache
@@ -400,6 +434,8 @@ class HotSwapManager:
             result = self._current.to_dict()
             if self._pending:
                 result["_pending"] = self._pending.diff(self._current)
+            if self._last_reactivation_error:
+                result["_reactivation_error"] = self._last_reactivation_error
             return result
 
     def get_pending_changes(self) -> dict[str, Any]:

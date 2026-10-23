@@ -145,7 +145,7 @@ def _h_compile_autotune(eng, _flags):
 
 def _h_hybrid_prefill(eng, _flags):
     from forge.engine.prefill import HybridChunkedPrefiller
-    eng._chunked_prefill = HybridChunkedPrefiller(
+    eng._chunked_prefiller = HybridChunkedPrefiller(
         eng.model, chunk_size=512, device=str(eng.device))
     return "Hybrid chunked prefill: active (adaptive chunking)"
 

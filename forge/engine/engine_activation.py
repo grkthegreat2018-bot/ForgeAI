@@ -81,14 +81,22 @@ class _ActivationMixin:
             features.append("mtp")
         if "_airllm_streamable" in keys:
             features.append("airllm")
-        if metadata.get("_bitnet_prequant") == "1":
+        is_bitnet_prequant = metadata.get("_bitnet_prequant") == "1"
+        if is_bitnet_prequant:
             features.append("bitnet_prequant")
             self._log(f"Pre-quantized BitNet checkpoint detected "
                       f"(mode={metadata.get('_prequant_mode', 'int8')})")
-        # QuaRot detection: check if V/O weights are Hadamard-rotated
-        # (heuristic: compare against original if available)
-        features.append("quarot")  # Assume applied by pipeline
-        features.append("mrl")     # Assume applied by pipeline
+        # QuaRot/MRL: the BitNet prequant pipeline always applies both; on
+        # any other checkpoint require explicit evidence (metadata flag or
+        # rotation/MRL tensors). Marking them unconditionally enabled
+        # QuaRotKV rotation semantics on weights that were never rotated
+        # (EC-098).
+        if (is_bitnet_prequant or metadata.get("_quarot") == "1"
+                or any("quarot" in k or "hadamard" in k for k in keys)):
+            features.append("quarot")
+        if (is_bitnet_prequant or metadata.get("_mrl") == "1"
+                or any("mrl" in k for k in keys)):
+            features.append("mrl")
 
         self.keystack_features = features
         self._checkpoint_metadata = metadata
@@ -164,7 +172,9 @@ class _ActivationMixin:
         self._activate_core_innovations(
             config.quantize, config.mrl_keep_ratio, config.kv_cache,
             config.kv_bits, feature_flags)
-        self._activate_kv_cache(config.kv_cache, config.kv_cache_tokens)
+        self._activate_kv_cache(config.kv_cache, config.kv_cache_tokens,
+                                kv_bits=config.kv_bits,
+                                kv_v_bits=config.kv_v_bits)
         self._activate_decoding(config.decoding)
         self._activate_acceleration(config.acceleration)
         self._activate_compile_runtime(feature_flags)
@@ -182,8 +192,10 @@ class _ActivationMixin:
             # This allows restore when activate(quantize=None) is called later.
             if not hasattr(self, '_original_weights') or self._original_weights is None:
                 self._save_original_weights()
-            self._apply_quantization(quantize)
-            self.quantize = quantize
+            # Record the APPLIED mode — the fallback chain may land on a
+            # lower-bit mode (or bf16) and self.quantize must not lie
+            # about what is actually running (EC-031).
+            self.quantize = self._apply_quantization(quantize)
         elif self.quantize is not None:
             # quantize=None but model was previously quantized → restore originals
             self._log(f"Restoring unquantized weights (was: {self.quantize})")
@@ -277,7 +289,12 @@ class _ActivationMixin:
         "streaming": [],
     }
 
-    def _activate_kv_cache(self, kv_cache, kv_cache_tokens):
+    # Strategies that accept constructor kwargs for bit-width config.
+    _KV_BIT_STRATEGIES = {"rotorquant", "hadamard_int4"}
+
+    def _activate_kv_cache(self, kv_cache, kv_cache_tokens,
+                           kv_bits: int = 4,
+                           kv_v_bits: int | None = None):
         cfg = getattr(self.model, "config", None)
         n_heads = getattr(cfg, "n_heads", 12)
         n_kv = getattr(cfg, "n_kv_heads", 2) or n_heads
@@ -317,7 +334,15 @@ class _ActivationMixin:
                 # Build + init into a local first: self.kv_cache must never
                 # reference a half-initialized cache (a concurrent stats()
                 # read crashed on missing attributes during the swap).
-                cache = build_kv_cache(try_cache)
+                # kv_bits/kv_v_bits only reach strategies that consume
+                # them — passing them to a fixed-width cache would fail
+                # the try and wrongly report the strategy as broken.
+                cache_kwargs = {}
+                if try_cache in self._KV_BIT_STRATEGIES:
+                    cache_kwargs = {"bits": kv_bits}
+                    if try_cache == "rotorquant" and kv_v_bits is not None:
+                        cache_kwargs["bits_v"] = kv_v_bits
+                cache = build_kv_cache(try_cache, **cache_kwargs)
                 cache.init(n_heads, head_dim, n_kv, max_seq,
                            str(self.device), self.dtype)
                 self.kv_cache = cache
@@ -394,7 +419,8 @@ class _ActivationMixin:
         if gate is not None:
             if gate <= 0:
                 return None
-            mem.gate = gate
+            from forge.engine.engine_common import _SuffixMemView
+            return _SuffixMemView(mem, float(gate))
         return mem
 
     def _activate_decoding(self, decoding):
@@ -541,12 +567,14 @@ class _ActivationMixin:
         else:
             self._cache_blend = None
 
-        # Chunked prefill
-        self._chunked_prefill = None
+        # Chunked prefill — named `_chunked_prefiller` (not
+        # `_chunked_prefill`, which is the mixin method it would shadow).
+        # `_prefill` dispatches long prompts through it (EC-108).
+        self._chunked_prefiller = None
         if (feature_flags["use_chunked_prefill"]
                 and not feature_flags["use_hybrid_prefill"]):
             from forge.engine.prefill import ChunkedPrefiller
-            self._chunked_prefill = ChunkedPrefiller(
+            self._chunked_prefiller = ChunkedPrefiller(
                 self.model, chunk_size=512, device=str(self.device))
             self._log("Chunked prefill: active (chunk_size=512)")
 
@@ -601,8 +629,16 @@ class _ActivationMixin:
             vocab_size = getattr(vocab_size, 'vocab_size', 65536) if vocab_size else 65536
             dummy = torch.randint(0, min(vocab_size, 32767), (1, 4),
                                   device=self.device, dtype=torch.long)
+            # The use_cache forward fills live conv/SSM buffers with
+            # garbage-token state — snapshot before and restore after so
+            # live-state readers (gated probes, snapshots) never observe
+            # the residue (EC-126).
+            from forge.engine.decoding import (
+                _spec_snapshot_recurrent, _spec_restore_recurrent)
+            snap = _spec_snapshot_recurrent(self.model)
             with torch.inference_mode():
                 self.model(dummy, use_cache=True)
+            _spec_restore_recurrent(snap)
             if self.device.type == "cuda":
                 torch.cuda.synchronize()
             self._log("Warmup: all CUDA kernels pre-compiled "
@@ -660,12 +696,16 @@ class _ActivationMixin:
         self._log(f"Restored {len(self._original_weights)} weight tensors "
                   f"from snapshot")
 
-    def _apply_quantization(self, mode: str):
+    def _apply_quantization(self, mode: str) -> str | None:
         """Apply weight-only quantization with automatic fallback.
 
         If the requested mode fails (unsupported hardware, OOM, ImportError),
         falls back through progressively lower-bit modes, finally to
         unquantized bf16. Never leaves the model in a broken state.
+
+        Returns the EFFECTIVE applied mode (may differ from ``mode``
+        after a fallback — callers must store the return value, not the
+        request, in ``self.quantize``).
         """
         chain = [mode] + self._QUANT_FALLBACK_CHAIN.get(mode, [None])
         last_error = None
@@ -677,14 +717,15 @@ class _ActivationMixin:
                     level="warn")
                 if last_error:
                     self._log(f"  Last error: {last_error}", level="warn")
-                return  # leave model unquantized
+                return None  # leave model unquantized
             try:
                 self._apply_quantization_single(try_mode)
                 if try_mode != mode:
                     self._log(
                         f"Quantization fallback: '{mode}' failed, "
-                        f"using '{try_mode}' instead", level="warn")
-                return
+                        f"using '{try_mode}' instead — effective mode "
+                        f"reported as '{try_mode}'", level="warn")
+                return try_mode
             except (ImportError, RuntimeError, ValueError,
                     torch.cuda.OutOfMemoryError) as e:
                 last_error = e
@@ -902,18 +943,14 @@ class _ActivationMixin:
                       f"K={K}). Sub-1-bit via pattern clustering.")
         elif mode == "ternary_ptq":
             from forge.engine.quant.novel_quant_r48 import (
-                collect_activations as _collect_acts_r48,
-            )
-            from forge.engine.quant.novel_quant_r48 import (
                 quantize_model_ternary_ptq,
             )
             cfg = getattr(self.model, "config", None)
             vocab_size = getattr(cfg, "vocab_size", 32000) if cfg else 32000
             calib_ids = torch.randint(0, vocab_size, (4, 128))
-            acts = _collect_acts_r48(self.model, calib_ids.to(self.device),
-                                     n_samples=128, device=str(self.device)) \
-                if hasattr(_collect_acts_r48, '__call__') else None
-            # Use R46's collect_activations (same signature)
+            # R46's collector is the calibration source (the r48 call used
+            # to run an identical pass first, then get overwritten —
+            # a full wasted calibration forward).
             from forge.engine.quant.novel_quant_r46 import collect_activations as _ca46
             acts = _ca46(self.model, calib_ids.to(self.device),
                          n_samples=128, device=str(self.device))
@@ -950,26 +987,32 @@ class _ActivationMixin:
         except Exception:
             return
         if free < self._LOW_VRAM_THRESHOLD_BYTES:
-            kv_info = self.kv_cache.info() if self.kv_cache else {}
-            kv_type = kv_info.get("type", kv_info.get("name", "none"))
-            if kv_type != "cpu_offload":
+            # The old code swapped kv_cache to 'cpu_offload' — a backend
+            # the decode path never calls, so the "rescue" was a placebo.
+            # What actually bounds KV VRAM:
+            #   1. the live compaction watermark — shrinking it makes
+            #      _maybe_compact_past_kv evict aggressively per step;
+            #   2. the context budget for FUTURE prompts (hotswap cap).
+            cache = getattr(self, "kv_cache", None)
+            if cache is not None and getattr(cache, "compact_over", None):
+                wm = max(512, int(cache.compact_over) // 4)
+                cache.compact_over = wm
                 self._log(
-                    f"Low VRAM ({free / 1e9:.2f} GB free < "
-                    f"{self._LOW_VRAM_THRESHOLD_BYTES / 1e9:.2f} GB) — "
-                    f"proactively switching KV cache to cpu_offload",
-                    level="warn")
+                    f"Low VRAM ({free / 1e9:.2f} GB free) — shrank KV "
+                    f"compaction watermark to {wm} tokens; decode-loop "
+                    "eviction now runs aggressively", level="warn")
                 self._clear_cuda_cache()
-                try:
-                    self._activate_kv_cache("cpu_offload", None)
-                except Exception as e:
-                    self._log(
-                        f"Proactive CPU offload failed: {e}", level="warn")
+            else:
+                self.hotswap.set_context_limit(4096)
+                kv_info = cache.info() if cache else {}
+                kv_type = kv_info.get("type", kv_info.get("name", "none"))
+                self._log(
+                    f"Low VRAM ({free / 1e9:.2f} GB free) — capped "
+                    f"context at 4096 tokens for future requests; "
+                    f"kv_cache '{kv_type}' has no live compaction hook, "
+                    "so an in-flight long generation can still OOM. "
+                    "For a hard bound use an evicting cache "
+                    "(streaming/beacon/anchor)", level="warn")
+                self._clear_cuda_cache()
 
-    # Evolution-discovered creative sampling preset (score 10.45):
-    # High temperature + high top_p + moderate top_k + low penalties.
-    # Use for creative/diverse generation tasks.
-    CREATIVE_SAMPLING = {
-        "temperature": 1.98, "top_p": 0.989, "top_k": 69,
-        "repetition_penalty": 1.011, "frequency_penalty": 0.014,
-    }
 

@@ -24,7 +24,11 @@ from typing import Optional
 # The canonical tokenizer directory — the only one that exists on disk.
 # Old code may pass "research/checkpoints/forgelm_v2_tokenizer" (the pre-V10
 # name); get_tokenizer() auto-redirects those to this path.
-CANONICAL_TOKENIZER_PATH = "research/checkpoints/forgelm_v2_tokenizer"
+# Absolute: callers/GUI launch with an arbitrary cwd, and os.path.isdir
+# checks below must not depend on it (EC-129).
+from pathlib import Path as _Path
+CANONICAL_TOKENIZER_PATH = str(
+    _Path(__file__).resolve().parent / "checkpoints" / "forgelm_v2_tokenizer")
 
 # Legacy paths that should be silently redirected to the canonical one.
 # This avoids touching 20+ call sites that still reference the old name.

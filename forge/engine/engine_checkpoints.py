@@ -154,7 +154,8 @@ class _CheckpointLoadingMixin:
         # GGUF checkpoint detection — route to ForgeLoader for dequant + load
         if str(checkpoint).lower().endswith(".gguf"):
             return cls._load_gguf_checkpoint(
-                checkpoint, _tokenizer(), device, auto_activate, **kwargs)
+                checkpoint, _tokenizer(), device, auto_activate,
+                act_kwargs=act_kwargs, **kwargs)
 
         ckpt_size = _checkpoint_size_cache.get(checkpoint)
         if ckpt_size is None:
@@ -216,7 +217,8 @@ class _CheckpointLoadingMixin:
                     cfg, checkpoint, _tokenizer(), device,
                     ckpt_size, vram_free, **kwargs)
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
-            if "size mismatch" in str(e).lower():
+            msg = str(e).lower()
+            if "size mismatch" in msg:
                 # Weights don't fit the built model — streaming the same
                 # shapes would silently produce a random-weight model.
                 raise CheckpointError(
@@ -226,10 +228,22 @@ class _CheckpointLoadingMixin:
                              "config": config_name},
                     suggestion="Select the config matching this checkpoint."
                 ) from e
-            # If the primary load path fails (OOM, corrupt weights, etc.),
-            # fall through to the streaming path as a last resort.
+            # Only genuine OOM may fall through to streaming — any other
+            # RuntimeError (corrupt weights, construction bug) must surface
+            # instead of silently producing a worse engine (EC-107).
+            if not (isinstance(e, torch.cuda.OutOfMemoryError)
+                    or "out of memory" in msg or "oom" in msg):
+                raise CheckpointError(
+                    f"Checkpoint load failed (not an OOM — refusing "
+                    f"streaming fallback): {e}",
+                    context={"checkpoint": checkpoint,
+                             "config": config_name},
+                    suggestion="Inspect the underlying error; if the model "
+                               "simply doesn't fit, reduce activation memory "
+                               "or use load_quantize.",
+                ) from e
             logger.warning(
-                "Load path failed (%s), falling back to AirLLM streaming...", e)
+                "Load path OOM'd (%s), falling back to AirLLM streaming...", e)
             cls._clear_cuda_cache_static(dev)
             engine = cls._load_streaming(
                 cfg, checkpoint, _tokenizer(), device,
@@ -766,10 +780,25 @@ class _CheckpointLoadingMixin:
                 head_module.register_buffer("weight_int8", w_int8)
                 head_module.register_buffer("qscale_buf", qscale)
                 head_module._prequantized = True
-                # Monkey-patch forward to use int8 buffer
-                _orig_forward = head_module.forward
+                # Monkey-patch forward: real W8A8 — quantize activations
+                # to int8 and use torch._int_mm (no full-weight dequant per
+                # token; the old `_w.to(x.dtype)` materialized ~250MB fp16
+                # every forward). Falls back to dequant on non-CUDA.
                 def _int8_forward(x, _w=w_int8, _s=qscale, _b=head_module.bias):
-                    return F.linear(x, _w.to(x.dtype), _b) * _s.to(x.dtype)
+                    if (x.device.type == "cuda"
+                            and hasattr(torch, "_int_mm")
+                            and x.shape[-1] >= 32):
+                        x2 = x.reshape(-1, x.shape[-1])
+                        xa = (x2.float().abs().amax(-1, keepdim=True)
+                              .clamp_(min=1e-8) / 127.0)
+                        xq = (x2.float() / xa).round_().clamp_(
+                            -127, 127).to(torch.int8)
+                        y = torch._int_mm(
+                            xq, _w.t().to(torch.int8)).float() * (xa * _s.float())
+                        if _b is not None:
+                            y = y + _b
+                        return y.view(*x.shape[:-1], _w.shape[0])
+                    return F.linear(x, _w.to(x.dtype) * _s.to(x.dtype), _b)
                 head_module.forward = _int8_forward
                 int8_loaded += 1
             elif key.endswith(".qscale") and (
@@ -795,9 +824,13 @@ class _CheckpointLoadingMixin:
                     "Unexpected keys: %s%s", unexpected[:5],
                     "..." if len(unexpected) > 5 else "")
 
-        # 6. Re-tie weights if needed (assign breaks sharing)
+        # 6. Re-tie weights if needed (assign breaks sharing). Skip when
+        # the head was prequantized — its `weight` param was deleted and
+        # re-tieing would register a stale fp weight that never runs.
         if getattr(cfg, 'tie_word_embeddings', True) \
-                and not getattr(cfg, 'use_pit', False):
+                and not getattr(cfg, 'use_pit', False) \
+                and not getattr(getattr(model, 'head', None),
+                                '_prequantized', False):
             model.head.weight = model.embed.weight
 
         # 7. Move non-int8 params/buffers to target device
@@ -834,9 +867,12 @@ class _CheckpointLoadingMixin:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        # 10. Post-load QK-norm identity scan
-        for block in model.blocks:
-            attn = block.attn
+        # 10. Post-load QK-norm identity scan — non-Forge archs may not
+        # expose `.blocks`/`.attn`; probe defensively (EC-134).
+        for block in getattr(model, "blocks", ()) or ():
+            attn = getattr(block, "attn", None)
+            if attn is None:
+                continue
             if hasattr(attn, 'q_norm') and hasattr(attn, '_qk_norm_identity'):
                 q_id = (attn.q_norm.weight == 1.0).all()
                 k_id = (attn.k_norm.weight == 1.0).all()
@@ -853,13 +889,20 @@ class _CheckpointLoadingMixin:
         engine = cls(model, tokenizer, device=device,
                      checkpoint_path=checkpoint, **kwargs)
         engine._checkpoint_metadata = metadata
-        engine.keystack_features = ["bitnet_prequant", "quarot", "mrl"]
+        # Merge, don't replace — __init__ already detected mtp/
+        # value_residual/... from checkpoint keys; clobbering them here
+        # made _auto_activate_optimal miss mtp_selfspec/v0_warm (EC-106).
+        # The BitNet prequant pipeline always applies QuaRot + MRL.
+        engine.keystack_features = sorted(
+            set(engine.keystack_features)
+            | {"bitnet_prequant", "quarot", "mrl"})
         engine._log(f"KeyStack features: {engine.keystack_features}")
         return engine
 
     @classmethod
     def _load_gguf_checkpoint(cls, checkpoint, tokenizer, device,
-                              auto_activate=True, **kwargs) -> "ForgeEngine":
+                              auto_activate=True, act_kwargs=None,
+                              **kwargs) -> "ForgeEngine":
         """Load a GGUF checkpoint with dequantization.
 
         Uses ForgeLoader to parse the GGUF file, dequantize quantized tensors
@@ -884,9 +927,24 @@ class _CheckpointLoadingMixin:
             f"{arch}.attention.head_count_kv", n_heads)
         intermediate = info.metadata.get(
             f"{arch}.feed_forward_length", int(4 * d_model))
-        vocab_size = info.metadata.get(f"{arch}.vocab_size", 32000)
+        vocab_size = info.metadata.get(f"{arch}.vocab_size")
+        if vocab_size is None:
+            # Fall back to the embedded tokenizer's token count before
+            # guessing — a hardcoded 32000 silently mismatches real vocabs.
+            tokens = info.metadata.get("tokenizer.ggml.tokens")
+            vocab_size = len(tokens) if tokens else 32000
         max_seq = info.metadata.get(
             f"{arch}.context_length", info.get_context_length())
+        # Architecture params live in GGUF metadata — hardcoding rope_base/
+        # norm_eps produced silently wrong RoPE/norm on non-llama-1 archs.
+        rope_base = float(info.metadata.get(
+            f"{arch}.rope.freq_base", 10000.0))
+        norm_eps = float(info.metadata.get(
+            f"{arch}.attention.layer_norm_rms_epsilon", 1e-5))
+        # Gemma2/3-style QK-norm is visible in the tensor names.
+        use_qk_norm = any(
+            "attn_q_norm" in t["name"] or "attn_k_norm" in t["name"]
+            for t in info.tensors)
 
         cfg = ModelConfig(
             vocab_size=vocab_size,
@@ -899,13 +957,13 @@ class _CheckpointLoadingMixin:
             attn_bias=False,
             ffn_type="swiglu",
             norm_type="rmsnorm",
-            norm_eps=1e-5,
+            norm_eps=norm_eps,
             use_embed_norm=False,
             use_final_norm=True,
-            rope_base=10000.0,
+            rope_base=rope_base,
             max_seq_len=max_seq,
             layer_types=["attention"] * n_layers,
-            use_qk_norm=False,
+            use_qk_norm=use_qk_norm,
             use_bitnet=False,
             use_bitnet_residual=False,
             ffn_compression="none",
@@ -928,38 +986,60 @@ class _CheckpointLoadingMixin:
         model = ModelLoader.build_model(cfg, checkpoint_path=None)
         model = model.to(device).to(torch.float16)
 
-        # Load and dequantize weights from GGUF
-        state_dict = {}
+        # Load and dequantize weights from GGUF — stream each tensor
+        # straight into its target param instead of staging a second full
+        # fp16 state_dict (a 6 GB Q4 GGUF previously needed ~18 GB peak:
+        # model + state_dict + mapped copy).  Peak is now model + one
+        # tensor.  GGUF names map via _map_gguf_to_forge.
+        params = dict(model.named_parameters(remove_duplicate=False))
+        buffers = dict(model.named_buffers(remove_duplicate=False))
+        expected_keys = set(params) | set(buffers)
+        loaded_keys, unexpected, failed = set(), [], []
         for t_info in info.tensors:
             name = t_info["name"]
+            forge_name = _map_gguf_to_forge(name)
+            if forge_name is None:
+                unexpected.append(name)
+                continue
+            target = params.get(forge_name)
+            if target is None:
+                target = buffers.get(forge_name)
+            if target is None:
+                unexpected.append(name)
+                continue
             try:
                 tensor = info.get_tensor(name, dequantize=True)
-                state_dict[name] = tensor.to(device).to(torch.float16)
+                if tuple(tensor.shape) != tuple(target.shape):
+                    failed.append(
+                        f"{name}: shape {tuple(tensor.shape)} != "
+                        f"{tuple(target.shape)}")
+                    continue
+                with torch.no_grad():
+                    target.data.copy_(tensor.to(
+                        device=target.device, dtype=target.dtype))
+                loaded_keys.add(forge_name)
             except Exception as e:
-                logger.warning("GGUF: skipping tensor %s: %s", name, e)
-
-        # Map GGUF tensor names to Forge model names
-        # GGUF uses: blk.N.attn_q.weight, blk.N.ffn_gate.weight, etc.
-        # Forge uses: blocks.N.attn.q_proj.weight, blocks.N.ffn.w_gate.weight, etc.
-        mapped = {}
-        for name, tensor in state_dict.items():
-            forge_name = _map_gguf_to_forge(name)
-            if forge_name:
-                mapped[forge_name] = tensor
-
-        # Load mapped weights into model (strict=False for missing/extra keys)
-        missing, unexpected = model.load_state_dict(mapped, strict=False)
+                failed.append(f"{name}: {e}")
+        missing = sorted(expected_keys - loaded_keys)
         if missing:
             logger.warning("GGUF missing keys: %d (first 5: %s)",
                            len(missing), missing[:5])
         if unexpected:
             logger.warning("GGUF unexpected keys: %d", len(unexpected))
+        if failed:
+            logger.warning("GGUF failed tensors: %d (first 5: %s)",
+                           len(failed), failed[:5])
 
+        n_tensors = len(info.tensors)
         info.close()
         engine = cls(model, tokenizer, device=device,
                      checkpoint_path=checkpoint, **kwargs)
-        engine._log(f"GGUF loaded: {arch}, {len(state_dict)} tensors, "
-                    f"{len(mapped)} mapped")
+        # Activation overrides (kv_cache_tokens, use_*, ...) must be set
+        # BEFORE auto-activation or they are silently dropped (EC-099).
+        if act_kwargs:
+            engine._user_activation_overrides = act_kwargs
+        engine._log(f"GGUF loaded: {arch}, {n_tensors} tensors, "
+                    f"{len(loaded_keys)} mapped")
         if auto_activate:
             engine._auto_activate_optimal()
         return engine
@@ -1039,7 +1119,10 @@ class _CheckpointLoadingMixin:
         engine = cls(model, tokenizer, device=device,
                      checkpoint_path=checkpoint, **kwargs)
         engine._load_quantize = mode_eff
-        engine.keystack_features = [f"load_quant_{mode_eff}"]
+        # Merge with detected features — don't drop mtp/value_residual
+        # (EC-106).
+        engine.keystack_features = sorted(
+            set(engine.keystack_features) | {f"load_quant_{mode_eff}"})
         engine._log(f"load_quantize={mode_eff}: "
                     f"{n_params / 1e9:.1f}B params, weights packed pre-GPU")
         return engine

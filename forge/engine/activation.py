@@ -41,6 +41,11 @@ class ActivationConfig:
     # Innovation parameters
     mrl_keep_ratio: float | None = None
     kv_bits: int = 4
+    # TurboQuant+: asymmetric V bit-width (None → same as kv_bits) and
+    # higher-precision V on boundary layers when caches are built
+    # per-layer (layer_idx/n_layers passed to the strategy).
+    kv_v_bits: int | None = None
+    kv_boundary_v_bits: int | None = None
     use_v0_warm: bool = False
     use_progressive_kv: bool = False
 
