@@ -1363,10 +1363,15 @@ class ForgeEvolve:
                                   if c.get("template_config") is not None]
 
                 # Template proposals bypass the frontier (few, full configs).
+                # Dedup keys are bare config keys — a template that decodes
+                # to a config already queued/evaluated by another emitter
+                # would otherwise be evaluated twice (mixed "t"/"c"
+                # namespaces let the same config slip past dedup).
                 templates_new = []
                 for cand in template_cands:
-                    key = ("t", self._config_key(cand["template_config"]))
-                    if key in self._eval_cache:
+                    key = self._config_key(cand["template_config"])
+                    if (key in self._eval_cache
+                            or key in self._frontier_keys):
                         continue
                     self._eval_cache[key] = None  # committed — block re-entry
                     templates_new.append(cand)
@@ -1383,7 +1388,7 @@ class ForgeEvolve:
                         [c["params"] for c in neural_cands]).detach().cpu()
                     for i, cand in enumerate(neural_cands):
                         config = self.domain.decode(bp[i])
-                        key = ("c", self._config_key(config))
+                        key = self._config_key(config)
                         if (key in self._eval_cache
                                 or key in self._frontier_keys):
                             continue
@@ -1417,7 +1422,7 @@ class ForgeEvolve:
                                        + torch.randn_like(p1) * 0.02)
                                 row = row.clamp(0, 1).cpu()
                                 config = self.domain.decode(row)
-                                key = ("c", self._config_key(config))
+                                key = self._config_key(config)
                                 if (key in self._eval_cache
                                         or key in self._frontier_keys):
                                     continue
@@ -1450,7 +1455,7 @@ class ForgeEvolve:
                             least = min(disc[ax],
                                         key=lambda v: counts.get(str(v), 0))
                             config[ax] = least
-                            key = ("c", self._config_key(config))
+                            key = self._config_key(config)
                             if (key in self._eval_cache
                                     or key in self._frontier_keys):
                                 continue
@@ -1475,7 +1480,7 @@ class ForgeEvolve:
                     try:
                         row = torch.rand(self.domain.output_dim())
                         config = self.domain.decode(row)
-                        key = ("c", self._config_key(config))
+                        key = self._config_key(config)
                         if (key in self._eval_cache
                                 or key in self._frontier_keys):
                             continue
@@ -1550,7 +1555,12 @@ class ForgeEvolve:
                         top += rem[:n_far]
                     picked = [picked[i] for i in top]
 
-                # Template configs: decode via encode-merge fallback
+                # Template configs: decode via encode-merge fallback.
+                # The RESOLVED config differs from template_config, so
+                # dedup must commit the resolved key too — otherwise a
+                # later proposal decoding to the same resolved config
+                # slips past _eval_cache and gets evaluated twice.
+                templates_resolved = []
                 for cand in templates_new:
                     tc = cand["template_config"]
                     try:
@@ -1565,15 +1575,20 @@ class ForgeEvolve:
                             config.update(tc)
                         except Exception:
                             config = tc
+                    rkey = self._config_key(config)
+                    if rkey in self._eval_cache:
+                        continue  # resolved config already committed
+                    self._eval_cache[rkey] = None
                     cand["config"] = config
+                    templates_resolved.append(cand)
 
-                selected = picked + templates_new
+                selected = picked + templates_resolved
                 configs = [e["config"] for e in selected]
                 # config-key -> generator_idx map (survives eval reordering)
                 key2gen = {e["key"]: e.get("generator_idx", -1)
                            for e in picked}
-                for cand in templates_new:
-                    key2gen[("c", self._config_key(cand["config"]))] = \
+                for cand in templates_resolved:
+                    key2gen[self._config_key(cand["config"])] = \
                         cand.get("generator_idx", -1)
                 results, configs = self._eval_configs(configs)
 
@@ -1648,7 +1663,7 @@ class ForgeEvolve:
                     # emitted it (crossover/templates -> random deme)
                     if n_isl:
                         gidx = key2gen.get(
-                            ("c", self._config_key(config)), -1)
+                            self._config_key(config), -1)
                         isl = (gidx % n_isl) if gidx >= 0 else \
                             int(np.random.randint(n_isl))
                         self._islands[isl].add(config, score,
@@ -1712,7 +1727,7 @@ class ForgeEvolve:
                                 mut = (base + torch.randn_like(base)
                                        * 0.05).clamp(0, 1)
                                 cfg_m = self.domain.decode(mut)
-                                key = ("c", self._config_key(cfg_m))
+                                key = self._config_key(cfg_m)
                                 if (key in self._eval_cache
                                         or key in self._frontier_keys):
                                     continue
