@@ -75,12 +75,18 @@ async def stream_tokens(runtime, prompt: str, max_new_tokens: int = 128,
         finally:
             emit(("end", None))
 
-    loop.run_in_executor(_pool, worker)
-    while True:
-        kind, data = await q.get()
-        if kind == "end":
-            break
-        yield {"type": kind, "data": data}
+    fut = loop.run_in_executor(_pool, worker)
+    try:
+        while True:
+            kind, data = await q.get()
+            if kind == "end":
+                break
+            yield {"type": kind, "data": data}
+    finally:
+        # Consumer gone (disconnect/GeneratorExit) — flag the worker so a
+        # running generate_stream breaks instead of holding the lease.
+        cancel.cancel()
+        fut.cancel()
 
 
 async def run_adaptive(runtime, prompt: str, think_max_tokens: int = 512,

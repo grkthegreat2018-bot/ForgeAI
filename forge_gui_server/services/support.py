@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -36,16 +38,19 @@ class ApprovalChannel:
 
     def __init__(self, hub) -> None:
         self._hub = hub
-        self._waiters: dict[str, tuple[threading.Event, dict]] = {}
-        self._counter = 0
+        self._waiters: dict[str, tuple[threading.Event, dict, dict]] = {}
+        # itertools.count.next() is atomic — the old `+= 1` could mint a
+        # duplicate req_id, orphaning a waiter until the 300s timeout.
+        self._counter = itertools.count(1)
 
     def request(self, kind: str, detail: dict,
                 timeout_s: float = 300.0) -> bool:
-        self._counter += 1
-        req_id = f"appr_{self._counter:04d}"
+        req_id = f"appr_{next(self._counter):04d}"
         evt = threading.Event()
         box: dict = {"granted": False}
-        self._waiters[req_id] = (evt, box)
+        self._waiters[req_id] = (evt, box,
+                                 {"id": req_id, "kind": kind,
+                                  "detail": detail})
         self._hub.publish("approval", {
             "id": req_id, "kind": kind, "detail": detail})
         got = evt.wait(timeout_s)
@@ -56,13 +61,13 @@ class ApprovalChannel:
         entry = self._waiters.get(req_id)
         if not entry:
             return False
-        evt, box = entry
+        evt, box, _meta = entry
         box["granted"] = granted
         evt.set()
         return True
 
     def pending(self) -> list[dict]:
-        return [{"id": rid} for rid in self._waiters]
+        return [dict(meta) for _evt, _box, meta in self._waiters.values()]
 
 
 # ── sub-agents ──────────────────────────────────────────────────────────
@@ -455,10 +460,14 @@ class BackupService:
             await asyncio.sleep(CHECK_INTERVAL_S)
             if self._active and not self._frozen:
                 try:
-                    changes = await asyncio.get_running_loop(
-                        ).run_in_executor(None, self._count_changes)
+                    loop = asyncio.get_running_loop()
+                    changes = await loop.run_in_executor(
+                        None, self._count_changes)
                     if changes >= MIN_CHANGED_FILES:
-                        self.create_backup()
+                        # Whole-project zip on the loop stalled every
+                        # endpoint — offload like the REST route does.
+                        await loop.run_in_executor(
+                            None, self.create_backup)
                 except Exception as e:
                     logger.warning("backup check failed: %s", e)
 
@@ -488,11 +497,20 @@ class BackupService:
 
     @staticmethod
     def _hash_file(path: Path) -> str:
-        size = path.stat().st_size
+        """Change fingerprint: mtime + size + sampled head/mid/tail blocks.
+        The old md5(size + first 4KB) missed edits past the 4KB mark."""
+        st = path.stat()
+        size = st.st_size
         h = hashlib.md5()
         h.update(str(size).encode())
+        h.update(str(st.st_mtime_ns).encode())
         with open(path, "rb") as f:
             h.update(f.read(4096))
+            if size > 8192:
+                f.seek(size // 2)
+                h.update(f.read(4096))
+                f.seek(max(0, size - 4096))
+                h.update(f.read(4096))
         return h.hexdigest()
 
     def _count_changes(self) -> int:
@@ -562,14 +580,50 @@ class BackupService:
         finally:
             self._frozen = False
 
+    _BAD_MEMBER_RE = re.compile(r"(^|/|\\)\.\.(/|\\|$)|^[a-zA-Z]:")
+
+    @classmethod
+    def _validate_zip_member(cls, name: str) -> None:
+        """Reject zip-slip members: absolute paths, drive letters, '..'
+        segments (forward- or back-slash)."""
+        if not name or name.startswith(("/", "\\")) \
+                or cls._BAD_MEMBER_RE.search(name):
+            raise ValueError(f"unsafe zip member: {name!r}")
+
     def _restore_backup(self, zip_path: str) -> None:
-        zip_p = Path(zip_path)
+        zip_p = Path(zip_path).resolve()
+        # Only backups we made are restorable — a caller-supplied zip
+        # anywhere else is rejected before the project is touched.
+        backup_root = self.backup_dir.resolve()
+        if not (zip_p == backup_root or backup_root in zip_p.parents):
+            raise ValueError(
+                f"backup path outside backups dir: {zip_path}")
         if not zip_p.is_file():
             raise FileNotFoundError(f"backup not found: {zip_path}")
+        # Validate every member + extract to a staging dir FIRST — the
+        # project tree is only wiped once the zip is known-good, so a
+        # corrupt/evil archive can't wipe-then-fail.
+        staging = self.backup_dir / f".restore_staging_{int(time.time())}"
+        try:
+            with zipfile.ZipFile(zip_p, "r") as zf:
+                for m in zf.namelist():
+                    self._validate_zip_member(m)
+                staging.mkdir(parents=True, exist_ok=True)
+                zf.extractall(staging)
+        except Exception:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
         wipe_skip = SKIP_DIRS | {"data/backups"}
+        # dirnames pruning only works TOP-DOWN (with topdown=False the
+        # subdirs are walked before the parent's tuple is yielded — the
+        # old prune was dead code and the wipe recursed into .git/venv/
+        # data anyway). Do the file pass top-down, then rmdir bottom-up.
+        dirs_seen: list[Path] = []
         for dirpath, dirnames, filenames in os.walk(
-                self.project_root, topdown=False):
+                self.project_root, topdown=True):
             dirnames[:] = [d for d in dirnames if d not in wipe_skip]
+            dirs_seen.append(Path(dirpath))
             for fn in filenames:
                 p = Path(dirpath) / fn
                 if p.suffix.lower() in SKIP_EXTS:
@@ -578,14 +632,40 @@ class BackupService:
                     p.unlink()
                 except OSError:
                     continue
-            if Path(dirpath) != self.project_root:
-                try:
-                    if not any(Path(dirpath).iterdir()):
-                        Path(dirpath).rmdir()
-                except OSError:
-                    continue
-        with zipfile.ZipFile(zip_p, "r") as zf:
-            zf.extractall(self.project_root)
+        # deepest-first so parents become empty after children are gone
+        for d in sorted(dirs_seen, key=lambda x: len(x.parts),
+                        reverse=True):
+            if d == self.project_root:
+                continue
+            try:
+                if not any(d.iterdir()):
+                    d.rmdir()
+            except OSError:
+                continue
+        import shutil
+
+        def _merge_move(src: Path, dst: Path) -> None:
+            # shutil.move(src→existing-dir) NESTS (src lands inside dst);
+            # merge directories recursively instead.
+            if src.is_dir() and dst.is_dir():
+                for child in src.iterdir():
+                    _merge_move(child, dst / child.name)
+                src.rmdir()
+            elif dst.exists():
+                dst.unlink() if dst.is_file() else shutil.rmtree(dst)
+                shutil.move(str(src), str(dst))
+            else:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+
+        try:
+            for item in staging.iterdir():
+                _merge_move(item, self.project_root / item.name)
+            staging.rmdir()
+        except Exception:
+            import shutil as _sh
+            _sh.rmtree(staging, ignore_errors=True)
+            raise
 
 
 # ── library install ─────────────────────────────────────────────────────
@@ -685,7 +765,11 @@ class LoraHarnessAdapter:
         return out
 
     def _run_sync(self, coro):
-        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            # No server loop (make_harness before startup) — run inline.
+            return asyncio.run(coro)
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
         return fut.result(timeout=180)
 
     def _load(self, path: str) -> None:

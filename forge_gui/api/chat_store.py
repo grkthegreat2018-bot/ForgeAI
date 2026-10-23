@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -48,6 +49,9 @@ class ChatStore:
         self.sft_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.chats_dir / "conversations.json"
         self.conversations: list[dict[str, Any]] = []
+        # Mutate+save under one lock — the SSE stream persists on the
+        # loop thread while REST/imports mutate from executor threads.
+        self._lock = threading.RLock()
         self.load()
 
     # ── persistence ───────────────────────────────────────────────────
@@ -63,25 +67,28 @@ class ChatStore:
             self.conversations = []
 
     def save(self) -> None:
-        tmp = self.path.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"version": 1, "conversations": self.conversations},
-                      f, ensure_ascii=False, indent=1)
-        os.replace(tmp, self.path)
+        with self._lock:
+            tmp = self.path.with_suffix(".json.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"version": 1,
+                           "conversations": self.conversations},
+                          f, ensure_ascii=False, indent=1)
+            os.replace(tmp, self.path)
 
     # ── conversation CRUD ─────────────────────────────────────────────
     def create(self, title: str = "New chat", model: str = "") -> dict[str, Any]:
-        conv = {
-            "id": uuid.uuid4().hex[:12],
-            "title": title,
-            "model": model,
-            "created_at": _now(),
-            "updated_at": _now(),
-            "messages": [],
-        }
-        self.conversations.insert(0, conv)
-        self.save()
-        return conv
+        with self._lock:
+            conv = {
+                "id": uuid.uuid4().hex[:12],
+                "title": title,
+                "model": model,
+                "created_at": _now(),
+                "updated_at": _now(),
+                "messages": [],
+            }
+            self.conversations.insert(0, conv)
+            self.save()
+            return conv
 
     def get(self, conv_id: str) -> dict[str, Any] | None:
         for c in self.conversations:
@@ -90,34 +97,39 @@ class ChatStore:
         return None
 
     def delete(self, conv_id: str) -> bool:
-        before = len(self.conversations)
-        self.conversations = [c for c in self.conversations if c["id"] != conv_id]
-        changed = len(self.conversations) != before
-        if changed:
-            self.save()
-        return changed
+        with self._lock:
+            before = len(self.conversations)
+            self.conversations = [c for c in self.conversations
+                                  if c["id"] != conv_id]
+            changed = len(self.conversations) != before
+            if changed:
+                self.save()
+            return changed
 
     def rename(self, conv_id: str, title: str) -> None:
-        conv = self.get(conv_id)
-        if conv is not None:
-            conv["title"] = title or "Untitled"
-            conv["updated_at"] = _now()
-            self.save()
+        with self._lock:
+            conv = self.get(conv_id)
+            if conv is not None:
+                conv["title"] = title or "Untitled"
+                conv["updated_at"] = _now()
+                self.save()
 
     def touch(self, conv_id: str, model: str = "") -> None:
-        conv = self.get(conv_id)
-        if conv is None:
-            return
-        conv["updated_at"] = _now()
-        if model:
-            conv["model"] = model
-        # auto-title from the first user message
-        if conv["title"] in ("New chat", "Untitled"):
-            for m in conv["messages"]:
-                if m.get("role") == "user" and m.get("content"):
-                    conv["title"] = m["content"].strip().splitlines()[0][:60]
-                    break
-        self.save()
+        with self._lock:
+            conv = self.get(conv_id)
+            if conv is None:
+                return
+            conv["updated_at"] = _now()
+            if model:
+                conv["model"] = model
+            # auto-title from the first user message
+            if conv["title"] in ("New chat", "Untitled"):
+                for m in conv["messages"]:
+                    if m.get("role") == "user" and m.get("content"):
+                        conv["title"] = \
+                            m["content"].strip().splitlines()[0][:60]
+                        break
+            self.save()
 
     # ── messages ──────────────────────────────────────────────────────
     def append_message(self, conv_id: str, role: str, content: str,
@@ -145,33 +157,54 @@ class ChatStore:
             msg["name"] = name
         if reasoning_content:
             msg["reasoning_content"] = reasoning_content
-        conv["messages"].append(msg)
-        conv["updated_at"] = _now()
-        self.save()
+        with self._lock:
+            conv["messages"].append(msg)
+            conv["updated_at"] = _now()
+            self.save()
         return len(conv["messages"]) - 1
+
+    def append_messages(self, conv_id: str,
+                        messages: list[dict]) -> int:
+        """Append a batch of produced messages with ONE save — the chat
+        stream used to N+1-rewrite the whole conversations file for a
+        tool-call turn (assistant + tool + assistant …)."""
+        conv = self.get(conv_id)
+        if conv is None:
+            raise KeyError(conv_id)
+        with self._lock:
+            for m in messages:
+                msg = dict(m)
+                msg.setdefault("rating", None)
+                msg.setdefault("ts", _now())
+                conv["messages"].append(msg)
+            conv["updated_at"] = _now()
+            self.save()
+        return len(conv["messages"])
 
     def truncate_messages(self, conv_id: str, index: int) -> dict | None:
         """Drop messages[index:] — backs regenerate/edit-and-resubmit."""
-        conv = self.get(conv_id)
-        if conv is None or not (0 <= index <= len(conv["messages"])):
-            return None
-        conv["messages"] = conv["messages"][:index]
-        conv["updated_at"] = _now()
-        self.save()
-        return conv
+        with self._lock:
+            conv = self.get(conv_id)
+            if conv is None or not (0 <= index <= len(conv["messages"])):
+                return None
+            conv["messages"] = conv["messages"][:index]
+            conv["updated_at"] = _now()
+            self.save()
+            return conv
 
     def rate_message(self, conv_id: str, msg_idx: int,
                      rating: str | None) -> str | None:
         """Set/clear a message rating ('good' | 'bad' | None). Toggles."""
-        conv = self.get(conv_id)
-        if conv is None or not (0 <= msg_idx < len(conv["messages"])):
-            return None
-        cur = conv["messages"][msg_idx].get("rating")
-        new = None if (rating is None or cur == rating) else rating
-        conv["messages"][msg_idx]["rating"] = new
-        conv["updated_at"] = _now()
-        self.save()
-        return new
+        with self._lock:
+            conv = self.get(conv_id)
+            if conv is None or not (0 <= msg_idx < len(conv["messages"])):
+                return None
+            cur = conv["messages"][msg_idx].get("rating")
+            new = None if (rating is None or cur == rating) else rating
+            conv["messages"][msg_idx]["rating"] = new
+            conv["updated_at"] = _now()
+            self.save()
+            return new
 
     @staticmethod
     def count_ratings(conv: dict[str, Any]) -> tuple[int, int]:

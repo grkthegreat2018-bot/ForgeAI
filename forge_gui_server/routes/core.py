@@ -3,6 +3,7 @@ activation catalog."""
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter
@@ -11,6 +12,72 @@ from pydantic import BaseModel
 from ..deps import services
 
 router = APIRouter()
+
+# Sane bounds for LoRA rank/alpha — unclamped values can blow up VRAM.
+LORA_RANK_MIN, LORA_RANK_MAX = 1, 256
+LORA_ALPHA_MIN, LORA_ALPHA_MAX = 1, 4096
+
+
+def _clamp(value: int | None, lo: int, hi: int) -> int | None:
+    if value is None:
+        return None
+    return max(lo, min(int(value), hi))
+
+
+def _confined_path(path: str, allowed_dirs: list[Path],
+                   must_exist: bool = False) -> str | None:
+    """Resolve ``path`` (relative → under project root) and require it to
+    live inside one of ``allowed_dirs``. Returns the resolved string, or
+    None when it escapes or fails the existence check."""
+    from forge_gui.api.status_reader import project_root
+    if not path:
+        return None
+    root = project_root().resolve()
+    p = Path(path)
+    if not p.is_absolute():
+        p = root / p
+    try:
+        p = p.resolve()
+    except OSError:
+        return None
+    for d in allowed_dirs:
+        d = d.resolve()
+        if p == d or d in p.parents:
+            if must_exist and not p.is_file():
+                return None
+            return str(p)
+    return None
+
+
+def _checkpoint_dirs() -> list[Path]:
+    """Dirs merge/LoRA/model paths are confined to."""
+    from forge_gui.api.status_reader import project_root
+    root = project_root()
+    return [root / "research" / "checkpoints"]
+
+
+def _writable_dirs() -> list[Path]:
+    """Dirs a route may write new artifacts into."""
+    from forge_gui.api.status_reader import project_root
+    root = project_root()
+    return [root / "research" / "checkpoints", root / "data" / "merged"]
+
+
+def _session_dict(s: Any) -> dict:
+    """Serialize a SessionState dataclass (or plain value) to JSON-safe."""
+    if s is None:
+        return {}
+    if isinstance(s, dict):
+        return s
+    d = {
+        "session_id": getattr(s, "session_id", None),
+        "created_at": getattr(s, "created_at", None),
+        "last_access": getattr(s, "last_access", None),
+        "ttl": getattr(s, "ttl", None),
+        "ttl_expires_at": getattr(s, "ttl_expires_at", None),
+        "pinned": getattr(s, "pinned", None),
+    }
+    return {k: v for k, v in d.items() if v is not None}
 
 
 def _run_dict(r) -> dict:
@@ -53,18 +120,22 @@ class StopRun(BaseModel):
 
 @router.post("/runs/stop")
 async def stop_run(body: StopRun):
-    snaps = services.status_reader.snapshot()
+    loop = asyncio.get_running_loop()
+    snaps = await loop.run_in_executor(
+        None, services.status_reader.snapshot)
     target = next((r for r in snaps if r.status_file == body.status_file),
                   None)
     if target is None:
         return {"ok": False, "error": "run not found"}
-    return {"ok": services.status_reader.request_stop(target)}
+    return {"ok": await loop.run_in_executor(
+        None, services.status_reader.request_stop, target)}
 
 
 @router.get("/runs/log_tail")
 async def run_log_tail(status_file: str, lines: int = 200):
-    return {"lines": services.status_reader.read_log_tail(
-        status_file, lines)}
+    lines = max(1, min(int(lines), 5000))
+    return {"lines": await asyncio.get_running_loop().run_in_executor(
+        None, services.status_reader.read_log_tail, status_file, lines)}
 
 
 # ── engine lifecycle ──────────────────────────────────────────────────
@@ -115,8 +186,9 @@ async def engine_learn_cancel():
 
 @router.post("/engine/reactivate")
 async def engine_reactivate(body: dict):
-    services.engine.reactivate(body.get("activation") or body)
-    return {"ok": True}
+    # reactivate() returns {"ok": bool, ...} — refusals (no engine / busy)
+    # and ignored activation keys are surfaced instead of hidden behind ok.
+    return services.engine.reactivate(body.get("activation") or body)
 
 
 class PowerRequest(BaseModel):
@@ -314,10 +386,11 @@ async def session_stats():
 @router.post("/engine/sessions/begin")
 async def session_begin(body: SessionRequest):
     try:
+        sid = body.session_id or f"gui_{id(body) & 0xFFFFFFFF:08x}"
         out = await _engine_call(
-            lambda e: e.begin_session(body.session_id or None,
-                                      ttl_s=body.ttl_s))
-        return {"ok": True, "result": out}
+            lambda e: e.begin_session(sid, ttl=body.ttl_s))
+        # begin_session returns a SessionState dataclass — serialize it.
+        return {"ok": True, "result": _session_dict(out)}
     except Exception as ex:
         return {"ok": False, "error": str(ex)}
 
@@ -328,7 +401,7 @@ async def session_continue(body: SessionRequest):
         out = await _engine_call(
             lambda e: e.continue_session(
                 body.session_id, body.prompt,
-                max_tokens=body.max_tokens,
+                max_new_tokens=body.max_tokens,
                 temperature=body.temperature, top_p=body.top_p),
             timeout_s=300)
         return {"ok": True, "result": out}
@@ -340,7 +413,7 @@ async def session_continue(body: SessionRequest):
 async def session_pin(body: SessionRequest):
     try:
         out = await _engine_call(
-            lambda e: e.pin_session(body.session_id, ttl_s=body.ttl_s))
+            lambda e: e.pin_session(body.session_id, ttl=body.ttl_s))
         return {"ok": True, "result": out}
     except Exception as ex:
         return {"ok": False, "error": str(ex)}
@@ -479,12 +552,26 @@ class MergeRequest(BaseModel):
 
 @router.post("/engine/merge")
 async def engine_merge(body: MergeRequest):
+    # Parents are read paths, out_path is a write path — all confined.
+    parents = [_confined_path(p, _checkpoint_dirs(), must_exist=True)
+               for p in body.parents]
+    if not parents or any(p is None for p in parents):
+        return {"ok": False, "error":
+                "parents must be existing files under research/checkpoints"}
+    out_path = None
+    if body.out_path:
+        out_path = _confined_path(body.out_path, _writable_dirs())
+        if out_path is None:
+            return {"ok": False, "error":
+                    "out_path must live under research/checkpoints or data/merged"}
     try:
         out = await _engine_call(
             lambda e: e.merge_checkpoints(
-                body.parents, method=body.method,
-                out_path=body.out_path or None,
-                hot_swap=body.hot_swap), timeout_s=1800)
+                parents, method=body.method,
+                out_path=out_path,
+                # engine kwarg is load_result — 'hot_swap' was silently
+                # swallowed by **kwargs and the swap never happened.
+                load_result=body.hot_swap), timeout_s=1800)
         return {"ok": True, "result": out}
     except Exception as ex:
         return {"ok": False, "error": str(ex)}
@@ -492,15 +579,32 @@ async def engine_merge(body: MergeRequest):
 
 @router.post("/engine/evolve_merge")
 async def engine_evolve_merge(body: MergeRequest):
+    parents = [_confined_path(p, _checkpoint_dirs(), must_exist=True)
+               for p in body.parents]
+    if not parents or any(p is None for p in parents):
+        return {"ok": False, "error":
+                "parents must be existing files under research/checkpoints"}
+    out_dir = None
+    if body.out_path:
+        out_dir = _confined_path(body.out_path, _writable_dirs())
+        if out_dir is None:
+            return {"ok": False, "error":
+                    "out_path must live under research/checkpoints or data/merged"}
     try:
         out = await _engine_call(
             lambda e: e.evolve_merge(
-                body.parents, out_path=body.out_path or None,
-                generations=body.generations, population=body.population,
-                elitism=body.elitism, crossover=body.crossover,
-                mutation=body.mutation, mut_rate=body.mut_rate,
-                bench_prompt=body.bench_prompt,
-                bench_tokens=body.bench_tokens), timeout_s=3600)
+                parents,
+                # Real signature: n_generations=, population_size=,
+                # mutation_rate=, out_dir=, benchmark_prompt=/_tokens —
+                # the old call (out_path=/generations=/population=/
+                # mut_rate=) TypeError'd on every request.
+                out_dir=out_dir,
+                n_generations=body.generations,
+                population_size=body.population,
+                elitism=body.elitism,
+                mutation_rate=body.mut_rate,
+                benchmark_prompt=body.bench_prompt,
+                benchmark_tokens=body.bench_tokens), timeout_s=3600)
         return {"ok": True, "result": out}
     except Exception as ex:
         return {"ok": False, "error": str(ex)}
@@ -581,17 +685,20 @@ async def model_configs():
 @router.delete("/models")
 async def delete_model(path: str):
     from forge_gui.api.status_reader import project_root
-    root = project_root()
-    p = root / path
+    root = project_root().resolve()
+    ckpt_dir = (root / "research" / "checkpoints").resolve()
+    p = (root / path).resolve()
+    # resolve() FIRST, then containment — a lexical relative_to check on
+    # an unresolved path is bypassable via '..' segments.
+    if not (p == ckpt_dir or ckpt_dir in p.parents):
+        return {"ok": False, "error": "outside checkpoints dir"}
     if not p.is_file() or p.suffix not in (".safetensors", ".gguf",
                                            ".pt", ".bin", ".flux"):
         return {"ok": False, "error": "not a model file"}
-    try:
-        p.relative_to(root / "research" / "checkpoints")
-    except ValueError:
-        return {"ok": False, "error": "outside checkpoints dir"}
     p.unlink()
-    for side in (p.with_suffix(".meta.json"), p.with_suffix(".json"),
+    # Real sidecars are '<filename>.meta.json' (e.g. m.safetensors.meta.json)
+    # — with_suffix('.meta.json') would look for 'm.meta.json' instead.
+    for side in (Path(str(p) + ".meta.json"), p.with_suffix(".json"),
                  p.with_suffix(".train.pt")):
         try:
             if side.is_file():
@@ -639,7 +746,9 @@ class LoraLoadRequest(BaseModel):
 @router.post("/lora/load")
 async def lora_load(body: LoraLoadRequest):
     return await services.lora.load_on_engine(
-        body.path, body.rank, body.alpha, body.target_key)
+        body.path, _clamp(body.rank, LORA_RANK_MIN, LORA_RANK_MAX),
+        _clamp(body.alpha, LORA_ALPHA_MIN, LORA_ALPHA_MAX),
+        body.target_key)
 
 
 @router.post("/lora/unload")
@@ -664,8 +773,10 @@ class LoraMergeRequest(BaseModel):
 @router.post("/lora/merge")
 async def lora_merge(body: LoraMergeRequest):
     return await services.lora.merge(
-        body.base, body.config_name, body.adapter, body.rank,
-        body.alpha, body.out)
+        body.base, body.config_name, body.adapter,
+        _clamp(body.rank, LORA_RANK_MIN, LORA_RANK_MAX),
+        _clamp(body.alpha, LORA_ALPHA_MIN, LORA_ALPHA_MAX),
+        body.out)
 
 
 @router.post("/lora/mode")
@@ -685,4 +796,6 @@ async def lora_unpin():
 
 @router.get("/lora/recommend")
 async def lora_recommend(mode: str = "chat"):
-    return {"adapter": services.lora.recommend_for_mode(mode)}
+    loop = asyncio.get_running_loop()
+    return {"adapter": await loop.run_in_executor(
+        None, services.lora.recommend_for_mode, mode)}

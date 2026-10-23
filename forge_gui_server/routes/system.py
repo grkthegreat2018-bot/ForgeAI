@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shlex
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -31,20 +30,32 @@ async def task_detail(task_id: str, tail: int = 500):
 
 
 class LaunchRequest(BaseModel):
-    command: str = ""
+    # Arbitrary caller-supplied commands are disabled — launches must go
+    # through a blessed preset (same as /launch/preset).
+    preset_name: str = ""
     name: str = ""
+    overrides: dict[str, str] = {}
+
+
+def _preset_command(preset_name: str, overrides: dict[str, str]):
+    """Resolve a preset name to an argv list, or an error string."""
+    from forge_gui.api.process_manager import (
+        build_command, get_presets, preset_script_exists)
+    preset = next((p for p in get_presets()
+                   if p.name == preset_name), None)
+    if preset is None:
+        return None, f"unknown preset: {preset_name}"
+    if not preset_script_exists(preset):
+        return None, f"preset script missing: {preset.script}"
+    return build_command(preset, overrides), None
 
 
 @router.post("/tasks/launch")
 async def task_launch(body: LaunchRequest):
-    try:
-        parts = shlex.split(body.command, posix=False)
-    except ValueError as e:
-        return {"ok": False, "error": str(e)}
-    if not parts:
-        return {"ok": False, "error": "empty command"}
-    name = body.name or f"custom: {parts[0]}"
-    task_id = services.procs.launch(name, parts)
+    cmd, err = _preset_command(body.preset_name, body.overrides)
+    if err:
+        return {"ok": False, "error": err}
+    task_id = services.procs.launch(body.name or body.preset_name, cmd)
     return {"ok": True, "task_id": task_id}
 
 
@@ -83,14 +94,10 @@ class PresetLaunchRequest(BaseModel):
 
 @router.post("/launch/preset")
 async def launch_preset(body: PresetLaunchRequest):
-    from forge_gui.api.process_manager import (
-        build_command, get_presets)
-    preset = next((p for p in get_presets()
-                   if p.name == body.preset_name), None)
-    if preset is None:
-        return {"ok": False, "error": "unknown preset"}
-    cmd = build_command(preset, body.overrides)
-    task_id = services.procs.launch(preset.name, cmd)
+    cmd, err = _preset_command(body.preset_name, body.overrides)
+    if err:
+        return {"ok": False, "error": err}
+    task_id = services.procs.launch(body.preset_name, cmd)
     return {"ok": True, "task_id": task_id, "cmd": cmd}
 
 
@@ -177,10 +184,9 @@ async def lorebook_entries():
 async def lorebook_add(body: dict):
     e = services.lorebook.add(
         keys=body.get("keys", []), content=body.get("content", ""),
-        category=body.get("category", "general"),
-        priority=int(body.get("priority", 5)),
-        tags=body.get("tags", []),
-        description=body.get("description", ""))
+        category=body.get("category", "note"),
+        priority=int(body.get("priority", 100)),
+        constant=bool(body.get("constant", False)))
     return e.to_dict() if e else {"error": "add failed"}
 
 
@@ -211,7 +217,9 @@ async def mcp_connect(name: str):
 
 @router.post("/mcp/disconnect/{name}")
 async def mcp_disconnect(name: str):
-    services.mcp.disconnect(name)
+    loop = asyncio.get_running_loop()
+    # client.close() blocks on proc.wait(timeout=5) — keep it off the loop
+    await loop.run_in_executor(None, services.mcp.disconnect, name)
     return {"ok": True}
 
 

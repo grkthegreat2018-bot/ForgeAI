@@ -55,10 +55,12 @@ class EventsReader:
         self._buffer: deque[dict] = deque(maxlen=max_events)
         self._last_rescan = 0.0
         self._rescan_interval = rescan_interval
-        # status.json cache
+        # status.json cache — the resolved path is reused across polls;
+        # discovery only re-runs when it vanishes or the interval lapses.
         self._status_path: Path | None = None
         self._status_mtime = 0.0
         self._status_cache: dict | None = None
+        self._last_status_scan = 0.0
 
     def _discover(self) -> None:
         """Find events.jsonl files under search dirs (called at most every rescan_interval).
@@ -185,9 +187,10 @@ class EventsReader:
         """Return the bounded rolling buffer (oldest-first, up to maxlen)."""
         return list(self._buffer)
 
-    def latest_status(self) -> dict | None:
-        """Cheap read of the newest status.json under checkpoints/self_play/."""
-        # Find the status file (prefer self_play/ subdir)
+    def _find_status_file(self) -> Path | None:
+        """Locate the newest self_play status.json. Only called on the
+        rescan cadence — the old latest_status() rglob()'d the whole
+        checkpoints tree every ~400ms poll while idle."""
         candidates: list[Path] = []
         for d in self._search_dirs:
             if not d.is_dir():
@@ -199,14 +202,26 @@ class EventsReader:
                 for p in d.rglob("status.json"):
                     if "self_play" in p.parent.name.lower():
                         candidates.append(p)
-
         if not candidates:
-            self._status_path = None
-            self._status_cache = None
             return None
+        return max(candidates, key=lambda p: p.stat().st_mtime)
 
-        # Pick the most recently modified
-        best = max(candidates, key=lambda p: p.stat().st_mtime)
+    def latest_status(self) -> dict | None:
+        """Cheap read of the newest status.json under checkpoints/self_play/."""
+        now = time.time()
+        best = self._status_path
+        # Re-resolve only when the cached path is gone/stale or the rescan
+        # interval elapsed (e.g. a new self_play run started elsewhere).
+        if best is None or now - self._last_status_scan > self._rescan_interval \
+                or not best.is_file():
+            self._last_status_scan = now
+            best = self._find_status_file()
+            if best is None:
+                self._status_path = None
+                self._status_cache = None
+                return None
+            self._status_path = best
+
         try:
             mtime = best.stat().st_mtime
         except OSError:

@@ -62,9 +62,12 @@ def lora_training_tool_defs() -> list[dict]:
                                 "Path to JSONL training data (required "
                                 "if data_source='file')"),
                         },
-                        "epochs": {
+                        "max_steps": {
                             "type": "integer",
-                            "description": "Training epochs (default 3)",
+                            "description": (
+                                "Training optimizer steps (default 500). "
+                                "sft_train is step-budgeted — it has no "
+                                "epoch flag."),
                         },
                         "lr": {
                             "type": "number",
@@ -129,7 +132,9 @@ class LoraTrainingTrigger:
             return {"ok": False, "result": {"error": "category required"}}
 
         rank = args.get("rank", 32)
-        epochs = args.get("epochs", 3)
+        # sft_train budgets optimizer steps, not epochs.
+        max_steps = int(args.get("max_steps", 500) or 500)
+        max_steps = max(1, min(max_steps, 200000))
         lr = args.get("lr", 5e-5)
         data_source = args.get("data_source", "chat_history")
 
@@ -151,23 +156,33 @@ class LoraTrainingTrigger:
                 return {"ok": False, "result": {
                     "error": f"data file not found: {data_file}"}}
 
-        # build output adapter name
+        # build output adapter name — sft_train snapshots the un-merged
+        # LoRA tensors to Path(--save).with_suffix(".lora.safetensors"),
+        # which the LoRA scan picks up under research/checkpoints/.
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        adapter_name = f"ForgeLM_V11_{category}_R{rank}_{timestamp}_lora"
-        output_dir = Path("research/checkpoints/lora") / adapter_name
+        adapter_name = f"ForgeLM_V11_{category}_R{rank}_{timestamp}"
+        save_path = (Path("research/checkpoints/lora")
+                     / f"{adapter_name}.safetensors")
+        adapter_path = save_path.with_suffix(".lora.safetensors")
 
-        # build training command
-        venv_py = str(Path("venv/Scripts/python.exe"))
+        # build training command — real sft_train flags:
+        # --lora-r / --lora-alpha / --max-steps / --save; there is no
+        # --epochs / --lora-rank / --output (the old argv TypeError'd or
+        # silently mis-routed the adapter path).
+        from forge_gui.api.status_reader import project_root
+        root = project_root()
+        venv_py = root / "venv" / "Scripts" / "python.exe"
         cmd = [
-            venv_py, "-u", "-m", "forge.training.runners.sft_train",
+            str(venv_py if venv_py.is_file() else "python"),
+            "-u", "-m", "forge.training.runners.sft_train",
             "--checkpoint", self.checkpoint,
             "--data", str(data_path),
+            "--save", str(save_path),
             "--save-lora-adapter",
-            "--lora-rank", str(rank),
+            "--lora-r", str(rank),
             "--lora-alpha", str(rank * 2),
-            "--epochs", str(epochs),
+            "--max-steps", str(max_steps),
             "--lr", str(lr),
-            "--output", str(output_dir / "adapter.safetensors"),
         ]
 
         # launch via ProcessManager
@@ -180,7 +195,7 @@ class LoraTrainingTrigger:
             "category": category,
             "rank": rank,
             "adapter_name": adapter_name,
-            "output_dir": str(output_dir),
+            "output_dir": str(adapter_path),
             "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "data_path": str(data_path),
         }
@@ -190,10 +205,11 @@ class LoraTrainingTrigger:
             "category": category,
             "adapter_name": adapter_name,
             "rank": rank,
-            "epochs": epochs,
+            "max_steps": max_steps,
+            "adapter_path": str(adapter_path),
             "message": (
                 f"LoRA training launched for '{category}' category. "
-                f"Adapter will be saved as {adapter_name}. "
+                f"Adapter will be saved as {adapter_path}. "
                 f"Use check_training(task_id='{task_id}') to monitor progress.")}}
 
     def _check_training(self, args: dict) -> dict:
@@ -203,12 +219,14 @@ class LoraTrainingTrigger:
             return {"ok": False, "result": {"error": f"unknown task_id: {task_id}"}}
 
         meta = self._training_tasks[task_id]
-        # check if process is still running
+        # check if process is still running — ProcessService exposes
+        # all_tasks() (there is no processes() method; the old call
+        # AttributeError'd every status check).
         running = False
         if self.proc_mgr is not None:
-            procs = self.proc_mgr.processes()
-            running = any(p.get("id") == task_id and p.get("running")
-                          for p in procs)
+            tasks = self.proc_mgr.all_tasks()
+            running = any(t.get("id") == task_id and t.get("is_live")
+                          for t in tasks)
 
         return {"ok": True, "result": {
             "task_id": task_id,
@@ -228,7 +246,11 @@ class LoraTrainingTrigger:
         try:
             export_path = Path("data/sft") / f"lora_{category}_{int(time.time())}.jsonl"
             export_path.parent.mkdir(parents=True, exist_ok=True)
-            n = self.chat_store.export_training_data(str(export_path))
+            # export_training_data(conv_ids, out_path, ...) returns
+            # (path, n_examples) — the old call passed the path positionally
+            # as conv_ids and compared the tuple to 0.
+            _path, n = self.chat_store.export_training_data(
+                out_path=export_path)
             if n == 0:
                 return None
             return export_path

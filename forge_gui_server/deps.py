@@ -63,6 +63,9 @@ class Services:
         self._web_tools: WebTools | None = None
         self._lora_training = None
         self._lora_adapter: LoraHarnessAdapter | None = None
+        # Captured in start() — make_harness runs on loop AND worker
+        # threads, where asyncio.get_event_loop() is dead/deprecation.
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     # ── lazy stores ───────────────────────────────────────────────────
     @property
@@ -109,7 +112,15 @@ class Services:
     def make_harness(self, workspace: str | None = None,
                      read_only: bool = False):
         from forge_gui.api.tool_harness import ToolHarness
-        loop = asyncio.get_event_loop()
+        # Prefer the loop bound at startup; fall back to the caller's
+        # running loop. asyncio.get_event_loop() from a worker thread
+        # raises RuntimeError (and is deprecated even on the loop thread).
+        loop = self._loop
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
         return ToolHarness(
             workspace=workspace or str(project_root()),
             lorebook=self.lorebook,
@@ -128,6 +139,7 @@ class Services:
     # ── lifecycle ─────────────────────────────────────────────────────
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
+        self._loop = loop
         self._install_pipe_reset_filter(loop)
         self.hub.bind_loop(loop)
         self.procs.bind_loop(loop)
@@ -137,7 +149,32 @@ class Services:
         self.agent.set_harness_factory(
             lambda workspace=None: self.make_harness(workspace))
         self._selfplay_task = asyncio.create_task(self._selfplay_watch())
+        self._warn_missing_presets()
+        # Auto-start configured MCP servers — connect_all spawns
+        # subprocesses + does JSON-RPC handshakes, so keep it off the loop.
+        loop.run_in_executor(None, self._mcp_connect_all_safe)
         self._preload_engine()
+
+    @staticmethod
+    def _warn_missing_presets() -> None:
+        """Log presets whose script path vanished (EC: launch validation)."""
+        try:
+            from forge_gui.api.process_manager import missing_preset_scripts
+            missing = missing_preset_scripts()
+            if missing:
+                logger.warning("launch presets with missing scripts "
+                               "(launch will refuse): %s", missing)
+        except Exception:
+            logger.debug("preset validation failed", exc_info=True)
+
+    def _mcp_connect_all_safe(self) -> None:
+        try:
+            results = self.mcp.connect_all()
+            for name, ok in results.items():
+                if not ok:
+                    logger.warning("MCP auto-connect failed: %s", name)
+        except Exception:
+            logger.warning("MCP connect_all failed", exc_info=True)
 
     async def _selfplay_watch(self) -> None:
         """Tail self-play telemetry files -> push onto the event hub.
@@ -237,6 +274,14 @@ class Services:
         self.backups.stop()
         self.timers.shutdown()
         self.sub_agents.shutdown()
+        # Tear down MCP subprocesses — close() blocks on proc.wait(5),
+        # so offload to the default executor.
+        if self._mcp is not None:
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, self._mcp.disconnect_all)
+            except Exception:
+                logger.debug("mcp disconnect_all failed", exc_info=True)
         await self.gpu.stop()
         await self.procs.shutdown()
         await self.engine.shutdown()

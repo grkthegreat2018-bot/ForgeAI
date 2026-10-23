@@ -150,10 +150,31 @@ class StatusReader:
         out.sort(key=lambda s: s.updated_at, reverse=True)
         return out
 
+    def _confined_run_file(self, path: Path) -> Path | None:
+        """Resolve ``path`` and require it under a runs search dir — a
+        caller-supplied status_file used to let /runs/log_tail read
+        log.txt out of ANY directory on the host."""
+        try:
+            p = path.resolve()
+        except OSError:
+            return None
+        for d in self.search_dirs:
+            d = d.resolve()
+            if p == d or d in p.parents:
+                return p
+        return None
+
     def read_log_tail(self, status_file: str, lines: int = 200) -> list[str]:
-        """Tail the sibling log.txt for a given status file's directory."""
-        d = Path(status_file).parent
-        log_path = d / "log.txt"
+        """Tail the sibling log.txt for a given status file's directory.
+
+        Seeks from EOF — the old readlines() loaded the entire (possibly
+        multi-GB) log on every 3s poll."""
+        sf = self._confined_run_file(Path(status_file))
+        if sf is None:
+            logger.warning("log_tail rejected out-of-bounds status_file: %s",
+                           status_file)
+            return []
+        log_path = sf.parent / "log.txt"
         if not log_path.is_file():
             # Fall back to project logs dir
             lp = project_root() / "logs"
@@ -162,9 +183,14 @@ class StatusReader:
         if not log_path or not log_path.is_file():
             return []
         try:
-            with open(log_path, encoding="utf-8", errors="ignore") as f:
-                all_lines = f.readlines()
-            return [ln.rstrip("\n") for ln in all_lines[-lines:]]
+            size = log_path.stat().st_size
+            # ~200B/line is generous; cap the read at 1MB.
+            read_back = min(size, max(lines * 200, 65536), 1 << 20)
+            with open(log_path, "rb") as f:
+                f.seek(size - read_back)
+                chunk = f.read(read_back)
+            tail = chunk.decode("utf-8", errors="ignore").splitlines()
+            return tail[-lines:]
         except Exception as e:
             logger.warning("failed to tail log %s: %s", log_path, e)
             return []

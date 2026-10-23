@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -95,13 +96,30 @@ class Lorebook:
     so it can be unit-tested anywhere and used from worker threads.
     """
 
+    # Fields a caller may change via update() — id/created/keys are the
+    # entry's identity + provenance (keys double as the trigger contract;
+    # letting an update rewrite them silently re-scopes who the memory
+    # fires for), and the trigger stats are internal bookkeeping.
+    _MUTABLE_FIELDS = {"content", "constant", "priority", "category",
+                       "enabled"}
+
     def __init__(self, root: Path | None = None) -> None:
         self._root = Path(root) if root else Path("data/memory")
         self._path = self._root / "lorebook.json"
         self._entries: list[LoreEntry] = []
+        # Mutate+save under one lock — inject() runs on the loop while
+        # remember/update run on harness threads; the old unguarded
+        # read-modify-write could interleave a dropped JSON write.
+        self._lock = threading.RLock()
+        self._dirty = False          # trigger-stat changes pending save
+        self._last_save = 0.0
         self.load()
 
     # ── persistence ───────────────────────────────────────────────────
+    # inject() fires once per chat send; throttle its stat-only save so a
+    # chatty session doesn't rewrite the whole file every message.
+    _SAVE_DEBOUNCE_S = 30.0
+
     def load(self) -> None:
         if not self._path.is_file():
             self._entries = []
@@ -115,12 +133,29 @@ class Lorebook:
             self._entries = []
 
     def save(self) -> None:
-        self._root.mkdir(parents=True, exist_ok=True)
-        data = {"version": 1, "entries": [e.to_dict() for e in self._entries]}
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
-        os.replace(tmp, self._path)
+        with self._lock:
+            self._root.mkdir(parents=True, exist_ok=True)
+            data = {"version": 1,
+                    "entries": [e.to_dict() for e in self._entries]}
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+            os.replace(tmp, self._path)
+            self._dirty = False
+            self._last_save = time.monotonic()
+
+    def _save_debounced(self) -> None:
+        """Persist pending trigger-stat updates at most every
+        _SAVE_DEBOUNCE_S — callers must hold the lock."""
+        self._dirty = True
+        if time.monotonic() - self._last_save >= self._SAVE_DEBOUNCE_S:
+            self.save()
+
+    def flush(self) -> None:
+        """Force-write pending trigger-stat updates (server shutdown)."""
+        with self._lock:
+            if self._dirty:
+                self.save()
 
     # ── CRUD ──────────────────────────────────────────────────────────
     @property
@@ -137,48 +172,56 @@ class Lorebook:
             constant: bool = False, priority: int = 100,
             category: str = "note") -> LoreEntry:
         """Add a new entry and persist."""
-        entry = LoreEntry(
-            id=str(uuid.uuid4()),
-            keys=keys,
-            content=content,
-            constant=constant,
-            priority=priority,
-            category=category if category in CATEGORIES else "note",
-            created=time.strftime("%Y-%m-%dT%H:%M:%S"),
-        )
-        self._entries.append(entry)
-        self.save()
-        return entry
+        with self._lock:
+            entry = LoreEntry(
+                id=str(uuid.uuid4()),
+                keys=keys,
+                content=content,
+                constant=constant,
+                priority=priority,
+                category=category if category in CATEGORIES else "note",
+                created=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            )
+            self._entries.append(entry)
+            self.save()
+            return entry
 
     def update(self, entry_id: str, **kwargs) -> LoreEntry | None:
-        """Update fields on an entry. Returns the updated entry or None."""
-        e = self.get(entry_id)
-        if e is None:
-            return None
-        for k, v in kwargs.items():
-            if hasattr(e, k):
-                setattr(e, k, v)
-        self.save()
-        return e
+        """Update mutable fields on an entry. Returns the entry or None.
+        Immutable fields (id/created/keys/trigger stats) are silently
+        dropped — a caller can't retarget or rewrite an entry's identity."""
+        with self._lock:
+            e = self.get(entry_id)
+            if e is None:
+                return None
+            for k, v in kwargs.items():
+                if k in self._MUTABLE_FIELDS:
+                    setattr(e, k, v)
+            self.save()
+            return e
 
     def delete(self, entry_id: str) -> bool:
-        before = len(self._entries)
-        self._entries = [e for e in self._entries if e.id != entry_id]
-        if len(self._entries) < before:
-            self.save()
-            return True
-        return False
+        with self._lock:
+            before = len(self._entries)
+            self._entries = [e for e in self._entries
+                             if e.id != entry_id]
+            if len(self._entries) < before:
+                self.save()
+                return True
+            return False
 
     def forget(self, keys: list[str]) -> int:
         """Delete all entries matching any of the given keys. Returns count."""
-        to_remove = {e.id for e in self._entries
-                     if any(k.lower() in " ".join(e.keys).lower()
-                            for k in keys if k)}
-        if not to_remove:
-            return 0
-        self._entries = [e for e in self._entries if e.id not in to_remove]
-        self.save()
-        return len(to_remove)
+        with self._lock:
+            to_remove = {e.id for e in self._entries
+                         if any(k.lower() in " ".join(e.keys).lower()
+                                for k in keys if k)}
+            if not to_remove:
+                return 0
+            self._entries = [e for e in self._entries
+                             if e.id not in to_remove]
+            self.save()
+            return len(to_remove)
 
     # ── search ────────────────────────────────────────────────────────
     def search(self, query: str, limit: int = 10) -> list[LoreEntry]:
@@ -219,18 +262,20 @@ class Lorebook:
             m.get("content", "") for m in scan_msgs
             if m.get("role") in ("user", "assistant"))
 
-        # collect entries
-        triggered: list[LoreEntry] = []
-        for e in self._entries:
-            if not e.enabled:
-                continue
-            if e.constant:
-                triggered.append(e)
-            elif e.matches(scan_text):
-                triggered.append(e)
-                # update trigger stats
-                e.last_triggered = time.strftime("%Y-%m-%dT%H:%M:%S")
-                e.trigger_count += 1
+        # collect entries — lock while reading/mutating entry state;
+        # add/delete/update run on other threads.
+        with self._lock:
+            triggered: list[LoreEntry] = []
+            for e in self._entries:
+                if not e.enabled:
+                    continue
+                if e.constant:
+                    triggered.append(e)
+                elif e.matches(scan_text):
+                    triggered.append(e)
+                    # update trigger stats
+                    e.last_triggered = time.strftime("%Y-%m-%dT%H:%M:%S")
+                    e.trigger_count += 1
 
         if not triggered:
             return ""
@@ -252,8 +297,10 @@ class Lorebook:
         lines.append("=== End Memory ===")
         text = "\n".join(lines)
 
-        # persist trigger count updates
-        self.save()
+        # Trigger stats changed — persist via debounce, not a full JSON
+        # rewrite on every chat send.
+        with self._lock:
+            self._save_debounced()
         return text
 
     # ── stats ─────────────────────────────────────────────────────────

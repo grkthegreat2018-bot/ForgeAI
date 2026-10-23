@@ -10,7 +10,7 @@ import asyncio
 import logging
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from forge_gui.api.status_reader import project_root
@@ -41,9 +41,15 @@ class TaskInfo:
         return self.status in ("starting", "running")
 
     def to_dict(self, tail: int = 0) -> dict:
-        d = asdict(self)
-        d["elapsed_s"] = round(self.elapsed_s, 1)
-        d["is_live"] = self.is_live
+        # asdict() deep-copied the whole 5000-line buffer per call — build
+        # the summary lazily; `lines` only ships when a tail is requested.
+        d = {"id": self.id, "name": self.name, "command": self.command,
+             "pid": self.pid, "status": self.status,
+             "started_at": self.started_at, "ended_at": self.ended_at,
+             "exit_code": self.exit_code, "log_path": self.log_path,
+             "n_lines": len(self.lines),
+             "elapsed_s": round(self.elapsed_s, 1),
+             "is_live": self.is_live}
         if tail:
             d["lines"] = self.lines[-tail:]
         return d
@@ -54,6 +60,8 @@ class ProcessService:
         self._hub = hub
         self.tasks: dict[str, TaskInfo] = {}
         self._procs: dict[str, asyncio.subprocess.Process] = {}
+        # task_id -> [file handle, unflushed-write-count] buffered log writers
+        self._log_fhs: dict[str, list] = {}
         self._counter = 0
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -64,10 +72,16 @@ class ProcessService:
                cwd: str | None = None) -> str:
         """Spawn a subprocess — sync so worker threads (LoRA training
         trigger, routes) can call it without an event loop."""
-        self._counter += 1
-        task_id = f"task_{self._counter:04d}"
         root = project_root()
-        task_dir = root / "research" / "tasks" / task_id
+        # The counter restarts every process — skip ids that collide with
+        # a live task or a stale research/tasks/ dir (log.txt would append
+        # into the old run's log otherwise).
+        while True:
+            self._counter += 1
+            task_id = f"task_{self._counter:04d}"
+            task_dir = root / "research" / "tasks" / task_id
+            if task_id not in self.tasks and not task_dir.exists():
+                break
         task_dir.mkdir(parents=True, exist_ok=True)
         log_path = task_dir / "log.txt"
 
@@ -89,6 +103,13 @@ class ProcessService:
 
     async def _run(self, task_id: str, cmd: list[str], cwd: str) -> None:
         info = self.tasks[task_id]
+        # Open log.txt once for the task's lifetime — the old per-line
+        # open/write/close hammered the disk every output line.
+        try:
+            self._log_fhs[task_id] = [
+                open(info.log_path, "a", encoding="utf-8"), 0]
+        except (OSError, TypeError):
+            self._log_fhs.pop(task_id, None)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, cwd=cwd,
@@ -123,6 +144,13 @@ class ProcessService:
             self._set_status(task_id, "done", code)
         else:
             self._set_status(task_id, "crashed", code)
+        self._flush_log(task_id, force=True)
+        ent = self._log_fhs.pop(task_id, None)
+        if ent is not None:
+            try:
+                ent[0].close()
+            except Exception:
+                pass
         self._hub.publish("task_finished", info.to_dict())
 
     @staticmethod
@@ -130,13 +158,32 @@ class ProcessService:
         import subprocess
         return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+    def _flush_log(self, task_id: str, force: bool = False) -> None:
+        ent = self._log_fhs.get(task_id)
+        if ent is None:
+            return
+        ent[1] += 1
+        if force or ent[1] >= 32:
+            try:
+                ent[0].flush()
+            except Exception:
+                pass
+            ent[1] = 0
+
     def _emit_line(self, task_id: str, line: str) -> None:
         info = self.tasks.get(task_id)
         if info:
             info.lines.append(line)
             if len(info.lines) > 5000:
                 del info.lines[: len(info.lines) - 5000]
-            if info.log_path:
+            ent = self._log_fhs.get(task_id)
+            if ent is not None:
+                try:
+                    ent[0].write(line + "\n")
+                    self._flush_log(task_id)
+                except Exception:
+                    logger.debug("task log write failed", exc_info=True)
+            elif info.log_path:
                 try:
                     with open(info.log_path, "a", encoding="utf-8") as f:
                         f.write(line + "\n")
@@ -161,7 +208,9 @@ class ProcessService:
     def kill(self, task_id: str) -> bool:
         proc = self._procs.get(task_id)
         info = self.tasks.get(task_id)
-        if info:
+        # Only stamp "killed" on live tasks — killing an already-finished
+        # task used to clobber its done/crashed status + end time.
+        if info and info.is_live:
             info.status = "killed"
             info.ended_at = time.time()
         if proc and proc.returncode is None:

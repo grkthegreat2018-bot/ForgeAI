@@ -109,9 +109,14 @@ def _build_finetune_cmd(body: FinetuneRequest) -> list[str] | None:
     if not body.datasets:
         return None
     root = project_root()
+    # Canonical trainer — research/ migrated to forge/ (the old path
+    # launched a nonexistent script and the task died instantly).
+    runner = root / "forge" / "training" / "runners" / "sft_train.py"
+    if not runner.is_file():
+        return None
     venv_python = root / "venv" / "Scripts" / "python.exe"
     cmd = [str(venv_python if venv_python.is_file() else "python"),
-           str(root / "research" / "training" / "runners" / "sft_train.py"),
+           str(runner),
            "--data", *body.datasets,
            "--config", body.config or "forgelm_v2",
            "--checkpoint", body.checkpoint,
@@ -159,6 +164,10 @@ async def finetune_preview(body: FinetuneRequest):
 
 @router.post("/finetune/launch")
 async def finetune_launch(body: FinetuneRequest):
+    runner = project_root() / "forge" / "training" / "runners" / "sft_train.py"
+    if not runner.is_file():
+        return {"ok": False, "error":
+                f"trainer not found: {runner.relative_to(project_root())}"}
     cmd = _build_finetune_cmd(body)
     if cmd is None:
         return {"ok": False, "error": "select at least one dataset"}
@@ -185,13 +194,18 @@ def _flux_checkpoints() -> list[str]:
 @router.get("/selfplay/status")
 async def selfplay_status():
     loop = asyncio.get_running_loop()
-    latest = await loop.run_in_executor(
-        None, services.events.latest_status)
-    events = services.events.all_events()[-200:]
-    hb_age = services.events.heartbeat_age()
+
+    def fetch():
+        ev = services.events
+        return (ev.latest_status(), ev.all_events()[-200:],
+                ev.heartbeat_age(), ev.heartbeat_stalled())
+
+    # JSON parse + file stats stay off the loop (EC: self-play status offload)
+    latest, events, hb_age, hb_stalled = await loop.run_in_executor(
+        None, fetch)
     return {"status": latest or {}, "events": events,
             "heartbeat_age_s": hb_age,
-            "heartbeat_stalled": services.events.heartbeat_stalled(),
+            "heartbeat_stalled": hb_stalled,
             "topics": SELFPLAY_TOPICS,
             "flux_models": _flux_checkpoints()}
 

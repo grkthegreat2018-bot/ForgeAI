@@ -39,8 +39,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -174,13 +176,34 @@ class MCPClient:
 
 # ── Stdio transport ─────────────────────────────────────────────────────
 
+# Sentinel pushed onto the rx queue when the server's stdout closes.
+_PROC_EOF = object()
+
+
+
 class StdioMCPClient(MCPClient):
-    """MCP client over stdio — launches a subprocess and communicates via pipes."""
+    """MCP client over stdio — launches a subprocess and communicates via pipes.
+
+    Reads go through a dedicated stdout pump thread feeding a queue:
+    ``_send_request`` then waits for the response whose JSON-RPC ``id``
+    matches its request (notifications/responses for other ids are
+    skipped) under ``_io_lock``, with a hard read timeout — a hung or
+    chatty server used to block the caller on ``readline()`` forever and
+    could return someone else's response.
+    """
+
+    # Max time to wait for OUR response after writing a request.
+    READ_TIMEOUT_S = 30.0
+    # Max response lines to scan past while looking for our id.
+    MAX_SKIP_LINES = 100
 
     def __init__(self, config: MCPServerConfig) -> None:
         super().__init__(config)
         self._proc: subprocess.Popen | None = None
         self._stderr_thread: threading.Thread | None = None
+        self._stdout_thread: threading.Thread | None = None
+        self._rx: queue.Queue = queue.Queue()
+        self._io_lock = threading.Lock()   # serialize write→matched read
 
     def _send_request(self, method: str, params: dict | None = None) -> dict:
         if self._proc is None or self._proc.poll() is not None:
@@ -193,17 +216,47 @@ class StdioMCPClient(MCPClient):
         if params is not None:
             req["params"] = params
         line = json.dumps(req) + "\n"
-        self._proc.stdin.write(line)
-        self._proc.stdin.flush()
-
-        # read response line
-        resp_line = self._proc.stdout.readline()
-        if not resp_line:
-            raise ConnectionError("MCP subprocess closed stdout")
-        resp = json.loads(resp_line)
-        if "error" in resp:
-            raise RuntimeError(f"MCP error: {resp['error']}")
-        return resp.get("result", {})
+        with self._io_lock:
+            try:
+                self._proc.stdin.write(line)
+                self._proc.stdin.flush()
+            except (BrokenPipeError, OSError) as e:
+                raise ConnectionError(
+                    f"MCP subprocess stdin broken: {e}") from e
+            # Read lines until our id answers — the server may interleave
+            # notifications or log lines on stdout.
+            deadline = time.monotonic() + self.READ_TIMEOUT_S
+            skipped = 0
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"MCP '{method}' timed out after "
+                        f"{self.READ_TIMEOUT_S}s")
+                try:
+                    resp = self._rx.get(timeout=min(remaining, 5.0))
+                except queue.Empty:
+                    if self._proc.poll() is not None:
+                        raise ConnectionError(
+                            "MCP subprocess exited while awaiting "
+                            "response")
+                    continue
+                if resp is _PROC_EOF:
+                    raise ConnectionError("MCP subprocess closed stdout")
+                if not isinstance(resp, dict):
+                    continue
+                if resp.get("id") != req["id"]:
+                    skipped += 1
+                    if skipped > self.MAX_SKIP_LINES:
+                        raise RuntimeError(
+                            "MCP response never arrived (skipped "
+                            f"{skipped} unrelated messages)")
+                    logger.debug("MCP skipping non-matching message "
+                                 "(id=%s)", resp.get("id"))
+                    continue
+                if "error" in resp:
+                    raise RuntimeError(f"MCP error: {resp['error']}")
+                return resp.get("result", {})
 
     def _send_notification(self, method: str, params: dict) -> None:
         if self._proc is None or self._proc.poll() is not None:
@@ -215,10 +268,12 @@ class StdioMCPClient(MCPClient):
         }
         line = json.dumps(notif) + "\n"
         try:
-            self._proc.stdin.write(line)
-            self._proc.stdin.flush()
+            with self._io_lock:
+                self._proc.stdin.write(line)
+                self._proc.stdin.flush()
         except Exception:
-            logger.debug("Failed to write to MCP server stdin", exc_info=True)
+            logger.debug("Failed to write to MCP server stdin",
+                         exc_info=True)
 
     def start(self) -> None:
         """Launch the MCP server subprocess."""
@@ -238,6 +293,29 @@ class StdioMCPClient(MCPClient):
         self._stderr_thread = threading.Thread(
             target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
+        # stdout pump — the ONLY reader of proc.stdout.
+        self._stdout_thread = threading.Thread(
+            target=self._pump_stdout, daemon=True)
+        self._stdout_thread.start()
+
+    def _pump_stdout(self) -> None:
+        proc = self._proc
+        if proc is None:
+            return
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    self._rx.put(json.loads(line))
+                except json.JSONDecodeError:
+                    logger.debug("MCP non-JSON stdout [%s]: %s",
+                                 self.config.name, line[:200])
+        except Exception:
+            logger.debug("MCP stdout pump failed", exc_info=True)
+        finally:
+            self._rx.put(_PROC_EOF)
 
     def _drain_stderr(self) -> None:
         if self._proc is None:
@@ -255,7 +333,8 @@ class StdioMCPClient(MCPClient):
                 try:
                     self._proc.kill()
                 except Exception:
-                    logger.debug("Failed to kill MCP server process", exc_info=True)
+                    logger.debug("Failed to kill MCP server process",
+                                 exc_info=True)
             self._proc = None
         self._connected = False
         super().close()
@@ -392,6 +471,12 @@ class MCPManager:
                         name, len(client.tools))
             return True
         except Exception as e:
+            # Kill the spawned subprocess — a failed handshake used to
+            # orphan the server process until GC/finalizers got to it.
+            try:
+                client.close()
+            except Exception:
+                pass
             logger.warning("MCP connect '%s' failed: %s", name, e)
             return False
 

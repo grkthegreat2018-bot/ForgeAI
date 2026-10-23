@@ -156,6 +156,7 @@ class EngineService:
                                  activation, config_overrides)
             self._progress("load queued behind in-flight load")
             return
+        old_engine = None
         if self.is_ready():
             # A bare request for the resident model is a no-op — avoids a
             # pointless unload+reload cycle (e.g. re-clicking Load on the
@@ -165,7 +166,9 @@ class EngineService:
                     and activation is None and use_compile is None \
                     and not config_overrides:
                 return
-            self.unload()
+            # Detach cheaply HERE; the blocking sleep(2)+empty_cache runs
+            # on the pool thread inside the load, not on the event loop.
+            old_engine = self._detach()
         self._error = ""
         self._load_seq += 1
         seq = self._load_seq
@@ -174,18 +177,19 @@ class EngineService:
         loop = self._loop or asyncio.get_event_loop()
         coro = self._load_async(
             seq, loop, checkpoint, config_name, use_compile, activation,
-            config_overrides)
+            config_overrides, old_engine)
         if loop.is_running():
             self._load_task = asyncio.run_coroutine_threadsafe(coro, loop)
         else:
             self._load_task = asyncio.ensure_future(coro)
 
     async def _load_async(self, seq, loop, checkpoint, config_name,
-                          use_compile, activation, config_overrides) -> None:
+                          use_compile, activation, config_overrides,
+                          old_engine=None) -> None:
         try:
             engine, info = await loop.run_in_executor(
                 self._pool, self._load_blocking, checkpoint, config_name,
-                use_compile, activation, config_overrides)
+                use_compile, activation, config_overrides, old_engine)
         except Exception as e:
             if seq == self._load_seq:
                 self._loading_req = None
@@ -225,9 +229,15 @@ class EngineService:
             pass
 
     def _load_blocking(self, checkpoint, config_name, use_compile,
-                       activation, config_overrides):
+                       activation, config_overrides, old_engine=None):
         """Blocking load — runs in the engine executor thread."""
         t0 = time.perf_counter()
+        if old_engine is not None:
+            # Previous resident model — teardown here (pool thread), not
+            # on the event loop where sleep(2)+empty_cache used to stall
+            # every endpoint + /ws.
+            self._progress("unloading previous model…")
+            self._discard_engine(old_engine)
         if activation is not None:
             _set_no_compile(bool(activation.get("use_compile", False)))
         else:
@@ -314,44 +324,48 @@ class EngineService:
         }
         return engine, info
 
-    def unload(self) -> None:
+    def _detach(self):
+        """Cheap state teardown — invalidate in-flight loads and drop the
+        resident-engine reference. Returns the engine (or None) so the
+        caller can dispose of it on a worker thread."""
         self._load_seq += 1  # invalidate any in-flight load
         self._queued_load = None
         self._loading_req = None
         self._load_task = None
         self._reactivating = False
         engine, self._engine = self._engine, None
-        if engine is not None:
-            try:
-                # level 2 discards weights — level 1's GPU->CPU copy (~2s
-                # for a 6.4GB model) is wasted on an engine we delete anyway.
-                engine.sleep(level=2)
-            except Exception:
-                try:
-                    engine.sleep()
-                except Exception as e:
-                    logger.warning(
-                        "engine sleep failed during unload: %s", e)
-            del engine
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                logger.debug("Failed to clear CUDA cache", exc_info=True)
         self._info = {}
         self._set_state("idle")
+        return engine
+
+    def unload(self) -> None:
+        """Detach + blocking teardown. Callers on the event loop should
+        run this via run_in_executor."""
+        engine = self._detach()
+        if engine is not None:
+            self._discard_engine(engine)
 
     # ── live re-activation ────────────────────────────────────────────
-    def reactivate(self, activation: dict) -> None:
+    def reactivate(self, activation: dict) -> dict:
+        """Schedule a re-activation. Returns {"ok": bool, ...} — refusals
+        come back as errors instead of the old always-ok route reply."""
         if not self.is_ready():
             self._hub.publish("engine_error",
                               {"error": "no resident engine to re-activate"})
-            return
+            return {"ok": False,
+                    "error": "no resident engine to re-activate"}
         if self.is_busy():
             self._hub.publish("engine_error",
                               {"error": "engine is busy"})
-            return
+            return {"ok": False, "error": "engine is busy"}
+        unknown: list[str] = []
+        try:
+            from dataclasses import fields as _dc_fields
+            from forge.engine.activation import ActivationConfig
+            valid = {f.name for f in _dc_fields(ActivationConfig)}
+            unknown = sorted(k for k in activation if k not in valid)
+        except Exception:
+            pass
         self._reactivating = True
         self._set_state(self._state)  # republish busy flag
         loop = self._loop or asyncio.get_event_loop()
@@ -360,6 +374,13 @@ class EngineService:
             asyncio.run_coroutine_threadsafe(coro, loop)
         else:
             asyncio.ensure_future(coro)
+        out: dict = {"ok": True}
+        if unknown:
+            # ActivationConfig.from_kwargs drops unknown keys silently —
+            # surface them so a typo doesn't masquerade as applied.
+            out["warnings"] = [
+                "unknown activation keys ignored: " + ", ".join(unknown)]
+        return out
 
     async def _reactivate_async(self, loop, activation) -> None:
         t0 = time.perf_counter()
@@ -496,13 +517,41 @@ class EngineService:
     def try_engine(self):
         return self._engine if self.is_ready() else None
 
+    @staticmethod
+    def _as_awaitable(fut):
+        """concurrent.futures.Future → awaitable; asyncio futures pass
+        through. asyncio.wait_for() rejects raw concurrent futures
+        (TypeError) — that was the old shutdown bug."""
+        if isinstance(fut, asyncio.Future):
+            return fut
+        return asyncio.wrap_future(fut)
+
     async def shutdown(self) -> None:
-        if self._load_task and not self._load_task.done():
+        # Stop accepting new work + cancel the learn loop first.
+        self._learn_cancel.set()
+        lt = self._learn_task
+        if lt is not None and not lt.done():
             try:
-                await asyncio.wait_for(self._load_task, timeout=60)
+                lt.cancel()
             except Exception:
                 pass
-        self._pool.shutdown(wait=False)
+        for fut, timeout in ((self._load_task, 60), (self._learn_task, 30)):
+            if fut is None:
+                continue
+            try:
+                if fut.done():
+                    continue
+                await asyncio.wait_for(self._as_awaitable(fut),
+                                       timeout=timeout)
+            except (Exception, asyncio.CancelledError):
+                pass
+        # Blocking engine teardown off the loop, on the engine pool.
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                self._pool, self.unload)
+        except Exception:
+            pass
+        self._pool.shutdown(wait=True, cancel_futures=True)
 
 
 class _EngineLease:

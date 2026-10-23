@@ -39,21 +39,9 @@ def get_presets() -> list[ProcessPreset]:
             arg_defaults={"--topic": "python_algorithms", "--mode": "selfplay", "--epochs": "3"},
         ),
         ProcessPreset(
-            name="Ablation Benchmark",
-            script="scripts/ablation_benchmark.py",
-            description="Run ablation benchmark suite across model configurations",
-            arg_defaults={},
-        ),
-        ProcessPreset(
             name="Download HF Datasets",
             script="scripts/download_hf_datasets.py",
             description="Download HuggingFace datasets for training",
-            arg_defaults={},
-        ),
-        ProcessPreset(
-            name="Extract Vocab Packs",
-            script="scripts/extract_vocab_packs.py",
-            description="Extract vocabulary packs from tokenizer",
             arg_defaults={},
         ),
     ]
@@ -65,11 +53,27 @@ def _venv_python() -> str:
     return venv_python if Path(venv_python).is_file() else "python"
 
 
+def preset_script_exists(preset: ProcessPreset) -> bool:
+    """True when the preset's script is present on disk."""
+    return (project_root() / preset.script).is_file()
+
+
+def missing_preset_scripts() -> list[str]:
+    """Preset names whose script path doesn't exist — call at startup."""
+    return [p.name for p in get_presets() if not preset_script_exists(p)]
+
+
 def build_command(preset: ProcessPreset, arg_overrides: dict[str, str]) -> list[str]:
-    """Build the full command list from a preset + arg overrides."""
+    """Build the full command list from a preset + arg overrides.
+
+    Overrides may only fill in args the preset declares — unknown keys are
+    dropped so a remote caller can't inject new flags (arg injection)."""
     root = project_root()
     cmd = [_venv_python(), str(root / preset.script)]
-    merged = {**preset.arg_defaults, **arg_overrides}
+    merged = dict(preset.arg_defaults)
+    for flag, val in (arg_overrides or {}).items():
+        if flag in merged:
+            merged[flag] = str(val)
     for flag, val in merged.items():
         if val.strip():
             cmd.extend([flag, val.strip()])

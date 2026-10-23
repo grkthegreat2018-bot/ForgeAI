@@ -531,9 +531,15 @@ async def run_chat(runtime, harness, messages: list[dict],
         finally:
             emit(("end", None))
 
-    loop.run_in_executor(_pool, worker)
-    while True:
-        kind, data = await q.get()
-        if kind == "end":
-            break
-        yield {"type": kind, "data": data}
+    fut = loop.run_in_executor(_pool, worker)
+    try:
+        while True:
+            kind, data = await q.get()
+            if kind == "end":
+                break
+            yield {"type": kind, "data": data}
+    finally:
+        # Consumer gone — stop the generation loop + any in-flight tool
+        # execution instead of orphaning the worker for a dead client.
+        cancel.cancel()
+        fut.cancel()

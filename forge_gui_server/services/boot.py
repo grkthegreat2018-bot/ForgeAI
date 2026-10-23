@@ -48,9 +48,13 @@ class BootService:
     def _run(self, checkpoint, config_name, prompt, max_tokens,
              timeout_s) -> dict:
         try:
+            # info.checkpoint is the RESOLVED absolute path; compare it to
+            # the resolved request — the old raw-string compare reloaded
+            # the engine even when the same model was already resident.
+            resolved_req = self._runtime._resolve_ckpt(checkpoint)
             needs_reload = (
                 not self._runtime.is_ready()
-                or self._runtime.info.get("checkpoint") != checkpoint
+                or self._runtime.info.get("checkpoint") != resolved_req
                 or self._runtime.info.get("config_name") != config_name)
             if needs_reload:
                 self._status(f"loading {config_name}…")

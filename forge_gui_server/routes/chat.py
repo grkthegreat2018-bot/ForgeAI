@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -15,6 +16,20 @@ from ..services import chat_loop, gen
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Approval modes a remote caller may request for /agent/runs. "none" runs
+# every side-effecting tool without asking — gated behind an explicit
+# opt-in env flag so a casual API caller can't disable the gate.
+_APPROVAL_MODES = {"destructive", "all"}
+_NO_APPROVAL_ENV = "FORGE_AGENT_ALLOW_NO_APPROVAL"
+
+
+def _allowed_approval_modes() -> set[str]:
+    modes = set(_APPROVAL_MODES)
+    if os.environ.get(_NO_APPROVAL_ENV, "").strip().lower() in (
+            "1", "true", "yes"):
+        modes.add("none")
+    return modes
 
 
 def _sse(event: dict) -> str:
@@ -169,51 +184,59 @@ async def chat_send(body: ChatSendRequest):
                 thinking_enabled=body.thinking)
         except Exception:
             sys_prompt = ""
-    if sys_prompt:
-        history.append({"role": "system", "content": sys_prompt})
     prior = [{"role": m["role"], "content": m.get("content", ""),
               "tool_calls": m.get("tool_calls"), "name": m.get("name", ""),
               "reasoning_content": m.get("reasoning_content")}
              for m in conv["messages"]]
     try:
+        # inject() returns the memory TEXT (str) — fold it into the system
+        # prompt; the old code discarded it by extending a str as messages.
         injected = services.lorebook.inject(prior)
-        history.extend(injected if isinstance(injected, list) else prior)
+        if isinstance(injected, str) and injected:
+            sys_prompt = (f"{sys_prompt}\n{injected}"
+                          if sys_prompt else injected)
     except Exception:
-        history.extend(prior)
+        pass
+    if sys_prompt:
+        history.append({"role": "system", "content": sys_prompt})
+    history.extend(prior)
 
     harness = services.make_harness(read_only=True) \
         if body.tools_enabled else None
     cfg_name = services.engine.info.get("config_name", "")
+    cancel = chat_loop.ChatCancel()
 
     async def event_stream():
         yield _sse({"type": "conv", "data": {"id": conv_id}})
         collected: list[dict] = []
-        async for evt in chat_loop.run_chat(
-                services.engine, harness, history,
-                config_name=cfg_name,
-                max_new_tokens=body.max_new_tokens,
-                temperature=body.temperature, top_p=body.top_p,
-                top_k=body.top_k,
-                repetition_penalty=body.repetition_penalty,
-                tools_enabled=body.tools_enabled,
-                thinking=body.thinking,
-                think_budget=body.think_budget,
-                min_p=body.min_p,
-                dry_multiplier=body.dry_multiplier,
-                dry_base=body.dry_base):
-            if evt["type"] == "done":
-                collected = evt["data"].get("messages", [])
-            yield _sse(evt)
-        # persist produced messages
-        for m in collected:
+        try:
+            async for evt in chat_loop.run_chat(
+                    services.engine, harness, history,
+                    config_name=cfg_name,
+                    max_new_tokens=body.max_new_tokens,
+                    temperature=body.temperature, top_p=body.top_p,
+                    top_k=body.top_k,
+                    repetition_penalty=body.repetition_penalty,
+                    tools_enabled=body.tools_enabled,
+                    thinking=body.thinking,
+                    think_budget=body.think_budget,
+                    min_p=body.min_p,
+                    dry_multiplier=body.dry_multiplier,
+                    dry_base=body.dry_base,
+                    cancel=cancel):
+                if evt["type"] == "done":
+                    collected = evt["data"].get("messages", [])
+                yield _sse(evt)
+        finally:
+            # Client disconnected (or stream ended) — stop generation and
+            # any in-flight tool execution instead of orphaning the worker.
+            cancel.cancel()
+        # persist produced messages (one save, not N+1 rewrites)
+        if collected:
             try:
-                store.append_message(
-                    conv_id, m["role"], m.get("content", ""),
-                    tool_calls=m.get("tool_calls"),
-                    name=m.get("name", ""),
-                    reasoning_content=m.get("reasoning_content"))
+                store.append_messages(conv_id, collected)
             except Exception:
-                logger.debug("persist message failed", exc_info=True)
+                logger.debug("persist messages failed", exc_info=True)
         yield _sse({"type": "saved", "data": {"id": conv_id}})
 
     return StreamingResponse(event_stream(),
@@ -236,7 +259,17 @@ def _agent_workspace(body: "AgentStartRequest") -> tuple[str, str]:
     the task — becomes the subfolder, created if missing.
     """
     if body.workspace:
-        return body.workspace, body.project or Path(body.workspace).name
+        # An explicit workspace must still live under the project root —
+        # an arbitrary path would jail the agent's file/exec tools to
+        # whatever directory the remote caller picked.
+        from forge_gui.api.status_reader import project_root
+        root = Path(project_root()).resolve()
+        ws = Path(body.workspace).resolve()
+        if not (ws == root or root in ws.parents):
+            raise ValueError(
+                f"workspace outside project root: {body.workspace}")
+        ws.mkdir(parents=True, exist_ok=True)
+        return str(ws), body.project or ws.name
     from forge_gui.api.status_reader import project_root
     project = _project_slug(body.project or body.task)
     root = Path(project_root()) / "ForgeAI_Projects"
@@ -265,7 +298,15 @@ class AgentStartRequest(BaseModel):
 async def agent_start(body: AgentStartRequest):
     if not services.engine.is_ready():
         return {"ok": False, "error": "engine not loaded — load a model first"}
-    ws, project = _agent_workspace(body)
+    mode = (body.approval_mode or "destructive").lower()
+    if mode not in _allowed_approval_modes():
+        return {"ok": False, "error":
+                f"approval_mode '{body.approval_mode}' not allowed "
+                f"(allowed: {sorted(_allowed_approval_modes())})"}
+    try:
+        ws, project = _agent_workspace(body)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
     kw = {}
     if body.system_prompt:
         kw["system_prompt"] = body.system_prompt
@@ -275,7 +316,7 @@ async def agent_start(body: AgentStartRequest):
         temperature=body.temperature, top_p=body.top_p, top_k=body.top_k,
         repetition_penalty=body.repetition_penalty,
         enabled_tools=body.enabled_tools,
-        approval_mode=body.approval_mode,
+        approval_mode=mode,
         history=body.history, **kw)
     return {"ok": True, "run_id": run.run_id}
 
@@ -344,13 +385,18 @@ class GenStreamRequest(BaseModel):
 
 @router.post("/gen/stream")
 async def gen_stream(body: GenStreamRequest):
+    cancel = gen.StreamCancel()
+
     async def event_stream():
-        async for evt in gen.stream_tokens(
-                services.engine, body.prompt,
-                max_new_tokens=body.max_new_tokens,
-                temperature=body.temperature, top_k=body.top_k,
-                top_p=body.top_p):
-            yield _sse(evt)
+        try:
+            async for evt in gen.stream_tokens(
+                    services.engine, body.prompt,
+                    max_new_tokens=body.max_new_tokens,
+                    temperature=body.temperature, top_k=body.top_k,
+                    top_p=body.top_p, cancel=cancel):
+                yield _sse(evt)
+        finally:
+            cancel.cancel()
     return StreamingResponse(event_stream(),
                              media_type="text/event-stream")
 

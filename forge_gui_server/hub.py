@@ -46,33 +46,43 @@ class EventHub:
         if loop is not None and loop.is_running():
             loop.call_soon_threadsafe(self._fanout, evt)
         else:
-            self._fanout(evt)
+            # No running loop → nobody can consume the queues anyway, and
+            # asyncio.Queue is not thread-safe: fanning out here touched
+            # subscriber deques from a foreign thread. The event stays in
+            # _recent, so late subscribers still replay it.
+            logger.debug("publish: no running loop; event kept for replay")
         return evt
 
     def _fanout(self, evt: dict) -> None:
         dead = []
-        for q in list(self._subs):
+        with self._lock:
+            subs = list(self._subs)
+        for q in subs:
             try:
                 q.put_nowait(evt)
             except asyncio.QueueFull:
                 dead.append(q)
-        for q in dead:
-            self._subs.discard(q)
+        if dead:
+            with self._lock:
+                for q in dead:
+                    self._subs.discard(q)
             logger.debug("dropped slow ws subscriber")
 
     def subscribe(self, replay: bool = True) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_MAX)
-        if replay:
-            for evt in self._recent:
-                try:
-                    q.put_nowait(evt)
-                except asyncio.QueueFull:
-                    break
-        self._subs.add(q)
+        with self._lock:
+            if replay:
+                for evt in self._recent:
+                    try:
+                        q.put_nowait(evt)
+                    except asyncio.QueueFull:
+                        break
+            self._subs.add(q)
         return q
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
-        self._subs.discard(q)
+        with self._lock:
+            self._subs.discard(q)
 
     @property
     def subscriber_count(self) -> int:
