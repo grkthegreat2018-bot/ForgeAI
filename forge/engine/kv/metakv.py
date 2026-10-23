@@ -123,11 +123,18 @@ class MetaKVCache(KVCacheStrategy):
         # Bridge watermark passthrough so the decode loop triggers
         # compaction on the inner strategy's schedule.
         self.compact_over = getattr(inner, "compact_over", None)
+        import inspect
+        self._append_takes_ids = "token_ids" in inspect.signature(
+            inner.append).parameters
 
     def append(self, k, v, position, attention_weights=None,
                token_ids=None):
-        self._inner.append(k, v, position,
-                           attention_weights=attention_weights)
+        # Forward token_ids when the inner strategy accepts them — the
+        # old code dropped the arg, starving id-aware inners.
+        kw = {"attention_weights": attention_weights}
+        if getattr(self, "_append_takes_ids", False):
+            kw["token_ids"] = token_ids
+        self._inner.append(k, v, position, **kw)
         self.seq_len = getattr(self._inner, "seq_len", self.seq_len)
 
     def get(self, positions):

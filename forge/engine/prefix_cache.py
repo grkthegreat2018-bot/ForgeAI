@@ -160,43 +160,6 @@ def apply_recurrent_state_prefix(model, snap) -> None:
             gdn2.set_state_prefix(st["gdn2"])
 
 
-def cache_prompt_prefix(engine, ids: torch.Tensor) -> None:
-    """Capture and store the KV cache for the prefix of ``ids``.
-
-    For ``ChunkedPrefixCache`` the *full* prompt KV is stored under its
-    rolling prefix hash (with token ids for verification), enabling
-    partial-prefix reuse by later, longer prompts.  For the legacy
-    cache only the first ``_PREFIX_CACHE_KEY_LENGTH`` tokens are stored.
-    """
-    prefix_cache = engine._prefix_cache
-    if prefix_cache is None or ids.shape[1] <= 16:
-        return
-    if isinstance(prefix_cache, ChunkedPrefixCache):
-        token_ids = ids[0].cpu().tolist()
-        hashes = prefix_cache.prefix_hashes(token_ids)
-        if not hashes:
-            return
-        full_hash = hashes[-1]
-        if full_hash in prefix_cache:
-            return  # already cached
-        with torch.inference_mode():
-            prefix_out = engine.model(ids, use_cache=True)
-            _, prefix_kv = unpack_output_with_kv(prefix_out)
-        prefix_cache.put((full_hash, token_ids), prefix_kv, len(token_ids))
-        return
-    key = cache_key(ids)
-    if not hasattr(prefix_cache, "put") and key in prefix_cache:
-        return
-    key_len = min(_PREFIX_CACHE_KEY_LENGTH, ids.shape[1])
-    with torch.inference_mode():
-        prefix_out = engine.model(ids[:, :key_len], use_cache=True)
-        _, prefix_kv = unpack_output_with_kv(prefix_out)
-    if hasattr(prefix_cache, "put"):
-        prefix_cache.put(key, prefix_kv, key_len)
-    else:
-        prefix_cache[key] = (key_len, prefix_kv)
-
-
 def get_cached_prefix(prefix_cache, ids: torch.Tensor):
     """Look up a cached prefix KV for ``ids``.
 

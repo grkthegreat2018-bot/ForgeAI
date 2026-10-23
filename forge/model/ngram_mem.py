@@ -250,13 +250,17 @@ class SuffixMemory:
         total = sum(row.values())
         return {t: c / total for t, c in row.items()}, float(total)
 
-    def lift_last(self, device=None, dtype=torch.float32) -> torch.Tensor:
+    def lift_last(self, device=None, dtype=torch.float32,
+                  gate: float | None = None) -> torch.Tensor:
         """(V,) additive logit lift for the next token, given the tail.
 
         Geometric mixture over orders: lift = gate * Σ_o w_o * log p_o,
         where p_o is the order-o successor distribution smoothed by the
         unigram table and a uniform floor (R64 fix: a known suffix with a
         novel successor must produce a finite lift, not -inf).
+
+        ``gate`` overrides ``self.gate`` for this call only — per-request
+        overrides must not write the shared sidecar's ``.gate``.
         """
         uni = self.unigram / max(self.total, 1)
         floor = np.full(self.vocab, np.log(self.uniform_floor),
@@ -279,7 +283,8 @@ class SuffixMemory:
         # Blend: matched successors keep their mixture lift; unseen tokens
         # get a mild negative pull (scale the floor so a memory hit is
         # always distinguishable but never a hard veto).
-        out = self.gate * (lift + 0.25 * floor)
+        g = self.gate if gate is None else float(gate)
+        out = g * (lift + 0.25 * floor)
         return torch.from_numpy(out).to(device=device, dtype=dtype)
 
     def draft(self, n: int = 4) -> list[int]:

@@ -44,13 +44,22 @@ class BatchedDecoding(DecodingStrategy):
     def generate(self, model, input_ids: torch.Tensor,
                  max_new_tokens: int = 100,
                  temperature: float = 0.0,
-                 top_p: float = 1.0) -> torch.Tensor:
+                 top_p: float = 1.0,
+                 top_k: int = 0, repetition_penalty: float = 1.0,
+                 stop=None, tokenizer=None, **_ignored) -> torch.Tensor:
+        # top_k/stop/tokenizer are real generate_batch params — dropping
+        # them silently mis-sampled, and **_ignored swallows the rest of
+        # the uniform engine kwarg surface (kv_compact, suffix_mem, ...).
         return self.generate_batch(
             model,
             [input_ids],
             [max_new_tokens],
             [temperature],
             [top_p],
+            top_k_list=[top_k],
+            repetition_penalty_list=[repetition_penalty],
+            stop_list=[stop],
+            tokenizer=tokenizer,
         )[0]
 
     def generate_batch(

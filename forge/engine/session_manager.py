@@ -36,17 +36,19 @@ Usage:
     future2 = bq.submit(task_id, "Now make it recursive", max_tokens=128)
 """
 import asyncio
+import logging
 import threading
 import time
 import uuid
 from collections import OrderedDict
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Any
 
 import torch
 
 from forge.engine.batched_decoding import BatchedDecoding
+
+logger = logging.getLogger(__name__)
 
 # ── Task Boot Config ─────────────────────────────────────────────────────────
 
@@ -79,39 +81,46 @@ class TaskBootConfig:
 
     def differs_from(self, engine) -> bool:
         """Check if this config differs from the engine's current state."""
-        if self.kv_cache != "standard" and (
-            engine.kv_cache is None or
-            getattr(engine.kv_cache, 'name', 'standard') != self.kv_cache):
+        # Compare ALL fields against the engine's recorded activation
+        # config — checking only a subset misses revert-to-default
+        # transitions (e.g. paged → standard).
+        active = getattr(engine, "active_config", None)
+        if active is not None:
+            cur = active.to_dict()
+            return any(cur.get(k) != v for k, v in self.to_dict().items())
+        # No recorded config (never activated) — probe live state.
+        # getattr-guarded: engine-like objects (fakes, aux runners) may
+        # not carry every attribute.
+        kv = getattr(engine, "kv_cache", None)
+        cur_kv = getattr(kv, "name", None) or "standard"
+        if self.kv_cache != cur_kv:
             return True
-        if self.decoding != "standard" and engine.decoding.name != self.decoding:
+        dec = getattr(engine, "decoding", None)
+        if self.decoding != getattr(dec, "name", "standard"):
             return True
-        if self.quantize != engine.quantize:
+        if self.quantize != getattr(engine, "quantize", None):
             return True
-        if self.acceleration != engine.acceleration:
+        if self.acceleration != getattr(engine, "acceleration", None):
             return True
         return False
 
     def apply_to(self, engine):
-        """Apply this config to a ForgeEngine via activate()."""
+        """Apply this config to a ForgeEngine via activate().
+
+        Seeds from the engine's *current* activation config and overlays
+        this task's fields — a bare ``activate(**self.to_dict())`` would
+        reset every other feature flag to its default.
+        """
         # Serialise against in-flight generation: activate() swaps
         # decoding/kv/quant strategies mid-request otherwise.
         with engine._gen_lock:
-            engine.activate(
-                kv_cache=self.kv_cache,
-                decoding=self.decoding,
-                quantize=self.quantize,
-                acceleration=self.acceleration,
-                kv_cache_tokens=self.kv_cache_tokens,
-                kv_bits=self.kv_bits,
-                mrl_keep_ratio=self.mrl_keep_ratio,
-                use_v0_warm=self.use_v0_warm,
-                use_progressive_kv=self.use_progressive_kv,
-                use_compile=self.use_compile,
-                use_triton_conv=self.use_triton_conv,
-                use_prefix_cache=self.use_prefix_cache,
-                use_spec_attn=self.use_spec_attn,
-                warmup=self.warmup,
-            )
+            base = getattr(engine, "active_config", None)
+            if base is not None:
+                merged = base.to_dict()
+                merged.update(self.to_dict())
+                engine.activate(**merged)
+            else:
+                engine.activate(**self.to_dict())
 
     def to_dict(self) -> dict:
         return {
@@ -135,8 +144,12 @@ class TaskBootConfig:
     def from_dict(cls, d: dict | None) -> "TaskBootConfig":
         if d is None:
             return cls()
-        # Filter to known fields
+        # Filter to known fields — warn on drops so typos don't vanish
         known = {f.name for f in cls.__dataclass_fields__.values()}
+        dropped = sorted(set(d) - known)
+        if dropped:
+            logger.warning("TaskBootConfig.from_dict: ignoring unknown "
+                           "keys %s", dropped)
         filtered = {k: v for k, v in d.items() if k in known}
         return cls(**filtered)
 
@@ -156,9 +169,6 @@ class TaskSession:
     created_at: float = field(default_factory=time.time)
     last_used: float = field(default_factory=time.time)
     total_tokens: int = 0
-    # Optional: cached KV state for continuation (not yet populated)
-    kv_cache: Any = None
-    kv_seq_len: int = 0
 
 
 class SessionManager:
@@ -254,6 +264,8 @@ class SessionManager:
             if session is None:
                 raise KeyError(f"Task '{task_id}' not found")
             session.history.append({"role": role, "content": content})
+            # ~4 chars/token — same estimate the trim budget below uses
+            session.total_tokens += max(1, len(content) // 4)
             # Trim oldest messages if token budget exceeded (~4 chars/token)
             char_budget = self.max_history_tokens * 4
             while len(session.history) > 2:
@@ -407,6 +419,12 @@ class BatchQueue:
         self._running = False
         self._dispatcher_thread: threading.Thread | None = None
 
+    @property
+    def pending_count(self) -> int:
+        """Number of queued-but-undispatched requests (for /health)."""
+        with self._lock:
+            return len(self._pending)
+
     def start(self):
         """Start the background dispatcher thread."""
         if self._running:
@@ -417,10 +435,18 @@ class BatchQueue:
         self._dispatcher_thread.start()
 
     def stop(self):
-        """Stop the dispatcher thread."""
+        """Stop the dispatcher thread, failing any still-queued requests."""
         self._running = False
         with self._cv:
+            pending, self._pending = self._pending, []
             self._cv.notify_all()
+        # Resolve dropped requests — otherwise their HTTP callers wait
+        # out the full timeout on a dead queue.
+        for req in pending:
+            if req.stream_queue is not None:
+                self._push_stream(req, None)
+            if not req.future.done():
+                req.future.set_exception(RuntimeError("BatchQueue stopped"))
         if self._dispatcher_thread:
             self._dispatcher_thread.join(timeout=5.0)
 
@@ -505,22 +531,25 @@ class BatchQueue:
                 if not self._pending:
                     continue
 
-                # Collect all pending requests (up to max_batch_size per model)
-                batch = self._pending[:self.max_batch_size]
-                self._pending = self._pending[len(batch):]
-
-            # Group by (model_id, boot config) — requests with different
-            # per-task boot configs CANNOT share one batched pass, since
-            # the engine reconfigures (KV cache, decoding, quant) before
-            # generating.  Grouping instead of taking request[0]'s config
-            # prevents silent cross-config contamination.
-            by_model: dict[tuple, list[PendingRequest]] = {}
-            for req in batch:
-                by_model.setdefault(
-                    (req.model_id, self._boot_key(req)), []).append(req)
+                # Group ALL pending by (model_id, boot config) — requests
+                # with different per-task boot configs CANNOT share one
+                # batched pass, since the engine reconfigures (KV cache,
+                # decoding, quant) before generating.  Group before
+                # slicing: a global max_batch_size slice up front would
+                # let one model's flood starve the others.
+                by_model: dict[tuple, list[PendingRequest]] = {}
+                for req in self._pending:
+                    by_model.setdefault(
+                        (req.model_id, self._boot_key(req)), []).append(req)
+                served = []
+                for key, reqs in by_model.items():
+                    served.append((key, reqs[:self.max_batch_size]))
+                served_ids = {id(r) for _k, g in served for r in g}
+                self._pending = [r for r in self._pending
+                                 if id(r) not in served_ids]
 
             # Dispatch each (model, config) group's batch
-            for (model_id, _bk), reqs in by_model.items():
+            for (model_id, _bk), reqs in served:
                 try:
                     self._run_batch(model_id, reqs)
                 except Exception as e:
@@ -546,8 +575,17 @@ class BatchQueue:
         """
         if req.stream_queue is None or req.loop is None:
             return False
-        asyncio.run_coroutine_threadsafe(
-            req.stream_queue.put(item), req.loop)
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                req.stream_queue.put(item), req.loop)
+        except RuntimeError:
+            return False  # loop closed
+
+        def _log_push_failure(f):
+            if not f.cancelled() and f.exception() is not None:
+                logger.debug("stream queue push failed",
+                             exc_info=f.exception())
+        fut.add_done_callback(_log_push_failure)
         return True
 
     def _run_batch(self, model_id: str, requests: list[PendingRequest]):
@@ -597,6 +635,9 @@ class BatchQueue:
                             max_new_tokens=req.max_tokens,
                             temperature=req.temperature,
                             top_p=req.top_p,
+                            top_k=req.top_k,
+                            repetition_penalty=req.repetition_penalty,
+                            stop=req.stop,
                         )
                         if req.task_id and self.session_manager:
                             self.session_manager.append_message(
@@ -613,7 +654,10 @@ class BatchQueue:
                 else:
                     run()
             except Exception as e:
-                req.future.set_exception(e)
+                if req.stream_queue is not None:
+                    self._push_stream(req, None)
+                if not req.future.done():
+                    req.future.set_exception(e)
             return
 
         # Multiple requests: batched generation
@@ -621,6 +665,10 @@ class BatchQueue:
             self._run_batched(model_id, requests)
         except Exception as e:
             for req in requests:
+                # Never leave a stream consumer waiting on a queue that
+                # will never receive its end sentinel.
+                if req.stream_queue is not None:
+                    self._push_stream(req, None)
                 if not req.future.done():
                     req.future.set_exception(e)
 
@@ -661,16 +709,6 @@ class BatchQueue:
             else:
                 ids = {k: v.to(device) for k, v in ids.items()}
             input_ids = ids["input_ids"] if isinstance(ids, dict) else ids.input_ids
-            # Chunked prefill: if the prompt is long and the engine has
-            # chunked prefill enabled, use it to avoid blocking decode queue.
-            if (hasattr(engine, '_chunked_prefill') and
-                    engine._chunked_prefill is not None and
-                    input_ids.shape[1] > 1024):
-                from forge.engine.prefill import should_chunk
-                if should_chunk(input_ids.shape[1]):
-                    # For chunked prefill, we handle this request separately
-                    # (not batched) — long prompts don't batch well anyway.
-                    pass  # The generate method handles this via ForgeEngine
             prompt_ids_list.append(input_ids)
             max_tokens_list.append(req.max_tokens)
             temps_list.append(req.temperature)
@@ -716,6 +754,45 @@ class BatchQueue:
                 entry.total_tokens += sum(
                     len(tokenizer.encode(t)) for t in outs)
             return
+
+        # Feather prefix-homogeneity scheduling: split the batch into
+        # groups whose prompts share long prefixes — prefix-reuse caches
+        # and shorter per-row padding benefit.
+        groups = [list(range(len(requests)))]
+        if self._feather is not None and len(requests) > 1:
+            sid_of: dict[int, int] = {}
+            try:
+                for i, pids in enumerate(prompt_ids_list):
+                    sid_of[i] = self._feather.add_request(
+                        pids[0].tolist())
+                inv = {v: k for k, v in sid_of.items()}
+                groups = [[inv[s] for s in grp]
+                          for grp in self._feather.form_batches(
+                              list(sid_of.values()))]
+            finally:
+                for sid in sid_of.values():
+                    self._feather.remove_request(sid)
+
+        for g in groups:
+            self._run_batched_group(
+                engine, entry, tokenizer,
+                [requests[i] for i in g],
+                [prompt_ids_list[i] for i in g],
+                [max_tokens_list[i] for i in g],
+                [temps_list[i] for i in g],
+                [top_ps_list[i] for i in g],
+                [top_ks_list[i] for i in g],
+                [rep_penalties_list[i] for i in g],
+                [seeds_list[i] for i in g],
+                [stop_list[i] for i in g])
+
+    def _run_batched_group(self, engine, entry, tokenizer, requests,
+                           prompt_ids_list, max_tokens_list, temps_list,
+                           top_ps_list, top_ks_list, rep_penalties_list,
+                           seeds_list, stop_list):
+        """Run one (possibly feather-grouped) batch through BatchedDecoding
+        and deliver results."""
+        model = engine.model
 
         # Run batched decoding with per-sequence settings.  Hold the
         # engine's generation lock — BatchedDecoding drives model.forward
@@ -776,24 +853,32 @@ class BatchQueue:
     def _run_single_stream(self, req: PendingRequest):
         """Stream a single request token-by-token."""
         accumulated = ""
-        for chunk in self.registry.generate_stream(
-            req.model_id, req.prompt,
-            max_new_tokens=req.max_tokens,
-            temperature=req.temperature,
-            top_p=req.top_p,
-            stop=req.stop,
-        ):
-            accumulated += chunk
+        try:
+            for chunk in self.registry.generate_stream(
+                req.model_id, req.prompt,
+                max_new_tokens=req.max_tokens,
+                temperature=req.temperature,
+                top_p=req.top_p,
+                top_k=req.top_k,
+                repetition_penalty=req.repetition_penalty,
+                stop=req.stop,
+            ):
+                accumulated += chunk
+                if req.stream_queue is not None:
+                    self._push_stream(req, chunk)
+
+            # Record in session history
+            if req.task_id and self.session_manager:
+                self.session_manager.append_message(
+                    req.task_id, "assistant", accumulated)
+
+            req.future.set_result(accumulated)
+        except Exception as e:
+            if not req.future.done():
+                req.future.set_exception(e)
+        finally:
+            # Always terminate the stream — a consumer blocked on
+            # queue.get() must not wait forever for a sentinel that an
+            # error would otherwise swallow.
             if req.stream_queue is not None:
-                self._push_stream(req, chunk)
-
-        # Record in session history
-        if req.task_id and self.session_manager:
-            self.session_manager.append_message(
-                req.task_id, "assistant", accumulated)
-
-        # Signal end of stream
-        if req.stream_queue is not None:
-            self._push_stream(req, None)
-
-        req.future.set_result(accumulated)
+                self._push_stream(req, None)

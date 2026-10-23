@@ -9,11 +9,14 @@ Layer map (three similarly-named modules):
     batching queue (BatchQueue/BatchedDecoding driver). Different layer.
 
 Provides:
-  - SessionCacheManager: per-session KV cache with radix tree prefix matching
+  - SessionCacheManager: per-session KV reuse — a per-session dict of
+    stored (past_kv + recurrent state + token history); a session
+    continues from its own cached prefix (no cross-session radix tree —
+    that lives in prefix_cache.py's ChunkedPrefixCache/LRUPrefixCache)
   - KV cache TTL: pin KV cache during tool calls / pauses, auto-evict on expiry
   - Multi-turn optimization: O(Δt) per turn instead of O(n) re-prefill
 
-Based on SGLang's Unified Radix Cache + Continuum's KV TTL + AgServe's
+Inspired by SGLang's Unified Radix Cache + Continuum's KV TTL + AgServe's
 session-aware eviction.
 
 Usage (automatic via ForgeEngine):
@@ -24,10 +27,6 @@ Usage (automatic via ForgeEngine):
     engine.continue_session("chat_001", "Hello, how are you?")
     engine.continue_session("chat_001", "Tell me about Python.")
     engine.end_session("chat_001")
-
-    # Or use generate() which auto-uses radix tree prefix matching:
-    engine.generate("Hello, how are you?")
-    engine.generate("Hello, how are you? Tell me about Python.")  # prefix hit!
 """
 from __future__ import annotations
 
@@ -66,6 +65,7 @@ class SessionState:
     token_ids: list[int] = field(default_factory=list)
     past_kv: Any = None  # KV cache tensor from model
     recurrent_state: Any = None  # conv/SSM snapshot (prefix_cache.capture_recurrent_state)
+    last_logits: Any = None  # logits for the next-token position at end of last turn
     created_at: float = field(default_factory=time.time)
     last_access: float = field(default_factory=time.time)
     ttl: float | None = None  # seconds until auto-eviction (None = no TTL)
@@ -92,14 +92,14 @@ class SessionState:
 
 
 class SessionCacheManager:
-    """Manages per-session KV cache with radix tree prefix matching + TTL.
+    """Manages per-session KV cache reuse + TTL.
 
     Features:
       - Session-aware: each session maintains its own KV + recurrent state.
         When a session continues, only the delta (new tokens) needs
         prefilling.  (Cross-session prefix sharing lives in the separate
-        ``ChunkedPrefixCache``/``RadixPrefixCache`` — this manager is
-        strictly per-session.)
+        ``ChunkedPrefixCache``/``LRUPrefixCache`` — this manager is
+        strictly per-session; matching is exact-history, not a radix tree.)
       - TTL: when a session pauses (e.g. tool call), pin its KV cache with
         a time-to-live. Auto-evict when TTL expires.
       - LRU eviction: when GPU memory is tight, evict least-recently-used
@@ -168,10 +168,12 @@ class SessionCacheManager:
         session.touch()
         session.refresh_ttl()
 
-        # Tokenize the new prompt
+        # Tokenize the new prompt — BOS on the FIRST turn only, matching
+        # generate() (raw prompts without BOS decode to garbage);
+        # continuation turns must not inject another BOS mid-sequence.
         new_ids = self.engine.tokenizer(
             prompt, return_tensors="pt",
-            add_special_tokens=False).input_ids[0].tolist()
+            add_special_tokens=not session.token_ids).input_ids[0].tolist()
 
         # Build full token sequence: previous session tokens + new tokens
         if session.token_ids:
@@ -214,12 +216,25 @@ class SessionCacheManager:
         return ids_tensor, past_kv, cached_len, recurrent
 
     def update_session_kv(self, session_id: str, past_kv: Any,
-                          recurrent_state: Any = None):
-        """Update the session's cached KV + recurrent state after generation."""
+                          recurrent_state: Any = None,
+                          generated_ids: list[int] | None = None,
+                          last_logits: Any = None):
+        """Update the session's cached KV + recurrent state after generation.
+
+        ``generated_ids`` MUST be the ids that were just decoded: past_kv
+        covers them, and token_ids has to mirror the cached sequence or the
+        next turn's length check (continue_session) mismatches — forcing a
+        full prefill AND dropping assistant replies from the context.
+        """
         if session_id in self._sessions:
-            self._sessions[session_id].past_kv = past_kv
-            self._sessions[session_id].recurrent_state = recurrent_state
-            self._sessions[session_id].touch()
+            session = self._sessions[session_id]
+            session.past_kv = past_kv
+            session.recurrent_state = recurrent_state
+            if generated_ids:
+                session.token_ids.extend(int(t) for t in generated_ids)
+            if last_logits is not None:
+                session.last_logits = last_logits
+            session.touch()
 
     def pin_session(self, session_id: str, ttl: float | None = None):
         """Pin a session's KV cache (prevent eviction).
@@ -249,10 +264,12 @@ class SessionCacheManager:
                              source="session", session_id=session_id)
 
     def _maybe_evict(self):
-        """Evict expired and LRU sessions."""
+        """Evict expired and LRU sessions.
+
+        Runs on every begin/continue — the scan is O(n_sessions) and
+        cheap; throttling it left expired sessions holding VRAM.
+        """
         self._access_count += 1
-        if self._access_count % self.eviction_check_interval != 0:
-            return
 
         # Evict expired sessions
         expired = [sid for sid, s in self._sessions.items()

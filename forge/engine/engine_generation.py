@@ -22,7 +22,9 @@ from .engine_common import (  # noqa: F401
     _map_gguf_to_forge,
     _min_k_filter,
     _ScalingModelAdapter,
+    _StopMatcher,
     _tokenizer_for_vocab,
+    _truncate_at_stop,
     logger,
     SamplingParams,
 )
@@ -152,39 +154,33 @@ class _GenerationMixin:
             skip_special_tokens=skip_special_tokens, learn=learn,
             mem_bias=mem_bias, suffix_gate=suffix_gate)
         with self._gen_lock:
-            if params.learn is False and _is_memory_model(self.model):
-                prev = self.model.learning
-                self.model.learning = False
-                try:
-                    return self._generate_with_oom_recovery(
-                        self._generate_impl, prompt, params,
-                        finish_sentence, context_limit,
-                        json_schema=json_schema,
-                        logprobs=logprobs,
-                        prompt_logprobs=prompt_logprobs,
-                        return_logprobs=return_logprobs)
-                finally:
-                    self.model.learning = prev
-            if params.mem_bias is not None \
-                    and _is_memory_model(self.model):
-                prev_b = self.model._gen_bias
-                self.model._gen_bias = float(params.mem_bias)
-                try:
-                    return self._generate_with_oom_recovery(
-                        self._generate_impl, prompt, params,
-                        finish_sentence, context_limit,
-                        json_schema=json_schema,
-                        logprobs=logprobs,
-                        prompt_logprobs=prompt_logprobs,
-                        return_logprobs=return_logprobs)
-                finally:
-                    self.model._gen_bias = prev_b
-            return self._generate_with_oom_recovery(
-                self._generate_impl, prompt, params,
-                finish_sentence, context_limit,
-                json_schema=json_schema,
-                logprobs=logprobs, prompt_logprobs=prompt_logprobs,
-                return_logprobs=return_logprobs)
+            # Memory-model request overrides.  learn=False and mem_bias
+            # must compose: the old two-if layout applied only the FIRST
+            # set flag (early return skipped the other), so
+            # learn=False + mem_bias silently dropped the bias.
+            saved = None
+            if _is_memory_model(self.model):
+                saved = {}
+                if params.learn is False:
+                    saved["learning"] = self.model.learning
+                    self.model.learning = False
+                if params.mem_bias is not None:
+                    saved["gen_bias"] = self.model._gen_bias
+                    self.model._gen_bias = float(params.mem_bias)
+            try:
+                return self._generate_with_oom_recovery(
+                    self._generate_impl, prompt, params,
+                    finish_sentence, context_limit,
+                    json_schema=json_schema,
+                    logprobs=logprobs,
+                    prompt_logprobs=prompt_logprobs,
+                    return_logprobs=return_logprobs)
+            finally:
+                if saved is not None:
+                    if "learning" in saved:
+                        self.model.learning = saved["learning"]
+                    if "gen_bias" in saved:
+                        self.model._gen_bias = saved["gen_bias"]
 
     def _generate_impl(self, prompt, params: SamplingParams,
                        finish_sentence, context_limit,
@@ -213,8 +209,15 @@ class _GenerationMixin:
             prompt = self.library.inject(
                 prompt, max_tokens=self._library_injection_budget)
 
-        # Per-request context limit override
-        ctx_limit = context_limit or self.hotswap.current.max_context_tokens
+        # Per-request context limit override.  context_limit <= 0 is an
+        # explicit "no cap" (the old `or` silently turned it into the
+        # hotswap default); only None falls back to the default.
+        if context_limit is None:
+            ctx_limit = self.hotswap.current.max_context_tokens
+        elif context_limit <= 0:
+            ctx_limit = None
+        else:
+            ctx_limit = context_limit
 
         _t0 = time.perf_counter()
         # Models with unbounded_context (e.g. FluxLM) never truncate —
@@ -255,11 +258,14 @@ class _GenerationMixin:
             generated_ids: list[int] = []
             logits, past_kv = self._prefill(ids)
             gen_tokens = []
-            for next_token, _ in self._decode_tokens(
+            for next_token, _stop, is_eos in self._decode_tokens(
                 logits, past_kv, params, eos_set, generated_ids, processor,
                 context_ids=ids[0].tolist(), step_observer=lp_observer,
             ):
-                gen_tokens.append(next_token)
+                # Drop EOS (StandardDecoding parity) but keep stop-string
+                # tokens — post-hoc truncation needs the full stop text.
+                if not is_eos:
+                    gen_tokens.append(next_token)
             if gen_tokens:
                 output_ids = torch.cat([ids] + [
                     t.unsqueeze(0) if t.dim() == 1 else t for t in gen_tokens
@@ -308,6 +314,7 @@ class _GenerationMixin:
                     dry_base=params.dry_base,
                     dry_allowed_length=params.dry_allowed_length,
                     dry_penalty_last_n=params.dry_penalty_last_n,
+                    stop=params.stop, tokenizer=self.tokenizer,
                     kv_compact=self._maybe_compact_past_kv,
                     suffix_mem=self._suffix_mem_for(params))
 
@@ -342,14 +349,9 @@ class _GenerationMixin:
 
         # Stop-string truncation: cut at the EARLIEST occurrence across all
         # stop strings (OpenAI API spec — the first stop hit ends output).
-        if params.stop:
-            cut = -1
-            for s in params.stop:
-                idx = result.find(s)
-                if idx != -1 and (cut == -1 or idx < cut):
-                    cut = idx
-            if cut != -1:
-                result = result[:cut]
+        # The decode loop already stops early via _StopMatcher; this is
+        # the backstop for strategies that ignore stop + trims the match.
+        result = _truncate_at_stop(result, params.stop)
 
         _gen_ms = (time.perf_counter() - _t0) * 1000
         self._record_output(prompt, result, n_gen, _gen_ms,
@@ -815,7 +817,11 @@ class _GenerationMixin:
             results.append(text)
 
         _gen_ms = (time.perf_counter() - _t0) * 1000
-        total_tokens = sum(len(r) for r in results)
+        # Token count, not character count — len(str) inflated the
+        # throughput log ~4x.
+        total_tokens = sum(
+            int(ids.shape[1]) - all_ids[i].shape[1]
+            for i, ids in enumerate(output_ids))
         self._record_generation(total_tokens)
         self._log(
             f"Batch generate: {len(prompts)} prompts, "
@@ -980,7 +986,20 @@ class _GenerationMixin:
         Shared by ``generate_raw``, ``generate_stream``, and
         ``_finish_to_stop`` (slow path) to avoid duplicating the
         ``model(ids, use_cache=True) + unpack`` pattern.
+
+        When ``use_chunked_prefill`` wired ``self._chunked_prefiller``,
+        long prompts go through the chunked path so a single huge prompt
+        doesn't hold the decode loop in one blocking forward (EC-108).
+        Hybrid prefiller only chunks while decode is active.
         """
+        prefiller = getattr(self, "_chunked_prefiller", None)
+        if (prefiller is not None
+                and ids.shape[1] > prefiller.chunk_size
+                and getattr(prefiller, "_decode_active", True)):
+            logits, past_kv = self._chunked_prefill(
+                ids, chunk_size=prefiller.chunk_size)
+            self.model._forge_prefill_kv = past_kv
+            return logits, past_kv
         with torch.inference_mode():
             out = self.model(ids, use_cache=True, logits_last_only=True)
             logits, past_kv = unpack_output_with_kv(out)
@@ -1140,7 +1159,12 @@ class _GenerationMixin:
         return candidate_ids.gather(-1, sampled)
 
     def _eos_token_ids(self, custom_ids=None) -> set[int]:
-        token_ids = set(custom_ids) if custom_ids else set(_DEFAULT_EOS_TOKEN_IDS)
+        # Custom EOS ids MERGE with the defaults — replacing them would
+        # silently unstop <|im_end|> etc. (a request passing a lone FIM
+        # or reasoning terminator still wants EOS honored).
+        token_ids = set(_DEFAULT_EOS_TOKEN_IDS)
+        if custom_ids:
+            token_ids.update(custom_ids)
         sources = (
             self.tokenizer,
             self.model,
@@ -1159,9 +1183,11 @@ class _GenerationMixin:
         stop_token_ids, generated_ids=None,
         logits_processor=None, context_ids: list[int] | None = None,
         hidden_observer=None, step_observer=None,
+        check_stop: bool = True,
     ):
         generated_ids = generated_ids if generated_ids is not None else []
         dry_ctx = context_ids if context_ids is not None else []
+        completed = False
         # R65: suffix sidecar — ingest the prompt, then lift logits +
         # observe each accepted token.  Reset per generation: the table
         # describes THIS context stream, not a persistent store.
@@ -1169,6 +1195,17 @@ class _GenerationMixin:
         if suffix_mem is not None:
             suffix_mem.reset_state()
             suffix_mem.feed(dry_ctx)
+        # Incremental stop-string matching inside the decode loop —
+        # otherwise generate() burns max_new_tokens and truncates the
+        # decoded text after the fact (wasted decode + leaked tokens
+        # when a stop string appears mid-generation).  check_stop=False
+        # for callers (generate_stream) that already run a cumulative
+        # decode + find() per step — a second matcher would decode the
+        # tail twice per token.
+        stop_matcher = (
+            _StopMatcher(self.tokenizer, params.stop,
+                         params.skip_special_tokens)
+            if params.stop and check_stop else None)
         try:
             for _ in range(params.max_new_tokens):
                 raw_logits = logits[:, -1, :]
@@ -1200,8 +1237,16 @@ class _GenerationMixin:
                     # Raw (pre-processor, pre-temperature) logits + the
                     # actually-sampled id — logprobs capture needs both.
                     step_observer(raw_logits, token_id)
-                should_stop = token_id in stop_token_ids
-                yield next_token, should_stop
+                is_eos = token_id in stop_token_ids
+                is_stop = False
+                if not is_eos and stop_matcher is not None:
+                    is_stop = stop_matcher.push(token_id)
+                should_stop = is_eos or is_stop
+                # 3-tuple: stop-string tokens must stay in the caller's
+                # output (post-hoc find() trims the full stop text —
+                # dropping the completing token would orphan its head);
+                # EOS tokens are dropped to match StandardDecoding.
+                yield next_token, should_stop, is_eos
                 if should_stop:
                     break
 
@@ -1235,8 +1280,12 @@ class _GenerationMixin:
                         # already includes it — ForgeGate conv/doom probes
                         # score exactly this per-step hidden.
                         hidden_observer(out[-1][0, -1], generated_ids)
+            completed = True
         finally:
-            if self.model is not None:
+            # Only publish last-KV/logits on normal completion — an
+            # aborted or crashed generator would leak a half-generated
+            # sequence's state into the next request reading them.
+            if completed and self.model is not None:
                 self.model._forge_last_kv = past_kv
                 self.model._forge_last_logits = logits
 
@@ -1308,13 +1357,21 @@ class _GenerationMixin:
         # serialize against in-flight generation.
         with self._gen_lock, torch.inference_mode():
             out = self.model(ids, use_cache=False, return_hidden=True)
-            # Model returns (logits, loss, presents, hidden) with return_hidden
-            if isinstance(out, tuple) and len(out) >= 4:
-                hidden = out[3]
+            # return_hidden puts hidden LAST in every tuple shape:
+            # (logits, loss, hidden) — use_cache=False — or
+            # (logits, loss, presents, hidden) — use_cache=True.
+            # The old len>=4 / out[3] check missed the 3-tuple form and
+            # silently pooled LOGITS into the "embedding".
+            if isinstance(out, tuple):
+                hidden = out[-1] if len(out) >= 3 else out[0]
             elif hasattr(out, 'last_hidden_state'):
                 hidden = out.last_hidden_state
             else:
                 # Fallback: use logits as pseudo-embedding
+                hidden = out.logits
+            if hidden.dim() != 3:
+                # Degenerate return (e.g. loss scalar) — fall back to
+                # logits rather than crashing mean(dim=0) on a 0-d tensor.
                 hidden = out[0] if isinstance(out, tuple) else out.logits
             # Mean-pool over sequence dimension
             emb = hidden[0].float().mean(dim=0)
@@ -1576,38 +1633,44 @@ class _GenerationMixin:
             # Stop-string holdback: never emit the last ``holdback``
             # decoded chars until a stop check passes — a match may start
             # inside that tail (stop strings can span token boundaries).
-            holdback = (max((len(s) for s in stop), default=0)
+            holdback = (max((len(s) for s in stop if s), default=0)
                         if stop else 0)
-            buf = ""
+            emitted = 0  # chars of decoded text already yielded
+            text = ""
 
             logits, past_kv = self._prefill(ids)
-            for next_token, _ in self._decode_tokens(
+            for next_token, _stop, _eos in self._decode_tokens(
                 logits, past_kv, params, eos_set, generated_ids,
                 logits_processor,
                 context_ids=ids[0].tolist(),
                 hidden_observer=hidden_observer,
+                check_stop=False,  # cumulative find() below covers it
             ):
-                chunk = self._safe_decode_ids([next_token.item()],
-                                              skip_special_tokens)
-                if not chunk:
-                    continue
-                buf += chunk
+                # Cumulative decode — decoding each token alone turns
+                # multi-byte UTF-8 sequences split across BPE tokens into
+                # \ufffd mojibake; decoding the running id list keeps
+                # partial sequences intact.  (generated_ids is appended
+                # inside _decode_tokens.)
+                text = self._safe_decode_ids(
+                    generated_ids, skip_special_tokens)
                 if stop:
                     cut = -1
                     for s in stop:
-                        idx = buf.find(s)
+                        if not s:
+                            continue
+                        idx = text.find(s)
                         if idx != -1 and (cut == -1 or idx < cut):
                             cut = idx
                     if cut != -1:
-                        if cut > 0:
-                            yield buf[:cut]
+                        if cut > emitted:
+                            yield text[emitted:cut]
                         return
-                if len(buf) > holdback:
-                    emit = len(buf) - holdback
-                    yield buf[:emit]
-                    buf = buf[emit:]
-            if buf:
-                yield buf
+                avail = len(text) - holdback
+                if avail > emitted:
+                    yield text[emitted:avail]
+                    emitted = avail
+            if len(text) > emitted:
+                yield text[emitted:]
 
             self._record_generation(len(generated_ids))
         except torch.cuda.OutOfMemoryError as e:
@@ -1654,9 +1717,11 @@ class _GenerationMixin:
         if not (0 < params.top_p <= 1.0):
             raise ConfigurationError(
                 f"top_p must be in (0, 1.0], got {params.top_p}")
-        if params.top_k <= 0:
+        # top_k=0 disables the top-k filter (llama.cpp/HF convention);
+        # only negatives are invalid — the samplers already gate on >0.
+        if params.top_k < 0:
             raise ConfigurationError(
-                f"top_k must be positive, got {params.top_k}")
+                f"top_k must be >= 0 (0 disables), got {params.top_k}")
         if params.repetition_penalty <= 0:
             raise ConfigurationError(
                 f"repetition_penalty must be positive, got {params.repetition_penalty}")
@@ -1708,29 +1773,42 @@ class _GenerationMixin:
             except torch.cuda.OutOfMemoryError:
                 pass
 
-            # Attempt 2: reduce KV bits + switch to S4R
+            # Attempt 2: reduce KV bits + switch to S4R.
+            # Snapshot ALL state _activate_kv_cache touches so a failed
+            # retry restores a consistent engine (EC-114).
             old_kv = self.kv_cache
-            getattr(self, '_active_kv_bits', 8)
+            old_bits = self._active_kv_bits
+            old_name = self._active_kv_cache_name
             try:
                 self._log("Retrying with S4R 4-bit KV cache...")
                 self._activate_kv_cache("s4r", None)
                 result = generate_fn(*args, **kwargs)
-                self._log("OOM recovery successful (S4R 4-bit)")
+                self._kv_downgrade = {"from": old_name, "to": "s4r",
+                                      "reason": "oom_recovery"}
+                self._log("OOM recovery successful (S4R 4-bit) — engine "
+                          "now on the downgraded KV strategy; recorded in "
+                          "stats(). kv_downgrade", level="warn")
                 return result
             except torch.cuda.OutOfMemoryError:
-                self.kv_cache = old_kv  # restore
-                pass
+                self.kv_cache = old_kv
+                self._active_kv_bits = old_bits
+                self._active_kv_cache_name = old_name
 
             # Attempt 3: CPU offload KV cache
             try:
                 self._log("Retrying with CPU offload KV cache...")
                 self._activate_kv_cache("cpu_offload", None)
                 result = generate_fn(*args, **kwargs)
-                self._log("OOM recovery successful (CPU offload KV)")
+                self._kv_downgrade = {"from": old_name, "to": "cpu_offload",
+                                      "reason": "oom_recovery"}
+                self._log("OOM recovery successful (CPU offload KV) — "
+                          "engine now on the downgraded KV strategy; "
+                          "recorded in stats().kv_downgrade", level="warn")
                 return result
             except torch.cuda.OutOfMemoryError:
                 self.kv_cache = old_kv
-                pass
+                self._active_kv_bits = old_bits
+                self._active_kv_cache_name = old_name
 
             # All recovery attempts failed
             vram = self.vram_usage()
@@ -1755,7 +1833,13 @@ class _GenerationMixin:
         Shared by ``generate_raw`` and ``generate_stream``.
         """
         tok_vocab = len(self.tokenizer)
-        safe_ids = [t if t < tok_vocab else tok_vocab - 1 for t in token_ids]
+        # Clamp BOTH ends — negative ids used to pass straight through to
+        # decode() (C++ tokenizer treats -1 as a giant unsigned id →
+        # mojibake or a native crash).
+        safe_ids = [
+            t if 0 <= t < tok_vocab else (0 if t < 0 else tok_vocab - 1)
+            for t in token_ids
+        ]
         return self.tokenizer.decode(
             safe_ids, skip_special_tokens=skip_special_tokens)
 
@@ -1829,7 +1913,7 @@ class _GenerationMixin:
         generated_ids: list[int] = []
         generated_tokens = []
 
-        for next_token, is_eos in self._decode_tokens(
+        for next_token, _stop, is_eos in self._decode_tokens(
             logits, past_kv, params, eos_set, generated_ids,
             context_ids=ids[0].tolist(),
         ):
@@ -1882,6 +1966,13 @@ class _GenerationMixin:
         content_logprobs = []
         prompt_lp = []
 
+        def _lp_entry(token_id: int, logprob: float) -> dict:
+            # OpenAI logprobs contract: "bytes" is the UTF-8 byte list of
+            # the token's text — the old code emitted the token id.
+            tok = self.tokenizer.decode([token_id])
+            return {"token": tok, "logprob": logprob,
+                    "bytes": list(tok.encode("utf-8"))}
+
         # Memory models learn on every forward — journaled writes are
         # undone via revert_since; predict-only pushes leave no journal
         # entries, so the stream scalars are snapshotted directly too
@@ -1909,36 +2000,26 @@ class _GenerationMixin:
                         top_n = min(prompt_logprobs, log_probs.shape[-1])
                         top_vals, top_ids = log_probs[i].topk(top_n)
                         top_lp = [
-                            {"token": self.tokenizer.decode([tid.item()]),
-                             "logprob": lp_val.item(),
-                             "bytes": tid.item()}
+                            _lp_entry(tid.item(), lp_val.item())
                             for tid, lp_val in zip(top_ids, top_vals)
                         ]
-                        prompt_lp.append({
-                            "token": self.tokenizer.decode([token_id]),
-                            "logprob": lp,
-                            "bytes": token_id,
-                            "top_logprobs": top_lp,
-                        })
+                        prompt_lp.append(
+                            {**_lp_entry(token_id, lp),
+                             "top_logprobs": top_lp})
 
                 if logprobs is not None and logprobs > 0 and len(gen_ids) > 0:
                     if captured_steps is not None:
                         # Zero-cost path: logits were recorded at decode.
                         for st in captured_steps[:len(gen_ids)]:
                             top_lp = [
-                                {"token": self.tokenizer.decode([tid]),
-                                 "logprob": lv,
-                                 "bytes": tid}
+                                _lp_entry(tid, lv)
                                 for tid, lv in zip(st["top_ids"],
                                                    st["top_vals"])
                             ]
-                            content_logprobs.append({
-                                "token": self.tokenizer.decode(
-                                    [st["token_id"]]),
-                                "logprob": st["token_lp"],
-                                "bytes": st["token_id"],
-                                "top_logprobs": top_lp,
-                            })
+                            content_logprobs.append(
+                                {**_lp_entry(st["token_id"],
+                                             st["token_lp"]),
+                                 "top_logprobs": top_lp})
                     else:
                         # Legacy: re-run generation for per-step logits.
                         ids = prompt_ids.clone()
@@ -1957,17 +2038,12 @@ class _GenerationMixin:
                             top_n = min(logprobs, log_probs.shape[-1])
                             top_vals, top_ids = log_probs.topk(top_n)
                             top_lp = [
-                                {"token": self.tokenizer.decode([tid.item()]),
-                                 "logprob": lp_val.item(),
-                                 "bytes": tid.item()}
+                                _lp_entry(tid.item(), lp_val.item())
                                 for tid, lp_val in zip(top_ids, top_vals)
                             ]
-                            content_logprobs.append({
-                                "token": self.tokenizer.decode([token_id]),
-                                "logprob": lp,
-                                "bytes": token_id,
-                                "top_logprobs": top_lp,
-                            })
+                            content_logprobs.append(
+                                {**_lp_entry(token_id, lp),
+                                 "top_logprobs": top_lp})
                             ids = torch.cat([ids, gen_ids[step:step+1].unsqueeze(0)], dim=1)
         finally:
             if saved is not None:
@@ -2018,7 +2094,7 @@ class _GenerationMixin:
             params, max_new_tokens=extra_budget)
         generated_tokens = [
             next_token
-            for next_token, _ in self._decode_tokens(
+            for next_token, _stop, _eos in self._decode_tokens(
                 logits, past_kv, budget_params, stop_tokens, generated_ids,
                 context_ids=output_ids[0, :prompt_len].tolist(),
             )

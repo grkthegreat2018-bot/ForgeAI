@@ -123,12 +123,17 @@ class UnoDecoding(StandardDecoding):
         if isinstance(self.proposer, NgramProposer):
             self.proposer.update(context)
 
-        eos_set = {7, 151643, 151645}
+        # Merge with the shared default EOS set — hardcoding {7, ...}
+        # missed Jamba/Qwen EOS ids (EC-039).
+        from forge.engine.engine_common import _DEFAULT_EOS_TOKEN_IDS
+        eos_set = set(_DEFAULT_EOS_TOKEN_IDS)
         eos = getattr(model, "eos_token_id", None)
         if eos is None:
             cfg = getattr(model, "config", None)
             eos = getattr(cfg, "eos_token_id", None) if cfg else None
-        if eos is not None:
+        if isinstance(eos, (list, tuple, set, frozenset)):
+            eos_set.update(eos)
+        elif eos is not None:
             eos_set.add(eos)
 
         generated = 0

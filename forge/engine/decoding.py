@@ -18,97 +18,12 @@ import torch
 import torch.nn.functional as F
 
 from forge.model_loader import unpack_output_with_kv
-
-
-def _min_k_filter_logits(logits: torch.Tensor, sensitivity: float) -> torch.Tensor:
-    """Min-k semantic-cliff sampling filter (ACL 2026, Ding et al.).
-
-    Analyzes the local shape of the sorted logit distribution to identify
-    "semantic cliffs" — sharp transitions from high-confidence core tokens
-    to uncertain long-tail tokens. Temperature-invariant: operates on
-    relative logit dynamics, not absolute probabilities.
-
-    Args:
-        logits: (batch, vocab) logit tensor.
-        sensitivity: cliff detection sensitivity in [0, 1]. Higher = more
-            aggressive truncation. 0 = no filtering.
-
-    Returns:
-        Filtered logits with long-tail tokens masked to -inf.
-    """
-    if sensitivity <= 0:
-        return logits
-    # Single sort: reuse the sorted indices for the scatter mask.
-    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-    diffs = sorted_logits[..., :-1] - sorted_logits[..., 1:]
-    n = diffs.shape[-1]
-    weights = torch.linspace(1.0, 0.1, n, device=logits.device, dtype=logits.dtype)
-    weighted_diffs = diffs * weights
-    max_decay = weighted_diffs.max(dim=-1, keepdim=True).values.clamp(min=1e-8)
-    cliff_mask = weighted_diffs > sensitivity * max_decay
-    # Truncate at the rightmost sharp transition (keep tokens up to and
-    # including it); fallback to the single sharpest cliff when none
-    # exceed the sensitivity threshold.
-    idx = torch.arange(n, device=logits.device).expand_as(cliff_mask)
-    last_cliff = torch.where(
-        cliff_mask, idx, torch.full_like(idx, -1)).amax(dim=-1, keepdim=True)
-    cliff_pos = torch.where(
-        last_cliff >= 0, last_cliff,
-        weighted_diffs.argmax(dim=-1, keepdim=True))
-    positions = torch.arange(sorted_logits.shape[-1], device=logits.device)
-    keep = positions <= cliff_pos
-    mask = torch.zeros_like(logits, dtype=torch.bool)
-    mask.scatter_(-1, sorted_indices, ~keep)
-    return logits.masked_fill(mask, float("-inf"))
-
-
-def _dry_penalties(
-    context_ids: list[int],
-    last_n: int,
-    allowed_length: int,
-    multiplier: float,
-    base: float,
-) -> dict[int, float]:
-    """DRY repetition penalty (llama.cpp ``sampler_dry``, p-e-w).
-
-    Local copy of ``engine_common._dry_penalties`` — this module is kept
-    import-light and cannot import engine_common without a cycle.
-    Returns ``{token_id: penalty}`` for logit-space subtraction.
-    """
-    n = len(context_ids)
-    if multiplier <= 0 or n < 2 or last_n <= 0:
-        return {}
-    last_idx = n - 1
-    start = max(0, last_idx - last_n)
-    match_len: dict[int, int] = {}
-    for i in range(start, last_idx):
-        if context_ids[i] != context_ids[last_idx]:
-            continue
-        r = 1
-        while i - r >= 0 and context_ids[i - r] == context_ids[last_idx - r]:
-            r += 1
-        if r > allowed_length:
-            nxt = context_ids[i + 1]
-            if r > match_len.get(nxt, 0):
-                match_len[nxt] = r
-    return {
-        tok: multiplier * (base ** (r - allowed_length))
-        for tok, r in match_len.items()
-    }
-
-
-def _apply_dry(
-    next_logits: torch.Tensor, penalties: dict[int, float]
-) -> torch.Tensor:
-    """Subtract DRY penalties from a (vocab,) or (B, vocab) logit slice."""
-    if not penalties:
-        return next_logits
-    toks = torch.tensor(list(penalties.keys()), device=next_logits.device)
-    pens = torch.tensor(
-        list(penalties.values()), device=next_logits.device, dtype=next_logits.dtype
-    )
-    next_logits.index_copy_(-1, toks, next_logits.index_select(-1, toks) - pens)
-    return next_logits
+from forge.engine.engine_common import (  # noqa: F401 — shared helpers
+    _apply_dry,
+    _DEFAULT_EOS_TOKEN_IDS,
+    _dry_penalties,
+    _min_k_filter as _min_k_filter_logits,
+)
 
 
 def _sample_from_logits(
@@ -205,7 +120,8 @@ class StandardDecoding(DecodingStrategy):
                  min_p: float = 0.0, min_k: float = 0.0,
                  dry_multiplier: float = 0.0, dry_base: float = 1.75,
                  dry_allowed_length: int = 2, dry_penalty_last_n: int = 512,
-                 kv_compact=None, suffix_mem=None):
+                 stop=None, tokenizer=None,
+                 kv_compact=None, suffix_mem=None, **_ignored):
         ids = input_ids.clone()
         device = input_ids.device
         # EOS detection: check model attr, config, then known defaults
@@ -215,7 +131,7 @@ class StandardDecoding(DecodingStrategy):
             eos = getattr(cfg, "eos_token_id", None) if cfg else None
         # LFM2.5 <|im_end|>=7, Qwen2.5 151643/151645,
         # Jamba <|endoftext|>=2, <|im_end|>=519
-        eos_set = {2, 7, 519, 151643, 151645}
+        eos_set = set(_DEFAULT_EOS_TOKEN_IDS)
         if isinstance(eos, (list, tuple, set, frozenset)):
             eos_set.update(eos)
         elif eos is not None:
@@ -234,6 +150,14 @@ class StandardDecoding(DecodingStrategy):
         if suffix_mem is not None:
             suffix_mem.reset_state()
             suffix_mem.feed(prompt_ids)
+
+        # Incremental stop-string matching inside the decode loop —
+        # the engine previously truncated the decoded text post-hoc, so a
+        # stop string never actually STOPPED generation (wasted tokens,
+        # and callers got full-length output with the tail cut off).
+        from forge.engine.engine_common import _StopMatcher
+        stop_matcher = (_StopMatcher(tokenizer, stop)
+                        if stop and tokenizer is not None else None)
 
         # Prefill — model returns (logits, loss, presents) when use_cache=True.
         # logits_last_only: only the last position is ever read — materializing
@@ -300,6 +224,13 @@ class StandardDecoding(DecodingStrategy):
 
             # Collect tokens for final cat (avoids O(n²) torch.cat per step)
             _generated_tokens.append(next_token)
+
+            # Stop-string match runs AFTER the append: the stop-completing
+            # token must land in output_ids so the caller's post-hoc find()
+            # can trim the full stop text (earlier chunks of the match were
+            # already emitted in prior steps).
+            if stop_matcher is not None and stop_matcher.push(tok_id):
+                break
             with torch.inference_mode():
                 out = model(next_token, past_key_values=past_kv, use_cache=True)
                 logits, past_kv = unpack_output_with_kv(out)
@@ -343,8 +274,13 @@ class NGramSpeculativeDecoding(DecodingStrategy):
                  **kwargs):
         ids = input_ids.clone()
         device = input_ids.device
-        input_ids.shape[1]
         generated = 0
+        eos = getattr(model, "eos_token_id", None)
+        eos_set = set(_DEFAULT_EOS_TOKEN_IDS)
+        if isinstance(eos, (list, tuple, set, frozenset)):
+            eos_set.update(eos)
+        elif eos is not None:
+            eos_set.add(eos)
 
         with torch.inference_mode():
             # Prefill
@@ -360,46 +296,84 @@ class NGramSpeculativeDecoding(DecodingStrategy):
             else:
                 probs = F.softmax(next_logits, dim=-1)
                 main_token = torch.multinomial(probs.view(-1), 1).unsqueeze(0)
+            if int(main_token.item()) in eos_set:
+                ids = torch.cat([ids, main_token], dim=-1)
+                break
 
             # N-gram lookup: find draft tokens by matching last ngram_size tokens
-            draft_tokens = self._ngram_lookup(ids, main_token.squeeze())
+            draft_tokens = self._ngram_lookup(ids, int(main_token.item()))
 
             if len(draft_tokens) > 0:
                 # Verify draft tokens in one forward pass
                 draft_tensor = torch.tensor(draft_tokens, device=device).unsqueeze(0)
                 verify_ids = torch.cat([main_token, draft_tensor], dim=-1)
+                # Snapshot before the T>1 verify advances live conv/SSM
+                # state past the committed boundary.
+                snap = _spec_snapshot_recurrent(model)
+                past_len = _spec_past_len(past_kv)
+                if verify_ids.shape[1] > 1:
+                    _spec_install_conv_prefix(snap)
                 with torch.inference_mode():
                     out = model(verify_ids, past_key_values=past_kv, use_cache=True)
-                    verify_logits, past_kv = unpack_output_with_kv(out)
+                    verify_logits, new_past_kv = unpack_output_with_kv(out)
 
                 # Accept tokens that match
                 accepted = 0
-                main_token.squeeze()
                 for i, draft_tok in enumerate(draft_tokens):
                     pred_tok = verify_logits[0, i, :].argmax()
                     if pred_tok.item() == draft_tok:
                         accepted += 1
-                        torch.tensor([draft_tok], device=device)
                     else:
                         break
 
+                # KV rollback: the verify pass appended positions for the
+                # WHOLE draft suffix — slice back to the committed prefix
+                # (main_token + accepted drafts).  The old code kept the
+                # full suffix: attention saw rejected drafts as context.
+                n_draft = len(draft_tokens)
+                old_past_kv = past_kv
+                past_kv = _spec_slice_kv(
+                    new_past_kv, past_len + 1 + accepted)
+                # Recurrent repair on rejection: restore + replay kept span.
+                if accepted < n_draft and (
+                        _spec_has_recurrent_state(snap)
+                        or _spec_has_recurrent_presents(new_past_kv)):
+                    rep_kv = _spec_repair_recurrent(
+                        model, snap, old_past_kv, verify_ids,
+                        1 + accepted)
+                    if rep_kv is not None:
+                        past_kv = rep_kv
+
                 # Append accepted + 1 (the token predicted at the mismatch)
                 new_tokens = [main_token.squeeze().item()] + draft_tokens[:accepted]
-                if accepted < len(draft_tokens):
-                    # Mismatch — use the model's prediction at the mismatch point
-                    new_tokens.append(verify_logits[0, accepted, :].argmax().item())
+                if accepted < n_draft:
+                    # Mismatch — resample the corrected token and FORWARD
+                    # it: its position's KV was computed for the rejected
+                    # draft, and the next round's logits must come from
+                    # the true committed context (the old code reused the
+                    # stale verify row conditioned on the rejected token).
+                    resample = verify_logits[
+                        :, accepted:accepted + 1, :].argmax(-1)
+                    new_tokens.append(int(resample.item()))
+                    with torch.inference_mode():
+                        out = model(
+                            resample.to(device).long(),
+                            past_key_values=past_kv, use_cache=True)
+                        logits, past_kv = unpack_output_with_kv(out)
+                else:
+                    # Full accept — keep_len already covers the whole
+                    # verify window; prediction after the last draft.
+                    logits = verify_logits[:, -1:, :]
 
+                stop = False
                 for tok in new_tokens:
                     ids = torch.cat([ids, torch.tensor([[tok]], device=device)], dim=-1)
                     generated += 1
-                    if generated >= max_new_tokens:
+                    if tok in eos_set or generated >= max_new_tokens:
+                        stop = True
                         break
-
-                # Get logits for next iteration (last position)
-                if accepted < len(draft_tokens):
-                    logits = verify_logits[:, accepted:accepted+1, :]
-                else:
-                    logits = verify_logits[:, -1:, :]
+                if stop:
+                    break
             else:
                 # No draft — standard step
                 ids = torch.cat([ids, main_token], dim=-1)
@@ -410,9 +384,11 @@ class NGramSpeculativeDecoding(DecodingStrategy):
 
         return ids
 
-    def _ngram_lookup(self, ids: torch.Tensor, last_token: int) -> list[int]:
+    def _ngram_lookup(self, ids: torch.Tensor, last_token) -> list[int]:
         """Find draft tokens by n-gram matching against the sequence."""
-        seq = ids[0].cpu().tolist() + [last_token]
+        # last_token may arrive as a 0-dim tensor — coerce to a real int
+        # (a tensor in the list only compared equal by accident).
+        seq = ids[0].tolist() + [int(last_token)]
         if len(seq) < self.ngram_size + 1:
             return []
         ngram = seq[-self.ngram_size:]
@@ -454,10 +430,13 @@ class ExternalDraftSpeculativeDecoding(DecodingStrategy):
         model._forge_prefill_kv = past_kv
 
         while generated < max_new_tokens:
-            # Draft model proposes k tokens
+            # Draft model proposes k tokens.  Its KV absorbs all drafted
+            # positions regardless of acceptance — resync it below once
+            # the committed span is known.
+            draft_past_len = _spec_past_len(draft_past_kv)
+            draft_snap = _spec_snapshot_recurrent(self.draft_model)
             draft_tokens = []
             cur_logits = draft_logits[:, -1, :]
-            cur_ids = ids
             for _ in range(self.draft_length):
                 if temperature == 0:
                     tok = cur_logits.argmax(-1, keepdim=True)
@@ -465,7 +444,6 @@ class ExternalDraftSpeculativeDecoding(DecodingStrategy):
                     probs = F.softmax(cur_logits / max(temperature, 1e-5), dim=-1)
                     tok = torch.multinomial(probs.view(-1), 1).unsqueeze(0)
                 draft_tokens.append(tok.squeeze().item())
-                cur_ids = torch.cat([cur_ids, tok], dim=-1)
                 with torch.inference_mode():
                     draft_out = self.draft_model(tok, past_key_values=draft_past_kv, use_cache=True)
                     draft_logits, draft_past_kv = unpack_output_with_kv(draft_out)
@@ -477,9 +455,13 @@ class ExternalDraftSpeculativeDecoding(DecodingStrategy):
                 # Verify draft in one forward pass
                 draft_tensor = torch.tensor(draft_tokens, device=device).unsqueeze(0)
                 verify_ids = torch.cat([main_token, draft_tensor], dim=-1)
+                snap = _spec_snapshot_recurrent(model)
+                past_len = _spec_past_len(past_kv)
+                if verify_ids.shape[1] > 1:
+                    _spec_install_conv_prefix(snap)
                 with torch.inference_mode():
                     out = model(verify_ids, past_key_values=past_kv, use_cache=True)
-                    verify_logits, past_kv = unpack_output_with_kv(out)
+                    verify_logits, new_past_kv = unpack_output_with_kv(out)
 
                 # Accept matching prefix
                 accepted = 0
@@ -490,8 +472,39 @@ class ExternalDraftSpeculativeDecoding(DecodingStrategy):
                         accepted += 1
                         new_tokens.append(draft_tok)
                     else:
-                        new_tokens.append(pred_tok.item())
                         break
+
+                # Roll the target KV back to the committed prefix
+                # (main + accepted drafts) — rejected draft positions
+                # must not remain as attention context.
+                n_draft = len(draft_tokens)
+                old_past_kv = past_kv
+                past_kv = _spec_slice_kv(
+                    new_past_kv, past_len + 1 + accepted)
+                if accepted < n_draft and (
+                        _spec_has_recurrent_state(snap)
+                        or _spec_has_recurrent_presents(new_past_kv)):
+                    rep_kv = _spec_repair_recurrent(
+                        model, snap, old_past_kv, verify_ids,
+                        1 + accepted)
+                    if rep_kv is not None:
+                        past_kv = rep_kv
+
+                if accepted < n_draft:
+                    # Resample the corrected token at the first mismatch
+                    # and forward it — that position's KV belongs to the
+                    # rejected draft, and next-round logits conditioned on
+                    # it (old verify_logits[:, -1:] reuse) are stale.
+                    resample = verify_logits[
+                        :, accepted:accepted + 1, :].argmax(-1)
+                    new_tokens.append(int(resample.item()))
+                    with torch.inference_mode():
+                        out = model(resample.to(device).long(),
+                                    past_key_values=past_kv,
+                                    use_cache=True)
+                        logits, past_kv = unpack_output_with_kv(out)
+                else:
+                    logits = verify_logits[:, -1:, :]
 
                 for tok in new_tokens:
                     ids = torch.cat([ids, torch.tensor([[tok]], device=device)], dim=-1)
@@ -499,13 +512,39 @@ class ExternalDraftSpeculativeDecoding(DecodingStrategy):
                     if generated >= max_new_tokens:
                         break
 
-                logits = verify_logits[:, -1:, :]
+                # Resync the draft model: slice its KV to the pre-draft
+                # boundary and feed the committed tokens (incl. main +
+                # resample it never drafted) so next-round proposals come
+                # from the true committed context.  Recurrent state is
+                # restored on EVERY round — even a full accept missed
+                # main_token's contribution to conv/SSM buffers.
+                draft_past_kv = _spec_slice_kv(draft_past_kv,
+                                               draft_past_len)
+                if _spec_has_recurrent_state(draft_snap) or \
+                        _spec_has_recurrent_presents(draft_past_kv):
+                    _spec_restore_recurrent(draft_snap)
+                commit_t = torch.tensor(new_tokens, device=device,
+                                        dtype=torch.long).unsqueeze(0)
+                if commit_t.shape[1] > 1:
+                    _spec_install_conv_prefix(draft_snap)
+                with torch.inference_mode():
+                    draft_out = self.draft_model(
+                        commit_t, past_key_values=draft_past_kv,
+                        use_cache=True)
+                    draft_logits, draft_past_kv = unpack_output_with_kv(
+                        draft_out)
             else:
                 ids = torch.cat([ids, main_token], dim=-1)
                 generated += 1
                 with torch.inference_mode():
                     out = model(main_token, past_key_values=past_kv, use_cache=True)
                     logits, past_kv = unpack_output_with_kv(out)
+                with torch.inference_mode():
+                    draft_out = self.draft_model(
+                        main_token, past_key_values=draft_past_kv,
+                        use_cache=True)
+                    draft_logits, draft_past_kv = unpack_output_with_kv(
+                        draft_out)
 
         return ids
 
@@ -630,7 +669,12 @@ class MTPSelfSpecDecoding(DecodingStrategy):
                  top_k=80, repetition_penalty=1.05,
                  **kwargs):
         ids = input_ids.clone()
-        eos = getattr(model, "eos_token_id", None)
+        eos_raw = getattr(model, "eos_token_id", None)
+        eos_set = set(_DEFAULT_EOS_TOKEN_IDS)
+        if isinstance(eos_raw, (list, tuple, set, frozenset)):
+            eos_set.update(eos_raw)
+        elif eos_raw is not None:
+            eos_set.add(eos_raw)
 
         # Get MTP module from model if not provided
         mtp = self.mtp
@@ -647,10 +691,11 @@ class MTPSelfSpecDecoding(DecodingStrategy):
         with torch.inference_mode():
             out = model(ids, use_cache=True, return_hidden=True,
                         logits_last_only=True)
-            # Returns (logits, loss, presents, hidden) when use_cache + return_hidden
-            logits = out[0]
-            past_kv = out[2]  # presents
-            hidden = out[3]   # hidden states
+            # (logits, loss, presents, hidden) when use_cache +
+            # return_hidden — unpack defensively (EC-169).
+            logits, past_kv = unpack_output_with_kv(out)
+            hidden = (out[3] if isinstance(out, tuple) and len(out) > 3
+                      else getattr(out, "hidden_states", None))
 
         generated = 0
         while generated < max_new_tokens:
@@ -662,7 +707,7 @@ class MTPSelfSpecDecoding(DecodingStrategy):
                 main_token = torch.multinomial(
                     F.softmax(next_logits, dim=-1), num_samples=1)
 
-            if eos and (main_token == eos).any().item():
+            if int(main_token.item()) in eos_set:
                 ids = torch.cat([ids, main_token], dim=-1)
                 break
 
@@ -707,13 +752,22 @@ class MTPSelfSpecDecoding(DecodingStrategy):
                 continue
 
             verify_seq = torch.cat(draft_tokens, dim=-1)  # [B, n_draft+1]
-            past_len = past_kv[0][0].shape[-2] if past_kv is not None else 0
+            # First tuple entry may be None/dict on conv-first hybrid
+            # stacks — scan for a seq-dim KV entry instead of [0][0].
+            past_len = _spec_past_len(past_kv)
+            # Snapshot live recurrent state before the T>1 verify advances
+            # it past the committed boundary (rejected drafts must not
+            # leak into conv/SSM state).
+            snap = _spec_snapshot_recurrent(model)
+            if verify_seq.shape[1] > 1:
+                _spec_install_conv_prefix(snap)
             with torch.inference_mode():
                 out = model(verify_seq, past_key_values=past_kv,
                             use_cache=True, return_hidden=True)
-                verify_logits = out[0]   # [B, n_draft+1, V]
-                new_past_kv = out[2]     # list of (k, v) with len past_len + n_draft + 1
-                verify_hidden = out[3]   # [B, n_draft+1, d]
+                verify_logits, new_past_kv = unpack_output_with_kv(out)
+                verify_hidden = (
+                    out[3] if isinstance(out, tuple) and len(out) > 3
+                    else getattr(out, "hidden_states", None))
 
             # Predictions for positions 0..n_draft-1 (what should follow each
             # accepted token) vs the drafted tokens at 1..n_draft.
@@ -738,12 +792,14 @@ class MTPSelfSpecDecoding(DecodingStrategy):
 
             # KV cache rollback: keep only past_len + n_accepted + 1 entries
             # (the accepted prefix). The new_past_kv tensors have length
-            # past_len + n_draft + 1; slice off the rejected tail.
+            # past_len + n_draft + 1; slice off the rejected tail.  Dict/
+            # None layer entries (conv/SSM) have no seq dim — pass through.
+            # Keep the pre-verify cache for the recurrent repair replay —
+            # the kept span is replayed against it (passing the extended
+            # cache would show attention the committed span twice).
+            old_past_kv = past_kv
             keep_len = past_len + n_accepted + 1
-            past_kv = []
-            for layer_kv in new_past_kv:
-                k, v = layer_kv
-                past_kv.append((k[:, :, :keep_len, :], v[:, :, :keep_len, :]))
+            past_kv = _spec_slice_kv(new_past_kv, keep_len)
 
             # ReplaySSM: if some drafts were rejected, rollback the SSM
             # input cache to the checkpoint so the next reconstruct_state
@@ -752,6 +808,18 @@ class MTPSelfSpecDecoding(DecodingStrategy):
             if (self.replay_ssm is not None and ssm_checkpoint is not None
                     and n_accepted < n_draft):
                 self.replay_ssm.rollback(ssm_checkpoint + n_accepted + 1)
+
+            # Recurrent-state repair: the verify forward advanced live
+            # conv/SSM buffers over the WHOLE draft suffix — on rejection
+            # restore the snapshot and replay the kept span one token at a
+            # time (bit-exact incremental path), chained presents included.
+            if n_accepted < n_draft and (
+                    _spec_has_recurrent_state(snap)
+                    or _spec_has_recurrent_presents(new_past_kv)):
+                rep_kv = _spec_repair_recurrent(
+                    model, snap, old_past_kv, verify_seq, n_accepted + 1)
+                if rep_kv is not None:
+                    past_kv = rep_kv
 
             # Accepted tokens: main_token + drafts 1..n_accepted.
             accepted = verify_seq[:, :n_accepted + 1]
@@ -768,10 +836,8 @@ class MTPSelfSpecDecoding(DecodingStrategy):
             logits = verify_logits[:, next_idx:next_idx + 1, :]    # [B, 1, V]
             hidden = verify_hidden[:, next_idx:next_idx + 1, :]    # [B, 1, d]
 
-            if eos:
-                # GPU-side EOS check on the accepted prefix (single sync).
-                if (accepted == eos).any().item():
-                    break
+            if any(t in eos_set for t in accepted.flatten().tolist()):
+                break
 
         return ids
 
@@ -825,6 +891,12 @@ class SelfSpeculativeSparse(DecodingStrategy):
         # KV selection scores from the last verification pass — reused
         # for sparse attention position selection in the next draft round.
         self._kv_scores: torch.Tensor | None = None
+        # Capability probes, resolved on first generate() call:
+        #   _sparse_ok — model accepts sparse_k (production
+        #     ConfigurableResearchLLM does NOT — it would TypeError).
+        #   _exit_layers — layer_indices early-exit draft fallback.
+        self._sparse_ok: bool | None = None
+        self._exit_layers: list[int] | None = None
 
     def generate(self, model, input_ids, max_new_tokens=100,
                  temperature=0.0, top_p=1.0,
@@ -833,12 +905,11 @@ class SelfSpeculativeSparse(DecodingStrategy):
         ids = input_ids.clone()
         device = input_ids.device
         eos = getattr(model, "eos_token_id", None)
-        eos_set = {2, 7, 519, 151643, 151645}
+        eos_set = set(_DEFAULT_EOS_TOKEN_IDS)
         if isinstance(eos, (list, tuple, set, frozenset)):
             eos_set.update(eos)
         elif eos is not None:
             eos_set.add(eos)
-        torch.tensor(list(eos_set), device=device)
 
         # Prefill with full attention.
         with torch.inference_mode():
@@ -868,19 +939,60 @@ class SelfSpeculativeSparse(DecodingStrategy):
             # Generate draft_len tokens autoregressively with sparse
             # attention (top-k KV positions).  The model forward receives
             # sparse_k so attention layers can limit the KV window.
+            #
+            # The production ConfigurableResearchLLM.forward has no
+            # sparse_k parameter — probe once and fall back to the
+            # layer_indices early-exit draft (a real cheap-draft path on
+            # this model) or a plain forward if neither is supported.
+            if self._sparse_ok is None:
+                import inspect
+                try:
+                    params = inspect.signature(model.forward).parameters
+                    self._sparse_ok = "sparse_k" in params
+                    if "layer_indices" in params:
+                        n_layers = len(getattr(model, "blocks", []) or []) \
+                            or getattr(getattr(model, "config", None),
+                                       "n_layers", 0) or 0
+                        depth = max(1, n_layers // 2)
+                        self._exit_layers = list(range(depth)) \
+                            if n_layers else None
+                except (TypeError, ValueError):
+                    self._sparse_ok = False
             draft_tokens = [base_token]
-            draft_kv = past_kv
-            for _ in range(self.draft_len):
-                with torch.inference_mode():
-                    draft_out = model(
-                        draft_tokens[-1],
-                        past_key_values=draft_kv,
-                        use_cache=True,
-                        sparse_k=self.sparse_k,
-                    )
-                    draft_logits_i, draft_kv = unpack_output_with_kv(draft_out)
-                draft_tok = draft_logits_i[:, -1, :].argmax(-1, keepdim=True)
-                draft_tokens.append(draft_tok)
+            # Snapshot live recurrent state — T==1 draft forwards mutate
+            # conv/SSM buffers even under use_cache=False; restore before
+            # the verify pass so drafts never leak into committed state.
+            snap = _spec_snapshot_recurrent(model)
+            try:
+                draft_kv = past_kv
+                for _ in range(self.draft_len):
+                    with torch.inference_mode():
+                        if self._sparse_ok:
+                            draft_out = model(
+                                draft_tokens[-1],
+                                past_key_values=draft_kv,
+                                use_cache=True,
+                                sparse_k=self.sparse_k,
+                            )
+                        elif self._exit_layers is not None:
+                            draft_out = model(
+                                draft_tokens[-1],
+                                past_key_values=draft_kv,
+                                use_cache=True,
+                                layer_indices=self._exit_layers,
+                                logits_last_only=True)
+                        else:
+                            draft_out = model(
+                                draft_tokens[-1],
+                                past_key_values=draft_kv,
+                                use_cache=True)
+                        draft_logits_i, draft_kv = unpack_output_with_kv(
+                            draft_out)
+                    draft_tok = draft_logits_i[:, -1, :].argmax(
+                        -1, keepdim=True)
+                    draft_tokens.append(draft_tok)
+            finally:
+                _spec_restore_recurrent(snap)
 
             n_draft = len(draft_tokens) - 1  # number of drafted tokens
 
@@ -889,7 +1001,12 @@ class SelfSpeculativeSparse(DecodingStrategy):
             # sequence in ONE forward pass.  The draft KV cache (sparse)
             # is discarded — we re-process from the original full KV.
             verify_seq = torch.cat(draft_tokens, dim=-1)  # [B, n_draft+1]
-            past_len = past_kv[0][0].shape[-2] if past_kv is not None else 0
+            past_len = _spec_past_len(past_kv)
+            if verify_seq.shape[1] > 1:
+                # Committed-boundary conv context for the T>1 segment —
+                # zero left-padding would corrupt the first kernel_size-1
+                # positions' logits.
+                _spec_install_conv_prefix(snap)
             with torch.inference_mode():
                 verify_out = model(
                     verify_seq,
@@ -923,12 +1040,11 @@ class SelfSpeculativeSparse(DecodingStrategy):
             )
 
             # ── Step 5: KV cache rollback to accepted prefix ─────────
+            # Dict/None layer entries (conv/SSM) pass through — seq-dim
+            # slicing only applies to (k, v) attention presents.
+            old_past_kv = past_kv
             keep_len = past_len + n_accepted + 1
-            past_kv = []
-            for layer_kv in new_past_kv:
-                k, v = layer_kv
-                past_kv.append(
-                    (k[:, :, :keep_len, :], v[:, :, :keep_len, :]))
+            past_kv = _spec_slice_kv(new_past_kv, keep_len)
 
             # ReplaySSM: if some drafts were rejected, rollback the SSM
             # input cache to the checkpoint + accepted prefix so the next
@@ -936,6 +1052,16 @@ class SelfSpeculativeSparse(DecodingStrategy):
             if (self.replay_ssm is not None and ssm_checkpoint is not None
                     and n_accepted < n_draft):
                 self.replay_ssm.rollback(ssm_checkpoint + n_accepted + 1)
+
+            # Recurrent repair: restore pre-draft state + replay the kept
+            # span token-by-token so conv/SSM buffers land bit-exact.
+            if n_accepted < n_draft and (
+                    _spec_has_recurrent_state(snap)
+                    or _spec_has_recurrent_presents(new_past_kv)):
+                rep_kv = _spec_repair_recurrent(
+                    model, snap, old_past_kv, verify_seq, n_accepted + 1)
+                if rep_kv is not None:
+                    past_kv = rep_kv
 
             # ── Step 6: Accept tokens ────────────────────────────────
             accepted = verify_seq[:, :n_accepted + 1]
@@ -1053,13 +1179,14 @@ class DoLaDecoding(DecodingStrategy):
                  repetition_penalty=1.05,
                  min_p: float = 0.0, min_k: float = 0.0,
                  dry_multiplier: float = 0.0, dry_base: float = 1.75,
-                 dry_allowed_length: int = 2, dry_penalty_last_n: int = 512):
+                 dry_allowed_length: int = 2, dry_penalty_last_n: int = 512,
+                 **_ignored):
         ids = input_ids.clone()
         eos = getattr(model, "eos_token_id", None)
         if eos is None:
             cfg = getattr(model, "config", None)
             eos = getattr(cfg, "eos_token_id", None) if cfg else None
-        eos_set = {2, 7, 519, 151643, 151645}
+        eos_set = set(_DEFAULT_EOS_TOKEN_IDS)
         if isinstance(eos, (list, tuple, set, frozenset)):
             eos_set.update(eos)
         elif eos is not None:
@@ -1089,7 +1216,9 @@ class DoLaDecoding(DecodingStrategy):
             out = model(ids, use_cache=True, return_hidden_states=True,
                         logits_last_only=True)
             logits, past_kv = unpack_output_with_kv(out)
-            hidden_list = out[3]
+            hidden_list = (out[3] if isinstance(out, tuple)
+                           and len(out) > 3
+                           else getattr(out, "hidden_states", None))
         model._forge_prefill_kv = past_kv
 
         for _ in range(max_new_tokens):
@@ -1127,7 +1256,9 @@ class DoLaDecoding(DecodingStrategy):
                 out = model(next_token, past_key_values=past_kv,
                             use_cache=True, return_hidden_states=True)
                 logits, past_kv = unpack_output_with_kv(out)
-                hidden_list = out[3]
+                hidden_list = (out[3] if isinstance(out, tuple)
+                               and len(out) > 3
+                               else getattr(out, "hidden_states", None))
 
         model._forge_last_kv = past_kv
         model._forge_last_logits = logits
@@ -1149,6 +1280,122 @@ _RECURRENT_STATE_ATTRS = (
     "_ssm_state", "_ssm_state_real", "_ssm_state_imag", "_state_reset",
     "_v0", "_v0_capture",
 )
+
+
+# ── shared speculative-decode state helpers ─────────────────────────
+# The snapshot/restore + KV-rollback machinery every draft/verify
+# strategy needs (previously trapped inside SpecBoundDecoding — MTP,
+# n-gram and self-spec paths crashed on dict presents or leaked
+# over-advanced conv/SSM state on rejection).
+
+def _spec_state_holders(model):
+    """Yield every object that may carry live recurrent state."""
+    yield model
+    for block in getattr(model, "blocks", []) or []:
+        yield block
+        for attr in ("attn", "_kda", "_gdn2", "_forge_hybrid_ssm"):
+            sub = getattr(block, attr, None)
+            if sub is not None:
+                yield sub
+
+
+def _spec_snapshot_recurrent(model) -> list:
+    """Clone every live recurrent-state buffer on the model."""
+    snap = []
+    for obj in _spec_state_holders(model):
+        ss = getattr(obj, "snapshot_state", None)
+        if callable(ss):
+            d = ss()
+            if any(v is not None for v in d.values()):
+                snap.append((obj, "__snap__", d))
+        for attr in _RECURRENT_STATE_ATTRS:
+            if hasattr(obj, attr):
+                val = getattr(obj, attr)
+                snap.append((obj, attr,
+                             val.clone() if torch.is_tensor(val) else val))
+    return snap
+
+
+def _spec_restore_recurrent(snap) -> None:
+    for obj, attr, val in snap:
+        if attr == "__snap__":
+            if torch.is_tensor(val.get("state")):
+                obj._state = val["state"].clone()
+            else:
+                obj._state = val.get("state")
+            for ck in ("conv_q", "conv_k", "conv_v"):
+                cv = getattr(obj, ck, None)
+                if cv is not None:
+                    s = val.get(ck)
+                    cv.state = s.clone() if torch.is_tensor(s) else s
+        else:
+            setattr(obj, attr,
+                    val.clone() if torch.is_tensor(val) else val)
+
+
+def _spec_has_recurrent_state(snap) -> bool:
+    return any(
+        (a == "__snap__" and any(x is not None for x in v.values()))
+        or (torch.is_tensor(v) and ("_conv_state" in a or "_ssm_state" in a))
+        for _, a, v in snap)
+
+
+def _spec_has_recurrent_presents(past_kv) -> bool:
+    """True when presents carry O(1) recurrent state (mamba-style dict
+    entries) that a seq-dim slice cannot roll back."""
+    if not past_kv:
+        return False
+    return any(isinstance(e, dict) for e in past_kv)
+
+
+def _spec_install_conv_prefix(snap) -> None:
+    """Install the snapshot's conv state as ``_conv_state_prefix`` so the
+    NEXT forward's T>1 causal conv uses the real committed-boundary
+    context instead of zero left-padding."""
+    for obj, attr, val in snap:
+        if attr == "_conv_state" and torch.is_tensor(val):
+            obj._conv_state_prefix = val
+
+
+def _spec_past_len(past_kv) -> int:
+    if not past_kv:
+        return 0
+    for e in past_kv:
+        if e is None or isinstance(e, dict):
+            continue  # conv/SSM entries carry no seq-dim KV
+        return e[0].shape[-2]
+    return 0
+
+
+def _spec_slice_kv(past_kv, keep_len: int):
+    """Rollback KV presents to ``keep_len`` (None-safe; dict presents
+    pass through — recurrent state is repaired by the replay below)."""
+    if past_kv is None:
+        return None
+    out = []
+    for layer_kv in past_kv:
+        if layer_kv is None or isinstance(layer_kv, dict):
+            out.append(layer_kv)
+        else:
+            k, v = layer_kv
+            out.append((k[:, :, :keep_len, :], v[:, :, :keep_len, :]))
+    return out
+
+
+def _spec_repair_recurrent(model, snap, old_past_kv, seq, n_kept: int):
+    """Restore pre-draft recurrent state, then replay ``seq[:, :n_kept]``
+    one token at a time against ``old_past_kv`` (the pre-verify cache),
+    chaining presents.  Returns the canonical post-repair cache.  T=1
+    calls take the incremental conv/SSM path — bit-exact vs sequential
+    StandardDecoding."""
+    _spec_restore_recurrent(snap)
+    rep_kv = old_past_kv
+    for i in range(n_kept):
+        with torch.inference_mode():
+            rep_out = model(seq[:, i:i + 1],
+                            past_key_values=rep_kv, use_cache=True)
+        _, rep_kv = unpack_output_with_kv(rep_out)
+    return rep_kv
 
 
 class SpecBoundDecoding(DecodingStrategy):
@@ -1252,88 +1499,32 @@ class SpecBoundDecoding(DecodingStrategy):
         self._partial_ok = True
 
     # ── recurrent-state snapshot / restore ─────────────────────────
+    # Thin delegates to the module-level _spec_* helpers shared by all
+    # draft/verify strategies.
 
     @staticmethod
     def _state_holders(model):
-        """Yield every object that may carry live recurrent state."""
-        yield model
-        for block in getattr(model, "blocks", []) or []:
-            yield block
-            for attr in ("attn", "_kda", "_gdn2", "_forge_hybrid_ssm"):
-                sub = getattr(block, attr, None)
-                if sub is not None:
-                    yield sub
+        return _spec_state_holders(model)
 
     @classmethod
     def _snapshot_recurrent(cls, model) -> list:
-        """Clone every live recurrent-state buffer on the model.
-
-        KDA/GDN2 side-paths keep state in ``_state`` + ``conv_*.state``
-        (nested submodules, outside the flat attr list) — those expose
-        ``snapshot_state()``; captured as ``(obj, "__snap__", dict)``.
-        """
-        snap = []
-        for obj in cls._state_holders(model):
-            ss = getattr(obj, "snapshot_state", None)
-            if callable(ss):
-                d = ss()
-                if any(v is not None for v in d.values()):
-                    snap.append((obj, "__snap__", d))
-            for attr in _RECURRENT_STATE_ATTRS:
-                if hasattr(obj, attr):
-                    val = getattr(obj, attr)
-                    snap.append((obj, attr,
-                                 val.clone() if torch.is_tensor(val) else val))
-        return snap
+        return _spec_snapshot_recurrent(model)
 
     @staticmethod
     def _restore_recurrent(snap) -> None:
-        for obj, attr, val in snap:
-            if attr == "__snap__":
-                # KDA/GDN2 dict snapshot: write state back directly
-                # (set_state_prefix is one-shot prefix semantics, NOT a
-                # restore — the T==1 replay below reads live _state).
-                if torch.is_tensor(val.get("state")):
-                    obj._state = val["state"].clone()
-                else:
-                    obj._state = val.get("state")
-                for ck in ("conv_q", "conv_k", "conv_v"):
-                    cv = getattr(obj, ck, None)
-                    if cv is not None:
-                        s = val.get(ck)
-                        cv.state = s.clone() if torch.is_tensor(s) else s
-            else:
-                setattr(obj, attr,
-                        val.clone() if torch.is_tensor(val) else val)
+        _spec_restore_recurrent(snap)
 
     @staticmethod
     def _has_recurrent_state(snap) -> bool:
-        return any(
-            (a == "__snap__" and any(x is not None for x in v.values()))
-            or (torch.is_tensor(v)
-                and ("_conv_state" in a or "_ssm_state" in a))
-            for _, a, v in snap)
+        return _spec_has_recurrent_state(snap)
 
     @staticmethod
     def _has_recurrent_presents(past_kv) -> bool:
-        """True when presents carry O(1) recurrent state (mamba-style dict
-        entries) that a seq-dim slice cannot roll back."""
-        if not past_kv:
-            return False
-        return any(isinstance(e, dict) for e in past_kv)
+        return _spec_has_recurrent_presents(past_kv)
 
     @staticmethod
     def _install_conv_prefix(snap) -> None:
-        """Install the snapshot's conv state as ``_conv_state_prefix`` so the
-        NEXT forward's T>1 causal conv uses the real committed-boundary
-        context instead of zero left-padding (which would corrupt logits at
-        the first ``kernel_size - 1`` segment positions — the same mechanism
-        ``forge/engine/prefix_cache.apply_recurrent_state_prefix`` uses).
-        The forward consumes the prefix (sets it back to None), so this must
-        be re-installed before every T>1 segment call."""
-        for obj, attr, val in snap:
-            if attr == "_conv_state" and torch.is_tensor(val):
-                obj._conv_state_prefix = val
+        _spec_install_conv_prefix(snap)
 
     # ── draft helpers ───────────────────────────────────────────────
 
@@ -1369,31 +1560,11 @@ class SpecBoundDecoding(DecodingStrategy):
 
     @staticmethod
     def _past_len(past_kv) -> int:
-        if not past_kv:
-            return 0
-        for e in past_kv:
-            if e is None or isinstance(e, dict):
-                continue  # conv/SSM entries carry no seq-dim KV
-            return e[0].shape[-2]
-        return 0
+        return _spec_past_len(past_kv)
 
     @staticmethod
     def _slice_kv(past_kv, keep_len: int):
-        """Rollback KV presents to ``keep_len`` (None-safe for
-        conv/SSM layers that carry no KV entry).  Dict presents
-        (mamba-style O(1) recurrent state) have no seq dim — they pass
-        through here and are rolled back by the per-token repair replay
-        instead."""
-        if past_kv is None:
-            return None
-        out = []
-        for layer_kv in past_kv:
-            if layer_kv is None or isinstance(layer_kv, dict):
-                out.append(layer_kv)
-            else:
-                k, v = layer_kv
-                out.append((k[:, :, :keep_len, :], v[:, :, :keep_len, :]))
-        return out
+        return _spec_slice_kv(past_kv, keep_len)
 
     def _top_p(self, logits, top_p):
         from research.sampling_utils import top_p_filter_logits
@@ -1406,7 +1577,8 @@ class SpecBoundDecoding(DecodingStrategy):
                  repetition_penalty=1.05,
                  min_p: float = 0.0, min_k: float = 0.0,
                  dry_multiplier: float = 0.0, dry_base: float = 1.75,
-                 dry_allowed_length: int = 2, dry_penalty_last_n: int = 512):
+                 dry_allowed_length: int = 2, dry_penalty_last_n: int = 512,
+                 **_ignored):
         if input_ids.shape[0] > 1:
             # The per-token emit/guard path below is B=1-only (like the
             # engine's speculative decode paths); batch inputs get the
@@ -1425,7 +1597,7 @@ class SpecBoundDecoding(DecodingStrategy):
         if eos is None:
             cfg = getattr(model, "config", None)
             eos = getattr(cfg, "eos_token_id", None) if cfg else None
-        eos_set = {2, 7, 519, 151643, 151645}
+        eos_set = set(_DEFAULT_EOS_TOKEN_IDS)
         if isinstance(eos, (list, tuple, set, frozenset)):
             eos_set.update(eos)
         elif eos is not None:
@@ -1681,7 +1853,11 @@ class SpecBoundDecoding(DecodingStrategy):
 
 
 def build_decoding(strategy: str = "standard", **kwargs) -> DecodingStrategy:
-    """Factory: build decoding strategy by name."""
+    """Factory: build decoding strategy by name.
+
+    Strict: unknown names raise ActivationError with the valid list —
+    a typo must never silently become StandardDecoding (EC-019).
+    """
     strategies = {
         "standard": StandardDecoding,
         "speculative": ExternalDraftSpeculativeDecoding,
@@ -1703,7 +1879,13 @@ def build_decoding(strategy: str = "standard", **kwargs) -> DecodingStrategy:
         from forge.decoding.uno import NgramProposer, UnoDecoding
         kwargs.setdefault("proposer", NgramProposer())
         return UnoDecoding(**kwargs)
-    cls = strategies.get(strategy, StandardDecoding)
+    cls = strategies.get(strategy)
+    if cls is None:
+        from forge.engine.errors import ActivationError
+        valid = sorted(set(strategies) | {"uno"})
+        raise ActivationError(
+            f"Unknown decoding strategy {strategy!r}. "
+            f"Valid: {', '.join(valid)}")
     return cls(**kwargs)
 
 
