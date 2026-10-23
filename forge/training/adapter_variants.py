@@ -1,6 +1,6 @@
-"""R38-3/4/5: PiSSA, AdaLoRA, rsLoRA adapter variants.
+"""R38-3/4/5 + MiCA: PiSSA, AdaLoRA, rsLoRA, MiCA adapter variants.
 
-Three LoRA initialization / scaling / allocation strategies that build on
+LoRA initialization / scaling / allocation strategies that build on
 the manual LoRA path in ``bitnet_lora.py`` (no PEFT dependency, works with
 BitNetLinear / NF4Linear / nn.Linear).
 
@@ -11,11 +11,18 @@ BitNetLinear / NF4Linear / nn.Linear).
                              sensitivity scores.
   R38-5  rsLoRALinear      — scale-free LoRA (1/sqrt(r) scaling) for stable
                              high-rank training without LR tuning.
+  MiCA   MiCAInitializer   — minor-singular-component init: frozen B spans
+          + MiCALinear       the LEAST important directions of W, trainable
+                             zero-init A.  Inverse of PiSSA; ~5.9x better
+                             knowledge acquisition per PEFT experiments —
+                             use for CPT / knowledge-injection SFT, not
+                             instruction tuning.
 
 Refs:
   PiSSA   — Meng et al. arXiv 2404.02948
   AdaLoRA — Zhang et al. arXiv 2308.13160
   rsLoRA  — Kalajdzievski arXiv 2312.03732
+  MiCA    — arXiv 2604.01694 (HF PEFT: init_lora_weights="mica")
 """
 from __future__ import annotations
 
@@ -110,6 +117,132 @@ class PiSSAInitializer:
                 f"rank mismatch: A.shape[0]={A.shape[0]} != B.shape[1]={B.shape[1]}")
         delta = scale * (B.to(torch.float32) @ A.to(torch.float32))
         return base_weight.to(torch.float32) + delta
+
+
+# ── MiCA (Minor-Component Adaptation) ────────────────────────────────────
+
+class MiCAInitializer:
+    """Initialize LoRA from the MINOR (bottom-r) singular subspace of W.
+
+    Exact inverse of PiSSA: where PiSSA puts the top-r singular component
+    into a trainable adapter, MiCA freezes ``B`` to the *least* important
+    left singular vectors ``U[:, -r:]`` and trains only a zero-initialized
+    ``A``.  The update is confined to the directions the pretrained weight
+    uses least, which preserves pretrained capability while still moving
+    knowledge — PEFT's ``init_lora_weights="mica"`` recipe (arXiv
+    2604.01694): ~5.9x better knowledge acquisition than vanilla LoRA for
+    knowledge-injection / CPT-style SFT, with only A's ``r * in_features``
+    params trainable (B frozen).
+
+    Not for instruction tuning — use vanilla/PiSSA there.  Recommended:
+    r=16–32, LR 5e-4..2e-3 (minor directions are flat and tolerate a large
+    step), target q_proj/v_proj per the paper.
+    """
+
+    @staticmethod
+    @torch.no_grad()
+    def initialize(weight_matrix: torch.Tensor, rank: int,
+                   clamp_rank: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
+        """Minor-subspace init: returns (A, B) for a LoRA adapter.
+
+        Args:
+            weight_matrix: base weight W of shape (out_features, in_features).
+            rank: target LoRA rank r. Clamped to min(rank, min(dims)) when
+                ``clamp_rank`` is True.
+            clamp_rank: if False, raise when rank exceeds the SVD limit.
+
+        Returns:
+            A: (rank, in_features) — ALL ZEROS, the trainable factor.
+            B: (out_features, rank) — U[:, -r:], the minor left singular
+                vectors of W.  ORTHONORMAL columns; meant to be FROZEN
+                (``requires_grad_(False)`` on the parameter).
+
+        The adapter starts as an exact no-op (A=0 → x @ A.T @ B.T = 0),
+        unlike PiSSA which starts carrying W's top-r component.  The base
+        weight is NOT modified — there is no residual to fold back.
+        """
+        if weight_matrix.ndim != 2:
+            raise ValueError(f"weight_matrix must be 2D, got {weight_matrix.ndim}D")
+        W = weight_matrix.to(torch.float32)
+        out_features, in_features = W.shape
+        max_rank = min(out_features, in_features)
+        if rank > max_rank:
+            if not clamp_rank:
+                raise ValueError(
+                    f"rank {rank} exceeds SVD limit {max_rank} for {tuple(W.shape)}")
+            rank = max_rank
+
+        U, _S, _Vh = torch.linalg.svd(W, full_matrices=False)
+        # U columns are sorted by descending singular value — the LAST r
+        # are the minor subspace.
+        B = U[:, -rank:].contiguous()                    # (out, r)
+        A = torch.zeros(rank, in_features, dtype=W.dtype)
+        return A, B
+
+
+class MiCALinear(nn.Module):
+    """Linear layer with a MiCA adapter (frozen minor-subspace B, trained A).
+
+    Forward is identical to vanilla LoRA —
+    ``y = base(x) + (alpha / r) * (x @ A.T @ B.T)`` — but ``lora_B`` is a
+    frozen buffer holding the bottom-r left singular vectors of the base
+    weight and ``lora_A`` is the only trainable factor, zero-initialized
+    so the adapter is an exact no-op at init.
+    """
+
+    def __init__(self, in_features: int, out_features: int, rank: int,
+                 alpha: float = 1.0, bias: bool = False,
+                 base_weight: torch.Tensor | None = None):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.rank = rank
+        self.alpha = alpha
+        self.scale = alpha / rank
+
+        if base_weight is not None:
+            assert base_weight.shape == (out_features, in_features)
+            self.base = nn.Linear(in_features, out_features, bias=bias)
+            with torch.no_grad():
+                self.base.weight.copy_(base_weight)
+        else:
+            self.base = nn.Linear(in_features, out_features, bias=bias)
+        self.base.weight.requires_grad_(False)
+        if self.base.bias is not None:
+            self.base.bias.requires_grad_(False)
+
+        A, B = MiCAInitializer.initialize(self.base.weight, rank)
+        self.lora_A = nn.Parameter(A.to(self.base.weight.dtype))
+        # Frozen direction matrix — buffer, not Parameter, so it can never
+        # collect a gradient or appear in optimizer groups.
+        self.register_buffer(
+            "lora_B", B.to(self.base.weight.dtype))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """y = base(x) + scale * (x @ A.T @ B.T)."""
+        out = self.base(x)
+        delta = self.scale * (x @ self.lora_A.T @ self.lora_B.T)
+        return out + delta.to(out.dtype)
+
+    @torch.no_grad()
+    def merge(self) -> nn.Linear:
+        """Merge adapter into base weight and return a plain nn.Linear."""
+        merged = nn.Linear(self.in_features, self.out_features,
+                           bias=self.base.bias is not None)
+        delta = self.scale * (self.lora_B.to(torch.float32)
+                              @ self.lora_A.to(torch.float32))
+        w = self.base.weight.to(torch.float32) + delta
+        merged.weight.copy_(w.to(self.base.weight.dtype))
+        if self.base.bias is not None:
+            merged.bias.copy_(self.base.bias.data)
+        merged = merged.to(self.base.weight.device)
+        return merged
+
+    def extra_repr(self) -> str:
+        return (f"in_features={self.in_features}, "
+                f"out_features={self.out_features}, rank={self.rank}, "
+                f"alpha={self.alpha}, scale=1/r={self.scale:.4f}, "
+                f"B=frozen(U[:, -r:])")
 
 
 # ── R38-4: AdaLoRA (Adaptive Budget Allocation) ──────────────────────────

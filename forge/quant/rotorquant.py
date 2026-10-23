@@ -181,16 +181,51 @@ class RotorQuantCache:
                  n_kv_heads: int | None = None,
                  attention_type: str = "gqa",
                  seed: int = 42, device: str = "cpu",
-                 dtype: torch.dtype = torch.float32):
+                 dtype: torch.dtype = torch.float32,
+                 bits_v: int | None = None,
+                 layer_idx: int | None = None,
+                 n_layers: int | None = None,
+                 boundary_v_bits: int | None = None,
+                 boundary_layers: int = 2):
+        """TurboQuant+ extensions over the base PlanarQuant pipeline.
+
+        Three drop-in upgrades from the TurboQuant+ fork findings
+        (TheTom/turboquant_plus, vLLM PR#38479 merged):
+
+          Asymmetric K/V (``bits_v``): K precision dominates error —
+          quantizing K to 3 bits is catastrophic while V at 3 bits is
+          nearly free, so ``bits`` applies to K and ``bits_v`` (default
+          = ``bits``) to V.  E.g. bits=4, bits_v=3.
+
+          Boundary-V (``layer_idx`` + ``n_layers`` + ``boundary_v_bits``):
+          the first and last ``boundary_layers`` layers (default 2) keep
+          V at a higher precision — the boundary layers carry outsized V
+          error sensitivity; recovers most of the quality gap at ~no cost.
+          Only applies when this cache is instantiated per layer.
+
+          Sparse-V dequant: see ``get_sparse_v`` — positions whose
+          attention weight is below a threshold skip V dequant entirely.
+        """
         self.d_model = d_model
         self.n_heads = n_heads
         self.head_dim = head_dim
         self.bits = bits
+        self.bits_v = self._resolve_v_bits(
+            bits, bits_v, layer_idx, n_layers,
+            boundary_v_bits, boundary_layers)
         self.max_seq_len = max_seq_len
         self.n_kv_heads = n_kv_heads if n_kv_heads is not None else n_heads
         self.attention_type = attention_type
         self.device = device
         self.dtype = dtype
+        self.layer_idx = layer_idx
+        self.n_layers = n_layers
+        self.boundary_v = (self.bits_v != (bits_v if bits_v is not None
+                                           else bits))
+
+        # Sparse-V dequant accounting (get_sparse_v)
+        self._sparse_kept = 0
+        self._sparse_skipped = 0
 
         # 2D pairs (pad head_dim to even if needed).
         self.n_groups = (head_dim + 1) // 2
@@ -201,10 +236,22 @@ class RotorQuantCache:
         self.rot2 = make_givens_rotations(self.n_groups, seed=seed,
                                           device=device, dtype=dtype)
 
-        # Lloyd-Max codebook for the rotated unit-vector coordinate distribution.
-        self.codebook = LloydMaxCodebook(d=head_dim, bits=bits)
-        self._centroids = self.codebook.centroids.to(device=device, dtype=dtype)
-        self._boundaries = self.codebook.boundaries.to(device=device, dtype=dtype)
+        # Lloyd-Max codebooks — asymmetric K/V bits get separate tables.
+        self.codebook_k = LloydMaxCodebook(d=head_dim, bits=bits)
+        self._centroids_k = self.codebook_k.centroids.to(
+            device=device, dtype=dtype)
+        self._boundaries_k = self.codebook_k.boundaries.to(
+            device=device, dtype=dtype)
+        if self.bits_v == bits:
+            self.codebook_v = self.codebook_k
+            self._centroids_v = self._centroids_k
+            self._boundaries_v = self._boundaries_k
+        else:
+            self.codebook_v = LloydMaxCodebook(d=head_dim, bits=self.bits_v)
+            self._centroids_v = self.codebook_v.centroids.to(
+                device=device, dtype=dtype)
+            self._boundaries_v = self.codebook_v.boundaries.to(
+                device=device, dtype=dtype)
 
         # --- Storage ---
         # Deferred prefill buffers (FP16). Non-None while in prefill mode.
@@ -222,16 +269,35 @@ class RotorQuantCache:
         self.current_length = 0
         self._quantized = False  # True once prefill buffer has been flushed to quantized
 
+    @staticmethod
+    def _resolve_v_bits(bits: int, bits_v: int | None,
+                        layer_idx: int | None, n_layers: int | None,
+                        boundary_v_bits: int | None,
+                        boundary_layers: int) -> int:
+        """Effective V bit-width: boundary layers get boundary_v_bits."""
+        base = bits if bits_v is None else bits_v
+        if (boundary_v_bits is not None and layer_idx is not None
+                and n_layers is not None):
+            if (layer_idx < boundary_layers
+                    or layer_idx >= n_layers - boundary_layers):
+                return boundary_v_bits
+        return base
+
     # ── low-level quantize / dequantize for a single tensor ──
 
-    def _quantize_tensor(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _quantize_tensor(self, x: torch.Tensor,
+                         boundaries: torch.Tensor | None = None,
+                         ) -> tuple[torch.Tensor, torch.Tensor]:
         """Rotate + Lloyd-Max quantize a KV tensor.
 
         x: (B, Hkv, T, head_dim) float
+        boundaries: codebook boundaries to quantize against (K or V table)
         Returns:
             norms:   (B, Hkv, T)        fp16
             indices: (B, Hkv, T, head_dim) int32
         """
+        if boundaries is None:
+            boundaries = self._boundaries_k
         x = x.to(self.dtype)
         norms = x.norm(dim=-1).clamp(min=1e-8)  # (B, Hkv, T)
         x_unit = x / norms.unsqueeze(-1)
@@ -246,17 +312,22 @@ class RotorQuantCache:
         flat = flat[..., :self.head_dim] if self.pad > 0 else flat
 
         # Scalar Lloyd-Max quantization per coordinate.
-        idx = torch.bucketize(flat, self._boundaries).to(torch.int32)
+        idx = torch.bucketize(flat, boundaries).to(torch.int32)
         return norms.to(torch.float16), idx
 
-    def _dequantize_tensor(self, norms: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+    def _dequantize_tensor(self, norms: torch.Tensor, idx: torch.Tensor,
+                           centroids: torch.Tensor | None = None,
+                           ) -> torch.Tensor:
         """Inverse-rotate + rescale to reconstruct a KV tensor.
 
         norms:   (B, Hkv, T)        float
         idx:     (B, Hkv, T, head_dim) int
+        centroids: codebook centroids to reconstruct from (K or V table)
         Returns: (B, Hkv, T, head_dim) float
         """
-        flat = self._centroids.to(idx.device)[idx]  # (B, Hkv, T, D)
+        if centroids is None:
+            centroids = self._centroids_k
+        flat = centroids.to(idx.device)[idx]  # (B, Hkv, T, D)
 
         if self.pad > 0:
             flat = torch.nn.functional.pad(flat, (0, self.pad))
@@ -297,7 +368,8 @@ class RotorQuantCache:
         if not self._quantized and self._prefill_k is not None:
             # Flush deferred prefill buffer → quantized storage.
             kn, ki = self._quantize_tensor(self._prefill_k)
-            vn, vi = self._quantize_tensor(self._prefill_v)
+            vn, vi = self._quantize_tensor(self._prefill_v,
+                                           self._boundaries_v)
             self._k_norms, self._k_idx = kn, ki
             self._v_norms, self._v_idx = vn, vi
             self._prefill_k = None
@@ -305,7 +377,7 @@ class RotorQuantCache:
             self._quantized = True
 
         kn, ki = self._quantize_tensor(k)
-        vn, vi = self._quantize_tensor(v)
+        vn, vi = self._quantize_tensor(v, self._boundaries_v)
 
         if self._quantized:
             self._k_norms = torch.cat([self._k_norms, kn], dim=2)
@@ -331,8 +403,74 @@ class RotorQuantCache:
         if self._k_idx is None:
             return None, None
         k = self._dequantize_tensor(self._k_norms, self._k_idx)
-        v = self._dequantize_tensor(self._v_norms, self._v_idx)
+        v = self._dequantize_tensor(self._v_norms, self._v_idx,
+                                    self._centroids_v)
         return k, v
+
+    def get_sparse_v(self, attn_weights: torch.Tensor,
+                     threshold: float = 1e-6,
+                     ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        """Dequantize V only at positions with attention mass ≥ threshold.
+
+        Sparse-V (TurboQuant+): in a long cache ~90% of positions receive
+        attention weight < 1e-6 — their contribution to ``attn @ V`` is
+        numerically nil, so dequantizing their V rows is wasted work.
+        Positions below ``threshold`` are returned as zero rows, which
+        keeps the downstream weighted sum unchanged to within
+        ``threshold * ||v||`` per position.
+
+        Args:
+            attn_weights: (..., T) post-softmax attention weights over the
+                cached positions — the max over leading dims decides keep.
+            threshold: skip positions whose max weight is below this.
+
+        Returns:
+            (v_hat, keep_mask): v_hat (B, n_kv, T, head_dim) with zero
+            rows at skipped positions; keep_mask (T,) bool.
+        """
+        if self._prefill_v is not None:
+            v_full = self._prefill_v
+            T = v_full.shape[2]
+            keep = torch.ones(T, dtype=torch.bool,
+                              device=v_full.device)
+            if attn_weights is not None:
+                w = attn_weights.reshape(-1, attn_weights.shape[-1])
+                keep = w.amax(dim=0)[:T] >= threshold
+            self._sparse_kept += int(keep.sum())
+            self._sparse_skipped += int((~keep).sum())
+            if not bool(keep.all()):
+                v_full = v_full.clone()
+                v_full[:, :, ~keep] = 0
+            return v_full, keep
+        if self._v_idx is None:
+            return None, torch.zeros(0, dtype=torch.bool,
+                                     device=self.device)
+        T = self._v_idx.shape[2]
+        if attn_weights is None:
+            keep = torch.ones(T, dtype=torch.bool, device=self._v_idx.device)
+        else:
+            w = attn_weights.reshape(-1, attn_weights.shape[-1])
+            keep = (w.amax(dim=0)[:T] >= threshold).to(self._v_idx.device)
+        kept_n = int(keep.sum())
+        self._sparse_kept += kept_n
+        self._sparse_skipped += T - kept_n
+        if kept_n == T:
+            # Nothing skipped — dequantize everything.
+            return (self._dequantize_tensor(
+                        self._v_norms, self._v_idx, self._centroids_v),
+                    keep)
+        # The actual win: skipped positions never touch the inverse
+        # rotation / codebook gather — only surviving rows are dequantized.
+        v_hat = torch.zeros(
+            *self._v_idx.shape[:2], T, self.head_dim,
+            dtype=torch.float16, device=self._v_idx.device)
+        if kept_n:
+            v_sel = self._dequantize_tensor(
+                self._v_norms[:, :, keep],
+                self._v_idx[:, :, keep],
+                self._centroids_v)
+            v_hat[:, :, keep] = v_sel
+        return v_hat, keep
 
     def compress(self, k: torch.Tensor, v: torch.Tensor) -> dict[str, torch.Tensor]:
         """Stateless compression of full K/V tensors.
@@ -341,11 +479,12 @@ class RotorQuantCache:
         Returns dict with norms + centroid indices for K and V.
         """
         kn, ki = self._quantize_tensor(k)
-        vn, vi = self._quantize_tensor(v)
+        vn, vi = self._quantize_tensor(v, self._boundaries_v)
         return {
             "k_norms": kn, "k_idx": ki,
             "v_norms": vn, "v_idx": vi,
             "bits": self.bits,
+            "bits_v": self.bits_v,
             "head_dim": self.head_dim,
             "n_kv_heads": self.n_kv_heads,
         }
@@ -357,8 +496,20 @@ class RotorQuantCache:
     def decompress_dict(self, comp: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Decompress a dict produced by ``compress``."""
         k = self._dequantize_tensor(comp["k_norms"], comp["k_idx"])
-        v = self._dequantize_tensor(comp["v_norms"], comp["v_idx"])
+        v = self._dequantize_tensor(comp["v_norms"], comp["v_idx"],
+                                    self._centroids_v)
         return k, v
+
+    def clear(self):
+        """Reset the cache to empty (drops prefill buffer + quantized store)."""
+        self._prefill_k = None
+        self._prefill_v = None
+        self._k_norms = None
+        self._k_idx = None
+        self._v_norms = None
+        self._v_idx = None
+        self.current_length = 0
+        self._quantized = False
 
     def __len__(self) -> int:
         return self.current_length
@@ -382,11 +533,22 @@ class RotorQuantCache:
             return 1.0
         # FP16 baseline: 2 bytes * 2 (K+V) * Hkv * D * T
         fp16_bytes = 2 * 2 * self.n_kv_heads * self.head_dim * self.current_length
-        # Compressed: bits/coord packed + 2 bytes norm per vector per K/V.
-        packed_bytes = (self.bits * self.n_kv_heads * self.head_dim * self.current_length * 2) / 8
+        # Compressed: bits/coord packed + 2 bytes norm per vector.
+        # Asymmetric K/V (TurboQuant+): K uses self.bits, V self.bits_v.
+        packed_bytes = ((self.bits + self.bits_v)
+                        * self.n_kv_heads * self.head_dim
+                        * self.current_length) / 8
         norm_bytes = 2 * 2 * self.n_kv_heads * self.current_length
         actual = packed_bytes + norm_bytes
         return fp16_bytes / max(actual, 1)
+
+    def info(self) -> dict:
+        return {"type": "rotorquant", "seq_len": self.current_length,
+                "bits_k": self.bits, "bits_v": self.bits_v,
+                "boundary_v": self.boundary_v,
+                "sparse_v_kept": self._sparse_kept,
+                "sparse_v_skipped": self._sparse_skipped,
+                "compression": self.compression_ratio()}
 
     def is_quantized(self) -> bool:
         """True if the cache is in quantized mode (prefill flushed)."""
