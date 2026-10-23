@@ -20,9 +20,9 @@ Output: research/data/finetune/synthetic_*.jsonl
 Format: {"prompt": "...", "response": "..."} (sft_train single-turn format)
 
 Usage:
-    python -m research.data.generate_synthetic_data
-    python -m research.data.generate_synthetic_data --count 50000
-    python -m research.data.generate_synthetic_data --categories math,logic
+    python scripts/generate_synthetic_data.py
+    python scripts/generate_synthetic_data.py --count 50000
+    python scripts/generate_synthetic_data.py --categories math,logic
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Callable
 
 # ─── Output directory ──────────────────────────────────────────────────────
-OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "research" / "data" / "finetune"
+OUTPUT_DIR = Path(__file__).resolve().parents[1] / "research" / "data" / "finetune"
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────

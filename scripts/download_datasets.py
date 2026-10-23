@@ -9,7 +9,7 @@ Organizes into:
 
 Usage:
     set HF_TOKEN=...
-    python -m research.data.download_datasets [--category all|pretrain|coding|reasoning|tool_use|agentic]
+    python scripts/download_datasets.py [--category all|pretrain|coding|reasoning|tool_use|agentic]
 """
 import argparse
 import os
@@ -20,7 +20,10 @@ from pathlib import Path
 # Fix Windows encoding
 os.environ.setdefault("PYTHONUTF8", "1")
 
-DATA_DIR = Path(__file__).resolve().parent  # research/data/
+# Repo-root anchored: this file lives in scripts/, parents[1] is the repo
+# root. Datasets land under research/data/ (EC-078 — previously wrote
+# into scripts/ itself).
+DATA_DIR = Path(__file__).resolve().parents[1] / "research" / "data"
 
 # ─── Dataset registry ─────────────────────────────────────────────────────
 

@@ -4,7 +4,7 @@ Pulls:
   1. Lite-Coder/LiteCoder-Terminal-SFT   (11,255 trajectories, ~1.2 GB)
   2. bunnybhaiya/agentgym-sft-trajectories (101,926 examples, ~459 MB)
 
-Into: D:\\windsurf\\ForgeAI\\data\\sft\\<dataset_name>\\
+Into: data\\sft\\<dataset_name>\\ under the repo root.
 """
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-BASE = Path(r"D:\windsurf\ForgeAI\data\sft")
+# Repo-root anchored (EC-091 — was a machine-specific absolute path).
+BASE = Path(__file__).resolve().parents[1] / "data" / "sft"
 
 DATASETS = [
     {

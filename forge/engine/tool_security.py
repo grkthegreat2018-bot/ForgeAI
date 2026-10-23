@@ -1,17 +1,20 @@
 """Security manager for ForgeEngine tool execution.
 
 Sandbox-file-based security model:
-  - A sandbox config file (research/data/sandbox.json) defines all access rules
+  - A sandbox config file (<workspace>/sandbox.json) defines all access rules
   - Everything OUTSIDE the sandbox rules is blacklisted for writes
-  - Reading is always allowed within the workspace (reading blacklisted files is OK)
+  - Reading is allowed within the workspace EXCEPT 'denied' paths and
+    credential/secret files matched by the file blacklist (.env, *.pem,
+    id_rsa, *.key, .ssh, sandbox.json, ...)
   - Per-path access rules: 'read_write', 'read_only', 'denied'
   - Website whitelist/blacklist for web tools
   - Script pre-scan for dangerous imports and escape attempts
 
 Access rule precedence (highest to lowest):
   1. 'denied' — no access at all (can't read or write)
-  2. File blacklist patterns — can't write/delete (but CAN read)
-  3. Protected engine files — can't write (but CAN read)
+  2. File blacklist patterns — can't read/write/delete (credentials stay
+     out of model context entirely)
+  3. Protected engine files — can't write/delete (but CAN read)
   4. 'read_write' — full access
   5. 'read_only' — can read but not write/delete
   6. No rule — default: read-only (can read, can't write)
@@ -62,8 +65,8 @@ VALID_ACCESS_LEVELS = {ACCESS_READ_WRITE, ACCESS_READ_ONLY, ACCESS_DENIED}
 
 
 # ── Default file blacklist patterns ──────────────────────────────────────────
-# These are always blocked for writes/deletes regardless of sandbox rules.
-# Reading is still allowed (reading blacklisted files is OK).
+# These are always blocked for reads AND writes/deletes regardless of sandbox
+# rules — credentials/secrets must never enter the model's context (EC-027).
 
 DEFAULT_FILE_BLACKLIST_PATTERNS = [
     ".env",
@@ -79,27 +82,35 @@ DEFAULT_FILE_BLACKLIST_PATTERNS = [
     "**/*.pfx",
     "**/id_rsa*",
     "**/id_ed25519*",
+    "**/.ssh",
     "**/.ssh/**",
     "**/__pycache__/**",
     "*.pyc",
+    # The sandbox policy itself — the model must not read or rewrite its
+    # own security configuration (EC-160).
+    "sandbox.json",
+    "**/sandbox.json",
 ]
 
-# Protected engine files — can read but never write/delete
+# Protected engine files — can read but never write/delete.
+# Exact repo-relative paths (EC-027): the previous bare-name endswith()
+# match over-blocked *any* file named config.py/paths.py anywhere in the
+# workspace (e.g. research/data/run1/config.py).
 PROTECTED_ENGINE_FILES = [
-    "tool_security.py",
-    "engine_tools.py",
-    "forge_engine.py",
-    "forge_server.py",
-    "hotswap.py",
-    "library.py",
-    "model_registry.py",
-    "kv_backend.py",
-    "session_manager.py",
-    "session_cache.py",
-    "model_loader.py",
-    "checkpoint_io.py",
-    "config.py",
-    "paths.py",
+    "forge/engine/tool_security.py",
+    "forge/engine/engine_tools.py",
+    "forge/engine/forge_engine.py",
+    "forge/engine/forge_server.py",
+    "forge/engine/hotswap.py",
+    "forge/engine/library.py",
+    "forge/engine/model_registry.py",
+    "forge/engine/kv_backend.py",
+    "forge/engine/session_manager.py",
+    "forge/engine/session_cache.py",
+    "forge/model_loader.py",
+    "forge/checkpoint_io.py",
+    "forge/config.py",
+    "research/paths.py",
 ]
 
 # ── Risky command patterns ───────────────────────────────────────────────────
@@ -221,10 +232,14 @@ DEFAULT_SANDBOX_CONFIG = {
         # Denied (no access at all)
         ".env": ACCESS_DENIED,
         ".git": ACCESS_DENIED,
+        ".ssh": ACCESS_DENIED,
         "venv": ACCESS_DENIED,
         ".venv": ACCESS_DENIED,
         "node_modules": ACCESS_DENIED,
         "__pycache__": ACCESS_DENIED,
+        # The sandbox policy lives at the workspace root (EC-160) and is
+        # denied + blacklisted so the model cannot read or rewrite it.
+        "sandbox.json": ACCESS_DENIED,
     },
     "website_whitelist": [],
     "website_blacklist": [],
@@ -239,9 +254,10 @@ class ToolSecurityManager:
     Security model:
     - A sandbox config file defines access rules for paths
     - Everything OUTSIDE the sandbox rules defaults to read-only (can read, can't write)
-    - Reading is always allowed within workspace (unless path is 'denied')
+    - Reading is allowed within workspace unless path is 'denied' or
+      matches a credential/secret blacklist pattern (EC-027)
     - Writing/deleting requires 'read_write' access rule
-    - File blacklist patterns always block writes (but reading is OK)
+    - File blacklist patterns always block reads AND writes
     - Protected engine files always block writes (but reading is OK)
     - Website whitelist/blacklist controls web tool access
 
@@ -262,11 +278,19 @@ class ToolSecurityManager:
     ):
         self.workspace_root = Path(workspace_root).resolve()
 
-        # Sandbox config file path
+        # Sandbox config file path. EC-160: the default used to live under
+        # research/data — a read_write zone — so the model could rewrite its
+        # own sandbox policy. The default now sits at the workspace root
+        # (default read-only, 'denied' + blacklisted by pattern). An
+        # existing legacy config is migrated once (see load_sandbox).
+        self._legacy_sandbox_path: Path | None = None
         if sandbox_path is not None:
             self.sandbox_path = Path(sandbox_path)
         else:
-            self.sandbox_path = self.workspace_root / "research" / "data" / "sandbox.json"
+            self.sandbox_path = self.workspace_root / "sandbox.json"
+            legacy = self.workspace_root / "research" / "data" / "sandbox.json"
+            if legacy.exists() and not self.sandbox_path.exists():
+                self._legacy_sandbox_path = legacy
 
         # Access rules: {path_pattern: access_level}
         self.access_rules: dict[str, str] = {}
@@ -297,10 +321,19 @@ class ToolSecurityManager:
         """Load sandbox configuration from the sandbox.json file.
 
         If the file doesn't exist, creates it with default config.
+        A legacy config left over in research/data (EC-160) is migrated
+        to the current sandbox_path once, then saved there.
         """
-        if self.sandbox_path.exists():
+        load_path = self.sandbox_path
+        migrated = False
+        if (not load_path.exists() and self._legacy_sandbox_path is not None
+                and self._legacy_sandbox_path.exists()):
+            load_path = self._legacy_sandbox_path
+            migrated = True
+
+        if load_path.exists():
             try:
-                with open(self.sandbox_path, encoding="utf-8") as f:
+                with open(load_path, encoding="utf-8") as f:
                     config = json.load(f)
             except (json.JSONDecodeError, OSError) as e:
                 # Fall back to defaults on parse error
@@ -318,11 +351,22 @@ class ToolSecurityManager:
             if v in VALID_ACCESS_LEVELS
         }
 
+        # Hard floor: these paths are always denied regardless of what a
+        # stale (or hand-edited) config file says — the policy file itself
+        # and the usual credential locations.
+        for floor in ("sandbox.json", ".env", ".git", ".ssh"):
+            self.access_rules[floor] = ACCESS_DENIED
+
         self.website_whitelist = set(config.get("website_whitelist", []))
         self.website_blacklist = set(config.get("website_blacklist", []))
 
         if "auto_mode" in config:
             self.auto_mode = config["auto_mode"]
+
+        if migrated:
+            # Persist the migrated policy at the protected location.
+            self._save_current_sandbox()
+            self._legacy_sandbox_path = None
 
     def save_sandbox(self, config: dict | None = None):
         """Save sandbox configuration to the sandbox.json file.
@@ -414,8 +458,11 @@ class ToolSecurityManager:
     def check_file_read(self, path: str) -> SecurityDecision:
         """Check if a file can be read.
 
-        Reading is allowed everywhere within workspace EXCEPT for
-        paths with 'denied' access level.
+        Reading is allowed within workspace EXCEPT for:
+        - paths with 'denied' access level
+        - paths matching the file blacklist (.env, *.pem, id_rsa, *.key,
+          .ssh, sandbox.json, ...) — credentials must never enter the
+          model's context (EC-027/EC-097)
         """
         resolved = self._resolve(path)
         p = Path(resolved)
@@ -441,8 +488,31 @@ class ToolSecurityManager:
                 details={"access_level": access, "path": rel_path},
             )
 
+        # Credential/secret blacklist applies to reads too (EC-027).
+        for pattern in self.file_blacklist:
+            if self._match_glob(rel_path, pattern) or self._match_glob(str(p), pattern):
+                return SecurityDecision(
+                    allowed=False,
+                    reason=f"File matches blacklist pattern: {pattern}",
+                    severity="critical",
+                    details={"pattern": pattern, "path": rel_path},
+                )
+
         # Reading is allowed for both read_only and read_write
         return SecurityDecision(allowed=True, details={"access_level": access})
+
+    def _is_protected_engine_file(self, rel_path: str) -> str | None:
+        """Return the matching PROTECTED_ENGINE_FILES entry, else None.
+
+        Exact repo-relative match only — the previous ``endswith`` match
+        refused writes to *any* ``config.py``/``paths.py``/``myconfig.py``
+        anywhere in the tree (EC-027).
+        """
+        norm = rel_path.replace("\\", "/")
+        for protected in PROTECTED_ENGINE_FILES:
+            if norm == protected:
+                return protected
+        return None
 
     def check_file_write(self, path: str, content: str = "") -> SecurityDecision:
         """Check if a file can be written/created.
@@ -491,15 +561,15 @@ class ToolSecurityManager:
                     details={"pattern": pattern, "path": rel_path},
                 )
 
-        # 4. Check protected engine files
-        for protected in PROTECTED_ENGINE_FILES:
-            if rel_path.endswith(protected):
-                return SecurityDecision(
-                    allowed=False,
-                    reason=f"Cannot modify protected engine file: {protected}",
-                    severity="critical",
-                    details={"protected_file": protected, "path": rel_path},
-                )
+        # 4. Check protected engine files (exact repo-relative match)
+        protected = self._is_protected_engine_file(rel_path)
+        if protected is not None:
+            return SecurityDecision(
+                allowed=False,
+                reason=f"Cannot modify protected engine file: {protected}",
+                severity="critical",
+                details={"protected_file": protected, "path": rel_path},
+            )
 
         # 5. Check content for hard refusal patterns
         if content:
@@ -613,14 +683,14 @@ class ToolSecurityManager:
                     severity="critical",
                 )
 
-        # Check protected engine files
-        for protected in PROTECTED_ENGINE_FILES:
-            if rel_path.endswith(protected):
-                return SecurityDecision(
-                    allowed=False,
-                    reason=f"Cannot delete protected engine file: {protected}",
-                    severity="critical",
-                )
+        # Check protected engine files (exact repo-relative match)
+        protected = self._is_protected_engine_file(rel_path)
+        if protected is not None:
+            return SecurityDecision(
+                allowed=False,
+                reason=f"Cannot delete protected engine file: {protected}",
+                severity="critical",
+            )
 
         # Deletes always need permission (unless auto_mode=allow)
         if self.auto_mode == "allow":
@@ -661,20 +731,43 @@ class ToolSecurityManager:
                     reason=f"Source file matches blacklist pattern: {pattern}",
                     severity="critical",
                 )
-        for protected in PROTECTED_ENGINE_FILES:
-            if rel_src.endswith(protected):
-                return SecurityDecision(
-                    allowed=False,
-                    reason=f"Cannot move protected engine file: {protected}",
-                    severity="critical",
-                )
+        protected = self._is_protected_engine_file(rel_src)
+        if protected is not None:
+            return SecurityDecision(
+                allowed=False,
+                reason=f"Cannot move protected engine file: {protected}",
+                severity="critical",
+            )
 
         # Destination must be writable
         write_check = self.check_file_write(destination)
         if not write_check.allowed:
             return write_check
 
-        return SecurityDecision(allowed=True)
+        # Moves/renames are destructive to the source path — require the
+        # same approval tier as deletes (EC-158) unless auto-approved.
+        if self.auto_mode == "allow":
+            return SecurityDecision(
+                allowed=True,
+                reason="Move auto-approved (mode=allow)",
+                severity="info",
+            )
+
+        request_id = f"perm_{len(self.pending_requests)}"
+        req = {
+            "id": request_id,
+            "type": "file_move",
+            "path": rel_src,
+            "destination": self._rel_path(destination),
+        }
+        self.pending_requests.append(req)
+        return SecurityDecision(
+            allowed=False,
+            needs_permission=True,
+            reason="File move/rename requires permission",
+            severity="warning",
+            details={"request_id": request_id},
+        )
 
     def check_file_rename(self, path: str, new_name: str) -> SecurityDecision:
         """Check if a file/dir can be renamed."""

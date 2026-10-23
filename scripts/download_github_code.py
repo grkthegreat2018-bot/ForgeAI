@@ -4,7 +4,8 @@ Targets ~5GB of Python/JS/TS/Rust/Go/C++/Java code.
 import json, os, sys, time
 from pathlib import Path
 
-OUTPUT_DIR = Path(__file__).parent / "github_code"
+# Repo-root anchored output (EC-078 — previously wrote into scripts/).
+OUTPUT_DIR = Path(__file__).resolve().parents[1] / "research" / "data" / "pretrain" / "github_code"
 TARGET_BYTES = 5 * 1024**3
 SHARD_SIZE = 500 * 1024**2
 LANGUAGES = {"python", "javascript", "typescript", "rust", "go", "c++", "c", "java"}
@@ -15,8 +16,8 @@ def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("PYTHONUTF8", "1")
 
-    # Load HF token from .env
-    env_path = Path(__file__).resolve().parents[3] / ".env"
+    # Load HF token from repo-root .env (parents[1] — this file is in scripts/)
+    env_path = Path(__file__).resolve().parents[1] / ".env"
     token = None
     if env_path.exists():
         with open(env_path) as f:

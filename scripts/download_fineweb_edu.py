@@ -13,7 +13,10 @@ import os
 import sys
 import time
 
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fineweb_edu_additional")
+# Repo-root anchored (EC-078 — previously wrote into scripts/).
+OUTPUT_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "research", "data", "pretrain", "fineweb_edu_additional")
 FILE_PREFIX = "fineweb_edu"
 MAX_FILE_BYTES = 500 * 1024 * 1024  # 500MB per file
 TARGET_TOTAL_BYTES = 3 * 1024 * 1024 * 1024  # 3GB total

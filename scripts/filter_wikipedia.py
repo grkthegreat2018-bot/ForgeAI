@@ -13,8 +13,8 @@ Strategy:
      (e.g. "This article is about a ...", "is a film/song/game", etc.)
 
 Usage:
-  python research/data/pretrain/filter_wikipedia.py
-  python research/data/pretrain/filter_wikipedia.py --input research/data/pretrain/wikipedia --output research/data/pretrain/wikipedia_filtered
+  python scripts/filter_wikipedia.py
+  python scripts/filter_wikipedia.py --input research/data/pretrain/wikipedia --output research/data/pretrain/wikipedia_filtered
 """
 import argparse
 import json

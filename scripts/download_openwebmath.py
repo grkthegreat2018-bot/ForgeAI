@@ -13,7 +13,10 @@ import os
 import sys
 import time
 
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openwebmath")
+# Repo-root anchored (EC-078 — previously wrote into scripts/).
+OUTPUT_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "research", "data", "pretrain", "openwebmath")
 FILE_PREFIX = "openwebmath"
 MAX_FILE_BYTES = 500 * 1024 * 1024  # 500MB per file
 TARGET_TOTAL_BYTES = 5 * 1024 * 1024 * 1024  # 5GB total

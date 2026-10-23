@@ -26,9 +26,13 @@ SKIP_DIRS_WALK = {".git", "__pycache__", ".venv", "venv", "node_modules",
                   ".pytest_cache", ".ruff_cache"}
 
 # Commands the agent may run via run_cmd (prefix match on argv[0]).
+# Interpreters/package managers/VCS are deliberately absent: an
+# allowlisted 'python'/'pip'/'git' is arbitrary code/data exfiltration
+# with extra steps — the dedicated run_python/git_* tools cover those
+# needs. (sys.executable was also a dead entry: the basename check below
+# could never match a full path anyway.)
 CMD_ALLOWLIST = {
-    "python", "python3", sys.executable.lower() if sys.executable else "python",
-    "pip", "pytest", "git", "dir", "type", "echo",
+    "pytest", "dir", "type", "echo",
 }
 
 _TOOL_DEFS: list[dict] = [
@@ -44,7 +48,7 @@ _TOOL_DEFS: list[dict] = [
      "parameters": {"path": {"type": "string"}}},
     {"name": "run_python", "description": "Execute a python snippet in the workspace and capture stdout/stderr.",
      "parameters": {"code": {"type": "string"}, "timeout_s": {"type": "number", "description": "optional, default 30"}}},
-    {"name": "run_cmd", "description": "Run an allowlisted shell command (pytest, git, pip, python script.py ...) in the workspace.",
+    {"name": "run_cmd", "description": "Run an allowlisted shell command (pytest, dir, type, echo) in the workspace. Use run_python for python code.",
      "parameters": {"command": {"type": "string"}, "timeout_s": {"type": "number", "description": "optional, default 60"}}},
     {"name": "grep_project", "description": "Regex search across workspace text files; returns matching path:line:text.",
      "parameters": {"pattern": {"type": "string"}, "glob": {"type": "string", "description": "optional filename glob, e.g. '*.py'"}}},
@@ -264,9 +268,17 @@ class ToolSandbox:
         parts = command.strip().split()
         if not parts:
             return {"error": "empty command"}
-        exe = os.path.splitext(os.path.basename(parts[0]))[0].lower()
+        # argv[0] must be a bare command name resolved via PATH — a
+        # relative/absolute path like '..\x\pytest.exe' used to pass the
+        # basename check while executing an out-of-workspace binary.
+        argv0 = parts[0]
+        if ("/" in argv0 or "\\" in argv0 or ":" in argv0
+                or argv0 in (".", "..")):
+            return {"error": f"command '{argv0}' must be a bare name "
+                             "(no path separators)"}
+        exe = os.path.splitext(argv0)[0].lower()
         if exe not in CMD_ALLOWLIST:
-            return {"error": f"command '{parts[0]}' not in allowlist "
+            return {"error": f"command '{argv0}' not in allowlist "
                              f"({', '.join(sorted(CMD_ALLOWLIST))})"}
         try:
             proc = subprocess.run(

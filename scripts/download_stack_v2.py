@@ -7,8 +7,8 @@ Output format (one JSON object per line):
     {"text": "<code>", "language": "python", "name": "foo.py"}
 
 Usage:
-    set PYTHONPATH=D:\\windsurf\\ForgeAI
-    D:\\windsurf\\ForgeAI\\venv\\Scripts\\python.exe research\\data\\pretrain\\download_stack_v2.py
+    set PYTHONPATH=<repo-root>
+    python scripts/download_stack_v2.py
 """
 from __future__ import annotations
 
@@ -20,7 +20,9 @@ from pathlib import Path
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
-OUTPUT_DIR = Path(r"D:\windsurf\ForgeAI\research\data\pretrain\the_stack_v2")
+# Repo-root anchored (EC-091 — was a machine-specific absolute path).
+OUTPUT_DIR = (Path(__file__).resolve().parents[1]
+              / "research" / "data" / "pretrain" / "the_stack_v2")
 SHARD_PREFIX = "stack_v2"
 SHARD_MAX_BYTES = 500 * 1024 * 1024          # 500 MB per file
 TARGET_TOTAL_BYTES = 5 * 1024 * 1024 * 1024  # 5 GB total
@@ -51,7 +53,7 @@ LANG_ALIASES = {
 
 def _load_env() -> None:
     """Load HF token from .env if present."""
-    env_path = Path(__file__).resolve().parents[3] / ".env"
+    env_path = Path(__file__).resolve().parents[1] / ".env"
     if env_path.exists():
         with open(env_path) as f:
             for line in f:

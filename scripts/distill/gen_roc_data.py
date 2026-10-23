@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import argparse, itertools, json, os, random, sys, time
 
-GGUF = r"D:\LMstudio\Models\TheDrummer\Rocinante-X-12B-v1-GGUF\Rocinante-X-12B-v1b-Q4_K_M.gguf"
+# EC-091: no machine-specific paths — pass --gguf or set ROC_GGUF env var.
+GGUF = os.environ.get("ROC_GGUF", "")
 
 # ---- mechanical seed grid (no authored prose) -------------------------------
 GENRES = ["fantasy", "sci-fi", "modern", "historical", "horror", "noir",
@@ -195,7 +196,8 @@ def make_continue(llm, rng, max_tokens, temp):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=r"data\roc_distill.jsonl")
-    ap.add_argument("--gguf", default=GGUF)
+    ap.add_argument("--gguf", default=GGUF,
+                    help="Path to the Rocinante GGUF (default: ROC_GGUF env var)")
     ap.add_argument("--n-scenes", type=int, default=500)
     ap.add_argument("--n-convos", type=int, default=300)
     ap.add_argument("--n-cont", type=int, default=100)
@@ -213,6 +215,8 @@ def main():
     if args.server:
         llm = args.server
     else:
+        if not args.gguf:
+            ap.error("--gguf or ROC_GGUF env var required (or use --server)")
         from llama_cpp import Llama
         llm = Llama(model_path=args.gguf, n_ctx=args.ctx,
                     n_gpu_layers=args.gpu_layers, verbose=False)

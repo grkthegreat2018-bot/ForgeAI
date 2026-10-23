@@ -32,11 +32,62 @@ import ast as _ast
 import json
 import math as _math
 import operator as _op
+import random as _random
 from collections.abc import Callable
 from typing import Any
 
 from forge.engine.library import CATEGORIES
 from forge.engine.tool_security import SecurityDecision, ToolSecurityManager
+from forge.web_primitives import wrap_untrusted
+
+# ── Tool tiers & annotations (EC-158) ────────────────────────────────────────
+# MCP-style read/write tiers drive the approval policy in _security_check:
+#   "read"        — read-only; auto-approvable EXCEPT blacklisted/credential
+#                   paths and 'denied' zones (checked by ToolSecurityManager)
+#   "write"       — mutating; gated by sandbox access rules + content scans
+#   "destructive" — irreversible-ish; always requires permission unless
+#                   auto_mode == "allow" (delete/move/rename)
+#   "network"     — reaches outside the workspace; domain allow/deny list
+TOOL_TIERS: dict[str, str] = {
+    # library
+    "library_save": "write", "library_update": "write",
+    "library_delete": "destructive",
+    "library_search": "read", "library_lookup": "read",
+    "library_get": "read", "library_stats": "read",
+    "library_optimize": "write", "library_set_config": "write",
+    # hot-swap / engine info / generation
+    "engine_set_kv_cache": "write", "engine_set_decoding": "write",
+    "engine_set_context_limit": "write",
+    "engine_enable_infinite_context": "write",
+    "engine_set_generation_params": "write", "engine_set_feature": "write",
+    "engine_apply_changes": "write",
+    "engine_get_settings": "read", "engine_get_stats": "read",
+    "engine_get_pending": "read",
+    "engine_batch_generate": "write", "engine_generate_adaptive": "write",
+    # math / random
+    "math_eval": "read", "calc": "read",
+    "random_number": "read", "chance": "read",
+    # web
+    "web_search": "network", "web_search_semantic": "network",
+    "web_scrape": "network",
+    # files
+    "file_read": "read", "file_list": "read",
+    "file_write": "write", "file_edit": "write",
+    "file_move": "destructive", "file_rename": "destructive",
+    "file_delete": "destructive",
+    # security introspection
+    "scan_script": "read", "security_get_config": "read",
+    "security_get_pending": "read",
+}
+
+# Tools whose output embeds untrusted external content (web pages, file
+# contents). Results are wrapped in a tagged untrusted-content block before
+# entering the transcript so embedded instructions are treated as data,
+# not commands (EC-163 — indirect prompt-injection mitigation).
+UNTRUSTED_OUTPUT_TOOLS = {
+    "web_search", "web_search_semantic", "web_scrape",
+    "file_read", "file_list",
+}
 
 # ── Tool definition schema ───────────────────────────────────────────────────
 
@@ -44,13 +95,18 @@ def _make_tool_def(
     name: str,
     description: str,
     parameters: dict[str, Any],
+    annotations: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create a tool definition in the format the model expects."""
-    return {
+    tool_def = {
         "name": name,
         "description": description,
         "parameters": parameters,
+        "tier": TOOL_TIERS.get(name, "read"),
     }
+    if annotations:
+        tool_def["annotations"] = annotations
+    return tool_def
 
 
 # ── Built-in tool definitions ────────────────────────────────────────────────
@@ -461,7 +517,8 @@ def get_builtin_tool_defs() -> list[dict[str, Any]]:
                                        "description": "Include synthesized answer"},
                 },
                 "required": ["query"],
-            }
+            },
+            annotations={"readOnlyHint": True, "openWorldHint": True},
         ),
 
         _make_tool_def(
@@ -487,7 +544,8 @@ def get_builtin_tool_defs() -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["query"],
-            }
+            },
+            annotations={"readOnlyHint": True, "openWorldHint": True},
         ),
 
         _make_tool_def(
@@ -508,7 +566,8 @@ def get_builtin_tool_defs() -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["url"],
-            }
+            },
+            annotations={"readOnlyHint": True, "openWorldHint": True},
         ),
 
         # ── File operation tools ───────────────────────────────────────
@@ -526,7 +585,8 @@ def get_builtin_tool_defs() -> list[dict[str, Any]]:
                                   "description": "Max characters to return"}
                 },
                 "required": ["path"],
-            }
+            },
+            annotations={"readOnlyHint": True},
         ),
 
         _make_tool_def(
@@ -542,7 +602,9 @@ def get_builtin_tool_defs() -> list[dict[str, Any]]:
                                "description": "Append to file instead of overwriting"}
                 },
                 "required": ["path", "content"],
-            }
+            },
+            annotations={"readOnlyHint": False, "destructiveHint": False,
+                         "idempotentHint": True},
         ),
 
         _make_tool_def(
@@ -560,7 +622,9 @@ def get_builtin_tool_defs() -> list[dict[str, Any]]:
                                    "description": "Replacement text"},
                 },
                 "required": ["path", "old_string", "new_string"],
-            }
+            },
+            annotations={"readOnlyHint": False, "destructiveHint": False,
+                         "idempotentHint": True},
         ),
 
         _make_tool_def(
@@ -574,7 +638,8 @@ def get_builtin_tool_defs() -> list[dict[str, Any]]:
                     "destination": {"type": "string", "description": "Destination path"},
                 },
                 "required": ["source", "destination"],
-            }
+            },
+            annotations={"readOnlyHint": False, "destructiveHint": True},
         ),
 
         _make_tool_def(
@@ -590,7 +655,8 @@ def get_builtin_tool_defs() -> list[dict[str, Any]]:
                                  "description": "New name (not full path, just the name)"},
                 },
                 "required": ["path", "new_name"],
-            }
+            },
+            annotations={"readOnlyHint": False, "destructiveHint": True},
         ),
 
         _make_tool_def(
@@ -607,7 +673,8 @@ def get_builtin_tool_defs() -> list[dict[str, Any]]:
                     "pattern": {"type": "string",
                                 "description": "Glob pattern filter (e.g. '*.py')"},
                 },
-            }
+            },
+            annotations={"readOnlyHint": True},
         ),
 
         _make_tool_def(
@@ -622,7 +689,8 @@ def get_builtin_tool_defs() -> list[dict[str, Any]]:
                                 "description": "Must be true to actually delete"},
                 },
                 "required": ["path", "confirm"],
-            }
+            },
+            annotations={"readOnlyHint": False, "destructiveHint": True},
         ),
 
         # ── Library update tool ────────────────────────────────────────
@@ -808,9 +876,18 @@ class EngineToolRegistry:
 
         try:
             result = handler(arguments)
-            return {"status": "success", "result": result}
         except Exception as e:
             return {"status": "error", "error": str(e)}
+
+        # Tag outputs that embed untrusted external content before they
+        # are serialized into the transcript (EC-163).
+        if name in UNTRUSTED_OUTPUT_TOOLS:
+            result = wrap_untrusted(result, source=name)
+        return {"status": "success", "result": result}
+
+    def tool_tier(self, name: str) -> str:
+        """Return the read/write annotation tier for a tool (EC-158)."""
+        return TOOL_TIERS.get(name, "read")
 
     def _security_check(self, name: str, args: dict) -> SecurityDecision:
         """Run security checks before executing a tool.
@@ -819,6 +896,17 @@ class EngineToolRegistry:
         the tool is not executed.
         """
         sec = self.security
+
+        # File read operations — gated like everything else (EC-097):
+        # 'denied' zones, credential/secret blacklist, outside-workspace.
+        # Auto-approve reads only AFTER these checks pass.
+        if name == "file_read":
+            path = args.get("path", "")
+            return sec.check_file_read(path)
+
+        if name == "file_list":
+            path = args.get("path", ".")
+            return sec.check_file_read(path)
 
         # File write operations
         if name == "file_write":
@@ -885,10 +973,24 @@ class EngineToolRegistry:
             name = call.get("name", "")
             args = call.get("arguments", {})
             if isinstance(args, str):
+                # Model emitted raw JSON text — parse it; malformed JSON is
+                # an error, NOT a silent {} fallback (EC-119).
                 try:
                     args = json.loads(args)
-                except json.JSONDecodeError:
-                    args = {}
+                except json.JSONDecodeError as e:
+                    results.append({
+                        "name": name,
+                        "status": "error",
+                        "error": f"Malformed JSON arguments for '{name}': {e}",
+                    })
+                    continue
+            if not isinstance(args, dict):
+                results.append({
+                    "name": name,
+                    "status": "error",
+                    "error": f"Tool arguments for '{name}' must be a JSON object",
+                })
+                continue
             result = self.execute(name, args)
             result["name"] = name
             results.append(result)
@@ -1098,35 +1200,83 @@ class EngineToolRegistry:
         _ast.UAdd: _op.pos, _ast.USub: _op.neg,
     }
 
+    # EC-119: bounds so a hostile/buggy expression can't burn CPU or memory.
+    _MAX_EXPR_LEN = 500
+    _MAX_AST_NODES = 200
+    _MAX_AST_DEPTH = 40
+    _MAX_POW_EXP = 10_000        # reject 9**9**9-style exponent towers
+    _MAX_FACTORIAL_ARG = 10_000  # factorial() bigint bomb guard
+    _MAX_COUNT = 1_000           # random_number / chance 'count' cap
+    _MAX_ITEMS = 10_000          # chance 'items' list cap
+    _MAX_LIST_ENTRIES = 10_000   # file_list entry cap
+
     def _safe_math_eval(self, expr: str) -> float:
         """Safely evaluate a math expression using AST."""
-        tree = self._ast.parse(expr, mode='eval')
+        if not isinstance(expr, str) or not expr.strip():
+            raise ValueError("Empty expression")
+        if len(expr) > self._MAX_EXPR_LEN:
+            raise ValueError("Expression too long")
+        tree = _ast.parse(expr, mode='eval')
+        if sum(1 for _ in _ast.walk(tree)) > self._MAX_AST_NODES:
+            raise ValueError("Expression too complex")
+        if self._ast_depth(tree) > self._MAX_AST_DEPTH:
+            raise ValueError("Expression too deeply nested")
         return self._eval_node(tree.body)
 
+    @classmethod
+    def _ast_depth(cls, node) -> int:
+        """Max nesting depth of an AST subtree (iterative, recursion-safe)."""
+        best = 0
+        stack = [(node, 1)]
+        while stack:
+            n, d = stack.pop()
+            if d > best:
+                best = d
+                if best > cls._MAX_AST_DEPTH:
+                    return best  # already over the cap — bail early
+            stack.extend((c, d + 1) for c in _ast.iter_child_nodes(n))
+        return best
+
     def _eval_node(self, node):
-        if isinstance(node, self._ast.Constant):
+        if isinstance(node, _ast.Constant):
+            if not isinstance(node.value, (int, float, complex)):
+                raise ValueError(f"Unsupported literal: {node.value!r}")
             return node.value
-        elif isinstance(node, self._ast.Num):  # py < 3.8 compat
+        elif isinstance(node, _ast.Num):  # py < 3.8 compat
             return node.n
-        elif isinstance(node, self._ast.Name):
+        elif isinstance(node, _ast.Name):
             if node.id in self._MATH_CONSTS:
                 return self._MATH_CONSTS[node.id]
             raise ValueError(f"Unknown variable: {node.id}")
-        elif isinstance(node, self._ast.BinOp):
+        elif isinstance(node, _ast.BinOp):
             op_func = self._BINOPS.get(type(node.op))
             if op_func is None:
                 raise ValueError(f"Unsupported operator: {type(node.op).__name__}")
+            if op_func is _op.pow:
+                # Exponent first: reject exponent towers like 9**9**9 that
+                # would materialize astronomical bigints (EC-119).
+                right = self._eval_node(node.right)
+                if not isinstance(right, (int, float)) or abs(right) > self._MAX_POW_EXP:
+                    raise ValueError("Exponent too large")
+                return op_func(self._eval_node(node.left), right)
             return op_func(self._eval_node(node.left), self._eval_node(node.right))
-        elif isinstance(node, self._ast.UnaryOp):
+        elif isinstance(node, _ast.UnaryOp):
             op_func = self._UNARYOPS.get(type(node.op))
             if op_func is None:
                 raise ValueError(f"Unsupported unary op: {type(node.op).__name__}")
             return op_func(self._eval_node(node.operand))
-        elif isinstance(node, self._ast.Call):
-            func_name = node.func.id if isinstance(node.func, self._ast.Name) else None
+        elif isinstance(node, _ast.Call):
+            func_name = node.func.id if isinstance(node.func, _ast.Name) else None
             if func_name not in self._MATH_FUNCS:
                 raise ValueError(f"Unknown function: {func_name}")
             args = [self._eval_node(a) for a in node.args]
+            if func_name == "factorial":
+                a = args[0]
+                if not isinstance(a, int) or a < 0 or a > self._MAX_FACTORIAL_ARG:
+                    raise ValueError(f"factorial() argument out of range (0..{self._MAX_FACTORIAL_ARG})")
+            elif func_name == "pow" and len(args) >= 2:
+                if not isinstance(args[1], (int, float)) or abs(args[1]) > self._MAX_POW_EXP:
+                    raise ValueError("Exponent too large")
             return self._MATH_FUNCS[func_name](*args)
         else:
             raise ValueError(f"Unsupported expression node: {type(node).__name__}")
@@ -1141,11 +1291,19 @@ class EngineToolRegistry:
         result = self._safe_math_eval(expr)
         return {"expression": expr, "result": result}
 
+    def _clamp_count(self, args: dict) -> int:
+        """Clamped 'count' arg — unbounded range(count) hangs (EC-119)."""
+        try:
+            count = int(args.get("count", 1))
+        except (TypeError, ValueError):
+            count = 1
+        return max(0, min(count, self._MAX_COUNT))
+
     def _random_number(self, args: dict) -> dict:
-        rng = self._random.Random(args["seed"]) if "seed" in args else self._random
+        rng = _random.Random(args["seed"]) if "seed" in args else _random
         min_val = args.get("min", 0)
         max_val = args.get("max", 1)
-        count = args.get("count", 1)
+        count = self._clamp_count(args)
         integer = args.get("integer", True)
         if integer:
             values = [rng.randint(int(min_val), int(max_val)) for _ in range(count)]
@@ -1154,26 +1312,30 @@ class EngineToolRegistry:
         return {"values": values, "count": count}
 
     def _chance(self, args: dict) -> dict:
-        rng = self._random.Random(args["seed"]) if "seed" in args else self._random
+        rng = _random.Random(args["seed"]) if "seed" in args else _random
         mode = args["mode"]
         if mode == "coin_flip":
-            count = args.get("count", 1)
+            count = self._clamp_count(args)
             flips = [rng.choice(["heads", "tails"]) for _ in range(count)]
             return {"flips": flips, "count": count}
         elif mode == "dice":
             sides = args.get("sides", 6)
-            count = args.get("count", 1)
+            count = self._clamp_count(args)
             rolls = [rng.randint(1, sides) for _ in range(count)]
             return {"rolls": rolls, "sides": sides, "total": sum(rolls)}
         elif mode == "choice":
             items = args.get("items", [])
             if not items:
                 return {"error": "items required for choice mode"}
+            if len(items) > self._MAX_ITEMS:
+                return {"error": f"items too large (max {self._MAX_ITEMS})"}
             return {"choice": rng.choice(items)}
         elif mode == "shuffle":
             items = list(args.get("items", []))
             if not items:
                 return {"error": "items required for shuffle mode"}
+            if len(items) > self._MAX_ITEMS:
+                return {"error": f"items too large (max {self._MAX_ITEMS})"}
             rng.shuffle(items)
             return {"shuffled": items}
         elif mode == "weighted":
@@ -1181,6 +1343,8 @@ class EngineToolRegistry:
             weights = args.get("weights", [])
             if not items or not weights or len(items) != len(weights):
                 return {"error": "items and weights (same length) required for weighted mode"}
+            if len(items) > self._MAX_ITEMS:
+                return {"error": f"items too large (max {self._MAX_ITEMS})"}
             choice = rng.choices(items, weights=weights, k=1)[0]
             return {"choice": choice}
         return {"error": f"Unknown mode: {mode}"}
@@ -1378,7 +1542,10 @@ class EngineToolRegistry:
 
     def _file_read(self, args: dict) -> dict:
         path = self._resolve_path(args["path"])
-        max_chars = args.get("max_chars", 50000)
+        try:
+            max_chars = max(1, min(int(args.get("max_chars", 50000)), 1_000_000))
+        except (TypeError, ValueError):
+            max_chars = 50000
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
                 content = f.read(max_chars + 1)
@@ -1456,24 +1623,26 @@ class EngineToolRegistry:
         recursive = args.get("recursive", False)
         pattern = args.get("pattern")
         entries = []
+        truncated = False
+        cap = self._MAX_LIST_ENTRIES
         if recursive:
             base = Path(path)
-            if pattern:
-                for p in base.rglob(pattern):
-                    entries.append({
-                        "name": str(p.relative_to(base)),
-                        "type": "dir" if p.is_dir() else "file",
-                        "size": p.stat().st_size if p.is_file() else 0,
-                    })
-            else:
-                for p in base.rglob("*"):
-                    entries.append({
-                        "name": str(p.relative_to(base)),
-                        "type": "dir" if p.is_dir() else "file",
-                        "size": p.stat().st_size if p.is_file() else 0,
-                    })
+            # Cap the walk — an uncapped rglob over the whole workspace
+            # (venv/, .git/, node_modules/) can enumerate 100k+ entries (EC-119).
+            for p in base.rglob(pattern or "*"):
+                if len(entries) >= cap:
+                    truncated = True
+                    break
+                entries.append({
+                    "name": str(p.relative_to(base)),
+                    "type": "dir" if p.is_dir() else "file",
+                    "size": p.stat().st_size if p.is_file() else 0,
+                })
         else:
             for name in os.listdir(path):
+                if len(entries) >= cap:
+                    truncated = True
+                    break
                 full = os.path.join(path, name)
                 if pattern:
                     import fnmatch
@@ -1485,7 +1654,7 @@ class EngineToolRegistry:
                     "size": os.path.getsize(full) if os.path.isfile(full) else 0,
                 })
         return {"path": args.get("path", "."), "entries": entries,
-                "count": len(entries)}
+                "count": len(entries), "truncated": truncated}
 
     def _file_delete(self, args: dict) -> dict:
         import os

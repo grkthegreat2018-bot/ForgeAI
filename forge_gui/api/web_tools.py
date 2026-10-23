@@ -13,9 +13,15 @@ Safety:
 - Only ``http``/``https`` URLs are accepted for ``web_fetch`` —
   ``javascript:``, ``file:``, ``data:``, ``ftp:`` etc. are rejected
   before any request is made.
+- SSRF guard (EC-213): ``fetch_url`` resolves the target host and refuses
+  private/loopback/link-local/reserved addresses (localhost, 127.*,
+  10.*, 172.16-31.*, 192.168.*, 169.254.*, ::1, metadata endpoints),
+  and every redirect hop is re-validated.
 - All requests are GET with a fixed browser User-Agent and a hard timeout.
 - Output is capped (``MAX_FETCH_CHARS`` / ``MAX_SNIPPET``) to keep the
-  tool result inside the engine's KV-cache budget.
+  tool result inside the engine's KV-cache budget, and results are
+  wrapped in a tagged untrusted-content block (EC-163) so page text is
+  treated as data, not instructions.
 """
 from __future__ import annotations
 
@@ -175,6 +181,7 @@ class WebTools:
             fetch_url,
             google_news_search,
             wikipedia_search,
+            wrap_untrusted,
         )
         n = int(args.get("n", DEFAULT_N))
         # clamp n to a sane range to avoid huge responses
@@ -198,4 +205,8 @@ class WebTools:
         # normalize: drop a falsy error so the harness ok-check passes
         if not res.get("error"):
             res.pop("error", None)
-        return res
+        else:
+            return res
+        # Page/search content is untrusted external data — tag it before
+        # it enters the transcript (EC-163).
+        return wrap_untrusted(res, source=name)

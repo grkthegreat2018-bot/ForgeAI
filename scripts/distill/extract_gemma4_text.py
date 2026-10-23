@@ -22,7 +22,6 @@ import argparse, json, os, shutil, struct
 from huggingface_hub import snapshot_download
 
 REPO = "OBLITERATUS/Gemma-4-12B-OBLITERATED"
-TOK = "hf_...REDACTED_REVOKED"
 CHUNK = 64 * 1024 * 1024
 
 
@@ -71,14 +70,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default=None)
     ap.add_argument("--dst", default=r"checkpoints\gemma4_oblit_text")
+    ap.add_argument("--token", default=None,
+                    help="Hugging Face token (default: HF_TOKEN env var)")
     args = ap.parse_args()
+
+    # EC-050: token comes from env/CLI — never hardcode credentials here.
+    token = args.token or os.environ.get("HF_TOKEN")
+    if args.src is None and not token:
+        ap.error("HF_TOKEN env var or --token required to download REPO")
 
     src = args.src or snapshot_download(
         REPO,
         allow_patterns=["model.safetensors", "config.json",
                         "tokenizer.json", "tokenizer_config.json",
                         "chat_template.jinja", "generation_config.json"],
-        token=TOK)
+        token=token)
     print("src:", src, flush=True)
 
     os.makedirs(args.dst, exist_ok=True)

@@ -6,8 +6,8 @@ articles (disambiguation, list-only, <500 chars), and writes JSONL
 shards of ~500 MB each until ~5 GB total is reached.
 
 Usage:
-    set PYTHONPATH=D:\\windsurf\\ForgeAI
-    D:\\windsurf\\ForgeAI\\venv\\Scripts\\python.exe download_wikipedia.py
+    set PYTHONPATH=<repo-root>
+    python scripts/download_wikipedia.py
 """
 
 from __future__ import annotations
@@ -24,7 +24,9 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 DATASET_NAME = "wikimedia/wikipedia"
 DATASET_CONFIG = "20231101.en"
-OUTPUT_DIR = Path(r"D:\windsurf\ForgeAI\research\data\pretrain\wikipedia")
+# Repo-root anchored (EC-091 — was a machine-specific absolute path).
+OUTPUT_DIR = (Path(__file__).resolve().parents[1]
+              / "research" / "data" / "pretrain" / "wikipedia")
 FILE_PREFIX = "wikipedia"
 MAX_FILE_BYTES = 500 * 1024 * 1024          # 500 MB per shard
 TARGET_TOTAL_BYTES = 5 * 1024 * 1024 * 1024  # 5 GB total

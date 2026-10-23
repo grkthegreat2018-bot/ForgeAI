@@ -15,9 +15,9 @@ Gap categories targeted:
 Datasets that are already complete are skipped. Incomplete downloads are resumed.
 
 Usage:
-    python -m research.data.download_gaps
-    python -m research.data.download_gaps --categories math,tool_use
-    python -m research.data.download_gaps --max-gb 10
+    python scripts/download_gaps.py
+    python scripts/download_gaps.py --categories math,tool_use
+    python scripts/download_gaps.py --max-gb 10
 """
 from __future__ import annotations
 

@@ -9,10 +9,11 @@ Stages:
 Usage:
   venv\\Scripts\\python.exe -X utf8 scripts\\bench_rocinante.py
       [--ckpt research/checkpoints/rocinante_x_12b]
-      [--gguf  D:/LMstudio/.../Rocinante-X-12B-v1b-Q4_K_M.gguf]
+      [--gguf  <path to Rocinante GGUF>  (or set ROC_GGUF env var)]
       [--stage parity|gen|mem|speed|all]
 """
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -21,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch
 
-GGUF = r"D:\LMstudio\Models\TheDrummer\Rocinante-X-12B-v1-GGUF\Rocinante-X-12B-v1b-Q4_K_M.gguf"
+# EC-091: no machine-specific paths — pass --gguf or set ROC_GGUF env var.
+GGUF = os.environ.get("ROC_GGUF", "")
 CKPT = r"research\checkpoints\rocinante_x_12b"
 
 PROMPT = ("[INST]You are a fantasy bard. Compose a four-line verse about "
@@ -102,7 +104,8 @@ def stage_speed(eng):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--gguf", default=GGUF)
+    ap.add_argument("--gguf", default=GGUF,
+                    help="Path to the Rocinante GGUF (default: ROC_GGUF env var)")
     ap.add_argument("--ckpt", default=CKPT)
     ap.add_argument("--stage", default="all",
                     choices=["parity", "gen", "mem", "speed", "all"])
@@ -110,6 +113,8 @@ def main():
 
     eng = None
     if args.stage in ("parity", "all"):
+        if not args.gguf:
+            ap.error("--gguf or ROC_GGUF env var required for the parity stage")
         eng = stage_parity(args.gguf, args.ckpt)
     if eng is None:
         from forge.engine.forge_engine import ForgeEngine
