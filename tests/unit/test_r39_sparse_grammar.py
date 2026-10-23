@@ -515,9 +515,12 @@ class TestSelfSpeculativeSparse:
         assert strategy.sparse_k == 32
 
     def test_build_decoding_default_standard(self):
-        """build_decoding with unknown name should fall back to StandardDecoding."""
-        strategy = build_decoding("nonexistent_strategy")
-        assert isinstance(strategy, StandardDecoding)
+        """build_decoding is strict (EC-019): unknown names raise
+        ActivationError — a typo must never silently become
+        StandardDecoding."""
+        from forge.engine.errors import ActivationError
+        with pytest.raises(ActivationError):
+            build_decoding("nonexistent_strategy")
 
     def test_draft_len_parameter(self):
         """draft_len should control how many tokens are drafted per iteration."""

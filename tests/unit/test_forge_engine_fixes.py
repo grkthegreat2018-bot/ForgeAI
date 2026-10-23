@@ -87,7 +87,7 @@ class TestReleaseAccelerationResources:
         engine._graph_runner = MagicMock()
         engine._megakernel = MagicMock()
         engine._flex_decoding = MagicMock()
-        engine._chunked_prefill = MagicMock()
+        engine._chunked_prefiller = MagicMock()
         engine.acceleration = "cuda_graph"
 
         engine._release_acceleration_resources()
@@ -95,7 +95,7 @@ class TestReleaseAccelerationResources:
         assert engine._graph_runner is None
         assert engine._megakernel is None
         assert engine._flex_decoding is None
-        assert engine._chunked_prefill is None
+        assert engine._chunked_prefiller is None
         assert engine.acceleration is None
 
     def test_calls_release_method_if_present(self, forge_engine_fixture):
@@ -281,7 +281,11 @@ class TestStreamStopStrings:
         tok = MagicMock()
         tok.eos_token_id = 0
         tok.return_value.input_ids = torch.tensor([[1, 2, 3]])
-        chunks = iter(["hel", "lo ", "ST", "OP", " trailing"])
+        # generate_stream decodes the running id list cumulatively — the
+        # mock returns the full decoded text at each step (a stop string
+        # still materializes across token boundaries).
+        chunks = iter(["hel", "hello ", "hello ST", "hello STOP",
+                       "hello STOP trailing"])
         tok.decode = MagicMock(side_effect=lambda *a, **k: next(chunks))
         eng = ForgeEngine(tiny_model, tok, device="cpu")
         eng._library_enabled = False

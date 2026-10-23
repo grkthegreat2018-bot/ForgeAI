@@ -19,6 +19,8 @@ import torch.nn as nn
 
 from forge.training.adapter_variants import (
     PiSSAInitializer,
+    MiCAInitializer,
+    MiCALinear,
     AdaLoRAClass,
     rsLoRALinear,
 )
@@ -105,6 +107,81 @@ def test_pissa_rank_clamp_disabled_raises():
     W = torch.randn(64, 128)
     try:
         PiSSAInitializer.initialize(W, rank=999, clamp_rank=False)
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError when clamp_rank=False")
+
+
+# ── MiCA (Minor-Component Adaptation) ────────────────────────────────────
+
+def test_mica_shapes_and_zero_a():
+    W = torch.randn(64, 128)
+    A, B = MiCAInitializer.initialize(W, rank=8)
+    assert A.shape == (8, 128)
+    assert B.shape == (64, 8)
+    assert torch.all(A == 0)          # A starts at zero — exact no-op
+
+
+def test_mica_selects_minor_subspace():
+    """B must span the BOTTOM-r singular directions (inverse of PiSSA)."""
+    torch.manual_seed(11)
+    W = torch.randn(64, 128)
+    U, S, Vh = torch.linalg.svd(W, full_matrices=False)
+    A, B = MiCAInitializer.initialize(W, rank=4)
+    # B columns must equal the last-4 left singular vectors (up to sign)
+    minor = U[:, -4:]
+    # |B^T minor| should be ~identity → B lies in the minor subspace
+    overlap = (B.T @ minor).abs()
+    assert torch.allclose(overlap, torch.eye(4), atol=1e-4), \
+        f"MiCA B is not in the minor subspace: {overlap}"
+    # and orthogonal to the TOP-r subspace
+    top = U[:, :4]
+    top_overlap = (B.T @ top).abs().max().item()
+    assert top_overlap < 1e-4, f"MiCA B leaks into top subspace: {top_overlap}"
+
+
+def test_mica_b_is_orthonormal():
+    """B = U[:, -r:] columns are orthonormal (SVD property)."""
+    W = torch.randn(64, 128)
+    A, B = MiCAInitializer.initialize(W, rank=8)
+    gram = B.T @ B
+    assert torch.allclose(gram, torch.eye(8), atol=1e-5)
+
+
+def test_mica_noop_at_init_linear():
+    """MiCALinear is an exact no-op at init (A=0)."""
+    layer = MiCALinear(128, 64, rank=8)
+    x = torch.randn(4, 128)
+    assert torch.allclose(layer(x), layer.base(x), atol=1e-6)
+
+
+def test_mica_b_frozen_a_trainable():
+    layer = MiCALinear(128, 64, rank=8)
+    assert layer.lora_A.requires_grad
+    # B is a buffer — can never collect grads or enter optimizer groups
+    assert not layer.lora_B.requires_grad
+    param_ids = {id(p) for p in layer.parameters()}
+    assert id(layer.lora_B) not in param_ids
+
+
+def test_mica_forward_and_merge():
+    """After A moves, forward = base + scale*(x @ A.T @ B.T), merge folds."""
+    layer = MiCALinear(128, 64, rank=4, alpha=1.0)
+    with torch.no_grad():
+        layer.lora_A.normal_(0, 0.1)
+    x = torch.randn(3, 128)
+    expected = layer.base(x) + layer.scale * (x @ layer.lora_A.T @ layer.lora_B.T)
+    assert torch.allclose(layer(x), expected, atol=1e-5)
+    merged = layer.merge()
+    assert torch.allclose(merged(x), layer(x), atol=1e-5)
+
+
+def test_mica_rank_clamp_and_raise():
+    W = torch.randn(64, 128)
+    A, B = MiCAInitializer.initialize(W, rank=999)
+    assert B.shape[1] == 64  # clamped to min(64,128)
+    try:
+        MiCAInitializer.initialize(W, rank=999, clamp_rank=False)
     except ValueError:
         return
     raise AssertionError("expected ValueError when clamp_rank=False")
