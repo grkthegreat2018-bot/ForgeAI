@@ -30,6 +30,7 @@ from pathlib import Path
 import torch
 
 from forge.engine.forge_engine import ForgeEngine, _checkpoint_size_cache
+from forge.engine.engine_common import _DEFAULT_TOKENIZER_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,12 @@ class EngineEntry:
     last_used: float = field(default_factory=time.time)
     generation_count: int = 0
     total_tokens: int = 0
+    # Registry-driven generations in progress (EC-199): busy engines are
+    # never eviction candidates.
+    in_flight: int = 0
+    # Actual VRAM footprint measured via mem_get_info delta at load
+    # (EC-161); 0 when unmeasured (CPU device or pre-measure loads).
+    measured_vram_bytes: int = 0
 
 
 class VRAMBudgetExceeded(Exception):
@@ -73,6 +80,10 @@ class ModelRegistry:
         self.safety_margin = safety_margin  # 10% VRAM headroom
         self._entries: dict[str, EngineEntry] = {}
         self._lock = threading.RLock()
+        # Bytes reserved by models currently loading off-lock (EC-199
+        # moved from_checkpoint out of the lock) — counted as unavailable
+        # so two concurrent register() calls can't both pass _make_room.
+        self._inflight_loads: dict[str, int] = {}
 
         # VRAM capacity
         if self.device.type == "cuda":
@@ -93,6 +104,7 @@ class ModelRegistry:
 
         Returns the loaded ForgeEngine (or existing if already registered).
         """
+        auto_budget = vram_budget_gb <= 0
         with self._lock:
             # Return existing if already loaded
             if model_id in self._entries:
@@ -102,7 +114,7 @@ class ModelRegistry:
                 return entry.engine
 
             # Calculate VRAM budget
-            if vram_budget_gb <= 0:
+            if auto_budget:
                 ckpt_size = _checkpoint_size_cache.get(checkpoint)
                 if ckpt_size is None:
                     ckpt_size = Path(checkpoint).stat().st_size
@@ -113,9 +125,15 @@ class ModelRegistry:
 
             # Ensure VRAM is available
             self._make_room(budget_bytes, exclude=model_id)
+            tok_path = tokenizer_path or _DEFAULT_TOKENIZER_PATH
+            self._inflight_loads[model_id] = budget_bytes
 
-            # Load the model
-            tok_path = tokenizer_path or "research/checkpoints/forgelm_v2_tokenizer"
+        # Load the model OUTSIDE the registry lock: checkpoint I/O + warmup
+        # take seconds and must not freeze generate()/stats()/list_models()
+        # for every other model (EC-199).
+        free_before = (self._free_vram()
+                       if self.device.type == "cuda" else None)
+        try:
             engine = ForgeEngine.from_checkpoint(
                 checkpoint=checkpoint,
                 config_name=config_name,
@@ -123,19 +141,42 @@ class ModelRegistry:
                 device=str(self.device),
                 **engine_kwargs,
             )
+        finally:
+            with self._lock:
+                self._inflight_loads.pop(model_id, None)
+        # EC-161: measure the real footprint instead of trusting the
+        # declared 1.5x-checkpoint estimate.
+        measured = (max(0, free_before - self._free_vram())
+                    if free_before is not None else 0)
 
+        with self._lock:
+            existing = self._entries.get(model_id)
+            if existing is not None:
+                # Lost a concurrent register() race — discard the duplicate
+                # load and hand back the winner.
+                try:
+                    engine.sleep(level=2)
+                except Exception:
+                    pass
+                return existing.engine
             entry = EngineEntry(
                 model_id=model_id,
                 engine=engine,
-                vram_budget_bytes=budget_bytes,
+                vram_budget_bytes=(
+                    measured if (auto_budget and measured > 0)
+                    else budget_bytes),
                 checkpoint_path=checkpoint,
                 config_name=config_name,
                 tokenizer_path=tok_path,
+                measured_vram_bytes=measured,
             )
             self._entries[model_id] = entry
 
-            logger.info("Registered: %s (budget=%.2fGB, free=%.2fGB)",
-                        model_id, vram_budget_gb, self._free_vram() / 1e9)
+            logger.info("Registered: %s (budget=%.2fGB%s, free=%.2fGB)",
+                        model_id, entry.vram_budget_bytes / 1e9,
+                        " measured" if (auto_budget and measured > 0)
+                        else " declared",
+                        self._free_vram() / 1e9)
             return engine
 
     def generate(self, model_id: str, prompt: str, max_new_tokens: int = 100,
@@ -153,30 +194,55 @@ class ModelRegistry:
             self._ensure_awake(model_id)
             entry = self._entries[model_id]
             entry.last_used = time.time()
+            entry.in_flight += 1
 
-        # Seed handling: set on the engine for reproducible sampling
-        if seed is not None:
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed)
-        output = entry.engine.generate(
-            prompt, max_new_tokens=max_new_tokens,
-            temperature=temperature, top_p=top_p,
-            finish_sentence=finish_sentence,
-            top_k=top_k, repetition_penalty=repetition_penalty,
-            stop=stop,
-            min_p=kwargs.get('min_p', 0.0),
-            min_k=kwargs.get('min_k', 0.0),
-            dry_multiplier=kwargs.get('dry_multiplier', 0.0),
-            dry_base=kwargs.get('dry_base', 1.75),
-            dry_allowed_length=kwargs.get('dry_allowed_length', 2),
-            dry_penalty_last_n=kwargs.get('dry_penalty_last_n', 512),
-            logprobs=kwargs.get('logprobs'),
-            prompt_logprobs=kwargs.get('prompt_logprobs'),
-            return_logprobs=kwargs.get('return_logprobs', False),
-        )
-        entry.generation_count += 1
-        entry.total_tokens += entry.engine.total_tokens_generated
+        def _call():
+            return entry.engine.generate(
+                prompt, max_new_tokens=max_new_tokens,
+                temperature=temperature, top_p=top_p,
+                finish_sentence=finish_sentence,
+                top_k=top_k, repetition_penalty=repetition_penalty,
+                stop=stop,
+                min_p=kwargs.get('min_p', 0.0),
+                min_k=kwargs.get('min_k', 0.0),
+                dry_multiplier=kwargs.get('dry_multiplier', 0.0),
+                dry_base=kwargs.get('dry_base', 1.75),
+                dry_allowed_length=kwargs.get('dry_allowed_length', 2),
+                dry_penalty_last_n=kwargs.get('dry_penalty_last_n', 512),
+                logprobs=kwargs.get('logprobs'),
+                prompt_logprobs=kwargs.get('prompt_logprobs'),
+                return_logprobs=kwargs.get('return_logprobs', False),
+            )
+
+        try:
+            # Hold the engine gen lock across the whole call: the token
+            # delta below is then exact (EC-061), and a per-request seed
+            # can be applied inside a forked RNG scope without another
+            # request's seed interleaving (EC-156).  _gen_lock is an
+            # RLock, so engine.generate() re-enters harmlessly.
+            devices = ([entry.engine.device]
+                       if getattr(entry.engine.device, "type", "")
+                       == "cuda" else [])
+            with entry.engine._gen_lock:
+                tokens_before = getattr(
+                    entry.engine, "total_tokens_generated", 0)
+                if seed is not None:
+                    with torch.random.fork_rng(devices=devices):
+                        torch.manual_seed(seed)
+                        output = _call()
+                else:
+                    output = _call()
+        finally:
+            with self._lock:
+                entry.in_flight -= 1
+
+        with self._lock:
+            entry.generation_count += 1
+            # EC-061: credit the request DELTA, not the engine's lifetime
+            # cumulative counter (which double-counted quadratically).
+            entry.total_tokens += max(
+                0, getattr(entry.engine, "total_tokens_generated", 0)
+                - tokens_before)
         return output
 
     def generate_stream(self, model_id: str, prompt: str, max_new_tokens: int = 256,
@@ -196,10 +262,6 @@ class ModelRegistry:
         Yields decoded text chunks (one per token) as they are generated.
         Sampling args mirror ForgeEngine.generate_stream.
         """
-        if seed is not None:
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed)
         with self._lock:
             if model_id not in self._entries:
                 raise KeyError(f"Model '{model_id}' not registered. "
@@ -207,37 +269,64 @@ class ModelRegistry:
             self._ensure_awake(model_id)
             entry = self._entries[model_id]
             entry.last_used = time.time()
+            entry.in_flight += 1
             engine = entry.engine
 
-        for chunk in engine.generate_stream(
-            prompt, max_new_tokens=max_new_tokens,
-            temperature=temperature, top_p=top_p, top_k=top_k,
-            repetition_penalty=repetition_penalty, min_p=min_p,
-            min_k=min_k, eos_token_ids=eos_token_ids,
-            dry_multiplier=dry_multiplier, dry_base=dry_base,
-            dry_allowed_length=dry_allowed_length,
-            dry_penalty_last_n=dry_penalty_last_n,
-            skip_special_tokens=skip_special_tokens,
-            logits_processor=logits_processor,
-            stop=stop,
-        ):
-            yield chunk
+        def _stream():
+            return engine.generate_stream(
+                prompt, max_new_tokens=max_new_tokens,
+                temperature=temperature, top_p=top_p, top_k=top_k,
+                repetition_penalty=repetition_penalty, min_p=min_p,
+                min_k=min_k, eos_token_ids=eos_token_ids,
+                dry_multiplier=dry_multiplier, dry_base=dry_base,
+                dry_allowed_length=dry_allowed_length,
+                dry_penalty_last_n=dry_penalty_last_n,
+                skip_special_tokens=skip_special_tokens,
+                logits_processor=logits_processor,
+                stop=stop,
+            )
 
-        with self._lock:
-            entry.generation_count += 1
-            entry.total_tokens += engine.total_tokens_generated
+        tokens_before = 0
+        try:
+            # Same discipline as generate(): engine._gen_lock (RLock)
+            # around the iteration so the token delta is exact (EC-061)
+            # and a forked RNG scope keeps a per-request seed from
+            # clobbering concurrent sampling / leaking globally (EC-156).
+            devices = ([engine.device]
+                       if getattr(engine.device, "type", "") == "cuda"
+                       else [])
+            with engine._gen_lock:
+                tokens_before = getattr(
+                    engine, "total_tokens_generated", 0)
+                if seed is not None:
+                    with torch.random.fork_rng(devices=devices):
+                        torch.manual_seed(seed)
+                        for chunk in _stream():
+                            yield chunk
+                else:
+                    for chunk in _stream():
+                        yield chunk
+        finally:
+            with self._lock:
+                entry.in_flight -= 1
+                entry.generation_count += 1
+                entry.total_tokens += max(
+                    0, getattr(engine, "total_tokens_generated", 0)
+                    - tokens_before)
 
     def sleep(self, model_id: str, level: int = 1):
         """Put a model to sleep to free VRAM."""
         with self._lock:
-            if model_id not in self._entries:
+            entry = self._entries.get(model_id)
+            if entry is None or not self._sync_awake(entry):
                 return
-            entry = self._entries[model_id]
-            if entry.is_awake:
-                entry.engine.sleep(level=level)
+            # engine.sleep() blocks on the engine _gen_lock for the whole
+            # in-flight decode — run it off the registry lock (EC-199).
+            self._sleep_unlocked(entry, level)
+            if self._entries.get(model_id) is entry:
                 entry.is_awake = False
-                logger.info("%s → sleep level %s (free=%.2fGB)",
-                            model_id, level, self._free_vram() / 1e9)
+            logger.info("%s → sleep level %s (free=%.2fGB)",
+                        model_id, level, self._free_vram() / 1e9)
 
     def wake(self, model_id: str):
         """Wake a sleeping model."""
@@ -247,17 +336,22 @@ class ModelRegistry:
     def switch(self, from_model: str, to_model: str):
         """Sleep one model, wake another. Target: <3s round-trip."""
         with self._lock:
-            self.sleep(from_model, level=1)
+            entry = self._entries.get(from_model)
+            if entry is not None and self._sync_awake(entry):
+                self._sleep_unlocked(entry, 1)
+                if self._entries.get(from_model) is entry:
+                    entry.is_awake = False
             self._ensure_awake(to_model)
 
     def unregister(self, model_id: str):
         """Remove a model from the registry and free all its resources."""
         with self._lock:
-            if model_id not in self._entries:
+            entry = self._entries.get(model_id)
+            if entry is None:
                 return
-            entry = self._entries[model_id]
-            if entry.is_awake:
-                entry.engine.sleep(level=2)  # Discard weights
+            if self._sync_awake(entry):
+                self._sleep_unlocked(entry, 2)  # Discard weights
+                entry.is_awake = False
             del entry.engine
             del self._entries[model_id]
             torch.cuda.empty_cache()
@@ -269,11 +363,15 @@ class ModelRegistry:
             return [
                 {
                     "id": e.model_id,
-                    "awake": e.is_awake,
+                    # Reflect sleeps triggered outside the registry
+                    # (direct engine.sleep()) — EC-161.
+                    "awake": self._sync_awake(e),
                     "vram_budget_gb": e.vram_budget_bytes / 1e9,
                     "config": e.config_name,
                     "last_used_ago_s": time.time() - e.last_used,
                     "generations": e.generation_count,
+                    "total_tokens": e.total_tokens,
+                    "in_flight": e.in_flight,
                 }
                 for e in self._entries.values()
             ]
@@ -300,7 +398,8 @@ class ModelRegistry:
     def stats(self) -> dict:
         """Aggregate registry statistics."""
         with self._lock:
-            awake_count = sum(1 for e in self._entries.values() if e.is_awake)
+            awake_count = sum(
+                1 for e in self._entries.values() if self._sync_awake(e))
             asleep_count = len(self._entries) - awake_count
             awake_vram = sum(
                 e.vram_budget_bytes for e in self._entries.values() if e.is_awake)
@@ -315,6 +414,52 @@ class ModelRegistry:
             }
 
     # ── Internal ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _sync_awake(entry: EngineEntry) -> bool:
+        """Sync ``entry.is_awake`` with the engine's live sleep state.
+
+        Sleeps triggered outside the registry (a direct ``engine.sleep()``
+        via ``get_engine``) used to leave the registry claiming the model
+        was awake (EC-161).  Returns the synced state.
+        """
+        awake = getattr(entry.engine, "_awake", None)
+        if awake is not None:
+            entry.is_awake = bool(awake)
+        return entry.is_awake
+
+    def _release_lock(self):
+        """Fully release this thread's hold on ``self._lock``.
+
+        Returns an opaque token for :meth:`_reacquire_lock`.  Works at any
+        recursion depth (RLock ``_release_save``/``_acquire_restore`` —
+        the same protocol ``threading.Condition`` uses internally).
+        Blocking engine calls (``sleep``/``wake``/load) wait on
+        ``engine._gen_lock``, which an in-flight decode can hold for
+        seconds; running them while holding the registry lock freezes
+        every other registry op (EC-199).
+        """
+        release_save = getattr(self._lock, "_release_save", None)
+        if release_save is not None:
+            return ("saved", release_save())
+        self._lock.release()  # fallback: single-level release
+        return ("single", None)
+
+    def _reacquire_lock(self, token):
+        """Undo :meth:`_release_lock`, restoring the prior hold depth."""
+        kind, state = token
+        if kind == "saved":
+            self._lock._acquire_restore(state)
+        else:
+            self._lock.acquire()
+
+    def _sleep_unlocked(self, entry: EngineEntry, level: int):
+        """``entry.engine.sleep()`` without holding the registry lock."""
+        token = self._release_lock()
+        try:
+            entry.engine.sleep(level=level)
+        finally:
+            self._reacquire_lock(token)
 
     def _free_vram(self) -> int:
         """Get currently free VRAM in bytes."""
@@ -331,14 +476,19 @@ class ModelRegistry:
         return sum(e.vram_budget_bytes for e in self._entries.values() if e.is_awake)
 
     def _ensure_awake(self, model_id: str):
-        """Wake a model, sleeping others if VRAM is tight."""
+        """Wake a model, sleeping others if VRAM is tight.
+
+        Caller must hold ``self._lock``; the blocking ``engine.wake()``
+        is internally run with the lock released (EC-199).
+        """
         entry = self._entries[model_id]
-        if entry.is_awake:
+        if self._sync_awake(entry):
             return
 
-        # Check if we need to free VRAM
+        # Check if we need to free VRAM.  Bytes reserved by in-flight
+        # register() loads aren't reclaimable — subtract them.
         needed = entry.vram_budget_bytes
-        free = self._free_vram()
+        free = max(0, self._free_vram() - sum(self._inflight_loads.values()))
         reserved = self._reserved_vram()
 
         if free + reserved < needed:
@@ -352,12 +502,21 @@ class ModelRegistry:
             # Sleep idle models (LRU order) until we have enough
             self._evict_lru(needed - free, exclude=model_id)
 
-        entry.engine.wake()
+        # engine.wake() blocks on _gen_lock — drop the registry lock so
+        # in-flight decodes can't freeze every other registry op.
+        token = self._release_lock()
+        try:
+            entry.engine.wake()
+        finally:
+            self._reacquire_lock(token)
+        if self._entries.get(model_id) is not entry:
+            raise KeyError(
+                f"Model '{model_id}' was unregistered during wake")
         entry.is_awake = True
 
     def _make_room(self, needed_bytes: int, exclude: str | None = None):
         """Ensure `needed_bytes` of free VRAM by sleeping idle engines."""
-        free = self._free_vram()
+        free = max(0, self._free_vram() - sum(self._inflight_loads.values()))
         reserved = self._reserved_vram()
 
         if free + reserved < needed_bytes:
@@ -370,28 +529,56 @@ class ModelRegistry:
             self._evict_lru(needed_bytes - free, exclude=exclude)
 
     def _evict_lru(self, needed_bytes: int, exclude: str | None = None):
-        """Sleep engines in LRU order until `needed_bytes` freed."""
-        # Sort awake engines by last_used (oldest first), exclude the target
+        """Sleep idle engines in LRU order until `needed_bytes` is freed.
+
+        Caller must hold ``self._lock``.  Victims are selected under the
+        lock, but ``engine.sleep()`` runs with the lock released — sleep
+        waits on the engine ``_gen_lock``, so holding the registry lock
+        across it froze all registry ops for the duration of an in-flight
+        decode, and a busy engine merely *blocked* the eviction loop
+        (EC-199).  Engines with in-flight registry generations are never
+        eviction candidates.
+        """
+        # Sort awake, idle engines by last_used (oldest first), exclude
+        # the target and any engine with an in-flight generation.
         candidates = sorted(
             (e for e in self._entries.values()
-             if e.is_awake and e.model_id != exclude),
+             if self._sync_awake(e) and e.model_id != exclude
+             and e.in_flight == 0),
             key=lambda e: e.last_used,
         )
 
         freed = 0
-        for entry in candidates:
-            entry.engine.sleep(level=1)
-            entry.is_awake = False
-            freed += entry.vram_budget_bytes
+        slept: list[EngineEntry] = []
+        token = self._release_lock()
+        try:
+            for entry in candidates:
+                try:
+                    entry.engine.sleep(level=1)
+                except Exception as e:
+                    # A failed sleep must not wedge the whole eviction —
+                    # skip it and keep trying other victims.
+                    logger.warning("Eviction sleep failed for %s: %s",
+                                   entry.model_id, e)
+                    continue
+                slept.append(entry)
+                freed += entry.vram_budget_bytes
+                if freed >= needed_bytes:
+                    break
+        finally:
+            self._reacquire_lock(token)
+
+        for entry in slept:
+            if self._entries.get(entry.model_id) is entry:
+                entry.is_awake = False
             logger.info("Evicted %s (idle %.0fs, freed %.2fGB)",
                         entry.model_id, time.time() - entry.last_used,
                         entry.vram_budget_bytes / 1e9)
-            if freed >= needed_bytes:
-                break
-        else:
+        if freed < needed_bytes:
             raise VRAMBudgetExceeded(
                 f"Could not free {needed_bytes/1e9:.2f}GB after evicting "
-                f"{len(candidates)} idle engines"
+                f"{len(slept)} idle engines "
+                f"({len(candidates) - len(slept)} skipped/failed)"
             )
 
 

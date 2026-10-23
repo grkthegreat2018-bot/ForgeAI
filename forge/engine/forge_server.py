@@ -25,20 +25,24 @@ Task-based concurrent generation:
     GET  /v1/tasks                    — list all active tasks
     DELETE /v1/tasks/{task_id}        — delete a task
 """
+from __future__ import annotations
+
 import argparse
 import asyncio
 import json
 import logging
 import os
 import tempfile
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from forge.engine.decide import QuestionValidationError
@@ -59,6 +63,17 @@ from forge.self_play.discovery.qwen_adapter import (
 from research.paths import FORGE_TOKENIZER_DIR, V2_CHECKPOINT
 
 logger = logging.getLogger(__name__)
+
+# HTTP methods that mutate engine/session state — gated by FORGE_API_KEY
+# when it is set (EC-058).
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+# Upper bound on /v1/batch/completions prompts per request (EC-218).
+_MAX_BATCH_PROMPTS = 64
+
+# Idle-timeout for task streams: no chunk AND no producer completion for
+# this long => the dispatcher died — error out instead of hanging (EC-073).
+_STREAM_IDLE_TIMEOUT_S = 300.0
 
 
 def _parse_reasoning(text: str, model: str = "") -> tuple[str, str | None]:
@@ -124,6 +139,12 @@ class ChatCompletionRequest(BaseModel):
     logprobs: bool | None = None
     top_logprobs: int | None = None
     lora_adapter: str | None = None
+    # Token ids that end generation (plumbed to eos_token_ids on the
+    # streaming path — the non-streaming generate() signature has no
+    # eos override). EC-152.
+    stop_token_ids: list[int] | None = None
+    # OpenAI stream_options; include_usage=True adds a final usage chunk.
+    stream_options: dict | None = None
 
 class ChatCompletionChoice(BaseModel):
     index: int = 0
@@ -162,6 +183,8 @@ class CompletionRequest(BaseModel):
     seed: int | None = None
     logprobs: int | None = None
     prompt_logprobs: int | None = None
+    # Token ids that end generation (streaming path only). EC-152.
+    stop_token_ids: list[int] | None = None
 
 class EmbeddingRequest(BaseModel):
     model: str = "forgelm-v2-jamba"
@@ -173,6 +196,14 @@ class RerankingRequest(BaseModel):
     query: str
     documents: list[str]
     top_n: int | None = None
+
+class TokenizeRequest(BaseModel):
+    model: str = "forgelm-v2-jamba"
+    text: str
+
+class DetokenizeRequest(BaseModel):
+    model: str = "forgelm-v2-jamba"
+    tokens: list[int]
 
 class InfillRequest(BaseModel):
     model: str = "forgelm-v2-jamba"
@@ -571,6 +602,26 @@ class ForgeServer:
             allow_methods=["*"],
             allow_headers=["*"],
         )
+        # ── Observability / auth state (EC-058, EC-065, EC-086) ────────
+        self._started_at = time.time()
+        self._metrics = {"requests_total": 0, "errors_total": 0}
+        # When set, mutating /v1 methods require `Authorization: Bearer`.
+        self._api_key = os.environ.get("FORGE_API_KEY") or None
+        # Per-task locks serialize history render+append so concurrent
+        # POSTs to one task can't interleave (EC-198).  They are
+        # threading.Lock, NOT asyncio.Lock: waiters can live on different
+        # event loops (e.g. per-request TestClient portals or multi-loop
+        # runners), and asyncio.Lock.release() wakes a waiter via
+        # call_soon, which never runs on a foreign loop — the waiter is
+        # stranded forever despite the lock being free.  threading.Lock
+        # is loop-agnostic.  The blocking acquire is offloaded to a
+        # dedicated pool so waiters never occupy the default executor.
+        self._task_locks: dict[str, threading.Lock] = {}
+        self._task_lock_waiters: dict[str, int] = {}
+        self._max_task_locks = max(2 * max_sessions, 16)
+        self._task_lock_pool = ThreadPoolExecutor(
+            max_workers=max(4, min(max_sessions, 32)),
+            thread_name_prefix="forge-task-lock")
         self._setup_routes()
 
     def _setup_gpu(self):
@@ -671,6 +722,17 @@ class ForgeServer:
     def serve(self, host: str = "0.0.0.0", port: int = 8000) -> None:
         """Start the HTTP server (blocking)."""
         self.batch_queue.start()
+        if not self._api_key and host not in ("127.0.0.1", "::1",
+                                              "localhost"):
+            logger.warning(
+                "=" * 60 + "\n"
+                "FORGE_API_KEY is NOT set and the server binds to %s "
+                "(non-loopback).\n"
+                "Every mutating /v1 endpoint — engine config, library "
+                "writes, tool execution, router register/delete — is "
+                "reachable UNAUTHENTICATED from the network.\n"
+                "Set FORGE_API_KEY or bind to 127.0.0.1." + "\n" + "=" * 60,
+                host)
         logger.info("=" * 60)
         logger.info("ForgeAI Inference Server v3.0.0")
         logger.info("Listening on http://%s:%s", host, port)
@@ -689,6 +751,163 @@ class ForgeServer:
         finally:
             self.batch_queue.stop()
             self._cleanup_gpu_lock()
+
+    def _task_lock(self, task_id: str) -> threading.Lock:
+        """Per-task lock serializing history render+append (EC-198).
+
+        threading.Lock because waiters may live on different event loops
+        (per-request portals, multi-loop runners) — asyncio.Lock would
+        strand them on release().  Bounded: past ``_max_task_locks``
+        entries, idle (unlocked, no queued waiters) locks for
+        unknown/deleted tasks are dropped.  Only called from the event
+        loop, so the dict needs no guard.
+        """
+        lock = self._task_locks.get(task_id)
+        if lock is None:
+            if len(self._task_locks) >= self._max_task_locks:
+                stale = [t for t, l in self._task_locks.items()
+                         if not l.locked()
+                         and not self._task_lock_waiters.get(t)]
+                drop = len(self._task_locks) - self._max_task_locks + 1
+                for t in stale[:drop]:
+                    self._task_locks.pop(t, None)
+                    self._task_lock_waiters.pop(t, None)
+            lock = threading.Lock()
+            self._task_locks[task_id] = lock
+        return lock
+
+    async def _acquire_task_lock(self, task_id: str) -> threading.Lock:
+        """Acquire the per-task lock without blocking the event loop.
+
+        Uncontended acquire happens inline; a contended one is parked in
+        ``_task_lock_pool`` so the loop stays free and the wait is
+        loop-agnostic (see ``_task_locks`` note in __init__).
+        """
+        lock = self._task_lock(task_id)
+        if lock.acquire(blocking=False):
+            return lock
+        self._task_lock_waiters[task_id] = \
+            self._task_lock_waiters.get(task_id, 0) + 1
+        loop = asyncio.get_running_loop()
+        fut = loop.run_in_executor(self._task_lock_pool, lock.acquire)
+
+        def _done(f):
+            self._task_lock_waiters[task_id] = max(
+                0, self._task_lock_waiters.get(task_id, 0) - 1)
+
+        fut.add_done_callback(_done)
+        try:
+            await fut
+        except BaseException:
+            # The await was cancelled but the parked worker can still win
+            # the lock later — release on arrival instead of stranding
+            # the lock held forever.
+            def _rescue(f):
+                try:
+                    if f.result():
+                        lock.release()
+                except Exception:
+                    pass
+            fut.add_done_callback(_rescue)
+            raise
+        return lock
+
+    @staticmethod
+    def _release_task_lock(lock: threading.Lock) -> None:
+        try:
+            lock.release()
+        except RuntimeError:
+            pass  # already released — never strand callers
+
+    def _render_task_prompt(self, session, req: TaskMessageRequest) -> str:
+        """Render system + history + the new user message for a task."""
+        messages = []
+        if session.system_prompt:
+            messages.append({"role": "system",
+                             "content": session.system_prompt})
+        messages.extend(session.history)
+        messages.append({"role": "user", "content": req.content})
+        cfg_name = self.registry.config_name_for(session.model_id)
+        tools = None
+        if req.tools:
+            tools = [{"name": t.function.name,
+                      "description": t.function.description or "",
+                      "parameters": t.function.parameters or {}}
+                     for t in req.tools]
+        return render_messages_for_config(
+            messages, config_name=cfg_name, tools=tools,
+            add_generation_prompt=True)
+
+    @staticmethod
+    def _stream_worker(gen_factory, queue: asyncio.Queue,
+                       loop: asyncio.AbstractEventLoop,
+                       cancel: threading.Event):
+        """Iterate a blocking registry stream off the event loop (EC-057).
+
+        Pushes ``("chunk", text)`` / ``("error", exc)`` / ``("done", None)``
+        tuples onto ``queue`` via the captured loop.  Setting ``cancel``
+        closes the generator at the next decode boundary, which releases
+        the engine ``_gen_lock`` held by ``generate_stream`` (EC-066).
+        """
+        def _put(item):
+            # Close the coroutine ourselves when submission fails —
+            # run_coroutine_threadsafe drops it unawaited otherwise
+            # ("coroutine was never awaited" RuntimeWarning on GC).
+            coro = queue.put(item)
+            try:
+                asyncio.run_coroutine_threadsafe(coro, loop)
+            except Exception:
+                coro.close()
+
+        gen = None
+        try:
+            gen = gen_factory()
+            for chunk in gen:
+                if cancel.is_set():
+                    break
+                _put(("chunk", chunk))
+        except Exception as e:  # surfaced to the SSE consumer
+            _put(("error", e))
+        finally:
+            if gen is not None:
+                try:
+                    gen.close()
+                except Exception:
+                    pass
+            _put(("done", None))  # no-op if the loop already closed
+
+    async def _aiter_stream(self, gen_factory,
+                            request: Request | None = None):
+        """Async-iterate a blocking ``registry.generate_stream`` result.
+
+        The decode loop runs on a daemon worker thread feeding an
+        ``asyncio.Queue`` so it never stalls the event loop.  When
+        ``request`` is given, ``is_disconnected()`` is polled between
+        chunks; on disconnect (or consumer close) the cancel event tells
+        the worker to ``close()`` the generator, releasing the engine's
+        ``_gen_lock`` at the next decode boundary (EC-057/EC-066).
+        """
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        cancel = threading.Event()
+        threading.Thread(
+            target=self._stream_worker,
+            args=(gen_factory, queue, loop, cancel),
+            daemon=True,
+        ).start()
+        try:
+            while True:
+                kind, payload = await queue.get()
+                if kind == "done":
+                    return
+                if kind == "error":
+                    raise payload
+                if (request is not None
+                        and await request.is_disconnected()):
+                    return  # finally below cancels the worker
+                yield payload
+        finally:
+            cancel.set()
 
     def _build_prompt(self, req: ChatCompletionRequest) -> str:
         """Build prompt from chat messages, using qwen_adapter when tools are present."""
@@ -731,20 +950,134 @@ class ForgeServer:
         app = self.app
         registry = self.registry
 
+        # ── Middleware: request-ID + metrics + optional bearer auth ────
+        # (EC-065 observability, EC-086 request-ID on every route,
+        #  EC-058 FORGE_API_KEY gate on mutating /v1 methods)
+        @app.middleware("http")
+        async def _request_id_auth_metrics(request: Request, call_next):
+            rid = request.headers.get("x-request-id") or uuid.uuid4().hex
+            request.state.request_id = rid
+            self._metrics["requests_total"] += 1
+            if (self._api_key
+                    and request.method in _MUTATING_METHODS
+                    and request.url.path.startswith("/v1")):
+                auth = request.headers.get("authorization", "")
+                if auth != f"Bearer {self._api_key}":
+                    self._metrics["errors_total"] += 1
+                    return JSONResponse(
+                        {"error": {
+                            "message": "missing or invalid API key",
+                            "type": "authentication_error"}},
+                        status_code=401,
+                        headers={"X-Request-ID": rid})
+            try:
+                resp = await call_next(request)
+            except Exception:
+                self._metrics["errors_total"] += 1
+                raise
+            if resp.status_code >= 500:
+                self._metrics["errors_total"] += 1
+            resp.headers["X-Request-ID"] = rid
+            return resp
+
         @app.get("/health")
         async def health():
-            """Health check with Prometheus-compatible metrics."""
+            """Deep health check: per-model state, queue depth, uptime.
+
+            Plain JSON — use /metrics for the counters surface."""
             stats = registry.stats()
             return {
                 "status": "ok",
                 "version": "3.0.0",
+                "uptime_s": round(time.time() - self._started_at, 1),
                 "models_loaded": stats["total_models"],
                 "models_awake": stats["awake"],
+                "models": [
+                    {"id": m["id"], "awake": m["awake"],
+                     "generations": m["generations"],
+                     "total_tokens": m.get("total_tokens", 0),
+                     "in_flight": m.get("in_flight", 0),
+                     "vram_budget_gb": round(m["vram_budget_gb"], 2)}
+                    for m in stats["models"]
+                ],
                 "vram_total_gb": round(stats["total_vram_gb"], 2),
                 "vram_free_gb": round(stats["free_vram_gb"], 2),
                 "active_tasks": len(self.session_manager.list_tasks()),
-                "batch_queue_pending": len(self.batch_queue._pending),
+                # Public counter — never reach into BatchQueue._pending
+                # (EC-072).
+                "batch_queue_pending": self.batch_queue.pending_count,
             }
+
+        @app.get("/metrics")
+        async def metrics():
+            """JSON metrics: request counters, per-model generations,
+            queue depth, uptime (EC-065)."""
+            stats = registry.stats()
+            return {
+                "uptime_s": round(time.time() - self._started_at, 1),
+                "requests_total": self._metrics["requests_total"],
+                "errors_total": self._metrics["errors_total"],
+                "generations_total": sum(
+                    m.get("generations", 0) for m in stats["models"]),
+                "tokens_generated_total": sum(
+                    m.get("total_tokens", 0) for m in stats["models"]),
+                "batch_queue_pending": self.batch_queue.pending_count,
+                "active_tasks": len(self.session_manager.list_tasks()),
+                "models": {
+                    m["id"]: {
+                        "generations": m.get("generations", 0),
+                        "total_tokens": m.get("total_tokens", 0),
+                        "awake": m.get("awake", False),
+                        "in_flight": m.get("in_flight", 0),
+                    }
+                    for m in stats["models"]
+                },
+            }
+
+        @app.get("/version")
+        async def version():
+            """Server/runtime version (llama.cpp-style /version, EC-152)."""
+            import torch as _torch
+            return {
+                "version": "3.0.0",
+                "server": "forgeai",
+                "torch": _torch.__version__,
+                "cuda_available": _torch.cuda.is_available(),
+            }
+
+        @app.post("/v1/tokenize")
+        async def tokenize(req: TokenizeRequest):
+            """Tokenize text → token ids (EC-152)."""
+            engine = registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+            tok = getattr(engine, "tokenizer", None)
+            if tok is None:
+                raise HTTPException(503, "engine has no tokenizer")
+            try:
+                if hasattr(tok, "encode"):
+                    ids = list(tok.encode(req.text))
+                else:
+                    ids = tok(req.text, return_tensors="pt"
+                              ).input_ids[0].tolist()
+            except Exception as e:
+                raise HTTPException(400, f"tokenize failed: {e}") from e
+            return {"model": req.model, "tokens": ids, "count": len(ids)}
+
+        @app.post("/v1/detokenize")
+        async def detokenize(req: DetokenizeRequest):
+            """Token ids → text (EC-152)."""
+            engine = registry.get_engine(req.model)
+            if engine is None:
+                raise HTTPException(404, f"Model '{req.model}' not found")
+            tok = getattr(engine, "tokenizer", None)
+            if tok is None:
+                raise HTTPException(503, "engine has no tokenizer")
+            try:
+                text = tok.decode(list(req.tokens))
+            except Exception as e:
+                raise HTTPException(400, f"detokenize failed: {e}") from e
+            return {"model": req.model, "text": text}
 
         @app.get("/v1/models")
         async def list_models(request: Request):
@@ -800,13 +1133,14 @@ class ForgeServer:
             return result
 
         @app.post("/v1/chat/completions")
-        async def chat_completions(req: ChatCompletionRequest):
+        async def chat_completions(req: ChatCompletionRequest,
+                                   request: Request):
             """OpenAI-compatible chat completions with SSE streaming and tool calling."""
             prompt = self._build_prompt(req)
 
             if req.stream:
                 return StreamingResponse(
-                    self._stream_chat(req, prompt),
+                    self._stream_chat(req, prompt, request=request),
                     media_type="text/event-stream",
                 )
 
@@ -913,11 +1247,11 @@ class ForgeServer:
             return resp
 
         @app.post("/v1/completions")
-        async def completions(req: CompletionRequest):
+        async def completions(req: CompletionRequest, request: Request):
             """OpenAI-compatible text completions."""
             if req.stream:
                 return StreamingResponse(
-                    self._stream_completion(req),
+                    self._stream_completion(req, request=request),
                     media_type="text/event-stream",
                 )
             raw_text = registry.generate(
@@ -1065,19 +1399,29 @@ class ForgeServer:
             engine = registry.get_engine(req.model)
             if engine is None:
                 raise HTTPException(404, f"Model '{req.model}' not found")
+            if len(req.prompts) > _MAX_BATCH_PROMPTS:
+                raise HTTPException(
+                    400, f"too many prompts: {len(req.prompts)} > "
+                         f"{_MAX_BATCH_PROMPTS}")
 
             import time as _time
             _t0 = _time.perf_counter()
-            results = engine.generate_batch(
-                req.prompts,
-                max_new_tokens=req.max_tokens,
-                temperature=req.temperature,
-                top_p=req.top_p,
-                top_k=req.top_k,
-                repetition_penalty=req.repetition_penalty,
+            # Blocking decode — run off the event loop (EC-218).
+            results = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: engine.generate_batch(
+                    req.prompts,
+                    max_new_tokens=req.max_tokens,
+                    temperature=req.temperature,
+                    top_p=req.top_p,
+                    top_k=req.top_k,
+                    repetition_penalty=req.repetition_penalty,
+                ),
             )
             _elapsed_ms = (_time.perf_counter() - _t0) * 1000
-            _total = sum(len(r.split()) for r in results)
+            # Real token counts via the engine tokenizer — len(r.split())
+            # counted WORDS (EC-218).
+            _total = sum(_token_count(engine, r) for r in results)
 
             return BatchGenerateResponse(
                 model=req.model,
@@ -1110,7 +1454,12 @@ class ForgeServer:
             engine = registry.get_engine(req.model)
             if engine is None:
                 raise HTTPException(404, f"Model '{req.model}' not found")
-            result = engine.tools.execute(req.name, req.arguments)
+            # Tool execution can block (file I/O, engine calls) — keep it
+            # off the event loop (EC-218).
+            result = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: engine.tools.execute(req.name, req.arguments),
+            )
             return {"status": result["status"], "result": result.get("result"),
                     "error": result.get("error")}
 
@@ -1391,7 +1740,8 @@ class ForgeServer:
             }
 
         @app.post("/v1/tasks/{task_id}/messages")
-        async def send_task_message(task_id: str, req: TaskMessageRequest):
+        async def send_task_message(task_id: str, req: TaskMessageRequest,
+                                    request: Request):
             """Send a message to a task and get a response.
 
             The task's conversation history is maintained server-side,
@@ -1403,41 +1753,58 @@ class ForgeServer:
             if session is None:
                 raise HTTPException(404, f"Task '{task_id}' not found")
 
-            # Build prompt from session history + new message
-            messages = []
-            if session.system_prompt:
-                messages.append({"role": "system", "content": session.system_prompt})
-            messages.extend(session.history)
-            messages.append({"role": "user", "content": req.content})
-
-            # Render with tools if present
-            cfg_name = self.registry.config_name_for(session.model_id)
-            if req.tools:
-                tools = [
-                    {
-                        "name": t.function.name,
-                        "description": t.function.description or "",
-                        "parameters": t.function.parameters or {},
-                    }
-                    for t in req.tools
-                ]
-                prompt = render_messages_for_config(
-                    messages, config_name=cfg_name, tools=tools,
-                    add_generation_prompt=True)
-            else:
-                prompt = render_messages_for_config(
-                    messages, config_name=cfg_name,
-                    add_generation_prompt=True)
-
-            # Record user message in session
-            self.session_manager.append_message(task_id, "user", req.content)
-
-            # Resolve seed: message-level seed overrides task-level seed
-            effective_seed = req.seed if req.seed is not None else session.seed
+            # Per-task lock (EC-198): history render + append + dispatch
+            # are atomic per task, so two concurrent POSTs can no longer
+            # interleave user2,user1,assistantA,assistantB.  Acquired via
+            # the lock pool — a synchronous wait here would freeze the
+            # event loop.
 
             if req.stream:
-                # Streaming via SSE
-                stream_queue = asyncio.Queue()
+                # The lock transfers into _stream_task — held until the
+                # stream ends so the assistant reply is appended before
+                # the next message on this task is rendered.
+                lock = await self._acquire_task_lock(task_id)
+                try:
+                    prompt = self._render_task_prompt(session, req)
+                    self.session_manager.append_message(
+                        task_id, "user", req.content)
+                    effective_seed = (req.seed if req.seed is not None
+                                      else session.seed)
+                    stream_queue = asyncio.Queue()
+                    future = self.batch_queue.submit(
+                        task_id=task_id,
+                        model_id=session.model_id,
+                        prompt=prompt,
+                        max_tokens=req.max_tokens,
+                        temperature=req.temperature,
+                        top_p=req.top_p,
+                        top_k=req.top_k,
+                        repetition_penalty=req.repetition_penalty,
+                        seed=effective_seed,
+                        stop=req.stop,
+                        stream=True,
+                        stream_queue=stream_queue,
+                    )
+                except BaseException:
+                    self._release_task_lock(lock)
+                    raise
+                return StreamingResponse(
+                    self._stream_task(
+                        task_id, stream_queue, future,
+                        request=request, release_lock=lock),
+                    media_type="text/event-stream",
+                )
+
+            # Non-streaming: submit to batch queue and wait
+            lock = await self._acquire_task_lock(task_id)
+            try:
+                prompt = self._render_task_prompt(session, req)
+                self.session_manager.append_message(
+                    task_id, "user", req.content)
+
+                # Resolve seed: message-level seed overrides task-level
+                effective_seed = (req.seed if req.seed is not None
+                                  else session.seed)
                 future = self.batch_queue.submit(
                     task_id=task_id,
                     model_id=session.model_id,
@@ -1449,50 +1816,32 @@ class ForgeServer:
                     repetition_penalty=req.repetition_penalty,
                     seed=effective_seed,
                     stop=req.stop,
-                    stream=True,
-                    stream_queue=stream_queue,
+                    stream=False,
                 )
-                return StreamingResponse(
-                    self._stream_task(task_id, stream_queue, future),
-                    media_type="text/event-stream",
-                )
+                try:
+                    # Wait for result (with timeout)
+                    result = await asyncio.wait_for(
+                        asyncio.get_running_loop().run_in_executor(
+                            None, future.result),
+                        timeout=120.0,
+                    )
+                except TimeoutError:
+                    raise HTTPException(504, "Generation timed out") from None
+                except Exception as e:
+                    raise HTTPException(500, str(e)) from e
 
-            # Non-streaming: submit to batch queue and wait
-            future = self.batch_queue.submit(
-                task_id=task_id,
-                model_id=session.model_id,
-                prompt=prompt,
-                max_tokens=req.max_tokens,
-                temperature=req.temperature,
-                top_p=req.top_p,
-                top_k=req.top_k,
-                repetition_penalty=req.repetition_penalty,
-                seed=effective_seed,
-                stop=req.stop,
-                stream=False,
-            )
-            try:
-                # Wait for result (with timeout)
-                result = await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(
-                        None, future.result),
-                    timeout=120.0,
-                )
-            except TimeoutError:
-                raise HTTPException(504, "Generation timed out") from None
-            except Exception as e:
-                raise HTTPException(500, str(e)) from e
+                # Parse tool calls if present
+                tool_calls, content = _parse_tool_calls_openai(result)
 
-            # Parse tool calls if present
-            tool_calls, content = _parse_tool_calls_openai(result)
-
-            return {
-                "task_id": task_id,
-                "role": "assistant",
-                "content": content,
-                "tool_calls": tool_calls or None,
-                "created_at": time.time(),
-            }
+                return {
+                    "task_id": task_id,
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls or None,
+                    "created_at": time.time(),
+                }
+            finally:
+                self._release_task_lock(lock)
 
         @app.get("/v1/tasks/{task_id}")
         async def get_task(task_id: str):
@@ -1645,7 +1994,10 @@ class ForgeServer:
         async def set_kv_cache_type(req: KVCacheTypeRequest):
             """Set KV cache quantization type (llama.cpp-style --cache-type-k/v).
 
-            Supported types: f32, f16, bf16, q8_0, q4_0, bf16
+            Supported types: f32, f16, bf16, q8_0, q4_0.
+            The engine exposes a single ``kv_bits`` — a ``cache_type_v``
+            that differs from ``cache_type_k`` is rejected honestly
+            instead of being silently ignored (EC-062).
             """
             engine = self.registry.get_engine(req.model)
             if engine is None:
@@ -1653,12 +2005,33 @@ class ForgeServer:
             type_map = {
                 "f32": 32, "f16": 16, "bf16": 16, "q8_0": 8, "q4_0": 4,
             }
-            k_bits = type_map.get(req.cache_type_k, 16)
-            v_bits = type_map.get(req.cache_type_v, 16)
+            if (req.cache_type_k not in type_map
+                    or req.cache_type_v not in type_map):
+                raise HTTPException(400, {
+                    "error": "unsupported cache type",
+                    "supported_types": sorted(type_map)})
+            k_bits = type_map[req.cache_type_k]
+            v_bits = type_map[req.cache_type_v]
+            if v_bits != k_bits:
+                raise HTTPException(400, {
+                    "error": "cache_type_v differs from cache_type_k, but "
+                             "the engine exposes a single kv_bits — "
+                             "separate V quantization is not supported",
+                    "supported_keys": ["cache_type_k",
+                                       "cache_type_v (= cache_type_k)"]})
             try:
-                engine.activate(kv_bits=k_bits)
-                return {"status": "ok", "cache_type_k": req.cache_type_k,
-                        "cache_type_v": req.cache_type_v, "k_bits": k_bits, "v_bits": v_bits}
+                # Route through hotswap so the other ~50 activation flags
+                # are preserved — a bare engine.activate(kv_bits=...) would
+                # rebuild a default ActivationConfig and wipe them (EC-062).
+                def _apply():
+                    engine.hotswap.update_from_dict({"kv_bits": k_bits})
+                    return engine.hotswap.apply_pending()
+                applied = await asyncio.get_running_loop(
+                ).run_in_executor(None, _apply)
+                return {"status": "ok", "applied": applied,
+                        "cache_type_k": req.cache_type_k,
+                        "cache_type_v": req.cache_type_v,
+                        "k_bits": k_bits, "v_bits": v_bits}
             except Exception as e:
                 raise HTTPException(400, str(e)) from e
 
@@ -1833,7 +2206,15 @@ class ForgeServer:
                 category=category, tag=tag, limit=limit, offset=offset)
             return {"entries": entries, "total": len(entries)}
 
-        # ── Router mode: dynamic model registration ───────────────────────
+        # ── Router mode: dynamic model registration ───────────────────
+        #
+        # EC-219 — engine subsystems intentionally NOT exposed on this
+        # server (GUI-only, see forge_gui_server): checkpoint merging
+        # (merge_checkpoints / evolve_merge), engine diagnostics
+        # (diagnose / benchmark / bottleneck), CacheBlend, live learn(),
+        # crash recover(), and the engine session_* endpoints.  If one of
+        # these is ever needed over this API, add a route here — do NOT
+        # shell out to the GUI server.
         @app.post("/v1/router/register")
         async def router_register(req: RouterRegisterRequest):
             """Dynamically register a model at runtime (router mode).
@@ -1860,7 +2241,8 @@ class ForgeServer:
             self.registry.unregister(model_id)
             return {"status": "ok", "model_id": model_id}
 
-    async def _stream_chat(self, req: ChatCompletionRequest, prompt: str):
+    async def _stream_chat(self, req: ChatCompletionRequest, prompt: str,
+                           request: Request | None = None):
         """SSE streaming generator for chat completions with tool-call detection."""
         resp_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
@@ -1876,13 +2258,8 @@ class ForgeServer:
             }
             return f"data: {json.dumps(chunk_data)}\n\n"
 
-        try:
-            # Initial role chunk
-            yield _sse_chunk({"role": "assistant", "content": ""})
-
-            accumulated = ""
-            tc_filter = _ToolCallStreamFilter()
-            for text_chunk in self.registry.generate_stream(
+        def _gen():
+            return self.registry.generate_stream(
                 req.model, prompt,
                 max_new_tokens=req.max_tokens,
                 temperature=req.temperature,
@@ -1896,7 +2273,21 @@ class ForgeServer:
                 dry_penalty_last_n=req.dry_penalty_last_n,
                 stop=req.stop,
                 seed=req.seed,
-            ):
+                eos_token_ids=req.stop_token_ids,
+            )
+
+        try:
+            # Initial role chunk
+            yield _sse_chunk({"role": "assistant", "content": ""})
+
+            accumulated = ""
+            tc_filter = _ToolCallStreamFilter()
+            # Decode runs on a worker thread feeding an asyncio.Queue —
+            # iterating the blocking generator here would stall the whole
+            # event loop (EC-057).  Client disconnect is polled between
+            # chunks and cancels the worker (EC-066).
+            async for text_chunk in self._aiter_stream(
+                    _gen, request=request):
                 accumulated += text_chunk
                 # Incremental marker state machine — handles markers split
                 # across chunks and preserves tail text after an end marker.
@@ -1923,6 +2314,16 @@ class ForgeServer:
                 yield _sse_chunk({}, finish_reason="tool_calls")
             else:
                 yield _sse_chunk({}, finish_reason="stop")
+            if (req.stream_options
+                    and req.stream_options.get("include_usage")):
+                # OpenAI stream_options.include_usage: trailing chunk with
+                # empty choices + real token counts (EC-152).
+                usage = _usage_dict(
+                    self.registry.get_engine(req.model), prompt, accumulated)
+                yield ("data: " + json.dumps({
+                    "id": resp_id, "object": "chat.completion.chunk",
+                    "created": created, "model": req.model,
+                    "choices": [], "usage": usage}) + "\n\n")
             yield "data: [DONE]\n\n"
 
         except Exception as e:
@@ -1939,8 +2340,19 @@ class ForgeServer:
             yield "data: [DONE]\n\n"
 
     async def _stream_task(self, task_id: str, stream_queue: asyncio.Queue,
-                           future):
-        """SSE streaming generator for task-based generation."""
+                           future,
+                           request: Request | None = None,
+                           release_lock: threading.Lock | None = None):
+        """SSE streaming generator for task-based generation.
+
+        Each ``queue.get`` races the producer's ``future`` — if the
+        dispatcher fails before pushing the ``None`` sentinel, the future
+        carries the exception and we surface it instead of hanging
+        forever (EC-073 server half).  ``release_lock`` is the per-task
+        serialization lock handed over by the route (EC-198); it is
+        released in ``finally`` so the history pair stays atomic and no
+        error path can strand it.
+        """
         resp_id = f"task-{task_id}"
         created = int(time.time())
 
@@ -1959,12 +2371,52 @@ class ForgeServer:
             yield _sse_chunk({"role": "assistant", "content": ""})
 
             while True:
-                chunk = await stream_queue.get()
+                get_next = asyncio.ensure_future(stream_queue.get())
+                fin = asyncio.wrap_future(future)
+                done, _pending = await asyncio.wait(
+                    {get_next, fin},
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=_STREAM_IDLE_TIMEOUT_S)
+                if not done:
+                    get_next.cancel()
+                    fin.cancel()
+                    raise TimeoutError(
+                        "task stream stalled: no chunk and no producer "
+                        f"completion for {_STREAM_IDLE_TIMEOUT_S:.0f}s")
+                if get_next in done:
+                    fin.cancel()
+                    chunk = get_next.result()
+                else:
+                    # Producer finished before the sentinel arrived —
+                    # surface its error rather than blocking (EC-073).
+                    exc = future.exception()
+                    if exc is not None:
+                        get_next.cancel()
+                        raise exc
+                    # Normal completion: queued chunks may still be in
+                    # flight — drain until the sentinel with a short grace.
+                    while True:
+                        try:
+                            chunk = await asyncio.wait_for(
+                                get_next, timeout=1.0)
+                        except asyncio.TimeoutError:
+                            chunk = None
+                        if chunk is None:
+                            break
+                        clean = _strip_markers(chunk)
+                        if clean:
+                            yield _sse_chunk({"content": clean})
+                        get_next = asyncio.ensure_future(
+                            stream_queue.get())
+                    break
                 if chunk is None:  # sentinel = end of stream
                     break
                 clean = _strip_markers(chunk)
                 if clean:
                     yield _sse_chunk({"content": clean})
+                if (request is not None
+                        and await request.is_disconnected()):
+                    break  # EC-066: dropped client — stop consuming
 
             yield _sse_chunk({}, finish_reason="stop")
             yield "data: [DONE]\n\n"
@@ -1980,8 +2432,14 @@ class ForgeServer:
             }
             yield f"data: {json.dumps(error_data)}\n\n"
             yield "data: [DONE]\n\n"
+        finally:
+            if release_lock is not None:
+                # threading.Lock — release is not owner-bound, safe to
+                # call from this (or any) loop thread.
+                self._release_task_lock(release_lock)
 
-    async def _stream_completion(self, req: CompletionRequest):
+    async def _stream_completion(self, req: CompletionRequest,
+                                 request: Request | None = None):
         """SSE streaming generator for text completions."""
         resp_id = f"cmpl-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
@@ -1997,8 +2455,8 @@ class ForgeServer:
             }
             return f"data: {json.dumps(chunk_data)}\n\n"
 
-        try:
-            for text_chunk in self.registry.generate_stream(
+        def _gen():
+            return self.registry.generate_stream(
                 req.model, req.prompt,
                 max_new_tokens=req.max_tokens,
                 temperature=req.temperature,
@@ -2012,7 +2470,15 @@ class ForgeServer:
                 dry_penalty_last_n=req.dry_penalty_last_n,
                 stop=req.stop,
                 seed=req.seed,
-            ):
+                eos_token_ids=req.stop_token_ids,
+            )
+
+        try:
+            # Worker thread + asyncio.Queue — never iterate the blocking
+            # generator on the event loop (EC-057); disconnect polling
+            # cancels the worker and frees the engine gen-lock (EC-066).
+            async for text_chunk in self._aiter_stream(
+                    _gen, request=request):
                 clean = _strip_markers(text_chunk)
                 if clean:
                     yield _sse_chunk(text=clean)
