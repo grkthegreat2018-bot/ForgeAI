@@ -1,9 +1,9 @@
 """Post-fix verification: real Chub path (Kobold -> completions) +
 memory-growth check across repeated requests."""
 import json
+import subprocess as sp
 import sys
 import urllib.request
-import subprocess as sp
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -24,7 +24,8 @@ def vram():
 
 
 LT, GT = chr(60) + chr(124), chr(124) + chr(62)
-mk = lambda n: LT + n + GT
+def mk(n):
+    return LT + n + GT
 
 CARD = ("Seraphina is a sharp-witted elven ranger traveling with the user. "
         "She speaks plainly, teases often, and hates formal titles.\n\n")

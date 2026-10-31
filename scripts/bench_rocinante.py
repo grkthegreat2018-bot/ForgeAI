@@ -33,6 +33,7 @@ PROMPT = ("[INST]You are a fantasy bard. Compose a four-line verse about "
 def stage_parity(gguf_path, ckpt_dir):
     """Greedy next-token agreement: llama.cpp logits vs Forge logits."""
     from llama_cpp import Llama
+
     from forge.engine.forge_engine import ForgeEngine
 
     print("[parity] llama_cpp baseline...")

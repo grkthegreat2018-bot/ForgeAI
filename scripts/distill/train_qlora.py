@@ -12,13 +12,14 @@ VRAM (RTX 5070 12GB): 4bit base ~8GB + LoRA ~0.6GB + activations ~1.5GB.
 """
 from __future__ import annotations
 
-import argparse, json, random
+import argparse
+import json
+import random
 
 import torch
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          BitsAndBytesConfig, Trainer, TrainingArguments)
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, Trainer, TrainingArguments
 
 MODEL = "OBLITERATUS/Gemma-4-12B-OBLITERATED"
 # Gemma4 turn markers, built by concat to keep them literal-safe.

@@ -15,8 +15,8 @@ outliers (real trained weights have this profile).
 Runs on CUDA when available (much faster MLP fitting).
 """
 import math
+
 import torch
-import torch.nn.functional as F
 
 DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Device: {DEV}")
@@ -76,7 +76,7 @@ def inr_compress(W, target_params, epochs=500, lr=1e-2, seed=0):
     ).to(DEV)
     opt = torch.optim.Adam(mlp.parameters(), lr=lr)
     target = W.float().reshape(-1, 1)
-    for ep in range(epochs):
+    for _ep in range(epochs):
         pred = mlp(coords)
         loss = (pred - target).pow(2).mean()
         opt.zero_grad(); loss.backward(); opt.step()
@@ -108,13 +108,13 @@ def test_weight(m, n, rank, label, budgets):
     print(f"{'='*60}")
     print(f"{'budget':>10} {'method':>16} {'actual':>10} {'compress':>10} {'rel_err':>10}")
     for budget in budgets:
-        r_svd, a_svd, rk = svd_compress(W, budget)
+        r_svd, a_svd, _rk = svd_compress(W, budget)
         e_svd = rel_err(r_svd, W)
         print(f"{budget:>10} {'SVD':>16} {a_svd:>10} {m*n/a_svd:>9.1f}x {e_svd:>10.4f}")
         r_inr, a_inr, h = inr_compress(W, budget, epochs=300)
         e_inr = rel_err(r_inr, W)
         print(f"{budget:>10} {'INR(h=%d)' % h:>16} {a_inr:>10} {m*n/a_inr:>9.1f}x {e_inr:>10.4f}")
-        r_ir, a_ir, h2, k = inr_plus_residual(W, budget, residual_frac=0.03, epochs=300)
+        r_ir, a_ir, _h2, k = inr_plus_residual(W, budget, residual_frac=0.03, epochs=300)
         e_ir = rel_err(r_ir, W)
         print(f"{budget:>10} {'INR+res(k=%d)' % k:>16} {a_ir:>10} {m*n/a_ir:>9.1f}x {e_ir:>10.4f}")
     if DEV.type == 'cuda':

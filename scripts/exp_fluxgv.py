@@ -9,15 +9,19 @@ Protocol:
      slots - held-out (word,unseen-digit) pairs test generalization
   B) real bytes (docs/research) held-out NLL/top1, base vs +gv
 """
-import os, sys, random, time
+import os
+import random
+import sys
+import time
 from pathlib import Path
 
 ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, str(ROOT))
 
 import torch
-from forge.model.flux import FluxConfig, FluxLM
+
 from forge.exp.harness import log_result
+from forge.model.flux import FluxConfig, FluxLM
 
 WORDS = list(b"abcdefghij")          # 10 lowercase 'word' contexts
 DIG_TRAIN = list(b"0123456789")[:8]  # 8 train digits, '8','9' held out
@@ -51,8 +55,8 @@ def tf(model_proto, ids):
 
 def run(name, vocab, orders, train, held, eval_n, fix_tail=1):
     held = held[:eval_n]
-    for tag, kw in [("base", {}), ("gv", dict(gen_variants=True,
-                                             gen_fix_tail=fix_tail))]:
+    for tag, kw in [("base", {}), ("gv", {"gen_variants": True,
+                                             "gen_fix_tail": fix_tail})]:
         torch.cuda.reset_peak_memory_stats()
         t0 = time.perf_counter()
         m = FluxLM(FluxConfig(vocab_size=vocab, device="cuda",

@@ -1,9 +1,11 @@
 """Find max batch size for BatchedDecoding on Qwen 0.5B with 12GB VRAM."""
 import sys
+
 sys.path.insert(0, ".")
 sys.stdout.reconfigure(encoding="utf-8")
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
 from forge.engine.batched_decoding import BatchedDecoding
 
 device = "cuda"

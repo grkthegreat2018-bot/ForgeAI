@@ -1,12 +1,14 @@
 """Test the trained LoRA adapter on novel tool-use prompts."""
 import os
 import sys
+
 os.environ["FORGE_NO_COMPILE"] = "1"
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _project_root)
 os.chdir(_project_root)
 
 import torch
+
 from forge.engine.forge_engine import ForgeEngine
 from forge.self_play.discovery.qwen_adapter import render_messages_for_config
 

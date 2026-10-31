@@ -18,9 +18,7 @@ Usage:
 """
 import argparse
 import json
-import os
 import re
-import sys
 import time
 from pathlib import Path
 
@@ -36,8 +34,7 @@ STEM_KEYWORDS = {
     "python", "javascript", "java", "rust", "golang", "typescript", "c++",
     "assembly", "machine code", "instruction set", "register", "pipeline",
     "parallel", "concurrent", "asynchronous", "distributed", "protocol",
-    "tcp", "udp", "http", "dns", "encryption", "cipher", "key", "hash",
-    "digital signature", "certificate", "authentication", "authorization",
+    "tcp", "udp", "http", "dns", "encryption", "cipher", "key", "digital signature", "certificate", "authentication", "authorization",
     "machine learning", "neural network", "deep learning", "tensor",
     "gradient", "optimization", "loss function", "backpropagation",
     "transformer", "attention", "embedding", "tokenization", "language model",
@@ -49,14 +46,12 @@ STEM_KEYWORDS = {
     "algebra", "calculus", "geometry", "topology", "trigonometry",
     "probability", "statistics", "combinatorics", "number theory",
     "differential", "integral", "derivative", "equation", "polynomial",
-    "function", "limit", "convergence", "series", "sequence", "set theory",
+    "limit", "convergence", "series", "sequence", "set theory",
     "logic", "boolean", "proposition", "predicate", "quantifier",
-    "inference", "deduction", "induction", "abduction", "syllogism",
-    "discrete mathematics", "graph theory", "game theory", "optimization",
-    "linear programming", "constraint", "objective", "feasible",
+    "deduction", "induction", "abduction", "syllogism",
+    "discrete mathematics", "graph theory", "game theory", "linear programming", "constraint", "objective", "feasible",
     "modular", "prime", "factor", "divisor", "congruence", "permutation",
-    "combination", "binomial", "exponential", "logarithm", "matrix",
-    "eigenvalue", "eigenvector", "determinant", "inverse", "transpose",
+    "combination", "binomial", "exponential", "logarithm", "eigenvalue", "eigenvector", "determinant", "inverse", "transpose",
     # Physics / Chemistry / Biology (reasoning-relevant)
     "physics", "quantum", "relativity", "mechanics", "thermodynamics",
     "entropy", "energy", "force", "momentum", "velocity", "acceleration",
@@ -66,13 +61,12 @@ STEM_KEYWORDS = {
     "biology", "cell", "dna", "rna", "protein", "enzyme", "gene",
     "evolution", "organism", "neuron", "synapse", "brain",
     # Engineering / Technology
-    "engineering", "circuit", "signal", "frequency", "amplifier",
+    "engineering", "circuit", "signal", "amplifier",
     "transistor", "semiconductor", "integrated circuit", "microprocessor",
     "digital", "analog", "sensor", "actuator", "robotics", "control system",
     "feedback", "stability", "oscillation", "resonance",
     # Logic / Philosophy of mind / cognition
-    "cognition", "cognitive", "reasoning", "rational", "logic",
-    "inference", "deductive", "inductive", "abductive",
+    "cognition", "cognitive", "reasoning", "rational", "deductive", "inductive", "abductive",
     "philosophy of mind", "consciousness", "computation", "turing",
     "complexity", "computability", "decidability", "formal language",
     "automaton", "finite state", "pushdown", "turing machine",
@@ -254,8 +248,8 @@ def main():
 
     print(f"Filtering {len(shards)} shards from {input_dir}")
     print(f"Output: {output_dir}")
-    print(f"Keeping: STEM, coding, math, logic, algorithms, AI/ML, physics, chemistry, biology, engineering")
-    print(f"Removing: politics, geography, sports, entertainment, religion, fashion, food\n")
+    print("Keeping: STEM, coding, math, logic, algorithms, AI/ML, physics, chemistry, biology, engineering")
+    print("Removing: politics, geography, sports, entertainment, religion, fashion, food\n")
 
     stats = {"kept": 0, "rejected": 0, "parse_errors": 0}
     t0 = time.time()
@@ -274,7 +268,7 @@ def main():
     total = stats["kept"] + stats["rejected"]
     pct = stats["kept"] / max(total, 1) * 100
     print(f"\n{'='*60}")
-    print(f"  FILTERING COMPLETE")
+    print("  FILTERING COMPLETE")
     print(f"{'='*60}")
     print(f"  Input articles:  {total}")
     print(f"  Kept (STEM):     {stats['kept']} ({pct:.1f}%)")

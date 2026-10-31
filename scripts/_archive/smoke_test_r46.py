@@ -1,24 +1,26 @@
 #!/usr/bin/env python
 """R46 Novel Quantization Smoke Test — CPU, fast."""
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn
 
 from forge.engine.quant.novel_quant_r46 import (
-    HadamardRotatedFP4Linear,
-    GPTQFP4Linear,
     AWQFP4Linear,
-    OptimalGridFP4Linear,
+    GPTQFP4Linear,
     HadamardGPTQFP4Linear,
-    quantize_model_hadamard_rotated_fp4,
-    quantize_model_gptq_fp4,
-    quantize_model_awq_fp4,
-    quantize_model_optimal_grid_fp4,
-    quantize_model_hadamard_gptq_fp4,
+    HadamardRotatedFP4Linear,
+    OptimalGridFP4Linear,
     collect_activations,
     estimate_r46_memory,
+    quantize_model_awq_fp4,
+    quantize_model_gptq_fp4,
+    quantize_model_hadamard_gptq_fp4,
+    quantize_model_hadamard_rotated_fp4,
+    quantize_model_optimal_grid_fp4,
 )
 
 

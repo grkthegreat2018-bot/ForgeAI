@@ -17,7 +17,11 @@ Usage (training venv):
 """
 from __future__ import annotations
 
-import argparse, json, os, shutil, struct
+import argparse
+import json
+import os
+import shutil
+import struct
 
 from huggingface_hub import snapshot_download
 
@@ -60,7 +64,7 @@ def stream_rewrite(src_path, dst_path):
                 while left:
                     b = f.read(min(CHUNK, left))
                     if not b:
-                        raise IOError(f"short read at {k}")
+                        raise OSError(f"short read at {k}")
                     o.write(b)
                     left -= len(b)
     return len(new_header) - (1 if meta else 0), len(header) - len(new_header)

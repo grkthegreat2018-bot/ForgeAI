@@ -7,24 +7,25 @@ Tests that all R45 algorithms:
   - Can convert a small model
   - Memory estimation works
 """
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn
 
 from forge.engine.quant.novel_quant_r45 import (
-    WaveletLiftLinear,
+    LloydMaxRotatedKVQuantizer,
     SchurABFP4Linear,
     SVDLiftBinaryLinear,
-    LloydMaxRotatedKVQuantizer,
-    requant_refine_model,
-    quantize_model_wavelet_lift,
+    WaveletLiftLinear,
+    _haar_matrix,
+    estimate_r45_memory,
     quantize_model_schur_ab_fp4,
     quantize_model_svd_lift_binary,
-    estimate_r45_memory,
-    _haar_matrix,
+    quantize_model_wavelet_lift,
+    requant_refine_model,
 )
 
 
@@ -205,8 +206,8 @@ def test_model_conversion():
 def test_requant_refine():
     """Test ReQuant refinement on a quantized model."""
     import copy
+
     from forge.engine.quant.novel_quant_r44 import (
-        AdaptiveBlockFP4Linear,
         quantize_model_adaptive_block_fp4,
     )
 
@@ -223,7 +224,7 @@ def test_requant_refine():
     # Compute error before refinement
     def compute_err(m1, m2):
         errs = []
-        for (n1, mod1), (n2, mod2) in zip(m1.named_modules(), m2.named_modules()):
+        for (_n1, mod1), (_n2, mod2) in zip(m1.named_modules(), m2.named_modules()):
             if isinstance(mod1, nn.Linear) and hasattr(mod2, '_dequantize_weight'):
                 w1 = mod1.weight.data.float()
                 w2 = mod2._dequantize_weight(torch.float32)

@@ -4,14 +4,16 @@ Phase A: decoding x kv_cache on bf16 weights.
 Phase B: quantize sweep (weights restored between cells by engine).
 Logs to .devin/exp_results.jsonl.
 """
-import os, sys, traceback
+import os
+import sys
+import traceback
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import torch
-from forge.exp.harness import (QWEN_ID, load_engine, bench_engine,
-                               bench_decode, log_result, wikitext_docs)
+
+from forge.exp.harness import QWEN_ID, bench_decode, load_engine, log_result, wikitext_docs
 
 PROMPT = "The quick brown fox jumps over the lazy dog and runs through the forest."
 DECODINGS = ["standard", "ngram_speculative", "uno", "dola", "batched"]

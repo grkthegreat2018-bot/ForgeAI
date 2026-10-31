@@ -1,7 +1,9 @@
 """Download github code from codeparrot (ungated, streaming).
 Targets ~5GB of Python/JS/TS/Rust/Go/C++/Java code.
 """
-import json, os, sys, time
+import json
+import os
+import time
 from pathlib import Path
 
 # Repo-root anchored output (EC-078 — previously wrote into scripts/).
@@ -27,7 +29,7 @@ def main():
                     break
 
     import datasets
-    print(f"[github_code] Loading codeparrot/github-code (streaming=True) ...", flush=True)
+    print("[github_code] Loading codeparrot/github-code (streaming=True) ...", flush=True)
     ds = datasets.load_dataset("codeparrot/github-code", split="train",
                                streaming=True, token=token, trust_remote_code=True)
 
@@ -89,7 +91,7 @@ def main():
         shard_path.unlink()
 
     elapsed = time.time() - t0
-    print(f"\n=== GitHub Code Download Complete ===")
+    print("\n=== GitHub Code Download Complete ===")
     print(f"  Files: {total_files}")
     print(f"  Total: {total_bytes/1e9:.2f} GB")
     print(f"  Skipped: {skipped}")

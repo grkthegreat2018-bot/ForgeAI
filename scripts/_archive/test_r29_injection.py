@@ -36,8 +36,15 @@ Usage:
   python scripts/test_r29_injection.py --phase 1
   python scripts/test_r29_injection.py --phase 2 --process full
 """
-import os, sys, json, math, glob, time, random, argparse
-from contextlib import contextmanager, ExitStack
+import argparse
+import glob
+import json
+import math
+import os
+import random
+import sys
+import time
+from contextlib import ExitStack, contextmanager
 
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
@@ -46,6 +53,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
+
 from forge.engine.forge_engine import ForgeEngine
 
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -450,13 +458,13 @@ def run_condition(engine, tag, process, rank, n_facts, epochs=EPOCHS_DEFAULT,
 
     stats = {"steps": 0, "train_time": 0.0, "final_loss": float("nan")}
     if train:
-        cfg = dict(lr=lr, epochs=epochs, batch=BATCH,
-                   replay_ratio=process.get("replay", 0.0),
-                   kl_weight=process.get("kl", 0.0),
-                   sched=process.get("sched", False),
-                   ema=process.get("ema", 0.0),
-                   early_stop=process.get("early_stop", 0),
-                   qa_anchor=process.get("qa_anchor", False))
+        cfg = {"lr": lr, "epochs": epochs, "batch": BATCH,
+                   "replay_ratio": process.get("replay", 0.0),
+                   "kl_weight": process.get("kl", 0.0),
+                   "sched": process.get("sched", False),
+                   "ema": process.get("ema", 0.0),
+                   "early_stop": process.get("early_stop", 0),
+                   "qa_anchor": process.get("qa_anchor", False)}
         stats = train_lora(engine, loras, inject_subset, cfg)
 
     # Merge verification (per module):
@@ -486,7 +494,7 @@ def run_condition(engine, tag, process, rank, n_facts, epochs=EPOCHS_DEFAULT,
     unfreeze_parent(engine.model)          # user flow: unfreeze parent ...
     merge_trio(engine.model)               # ... then merge delta into parent
     max_rel = 0.0
-    for i, n in enumerate(TRIO):
+    for _i, n in enumerate(TRIO):
         merged_lin = getattr(mlp, n)
         assert torch.equal(merged_lin.weight.data, expected[n].data), \
             f"merge weight reconstruction failed on {n}"
@@ -656,7 +664,7 @@ def main():
     ap.add_argument("--rank", type=int, default=16)
     args = ap.parse_args()
 
-    print(f"=== R29: LoRA knowledge injection (Qwen 2.5 0.5B via ForgeEngine) ===")
+    print("=== R29: LoRA knowledge injection (Qwen 2.5 0.5B via ForgeEngine) ===")
     print(f"Device: {DEV}  facts: {len(INJECT)} inject / {len(KNOWN)} known / "
           f"{len(HELD)} held / {len(ANCHORS)} anchors", flush=True)
 

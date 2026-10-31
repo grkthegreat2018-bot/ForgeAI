@@ -21,28 +21,33 @@ Baselines tested:
 
 Runs on CUDA. Loads real weights from V9 checkpoint.
 """
-import os, sys, math, time
+import math
+import os
+import sys
+import time
+
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import torch
-import torch.nn.functional as F
 from safetensors import safe_open
 
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float32
 CKPT = r"D:\windsurf\ForgeAI\research\checkpoints\ForgeLM_V2_Light.safetensors"
 
-from forge.engine.quant.nvfp4_quant import (
-    _quantize_to_fp4, _dequantize_fp4,
-)
 from forge.engine.quant.novel_quant import (
-    _optimal_fp4_scale, _quantize_to_fp4_adaptive,
-    quantize_asfp4_dequant, quantize_sr_fp4, quantize_iri_fp4,
-    quantize_tsd_fp4, quantize_hpr_fp4,
+    _quantize_to_fp4_adaptive,
+    quantize_hpr_fp4,
+    quantize_iri_fp4,
+    quantize_sr_fp4,
+    quantize_tsd_fp4,
+)
+from forge.engine.quant.nvfp4_quant import (
+    _dequantize_fp4,
+    _quantize_to_fp4,
 )
 from tests.fixtures.keys.quantization.bitnet_residual_key import ternary_quantize
-
 
 # ──────────────────────────────────────────────────────────────────────────
 # Metrics
@@ -282,8 +287,8 @@ def main():
             avg_oe = sum(oes) / len(oes) if oes else 0
             print(f"  {algo:<22} {avg_sq:>10.2f} {avg_bpw:>10.3f} {avg_oe:>12.4f}")
 
-    print(f"\n  KEY: R25 novel algorithms (AdditiveFP4, IRI-Alloc, LatticeFP4)")
-    print(f"  must beat these numbers on the SAME weights at <= 2.0 bpw.")
+    print("\n  KEY: R25 novel algorithms (AdditiveFP4, IRI-Alloc, LatticeFP4)")
+    print("  must beat these numbers on the SAME weights at <= 2.0 bpw.")
 
 
 if __name__ == "__main__":

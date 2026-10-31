@@ -20,7 +20,11 @@ Usage (Forge venv - llama_cpp lives there):
 """
 from __future__ import annotations
 
-import argparse, itertools, json, os, random, sys, time
+import argparse
+import json
+import os
+import random
+import time
 
 # EC-091: no machine-specific paths — pass --gguf or set ROC_GGUF env var.
 GGUF = os.environ.get("ROC_GGUF", "")
@@ -160,7 +164,7 @@ def make_convo(llm, rng, max_tokens, temp, turns):
             + f"\n\n[scene: {hook} at {setting}]")
     msgs = [{"role": "system", "content": sys_p},
             {"role": "user", "content": user}]
-    for t in range(turns):
+    for _t in range(turns):
         prompt = mistral_wrap(msgs)
         reply = gen(llm, prompt, max_tokens, temp, stop=["[INST]", "</s>"])
         if len(reply) < 120:

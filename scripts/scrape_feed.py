@@ -28,13 +28,12 @@ under tag "<tag>:<source>" so a bad source is one revert_tag away.
 """
 import argparse
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # siblings
 
-from forge import scrape_feed as sf  # noqa: E402
+from forge import scrape_feed as sf
 
 
 def _seed_words() -> list[str]:
@@ -150,9 +149,9 @@ def main() -> int:
     elif args.to == "model":
         if not args.model:
             ap.error("--to model needs --model <path.flux>")
+        from forge.engine.engine_common import _tokenizer_for_vocab
         from forge.model.flux import FluxLM
         from research.tokenizer_cache import get_tokenizer
-        from forge.engine.engine_common import _tokenizer_for_vocab
         model = FluxLM.load(args.model, device=args.device,
                             cuda_primary=args.cuda_primary or None)
         tok = get_tokenizer(_tokenizer_for_vocab(model.vocab_size))

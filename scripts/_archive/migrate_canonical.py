@@ -1,8 +1,9 @@
 """One-shot migration: copy findings from old per-profile DBs into the
 shared forge_evolve.db and populate canonical_generators/surrogate tables."""
+import os
 import sqlite3
 import sys
-import os
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 RESULTS = "D:/windsurf/ForgeAI/research/results"

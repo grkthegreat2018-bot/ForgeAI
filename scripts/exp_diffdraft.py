@@ -4,17 +4,24 @@ Trains a parallel diffusion draft head on frozen Qwen, then measures
 greedy spec-verify acceptance and effective decode speed vs AR baseline.
 Fidelity check: hybrid output ids must equal plain greedy ids.
 """
-import os, sys, time
+import os
+import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import torch
-from forge.exp.harness import (QWEN_ID, load_engine, log_result,
-                               wikitext_docs)
-from forge.exp.diffdraft import (DiffusionDraftHead, MedusaDraftHead,
-                                 spec_verify, fixup_step,
-                                 train_draft_head, train_medusa_head)
+
+from forge.exp.diffdraft import (
+    DiffusionDraftHead,
+    MedusaDraftHead,
+    fixup_step,
+    spec_verify,
+    train_draft_head,
+    train_medusa_head,
+)
+from forge.exp.harness import QWEN_ID, load_engine, log_result, wikitext_docs
 
 MAX_LEN = 256
 K = 4

@@ -17,17 +17,20 @@ Corpora: synthetic sparse Markov chain (rev's hardest case — the
 generative direction is all there is) and real markdown prose at byte
 level (degenerate continuations exist for rev to suppress).
 """
-import os, sys, time, random
+import os
+import random
+import sys
+import time
 from pathlib import Path
 
 ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, str(ROOT))
 
 import torch
-from forge.model.flux import FluxConfig, FluxLM
-from forge.model.flux.revmem import ReverseMem, generate_rerank, \
-    joint_prev_nll
+
 from forge.exp.harness import log_result
+from forge.model.flux import FluxConfig, FluxLM
+from forge.model.flux.revmem import ReverseMem, joint_prev_nll
 
 V_MARKOV = 2048
 K_CANDS = 4
@@ -116,10 +119,10 @@ def gen_consistency(model_proto, rev_frozen, prompt, max_new=64):
 def run_corpus(name, vocab, train, held, eval_n):
     orders_def = (3, 4, 6, 8, 12, 16, 24, 32, 48, 64)
     variants = {
-        "base": dict(orders=orders_def),
-        "o1": dict(orders=(1,) + orders_def),
-        "rev": dict(orders=orders_def, rev_channel=True),
-        "rev+o1": dict(orders=(1,) + orders_def, rev_channel=True),
+        "base": {"orders": orders_def},
+        "o1": {"orders": (1,) + orders_def},
+        "rev": {"orders": orders_def, "rev_channel": True},
+        "rev+o1": {"orders": (1,) + orders_def, "rev_channel": True},
     }
     held = held[:eval_n]
     rev_f = ReverseMem(vocab)

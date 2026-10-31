@@ -12,8 +12,7 @@ Also tests: does the RoPE component dominate? (fit K_raw vs K_rope separately)
 Runs on CUDA.
 """
 import math
-import sys
-import os
+
 import torch
 import torch.nn.functional as F
 from safetensors import safe_open
@@ -64,7 +63,7 @@ def fit_fourier(target, basis):
 
 def attention_output(q, k, v):
     """q [seq, n_heads, hd], k/v [seq, n_kv, hd]. GQA."""
-    seq, n_heads, hd = q.shape
+    _seq, n_heads, hd = q.shape
     n_kv = k.shape[1]
     rep = n_heads // n_kv
     k_rep = k.repeat_interleave(rep, dim=1)
@@ -83,9 +82,11 @@ def load_real_weights(layer_idx=2):
     return W_q.float(), W_k.float(), W_v.float()
 
 
-def test_real_spectral_kv(seq_lens=[512, 2048, 8192], max_freq=64):
+def test_real_spectral_kv(seq_lens=None, max_freq=64):
+    if seq_lens is None:
+        seq_lens = [512, 2048, 8192]
     W_q, W_k, W_v = load_real_weights(layer_idx=2)
-    print(f"Loaded real LFM2.5 layer-2 weights:")
+    print("Loaded real LFM2.5 layer-2 weights:")
     print(f"  W_q: {W_q.shape}, W_k: {W_k.shape}, W_v: {W_v.shape}")
     print(f"  W_k stats: mean={W_k.mean():.4f}, std={W_k.std():.4f}, "
           f"max={W_k.abs().max():.4f}")

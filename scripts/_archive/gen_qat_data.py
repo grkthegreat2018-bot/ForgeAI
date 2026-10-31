@@ -1,9 +1,13 @@
 """Generate self-distillation data from FP16 teacher, save as JSONL for sft_train."""
-import sys, json, time
+import json
+import sys
+import time
+
 sys.path.insert(0, ".")
 sys.stdout.reconfigure(encoding="utf-8")
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
 from forge.engine.batched_decoding import BatchedDecoding
 
 device = "cuda"
@@ -120,6 +124,7 @@ print(f"Generated {len(all_outputs)} samples in {time.time()-t0:.1f}s")
 # Save as JSONL in sft_train format: {"messages": [...]}
 out_path = "data/qat_self_distill.jsonl"
 import os
+
 os.makedirs("data", exist_ok=True)
 with open(out_path, "w", encoding="utf-8") as f:
     for i, out in enumerate(all_outputs):

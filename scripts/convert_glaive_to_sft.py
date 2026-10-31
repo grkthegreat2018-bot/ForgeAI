@@ -17,9 +17,7 @@ Tool calls are converted to Pythonic format for rendering by sft_train.py:
 """
 import json
 import re
-import sys
 from pathlib import Path
-
 
 _FUNCTIONCALL_RE = re.compile(
     r'<functioncall>\s*(.+?)(?=\n\n|\Z)',
@@ -176,7 +174,7 @@ def convert(input_path: str, output_path: str, max_examples: int = 0) -> int:
     n_with_tools = 0
 
     with open(output_path, "w", encoding="utf-8") as out:
-        for i, item in enumerate(data):
+        for _i, item in enumerate(data):
             if max_examples > 0 and n_written >= max_examples:
                 break
 

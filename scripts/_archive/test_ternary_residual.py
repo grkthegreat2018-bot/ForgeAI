@@ -10,7 +10,6 @@ Compares: pure ternary vs ternary+residual vs INT8 vs bf16 baseline.
 Runs on CUDA.
 """
 import torch
-import torch.nn.functional as F
 
 DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Device: {DEV}")
@@ -49,7 +48,7 @@ def int8_quant(W):
 
 def ternary_plus_residual(W, k_frac):
     """Ternary on all rows, then restore top-k% error rows to dense bf16."""
-    W_t, scale = bitnet_ternary(W)
+    W_t, _scale = bitnet_ternary(W)
     err = (W - W_t).abs().sum(dim=1)
     k = int(W.shape[0] * k_frac)
     if k == 0:

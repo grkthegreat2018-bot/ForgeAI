@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import time
 from pathlib import Path
+import contextlib
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
@@ -229,10 +229,8 @@ def run() -> None:
     shard_fh.close()
     # Remove trailing empty shard if nothing was written to it
     if shard_bytes == 0 and shard_idx > 0:
-        try:
+        with contextlib.suppress(OSError):
             shard_path.unlink()
-        except OSError:
-            pass
 
     elapsed = time.time() - t0
 

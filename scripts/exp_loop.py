@@ -5,17 +5,18 @@ B) NLL vs iteration count (untrained looping)
 C) learned LoopGates (zero-init, ~8 params) — does ANY depth reuse help?
 D) decode-time loop cost
 """
-import os, sys, time
+import os
+import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import torch
 import torch.nn.functional as F
-from forge.exp.harness import (QWEN_ID, load_engine, log_result,
-                               wikitext_docs)
-from forge.exp.loopdepth import (looped_prefill, looped_decode_step,
-                                 train_loop_gates)
+
+from forge.exp.harness import QWEN_ID, load_engine, log_result, wikitext_docs
+from forge.exp.loopdepth import looped_decode_step, looped_prefill, train_loop_gates
 
 MAX_LEN = 256
 LOOP_LO, LOOP_HI = 8, 16

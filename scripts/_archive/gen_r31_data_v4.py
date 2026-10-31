@@ -82,9 +82,7 @@ def tc(name, **args):
         if isinstance(v, str):
             v = v.replace("\\", "\\\\").replace("'", "\\'")
             parts.append(f"{k}='{v}'")
-        elif isinstance(v, bool):
-            parts.append(f"{k}={v}")
-        elif isinstance(v, (int, float)):
+        elif isinstance(v, bool) or isinstance(v, (int, float)):
             parts.append(f"{k}={v}")
         else:
             parts.append(f"{k}={json.dumps(v)}")
@@ -173,7 +171,7 @@ made_up_tools_pool = [
 
 n_hermes = 0
 n_hermes_failed = 0
-with open(HF_DATASETS / "hermes_fc.jsonl", "r", encoding="utf-8") as f:
+with open(HF_DATASETS / "hermes_fc.jsonl", encoding="utf-8") as f:
     for line in f:
         line = line.strip()
         if not line:

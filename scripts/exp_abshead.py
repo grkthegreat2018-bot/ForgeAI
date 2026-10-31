@@ -6,17 +6,17 @@ B) train LatentThoughtHead h_t -> h_{t+4} (frozen model), report
 C) train the gated residual hint on next-token CE, report honest dNLL
 D) decode overhead: ms/tok with vs without the hint recompute
 """
-import os, sys, time
+import os
+import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import torch
-from forge.exp.harness import (QWEN_ID, load_engine, log_result,
-                               wikitext_docs)
-from forge.exp.abshead import (LatentThoughtHead, decode_ms_per_tok,
-                               eval_latent, hint_nll, train_hint,
-                               train_latent)
+
+from forge.exp.abshead import LatentThoughtHead, decode_ms_per_tok, eval_latent, hint_nll, train_hint, train_latent
+from forge.exp.harness import QWEN_ID, load_engine, log_result, wikitext_docs
 
 MAX_LEN = 256
 K = 4

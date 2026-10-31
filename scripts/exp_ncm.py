@@ -4,15 +4,16 @@ A) lossless attach check (gate=0)
 B) train NCM params only (4 last blocks) on wikitext, eval dNLL
 C) decay-gate statistics (learned timescales)
 """
-import os, sys, time
+import os
+import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import torch
-import torch.nn.functional as F
-from forge.exp.harness import (QWEN_ID, load_engine, log_result,
-                               wikitext_docs)
+
+from forge.exp.harness import QWEN_ID, load_engine, log_result, wikitext_docs
 from forge.exp.ncm import attach_ncm, train_ncm
 
 MAX_LEN = 256

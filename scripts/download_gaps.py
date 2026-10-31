@@ -23,9 +23,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import sys
-import time
 from pathlib import Path
 
 DATA_ROOT = Path(__file__).resolve().parent.parent / "data"
@@ -72,7 +69,7 @@ def check_existing(path: Path) -> tuple[int, float]:
     if not path.exists():
         return 0, 0.0
     lines = 0
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for _ in f:
             lines += 1
     return lines, path.stat().st_size / 1e6

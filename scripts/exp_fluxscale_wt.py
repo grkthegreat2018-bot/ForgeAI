@@ -8,15 +8,18 @@ and held_docs (cross-domain transfer, same slice as exp_fluxscale).
 No gradient training; ingest = memory.  Same order/channel config as
 exp_fluxscale.run so numbers are directly comparable.
 """
-import os, sys, time
+import os
+import sys
+import time
 from pathlib import Path
 
 ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, str(ROOT))
 
 import torch
+
+from forge.exp.harness import load_hf, log_result
 from forge.model.flux import FluxConfig, FluxLM
-from forge.exp.harness import log_result, load_hf
 from scripts.exp_fluxscale import pool_bytes, tf
 
 V = 151936
@@ -33,10 +36,10 @@ def run_wt(name, segs, held_wt, held_docs, chunk=1 << 20,
         m = FluxLM.load(snap)
         n = int(getattr(m, "_count", -1))
     else:
-        cfg = dict(vocab_size=V, device="cuda", cuda_primary=True,
-                   sparse_taps=(), class_orders=(), word_orders=(),
-                   hybrid_taps=(), use_knn=False,
-                   orders=(1, 2, 3, 4, 6, 8, 12, 16, 24, 32))
+        cfg = {"vocab_size": V, "device": "cuda", "cuda_primary": True,
+                   "sparse_taps": (), "class_orders": (), "word_orders": (),
+                   "hybrid_taps": (), "use_knn": False,
+                   "orders": (1, 2, 3, 4, 6, 8, 12, 16, 24, 32)}
         cfg.update(kw)
         m = FluxLM(FluxConfig(**cfg))
         for ids, dom in segs:

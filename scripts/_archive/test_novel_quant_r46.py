@@ -19,24 +19,23 @@ import copy
 import gc
 import json
 import time
-import sys
 
 import torch
 import torch.nn as nn
 
+from forge.engine.quant.novel_quant_r45 import (
+    estimate_r45_memory,
+    quantize_model_schur_ab_fp4,
+)
 from forge.engine.quant.novel_quant_r46 import (
-    quantize_model_hadamard_rotated_fp4,
-    quantize_model_gptq_fp4,
-    quantize_model_awq_fp4,
-    quantize_model_optimal_grid_fp4,
-    quantize_model_hadamard_gptq_fp4,
-    quantize_model_hadamard_awq_fp4,
     collect_activations,
     estimate_r46_memory,
-)
-from forge.engine.quant.novel_quant_r45 import (
-    quantize_model_schur_ab_fp4,
-    estimate_r45_memory,
+    quantize_model_awq_fp4,
+    quantize_model_gptq_fp4,
+    quantize_model_hadamard_awq_fp4,
+    quantize_model_hadamard_gptq_fp4,
+    quantize_model_hadamard_rotated_fp4,
+    quantize_model_optimal_grid_fp4,
 )
 from forge.engine.quant.nvfp4_quant import quantize_model_nvfp4
 
@@ -235,7 +234,7 @@ def run_test(model_id, methods, device, max_seq_len=512, n_gen_tokens=30,
     if needs_calib:
         print(f"\nCollecting calibration activations ({n_calib_samples} samples per text)...")
         all_activations = {}
-        for i, calib_input_ids in enumerate(calib_input_ids_list):
+        for _i, calib_input_ids in enumerate(calib_input_ids_list):
             acts = collect_activations(model_fp, calib_input_ids,
                                         n_samples=n_calib_samples // len(calib_input_ids_list),
                                         device=device)
@@ -360,7 +359,7 @@ def run_test(model_id, methods, device, max_seq_len=512, n_gen_tokens=30,
     }
     with open('scripts/r46_quant_results.json', 'w') as f:
         json.dump(output, f, indent=2)
-    print(f"\nResults saved to scripts/r46_quant_results.json")
+    print("\nResults saved to scripts/r46_quant_results.json")
 
 
 if __name__ == "__main__":

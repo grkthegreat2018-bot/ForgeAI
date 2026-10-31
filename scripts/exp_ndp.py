@@ -5,15 +5,17 @@ Compares per-token cost of:
   B) NDP: host computes far partial, GPU combines    (exact, no migration)
   C) migrate far pages H2D each step, then attend    (naive tiered)
 """
-import os, sys, time
+import os
+import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import torch
+
 from forge.exp.harness import log_result
-from forge.exp.ndp import ndp_attention, attn_partial, ndp_combine, \
-    transfer_bytes
+from forge.exp.ndp import attn_partial, ndp_attention, transfer_bytes
 
 H, D = 14, 64          # Qwen2.5-0.5B query heads, head_dim
 T_LOCAL = 1024
@@ -41,25 +43,25 @@ def main():
         K_a = torch.cat([K_l, K_f.to(dev)], dim=1)
         V_a = torch.cat([V_l, V_f.to(dev)], dim=1)
 
-        def run_gpu():
+        def run_gpu(q=q, K_a=K_a, V_a=V_a):
             return attn_partial(q, K_a, V_a)
 
         out_ref = run_gpu()
         t_gpu = bench(run_gpu)
 
         # B) NDP: host partial + combine
-        def run_ndp():
+        def run_ndp(q=q, K_l=K_l, V_l=V_l, K_f=K_f, V_f=V_f):
             return ndp_attention(q, (K_l, V_l), (K_f, V_f))
 
         out_ndp = run_ndp()
         t_ndp = bench(run_ndp)
 
         # exactness check vs reference
-        m_r, s_r, acc_r = out_ref
+        _m_r, s_r, acc_r = out_ref
         err = float((acc_r / s_r.unsqueeze(-1) - out_ndp).abs().max())
 
         # C) migrate pages then attend
-        def run_migrate():
+        def run_migrate(q=q, K_l=K_l, V_l=V_l, K_f=K_f, V_f=V_f):
             Km = K_f.to(dev, non_blocking=True)
             Vm = V_f.to(dev, non_blocking=True)
             return attn_partial(q, torch.cat([K_l, Km], 1),

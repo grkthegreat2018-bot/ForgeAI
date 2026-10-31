@@ -23,10 +23,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import copy
 import gc
 import time
-import sys
 
 import torch
 import torch.nn as nn
@@ -34,26 +32,20 @@ import torch.nn as nn
 # ──────────────────────────────────────────────────────────────────────────
 # Imports
 # ──────────────────────────────────────────────────────────────────────────
-
 # Novel algorithms
 from forge.engine.quant.novel_quant_r44 import (
-    HadamardLiftLinear,
-    AdaptiveBlockFP4Linear,
-    SparseResidualINT3Linear,
-    TernaryLiftLinear,
-    quantize_model_hadamard_lift,
+    estimate_quantized_memory,
     quantize_model_adaptive_block_fp4,
+    quantize_model_hadamard_lift,
     quantize_model_sparse_residual_int3,
     quantize_model_ternary_lift,
-    estimate_quantized_memory,
 )
-
-# Baselines
-from forge.quant.inference_quant import quantize_model_int4, quantize_model_int8
 
 # FP4 baseline
 from forge.engine.quant.nvfp4_quant import quantize_model_nvfp4
 
+# Baselines
+from forge.quant.inference_quant import quantize_model_int4, quantize_model_int8
 
 # ──────────────────────────────────────────────────────────────────────────
 # Utilities
@@ -71,9 +63,7 @@ def model_weight_bytes(model: nn.Module) -> int:
         total += buf.numel() * buf.element_size()
     for name, param in model.named_parameters():
         # Skip bias (small), count weight params
-        if 'weight' in name or 'q_weight' in name or 'q_signs' in name or 'q_weights' in name:
-            total += param.numel() * param.element_size()
-        elif 'bias' in name:
+        if 'weight' in name or 'q_weight' in name or 'q_signs' in name or 'q_weights' in name or 'bias' in name:
             total += param.numel() * param.element_size()
         else:
             total += param.numel() * param.element_size()

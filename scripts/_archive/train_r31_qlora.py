@@ -11,15 +11,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import random
-import sys
 import time
 from pathlib import Path
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 FORGE_ROOT = Path(__file__).resolve().parent.parent
@@ -40,7 +37,7 @@ MAX_RANK = 64
 def load_examples(path: str) -> list[dict]:
     """Load JSONL examples (prompt/response or messages format)."""
     examples = []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -299,7 +296,7 @@ def main():
     model.eval()
 
     # Add LoRA adapters — FFN + attention (attention needed for tool-name copying from system prompt)
-    from forge.training.bitnet_lora import add_lora_adapters, merge_lora_adapters
+    from forge.training.bitnet_lora import add_lora_adapters
     n_adapters, lora_params_list = add_lora_adapters(
         model, rank=args.max_rank, alpha=args.max_rank * 2,
         target_modules=["w_gate", "w_up", "w_down", "q_proj", "v_proj", "out_proj", "in_proj"]
@@ -322,7 +319,7 @@ def main():
             print(f"  Resumed LoRA from {lora_ckpt} ({loaded} params loaded)")
 
     # ── Train ─────────────────────────────────────────────────────────────
-    print(f"\n[4/4] Training...")
+    print("\n[4/4] Training...")
     eff_batch = args.batch_size * args.grad_accum
     n_steps = (len(train_data) * args.epochs) // eff_batch
     # Round up to nearest multiple of eff_batch
@@ -346,7 +343,7 @@ def main():
     best_val_loss = float("inf")
     lr = args.lr
 
-    for epoch in range(args.epochs):
+    for _epoch in range(args.epochs):
         prefetcher.reset()
         optimizer.zero_grad()
 
@@ -429,7 +426,7 @@ def main():
             val_losses.append(vl_loss.item())
     final_val = sum(val_losses) / len(val_losses) if val_losses else 0
     print(f"\n  Final val_loss: {final_val:.4f}")
-    print(f"\n=== R31 complete ===")
+    print("\n=== R31 complete ===")
 
 
 if __name__ == "__main__":

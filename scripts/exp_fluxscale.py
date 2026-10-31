@@ -8,15 +8,18 @@ held-out docs slice: docs-only (190K) -> full local text pool
 VRAM: gpu_table_slots raised for the big pool (cells grow
 sublinearly with corpus but high orders mostly unique).
 """
-import os, sys, time
+import os
+import sys
+import time
 from pathlib import Path
 
 ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, str(ROOT))
 
 import torch
+
+from forge.exp.harness import load_hf, log_result
 from forge.model.flux import FluxConfig, FluxLM
-from forge.exp.harness import log_result, load_hf
 
 V = 151936
 
@@ -100,10 +103,10 @@ def tf(model_proto, ids, w_override=None, clone=True):
 def run(name, train_ids, held_ids, ret=None, **kw):
     torch.cuda.reset_peak_memory_stats()
     t0 = time.perf_counter()
-    cfg = dict(vocab_size=V, device="cuda", cuda_primary=True,
-               sparse_taps=(), class_orders=(), word_orders=(),
-               hybrid_taps=(), use_knn=False,
-               orders=(1, 2, 3, 4, 6, 8, 12, 16, 24, 32))
+    cfg = {"vocab_size": V, "device": "cuda", "cuda_primary": True,
+               "sparse_taps": (), "class_orders": (), "word_orders": (),
+               "hybrid_taps": (), "use_knn": False,
+               "orders": (1, 2, 3, 4, 6, 8, 12, 16, 24, 32)}
     cfg.update(kw)
     m = FluxLM(FluxConfig(**cfg))
     m.ingest(train_ids, tag="train")

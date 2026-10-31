@@ -17,6 +17,7 @@ adapts per head.
 Runs on CUDA.
 """
 import math
+
 import torch
 import torch.nn.functional as F
 
@@ -68,7 +69,7 @@ def poly_kernel_attention_learned(q, k, v, order=2, n_features=64, epochs=100, l
     omega = torch.nn.Parameter(torch.randn(n_heads, hd, n_features, device=DEV) / math.sqrt(hd))
     opt = torch.optim.Adam([omega], lr=lr)
     target = softmax_attention(q, k, v)
-    for ep in range(epochs):
+    for _ep in range(epochs):
         # Per-head feature map
         omega_q = omega.unsqueeze(1)  # [h, 1, d, f]
         phi_q = torch.cat([torch.ones(n_heads, seq, 1, device=DEV),
@@ -151,7 +152,7 @@ def test_seq_len(seq_len, n_heads=8, head_dim=64):
     e_gla = rel_err(out_gla, out_ref)
 
     print(f"\n--- seq_len={seq_len}, n_heads={n_heads}, hd={head_dim} ---")
-    print(f"  Softmax (ref):     err=0.0000, O(n^2) memory")
+    print("  Softmax (ref):     err=0.0000, O(n^2) memory")
     print(f"  Fixed poly (r=2):  err={e_fixed:.4f}, O(1) memory, 64 features")
     print(f"  Learned poly:      err={e_learned:.4f}, O(1) memory, {npar} learned params")
     print(f"  GLA:               err={e_gla:.4f}, O(1) memory (linear attention baseline)")

@@ -12,13 +12,14 @@ Usage:
     python ablation_benchmark.py --keys rope_share,wisparse,spec_attn
     python ablation_benchmark.py --quick  # fewer samples, faster
 """
+import argparse
+import json
 import os
 import sys
 import time
-import json
-import torch
-import argparse
 from pathlib import Path
+
+import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -226,9 +227,10 @@ def main():
     print("ForgeLM Key Ablation Benchmark")
     print("=" * 70)
 
+    from transformers import AutoTokenizer
+
     from forge.config import get_config
     from forge.model_loader import ModelLoader
-    from transformers import AutoTokenizer
 
     device = "cuda"
     prompts = TEST_PROMPTS[:4] if args.quick else TEST_PROMPTS
@@ -274,7 +276,7 @@ def main():
         all_keys = [k for k in all_keys if k[0] in selected]
 
     print(f"\n[3] Testing {len(all_keys)} keys...")
-    for key_name, apply_fn, revert_fn in all_keys:
+    for key_name, apply_fn, _revert_fn in all_keys:
         print(f"\n  [{key_name}]")
         try:
             # Reload fresh model to avoid key contamination

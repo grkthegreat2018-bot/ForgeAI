@@ -29,11 +29,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import random
-import string
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 # ─── Output directory ──────────────────────────────────────────────────────
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "research" / "data" / "finetune"
@@ -67,7 +65,7 @@ def gen_arithmetic(n: int, rng: random.Random) -> list[dict]:
         ("/", lambda a, b: a / b if b != 0 else None, "divide"),
     ]
     for _ in range(n):
-        op_sym, op_fn, op_name = rng.choice(ops)
+        op_sym, _op_fn, _op_name = rng.choice(ops)
         if op_sym == "/":
             b = rng.randint(2, 20)
             result = rng.randint(2, 50)
@@ -370,7 +368,7 @@ def gen_number_theory(n: int, rng: random.Random) -> list[dict]:
             prompt = f"Compute {a}^{b} mod {m}."
             # Show step-by-step modular exponentiation (square-and-multiply)
             steps = [f"{a}^{b} mod {m}", ""]
-            steps.append(f"Using modular exponentiation (square and multiply):")
+            steps.append("Using modular exponentiation (square and multiply):")
             cur = a % m
             steps.append(f"  {a} mod {m} = {cur}")
             for i in range(2, b + 1):
@@ -378,7 +376,7 @@ def gen_number_theory(n: int, rng: random.Random) -> list[dict]:
                 if i <= 3 or i == b:  # show first few + final
                     steps.append(f"  {a}^{i} mod {m} = {cur}")
                 elif i == 4:
-                    steps.append(f"  ... (continuing)")
+                    steps.append("  ... (continuing)")
             steps.append(f"\nAnswer: {a}^{b} mod {m} = {result}")
             response = "\n".join(steps)
         examples.append({"prompt": prompt, "response": response})
@@ -417,7 +415,7 @@ def gen_logic_syllogisms(n: int, rng: random.Random) -> list[dict]:
             premise1 = f"All {mid} {pred}."
             premise2 = f"All {minor_subj} are {mid}."
             conclusion = f"Therefore, all {minor_subj} {pred}."
-            answer = f"VALID. The conclusion follows from the premises by transitivity."
+            answer = "VALID. The conclusion follows from the premises by transitivity."
         else:
             # Invalid: affirming the consequent or undistributed middle
             premise1 = f"All {mid} {pred}."
@@ -893,12 +891,12 @@ def main():
         total += written
 
     print(f"\nTotal: {total} examples generated in {out_dir}")
-    print(f"\nTo use in training:")
-    print(f"  python -m research.training.runners.sft_train \\")
+    print("\nTo use in training:")
+    print("  python -m research.training.runners.sft_train \\")
     print(f"    --data {out_dir}/synthetic_arithmetic.jsonl \\")
     print(f"    --data {out_dir}/synthetic_algebra.jsonl \\")
     print(f"    --data {out_dir}/synthetic_logic.jsonl \\")
-    print(f"    ... (add all synthetic_*.jsonl files)")
+    print("    ... (add all synthetic_*.jsonl files)")
 
 
 if __name__ == "__main__":

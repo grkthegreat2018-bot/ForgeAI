@@ -6,9 +6,13 @@ import torch
 import torch.nn as nn
 
 from forge.engine.quant.novel_quant_r48 import (
-    NanoQuantLinear, BTCQuantLinear, TernaryPTQLinear,
-    quantize_model_nanoquant, quantize_model_btc, quantize_model_ternary_ptq,
+    BTCQuantLinear,
+    NanoQuantLinear,
+    TernaryPTQLinear,
     estimate_r48_memory,
+    quantize_model_btc,
+    quantize_model_nanoquant,
+    quantize_model_ternary_ptq,
 )
 
 
@@ -151,14 +155,14 @@ def test_cache_invalidation():
     # Second forward — should use cache
     out2 = q_lin(x)
     assert torch.allclose(out1, out2), "Cache gave different result"
-    print(f"  Cache reuse: OK")
+    print("  Cache reuse: OK")
 
     # Invalidate
     q_lin._invalidate_cache()
     assert q_lin._cached_weight is None, "Cache not invalidated"
     out3 = q_lin(x)
     assert torch.allclose(out1, out3), "Rebuild gave different result"
-    print(f"  Cache rebuild: OK")
+    print("  Cache rebuild: OK")
 
 
 def main():

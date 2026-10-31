@@ -31,10 +31,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling scripts
 
-from forge.model.flux import FluxConfig, FluxLM  # noqa: E402
-from research.tokenizer_cache import get_tokenizer  # noqa: E402
-from forge.engine.engine_common import _tokenizer_for_vocab  # noqa: E402
-
+from forge.engine.engine_common import _tokenizer_for_vocab
+from forge.model.flux import FluxConfig, FluxLM
+from research.tokenizer_cache import get_tokenizer
 
 _IM_START = chr(60) + "|im_start|" + chr(62)
 _IM_END = chr(60) + "|im_end|" + chr(62)
@@ -67,8 +66,7 @@ def _render_chat(turns, style: str = "natural") -> str:
         else:
             label = _CHAT_ROLE.get(role, role.capitalize())
             out.append(f"{label}: {v.strip()}")
-    return ("\n".join(out) if style != "plain" else "\n".join(out)) \
-        + ("\n" if out else "")
+    return "\n".join(out) + ("\n" if out else "")
 
 
 def _iter_texts(path: Path, field: str | None, dict_flatten: bool = False,

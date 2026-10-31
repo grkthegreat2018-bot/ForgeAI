@@ -25,7 +25,6 @@ rebase (contrast case).
 Runs on CUDA.
 """
 import torch
-import torch.nn.functional as F
 
 DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Device: {DEV}")
@@ -79,7 +78,7 @@ def test_lora_rebase():
     print(f"  Parent update norm: {delta_W.norm():.4f}")
     print(f"  Same-LoRA vs rebased-LoRA: {err_same_vs_rebased:.6f} (should be ~0)")
     print(f"  LoRA on new parent vs ideal: {err_lora:.6f} (should be ~0)")
-    print(f"  VERDICT: LoRA is parent-independent, NO rebase needed. ✓")
+    print("  VERDICT: LoRA is parent-independent, NO rebase needed. ✓")
 
 
 def test_direct_mod_rebase():
@@ -107,8 +106,8 @@ def test_direct_mod_rebase():
     print("Test 2: Direct modification + parent update")
     print(f"{'='*60}")
     print(f"  Naive (apply old mod to new parent) vs ideal: {err:.6f}")
-    print(f"  VERDICT: Direct mod is ALSO parent-independent (additive).")
-    print(f"  Rebase is only needed if expert REPLACES weights, not ADDS.")
+    print("  VERDICT: Direct mod is ALSO parent-independent (additive).")
+    print("  Rebase is only needed if expert REPLACES weights, not ADDS.")
 
 
 def test_merge_then_recover():
@@ -151,10 +150,10 @@ def test_merge_then_recover():
     print(f"  Training noise norm: {delta_train.norm():.4f}")
     print(f"  Recovered (W_trained - W) err vs original: {err_recovery:.4f}")
     print(f"  Projected to rank-{rank} err vs original: {err_projected:.4f}")
-    print(f"  VERDICT: Recovery is lossy (training noise entangled).")
+    print("  VERDICT: Recovery is lossy (training noise entangled).")
     print(f"  Rank-{rank} projection recovers {'well' if err_projected < 0.3 else 'poorly'}.")
-    print(f"  BETTER APPROACH: don't merge experts into parent. Keep them as")
-    print(f"  separate LoRA adapters. Parent trains independently, experts stay intact.")
+    print("  BETTER APPROACH: don't merge experts into parent. Keep them as")
+    print("  separate LoRA adapters. Parent trains independently, experts stay intact.")
 
 
 def test_rebase_when_parent_absorbs():
@@ -193,9 +192,9 @@ def test_rebase_when_parent_absorbs():
     print(f"{'='*60}")
     print(f"  After merge + train, rank-{rank} projection of full delta:")
     print(f"    err vs original expert: {err_pure:.4f}")
-    print(f"  VERDICT: Rebase via rank-r projection recovers the expert")
+    print("  VERDICT: Rebase via rank-r projection recovers the expert")
     print(f"  {'well' if err_pure < 0.2 else 'poorly'} (training noise is higher-rank,")
-    print(f"  projects out). This is the correct rebase protocol for AirMoE.")
+    print("  projects out). This is the correct rebase protocol for AirMoE.")
 
     if DEV.type == 'cuda':
         torch.cuda.empty_cache()

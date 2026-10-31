@@ -1,4 +1,4 @@
-"""Download HF datasets for AirMoE expert pack training.
+r"""Download HF datasets for AirMoE expert pack training.
 
 Downloads to D:\windsurf\hf_cache (NOT C drive).
 Each dataset is filtered to (prompt, solution) pairs and saved as JSONL
@@ -24,7 +24,6 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

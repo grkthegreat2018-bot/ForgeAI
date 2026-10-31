@@ -13,7 +13,6 @@ Usage:
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
 import time
@@ -93,9 +92,7 @@ def should_skip(title: str, text: str) -> bool:
         return True
     if is_disambiguation(text):
         return True
-    if is_list_only(text):
-        return True
-    return False
+    return bool(is_list_only(text))
 
 
 # ---------------------------------------------------------------------------

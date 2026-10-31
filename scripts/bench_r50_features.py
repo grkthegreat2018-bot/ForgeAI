@@ -43,8 +43,8 @@ def rep_n(ids, n=3):
 
 
 def main():
+    from forge.engine.decoding import DoLaDecoding, StandardDecoding
     from forge.model_loader import load_default_model
-    from forge.engine.decoding import StandardDecoding, DoLaDecoding
 
     print("Loading ForgeLM V2 (bf16, cuda)...")
     model, tok = load_default_model("forgelm_v2", device="cuda")
@@ -94,10 +94,12 @@ def main():
     gc.collect(); torch.cuda.empty_cache()
 
     import dataclasses
+
     from safetensors.torch import load_file
+
     from forge.config import get_config
-    from forge.model.llm import ConfigurableResearchLLM
     from forge.keys.attention.kda_key import KDAKey
+    from forge.model.llm import ConfigurableResearchLLM
     from research.paths import V2_CHECKPOINT
 
     cfg = dataclasses.replace(get_config("forgelm_v2"), use_kda=True)

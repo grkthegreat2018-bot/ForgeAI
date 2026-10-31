@@ -17,14 +17,19 @@ Tests ALL sub-BitNet approaches:
   6. LowRankTernary (W ≈ A@B ternary factors)
   7. Per-block ternary (block_size=32, 64, 128)
 """
-import os, sys, math, time
+import math
+import os
+import sys
+import time
+
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
+
+import glob
 
 import torch
 import torch.nn.functional as F
 from safetensors import safe_open
-import glob
 
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float32
@@ -57,7 +62,7 @@ def q_bitnet_per_tensor(W):
 
 def q_ternary_per_channel(W):
     """Ternary per-channel scale, base-3 packed (1.6 bits/w)."""
-    out_f, in_f = W.shape
+    out_f, _in_f = W.shape
     scales = W.abs().mean(dim=1, keepdim=True).clamp(min=1e-8) / 0.7
     w_norm = W / scales
     w_t = torch.sign(w_norm) * (w_norm.abs() > 0.5).float()

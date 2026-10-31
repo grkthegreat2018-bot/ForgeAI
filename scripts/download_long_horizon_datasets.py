@@ -8,7 +8,6 @@ Into: data\\sft\\<dataset_name>\\ under the repo root.
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -47,7 +46,7 @@ def main() -> int:
                 max_workers=4,
             )
             print(f"  [ok] downloaded to {local_dir}", flush=True)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"  [FAIL] {repo_id}: {e}", flush=True)
             failures.append(repo_id)
     if failures:

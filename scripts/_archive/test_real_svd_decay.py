@@ -10,8 +10,8 @@ Also compares: Monarch vs TT vs SVD at matched param budget (§13.4).
 
 Runs on CUDA.
 """
+
 import torch
-import math
 from safetensors import safe_open
 
 DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -28,7 +28,7 @@ def svd_analysis(W, label):
     """SVD a weight, report singular value decay + effective ranks."""
     m, n = W.shape
     Wf = W.float().to(DEV)
-    U, S, Vh = torch.linalg.svd(Wf, full_matrices=False)
+    _U, S, _Vh = torch.linalg.svd(Wf, full_matrices=False)
     total_energy = S.pow(2).sum().item()
     cum_energy = S.pow(2).cumsum(0) / total_energy
 
@@ -52,9 +52,9 @@ def svd_analysis(W, label):
 
     print(f"\n{'='*60}")
     print(f"  {label}: {W.shape} ({m*n} params)")
-    print(f"  Top-10 SVs: {['%.3f' % s for s in top10]}")
+    print(f"  Top-10 SVs: {['{:.3f}'.format(s) for s in top10]}")
     print(f"  SV decay exponent (alpha, first 50): {alpha:.2f}")
-    print(f"  Effective rank (energy captured):")
+    print("  Effective rank (energy captured):")
     for t, r in sorted(ranks.items(), reverse=True):
         cr = (m * n) / (r * (m + n)) if r > 0 else 0
         print(f"    {t*100:.2f}%: rank={r} ({cr:.1f}x SVD compression)")
@@ -62,7 +62,7 @@ def svd_analysis(W, label):
 
 
 def svd_compress(W, rank):
-    m, n = W.shape
+    _m, _n = W.shape
     U, S, Vh = torch.linalg.svd(W.float().to(DEV), full_matrices=False)
     return (U[:, :rank] * S[:rank]) @ Vh[:rank, :]
 
@@ -106,7 +106,7 @@ def test_real_weights():
 
     all_ranks = {}
     for label, W in weights.items():
-        ranks, alpha = svd_analysis(W, label)
+        ranks, _alpha = svd_analysis(W, label)
         all_ranks[label] = ranks
 
     # --- Monarch vs SVD comparison on FFN w_gate ---
@@ -137,21 +137,21 @@ def test_real_weights():
     print("NLRQ RANK SUFFICIENCY ANALYSIS:")
     print(f"{'='*60}")
     ffn_ranks = all_ranks["FFN w_gate (layer 2)"]
-    print(f"  LFM2.5 FFN w_gate [8192x2048] effective ranks:")
+    print("  LFM2.5 FFN w_gate [8192x2048] effective ranks:")
     for t, r in sorted(ffn_ranks.items(), reverse=True):
         print(f"    {t*100:.2f}% energy: rank={r}")
-    print(f"  V8 FFN is [16384x4096] (2x both dims).")
+    print("  V8 FFN is [16384x4096] (2x both dims).")
     print(f"  V8 NLRQ rank=1024. If LFM2.5 99% rank ~{ffn_ranks[0.99]},")
     print(f"  V8 99% rank ~{ffn_ranks[0.99]*4} (scales with min(m,n)).")
-    print(f"  rank=1024 captures: need to check on V8-sized weights.")
+    print("  rank=1024 captures: need to check on V8-sized weights.")
     # Extrapolate: V8 FFN is 2x wider and 2x taller, so rank scales ~2x
     v8_99_rank = ffn_ranks[0.99] * 2  # rough extrapolation
     print(f"  Estimated V8 99% rank: ~{v8_99_rank}")
     if v8_99_rank > 1024:
-        print(f"  WARNING: rank=1024 may be INSUFFICIENT for 99% energy!")
+        print("  WARNING: rank=1024 may be INSUFFICIENT for 99% energy!")
         print(f"  Consider rank={int(v8_99_rank)} for V8-8B-B.")
     else:
-        print(f"  rank=1024 is SUFFICIENT for 99% energy. ✓")
+        print("  rank=1024 is SUFFICIENT for 99% energy. ✓")
 
     if DEV.type == 'cuda':
         torch.cuda.empty_cache()

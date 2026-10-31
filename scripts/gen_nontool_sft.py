@@ -3,8 +3,8 @@
 Mix these with Glaive tool-use data to prevent overfitting to tool-call format.
 """
 import json
-import random
 import os
+import random
 
 random.seed(42)
 

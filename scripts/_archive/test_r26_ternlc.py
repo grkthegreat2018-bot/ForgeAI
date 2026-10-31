@@ -32,7 +32,11 @@ ALSO TESTS: TernaryPack with per-CHANNEL scale (vs per-tensor).
   Quality: much better than per-tensor (each output channel gets its own scale).
   This is what BitNet QAT does — but we apply it post-training.
 """
-import os, sys, math, time
+import math
+import os
+import sys
+import time
+
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
@@ -74,7 +78,7 @@ def quantize_ternary_per_channel(W: torch.Tensor) -> tuple[torch.Tensor, float]:
     Storage: ternary (0.2 bytes/w base-3 packed) + per-channel scales
     (out_f * 4 bytes = negligible for large weights).
     """
-    out_f, in_f = W.shape
+    out_f, _in_f = W.shape
     # Per-output-row scale
     scales = W.abs().mean(dim=1, keepdim=True).clamp(min=1e-8) / 0.7  # (out, 1)
     w_norm = W / scales
@@ -91,7 +95,7 @@ def quantize_ternary_per_channel(W: torch.Tensor) -> tuple[torch.Tensor, float]:
 
 def quantize_ternary_per_channel_int8(W: torch.Tensor) -> tuple[torch.Tensor, float]:
     """Ternary with per-channel scale, int8 storage (like BitNet but per-channel)."""
-    out_f, in_f = W.shape
+    out_f, _in_f = W.shape
     scales = W.abs().mean(dim=1, keepdim=True).clamp(min=1e-8) / 0.7
     w_norm = W / scales
     w_t = torch.sign(w_norm) * (w_norm.abs() > 0.5).float()
@@ -278,7 +282,7 @@ def benchmark_weight(label, W_key, x_dim=None):
     with safe_open(CKPT, framework="pt", device="cpu") as f:
         W = f.get_tensor(W_key).to(DEV).to(DTYPE)
 
-    m, n = W.shape
+    _m, n = W.shape
     print(f"\n  {label}: {W.shape} std={W.std():.5f}")
 
     if x_dim is None:
@@ -351,9 +355,9 @@ def main():
         except Exception as e:
             print(f"\n  SKIP {label}: {e}")
 
-    print(f"\n  KEY: TernLC target = 0.2-0.25 bytes/w with SQNR >> 6.61 dB (BitNet post-training).")
-    print(f"  Per-channel ternary alone should beat per-tensor BitNet by several dB.")
-    print(f"  Low-rank correction adds ~0.02 bytes/w for +5-10 dB more.")
+    print("\n  KEY: TernLC target = 0.2-0.25 bytes/w with SQNR >> 6.61 dB (BitNet post-training).")
+    print("  Per-channel ternary alone should beat per-tensor BitNet by several dB.")
+    print("  Low-rank correction adds ~0.02 bytes/w for +5-10 dB more.")
 
 
 if __name__ == "__main__":

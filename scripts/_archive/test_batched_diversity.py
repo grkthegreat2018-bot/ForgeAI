@@ -1,9 +1,11 @@
 """Verify per-sequence temp/seed produces different outputs in BatchedDecoding."""
 import sys
+
 sys.path.insert(0, ".")
 sys.stdout.reconfigure(encoding="utf-8")
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
 from forge.engine.batched_decoding import BatchedDecoding
 
 device = "cuda"
@@ -34,7 +36,7 @@ outputs = decoder.generate_batch(
 )
 
 print(f'Same prompt: "{prompt}"')
-print(f"8 different (temp, seed) combos:\n")
+print("8 different (temp, seed) combos:\n")
 texts = []
 for i, out in enumerate(outputs):
     text = tok.decode(out[0], skip_special_tokens=True)

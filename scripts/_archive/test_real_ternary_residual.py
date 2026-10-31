@@ -14,7 +14,6 @@ Also tests: per-ROW residual (keep outlier rows dense) vs per-ELEMENT residual
 Runs on CUDA.
 """
 import torch
-import torch.nn.functional as F
 from safetensors import safe_open
 
 DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -35,7 +34,7 @@ def bitnet_ternary(W):
 
 def ternary_row_residual(W, k_frac):
     """Keep top-k% outlier ROWS dense, rest ternary."""
-    W_t, scale = bitnet_ternary(W)
+    W_t, _scale = bitnet_ternary(W)
     err = (W - W_t).abs().sum(dim=1)  # per-row error
     k = int(W.shape[0] * k_frac)
     if k == 0:
@@ -47,7 +46,7 @@ def ternary_row_residual(W, k_frac):
 
 def ternary_elem_residual(W, k_frac):
     """Keep top-k% outlier INDIVIDUAL ELEMENTS dense, rest ternary."""
-    W_t, scale = bitnet_ternary(W)
+    W_t, _scale = bitnet_ternary(W)
     err = (W - W_t).abs()
     k = int(W.numel() * k_frac)
     if k == 0:
@@ -60,7 +59,7 @@ def ternary_elem_residual(W, k_frac):
 
 def ternary_col_residual(W, k_frac):
     """Keep top-k% outlier COLUMNS dense, rest ternary."""
-    W_t, scale = bitnet_ternary(W)
+    W_t, _scale = bitnet_ternary(W)
     err = (W - W_t).abs().sum(dim=0)  # per-column error
     k = int(W.shape[1] * k_frac)
     if k == 0:
@@ -82,7 +81,7 @@ def test_real_weight(label, W_key, x_dim=None):
           f"max={W.abs().max():.4f}")
 
     # Outlier analysis
-    W_t, scale = bitnet_ternary(W)
+    W_t, _scale = bitnet_ternary(W)
     err = (W - W_t).abs()
     row_errs = err.sum(dim=1)
     col_errs = err.sum(dim=0)
@@ -110,13 +109,13 @@ def test_real_weight(label, W_key, x_dim=None):
     print(f"  {'k%':>6} {'row_res':>12} {'col_res':>12} {'elem_res':>12}")
     for k_frac in [0.005, 0.01, 0.02, 0.05, 0.10]:
         # Row residual
-        W_rr, k_r = ternary_row_residual(W, k_frac)
+        W_rr, _k_r = ternary_row_residual(W, k_frac)
         e_rr = rel_err(x @ W_rr.T, y_ref)
         # Col residual
-        W_cr, k_c = ternary_col_residual(W, k_frac)
+        W_cr, _k_c = ternary_col_residual(W, k_frac)
         e_cr = rel_err(x @ W_cr.T, y_ref)
         # Element residual
-        W_er, k_e = ternary_elem_residual(W, k_frac)
+        W_er, _k_e = ternary_elem_residual(W, k_frac)
         e_er = rel_err(x @ W_er.T, y_ref)
         print(f"  {k_frac*100:>5.1f}% {e_rr:>12.4f} {e_cr:>12.4f} {e_er:>12.4f}")
 

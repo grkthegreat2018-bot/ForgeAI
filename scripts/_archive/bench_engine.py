@@ -4,11 +4,18 @@ KV cache, quantization, decoding, and acceleration strategies.
 Usage:
     python scripts/bench_engine.py [--model qwen|forgelm]
 """
-import sys, os, time, json, gc, traceback
+import gc
+import json
+import os
+import sys
+import time
+import traceback
+
 os.environ.setdefault("FORGE_NO_COMPILE", "1")  # avoid triton/inductor issues
 
 import torch
 import torch.cuda as cuda
+
 
 def log(msg):
     print(f"[bench] {msg}", flush=True)
@@ -43,10 +50,11 @@ def load_forgelm():
 
 def load_qwen():
     """Load Qwen 2.5 0.5B by creating a matching config and downloading."""
-    from forge.config import ModelConfig, get_config
-    from forge.model_loader import ModelLoader
-    from forge.engine.forge_engine import ForgeEngine
     from transformers import AutoTokenizer
+
+    from forge.config import ModelConfig
+    from forge.engine.forge_engine import ForgeEngine
+    from forge.model_loader import ModelLoader
 
     # Qwen 2.5 0.5B architecture
     qwen_cfg = ModelConfig(

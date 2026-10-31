@@ -1,9 +1,9 @@
 """Quick smoke test for R44 novel quant algorithms."""
 import torch
-import torch.nn as nn
+
 from forge.engine.quant.novel_quant_r44 import (
-    HadamardLiftLinear,
     AdaptiveBlockFP4Linear,
+    HadamardLiftLinear,
     SparseResidualINT3Linear,
     TernaryLiftLinear,
 )

@@ -12,9 +12,7 @@ Uses trained-like synthetic weights (low-rank + outlier channels).
 
 Runs on CUDA when available.
 """
-import math
 import torch
-import torch.nn.functional as F
 
 DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Device: {DEV}")
@@ -61,7 +59,7 @@ def vq_compress(W, K, residual_frac=0.0):
     torch.manual_seed(0)
     idx = torch.randperm(m, device=DEV)[:K]
     codebook = Wf[idx].clone()
-    for it in range(25):
+    for _it in range(25):
         dists = torch.cdist(Wf, codebook)
         assign = dists.argmin(dim=1)
         for k in range(K):

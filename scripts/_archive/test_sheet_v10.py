@@ -17,10 +17,17 @@ Usage:
   python scripts/test_sheet_v10.py --kv spectral
   python scripts/test_sheet_v10.py --quick  # skip bottleneck profiling
 """
-import sys, os, time, json, argparse, traceback
+import argparse
+import json
+import os
+import sys
+import time
+import traceback
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
+
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 def log(msg):
@@ -48,18 +55,18 @@ def check_answer(response, expected):
     return expected.lower() in response.lower()
 
 def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
+    from forge.config import get_config
     from forge.engine.forge_engine import ForgeEngine
     from forge.model_loader import load_default_model
-    from forge.config import get_config
     from research.paths import V10_CHECKPOINT
 
     log("=" * 70)
-    log(f"ForgeEngine Test Sheet â€” ForgeLM V10-1.2B")
+    log("ForgeEngine Test Sheet â€” ForgeLM V10-1.2B")
     log(f"KV strategy: {kv_strategy}")
     log("=" * 70)
 
     # â”€â”€ Load model â”€â”€
-    log(f"\n[1] Loading V10-1.2B...")
+    log("\n[1] Loading V10-1.2B...")
     t0 = time.time()
     model, tokenizer = load_default_model(
         "forgelm_v2_light",
@@ -72,7 +79,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
     log(f"  Loaded in {load_time:.1f}s | {n_params/1e6:.1f}M params")
 
     # â”€â”€ Create ForgeEngine â”€â”€
-    log(f"\n[2] Creating ForgeEngine...")
+    log("\n[2] Creating ForgeEngine...")
     engine = ForgeEngine(model, tokenizer, device=device,
                          checkpoint_path=str(V10_CHECKPOINT))
     log(f"  Engine created. KV cache: {engine.kv_cache}")
@@ -98,7 +105,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
         kv_strategy = "standard (fallback)"
 
     # â”€â”€ Engine stats â”€â”€
-    log(f"\n[4] Engine stats:")
+    log("\n[4] Engine stats:")
     stats = engine.stats()
     for k, v in stats.items():
         if isinstance(v, dict):
@@ -109,7 +116,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
             log(f"  {k}: {v}")
 
     # â”€â”€ Test 1: Speed (tokens/sec) â”€â”€
-    log(f"\n" + "=" * 50)
+    log("\n" + "=" * 50)
     log(f"TEST 1: Generation speed (kv={kv_strategy})")
     log("=" * 50)
 
@@ -141,7 +148,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
             speed_results[label] = {"error": str(e)}
 
     # â”€â”€ Test 2: Memory â”€â”€
-    log(f"\n" + "=" * 50)
+    log("\n" + "=" * 50)
     log(f"TEST 2: Memory usage (kv={kv_strategy})")
     log("=" * 50)
 
@@ -159,8 +166,8 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
         log(f"  KV cache info: {kv_info}")
 
     # â”€â”€ Test 3: Accuracy (10 questions) â”€â”€
-    log(f"\n" + "=" * 50)
-    log(f"TEST 3: Accuracy (10 questions, greedy)")
+    log("\n" + "=" * 50)
+    log("TEST 3: Accuracy (10 questions, greedy)")
     log("=" * 50)
 
     correct = 0
@@ -180,8 +187,8 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
     log(f"\n  Accuracy: {correct}/{total} = {accuracy:.0%}")
 
     # â”€â”€ Test 3b: Accuracy with sampling (temperature=0.7) â”€â”€
-    log(f"\n" + "=" * 50)
-    log(f"TEST 3b: Accuracy with sampling (temp=0.7, top_p=0.9)")
+    log("\n" + "=" * 50)
+    log("TEST 3b: Accuracy with sampling (temp=0.7, top_p=0.9)")
     log("=" * 50)
 
     correct_s = 0
@@ -203,14 +210,14 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
     # â”€â”€ Test 4: Bottleneck profile (skip if quick) â”€â”€
     bottleneck_results = None
     if not quick:
-        log(f"\n" + "=" * 50)
-        log(f"TEST 4: Bottleneck profile")
+        log("\n" + "=" * 50)
+        log("TEST 4: Bottleneck profile")
         log("=" * 50)
         try:
             report = engine.bottleneck(max_new_tokens=16)
             bottleneck_results = report
             if "bottlenecks" in report:
-                log(f"  Top bottlenecks:")
+                log("  Top bottlenecks:")
                 for b in report["bottlenecks"][:5]:
                     log(f"    {b}")
             if "tokens_per_sec" in report:
@@ -219,8 +226,8 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
             log(f"  Bottleneck profiling failed: {e}")
 
     # â”€â”€ Test 5: KV cache comparison â”€â”€
-    log(f"\n" + "=" * 50)
-    log(f"TEST 5: KV cache comparison")
+    log("\n" + "=" * 50)
+    log("TEST 5: KV cache comparison")
     log("=" * 50)
 
     from forge.config import get_config
@@ -239,8 +246,8 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
     log(f"  Compression: {standard_mb/spectral_mb:.1f}Ã—")
 
     # â”€â”€ Final engine stats â”€â”€
-    log(f"\n" + "=" * 50)
-    log(f"FINAL ENGINE STATS")
+    log("\n" + "=" * 50)
+    log("FINAL ENGINE STATS")
     log("=" * 50)
     final_stats = engine.stats()
     log(f"  Generation count: {final_stats['generation_count']}")
@@ -251,7 +258,7 @@ def run_test_sheet(kv_strategy="standard", quick=False, device="cuda"):
         log(f"  VRAM: {final_stats['vram']}")
 
     # â”€â”€ Summary â”€â”€
-    log(f"\n" + "=" * 70)
+    log("\n" + "=" * 70)
     log(f"SUMMARY (kv={kv_strategy})")
     log("=" * 70)
     log(f"  Load time: {load_time:.1f}s")
@@ -318,7 +325,7 @@ def main():
 
         # Comparison table
         log(f"\n{'=' * 70}")
-        log(f"KV STRATEGY COMPARISON")
+        log("KV STRATEGY COMPARISON")
         log(f"{'=' * 70}")
         log(f"{'Strategy':<15} {'Speed (tok/s)':>15} {'Accuracy':>10} {'VRAM (GB)':>10} {'KV MB':>10}")
         log(f"{'-' * 60}")
@@ -337,7 +344,7 @@ def main():
 
         with open("scripts/_test_sheet_comparison.json", "w") as f:
             json.dump(all_results, f, indent=2, default=str)
-        log(f"\nComparison saved to scripts/_test_sheet_comparison.json")
+        log("\nComparison saved to scripts/_test_sheet_comparison.json")
     else:
         run_test_sheet(kv_strategy=args.kv, quick=args.quick)
 

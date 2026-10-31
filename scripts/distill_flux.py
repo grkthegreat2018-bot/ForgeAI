@@ -23,9 +23,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import torch  # noqa: E402
+import torch
 
-from forge.model.flux import FluxLM  # noqa: E402
+from forge.model.flux import FluxLM
 
 
 def _v2_score_fn(model, device):

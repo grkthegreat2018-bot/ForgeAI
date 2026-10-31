@@ -1,9 +1,14 @@
 """Tune KL calibration: more iterations, higher LR, multiple rounds."""
-import torch, time, sys
+import sys
+import time
+
+import torch
+
 sys.path.insert(0, '.')
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from forge.engine.quant.novel_quant_r48 import quantize_model_nanoquant, estimate_r48_memory
+
 from forge.engine.quant.block_recon import BlockReconstructor
+from forge.engine.quant.novel_quant_r48 import estimate_r48_memory, quantize_model_nanoquant
 
 device = 'cuda'
 model_id = 'Qwen/Qwen2.5-0.5B'
@@ -78,7 +83,7 @@ for round_i in range(3):
           f"KL={kl_loss:.4f}, time={time.time()-t0:.1f}s")
 
 # Also try standard block recon + KL
-print(f"\n  Now trying standard block recon + KL...")
+print("\n  Now trying standard block recon + KL...")
 recon2 = BlockReconstructor(
     model_orig=model_orig, model_quant=model_quant,
     calibration_data=calib_ids, device=device)

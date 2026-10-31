@@ -16,7 +16,6 @@ Usage:
 """
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -25,8 +24,6 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tests.fixtures.keys.architecture.mamba_key import MambaKey
-from forge.config import ModelConfig
-
 
 # Jamba Reasoning 3B config
 JAMBA_REPO = "ai21labs/AI21-Jamba-Reasoning-3B"

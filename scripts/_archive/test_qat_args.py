@@ -1,13 +1,12 @@
 """Quick smoke test: verify sft_train accepts new --hf-model and --nanoquant-qat args."""
 import sys
+
 sys.path.insert(0, ".")
 sys.stdout.reconfigure(encoding="utf-8")
 import argparse
-from forge.training.runners.sft_train import main
 
 # Just parse args, don't run training
 # We patch main to only parse and print
-import forge.training.runners.sft_train as mod
 
 # Build the parser by calling the arg parsing portion
 # Actually, let's just verify the args exist by checking the parser

@@ -1,18 +1,20 @@
 """Quick re-test: verify quantization state is sticky across activate() calls,
 and test if re-loading the engine fresh fixes the 3.5x slowdown."""
-import sys, os, gc, time, json
+import gc
+import os
+
 os.environ["FORGE_NO_COMPILE"] = "1"
 os.environ["PYTHONPATH"] = "D:\\windsurf\\ForgeAI"
 
-import torch
 import torch.cuda as cuda
+
 
 def log(msg):
     print(f"[retest] {msg}", flush=True)
 
 def vram_mb():
     alloc = cuda.memory_allocated() / 1e6
-    free, total = cuda.mem_get_info()
+    free, _total = cuda.mem_get_info()
     return {"allocated": round(alloc, 1), "free": round(free/1e6, 1)}
 
 PROMPT = "The quick brown fox jumps over the lazy dog. " * 5
@@ -80,6 +82,7 @@ def main():
     log("=== Test 6: generate_batch API check ===")
     try:
         import inspect
+
         from forge.engine.decoding import BatchedDecoding
         sig = inspect.signature(BatchedDecoding.generate_batch)
         log(f"  generate_batch signature: {sig}")
@@ -101,7 +104,7 @@ def main():
         log(f"  prefix_cache FAILED: {e}")
         traceback.print_exc()
 
-    log(f"\n=== SUMMARY ===")
+    log("\n=== SUMMARY ===")
     log(f"Fresh standard (no quant): {tps1} tok/s")
     log(f"Fresh int4: {tps2} tok/s")
     log(f"Fresh w8a8: {tps3} tok/s")

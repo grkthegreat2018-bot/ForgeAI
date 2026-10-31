@@ -1,9 +1,14 @@
 """Test different reconstruction modes on Qwen 2.5 0.5B."""
-import torch, time, sys
+import sys
+import time
+
+import torch
+
 sys.path.insert(0, '.')
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from forge.engine.quant.novel_quant_r48 import quantize_model_nanoquant, estimate_r48_memory
+
 from forge.engine.quant.block_recon import BlockReconstructor
+from forge.engine.quant.novel_quant_r48 import estimate_r48_memory, quantize_model_nanoquant
 
 device = 'cuda'
 model_id = 'Qwen/Qwen2.5-0.5B'

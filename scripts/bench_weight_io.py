@@ -13,10 +13,11 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from forge.runtime.configure import configure  # noqa: E402
+from forge.runtime.configure import configure
+
 configure()
 
-import torch  # noqa: E402
+import torch
 
 CKPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     "research", "checkpoints", "ForgeLM_V2.safetensors")
@@ -54,7 +55,7 @@ def via_pipelined():
 def main():
     sz = os.path.getsize(CKPT)
     print(f"checkpoint: {sz / 1e9:.2f} GB — {CKPT}")
-    free, tot = torch.cuda.mem_get_info()
+    free, _tot = torch.cuda.mem_get_info()
     print(f"VRAM free: {free / 1e9:.1f} GB\n")
 
     t = time.perf_counter()

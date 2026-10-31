@@ -16,7 +16,10 @@ Key configs to test (bpw ≈ 0.53 + n_cb * (log2(n_codes)/8 + 1/32)):
 
 Also test: per-block scale strategy (absmax/6 vs L2-norm vs MSE-optimal).
 """
-import os, sys, math, time
+import math
+import os
+import sys
+
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
@@ -28,8 +31,8 @@ DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float32
 CKPT = r"D:\windsurf\ForgeAI\research\checkpoints\ForgeLM_V2_Light.safetensors"
 
-from forge.engine.quant.nvfp4_quant import _FP4_MAGNITUDES, _FP4_BOUNDARIES
 from forge.engine.quant.novel_quant import _optimal_fp4_scale, quantize_iri_fp4
+from forge.engine.quant.nvfp4_quant import _FP4_BOUNDARIES, _FP4_MAGNITUDES
 
 
 def frob_err(ref, q):
@@ -94,7 +97,7 @@ def quantize_additive_fp4_scaled(W, block_size=32, n_codes=8, n_codebooks=2,
         res_flat = res_norm.reshape(-1).contiguous()
         N = res_flat.numel()
         max_km = 200_000
-        if N > max_km:
+        if max_km < N:
             g = torch.Generator(device=W.device).manual_seed(42 + k)
             sub = res_flat[torch.randperm(N, generator=g, device=W.device)[:max_km]]
         else:

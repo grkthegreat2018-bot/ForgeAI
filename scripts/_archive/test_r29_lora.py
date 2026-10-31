@@ -12,16 +12,15 @@ Covers the guarantees the R29 experiment relies on:
   7. ce_loss shifts logits/labels by one position (off-by-one regression guard
      for the batched training path).
 """
-import os, sys
+import sys
+
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 sys.path.insert(0, r"D:\windsurf\ForgeAI\scripts")
 
-import math
+import test_r29_injection as r29
 import torch
 import torch.nn.functional as F
 from torch import nn
-
-import test_r29_injection as r29
 
 
 def _parent():

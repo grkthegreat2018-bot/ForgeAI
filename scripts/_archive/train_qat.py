@@ -18,7 +18,6 @@ Usage:
       --rank 128 --qat-steps 500 --lr 1e-4 --seq-len 256
 """
 import argparse
-import math
 import sys
 import time
 
@@ -30,18 +29,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from forge.engine.batched_decoding import BatchedDecoding
 from forge.engine.quant.novel_quant_r48 import (
-    NanoQuantQATLinear,
-    convert_model_to_nanoquant_qat,
     bake_qat_model,
+    convert_model_to_nanoquant_qat,
     estimate_r48_memory,
 )
-from forge.engine.batched_decoding import BatchedDecoding
 from forge.training.training_utils import (
     configure_optimizer,
     get_lr,
     oom_guard,
-    grad_accum_for_effective_batch,
 )
 
 
@@ -428,7 +425,7 @@ def main():
     student.eval()
     ppl_after = compute_ppl(student, test_ids)
     print(f"\n{'='*70}")
-    print(f"RESULTS")
+    print("RESULTS")
     print(f"{'='*70}")
     print(f"FP16 teacher PPL:    {fp16_ppl:.4f}")
     print(f"PPL before QAT:      {ppl_before:.4f} (delta={ppl_before-fp16_ppl:+.4f})")
@@ -440,7 +437,7 @@ def main():
 
     # Bake (NanoQuant only)
     if args.method == "nanoquant" and args.save:
-        print(f"\nBaking QAT model to inference mode...")
+        print("\nBaking QAT model to inference mode...")
         n_baked = bake_qat_model(student, verbose=True)
         ppl_baked = compute_ppl(student, test_ids)
         print(f"PPL after baking:    {ppl_baked:.4f}")

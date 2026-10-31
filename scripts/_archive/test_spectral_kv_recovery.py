@@ -23,6 +23,7 @@ sequence, test on second half)?
 Runs on CUDA.
 """
 import math
+
 import torch
 import torch.nn.functional as F
 from safetensors import safe_open
@@ -66,7 +67,7 @@ def fourier_basis(seq_len, max_freq):
 
 
 def attention_output(q, k, v):
-    seq, n_heads, hd = q.shape
+    _seq, n_heads, hd = q.shape
     n_kv = k.shape[1]
     rep = n_heads // n_kv
     k_rep = k.repeat_interleave(rep, dim=1)
@@ -205,7 +206,7 @@ if __name__ == "__main__":
     print(f"\n{'='*70}")
     print("SUMMARY:")
     print(f"{'config':>16} {'baseline':>10} {'train_err':>10} {'test_err':>10} {'improvement':>12}")
-    for name, (base, tr, te, np) in results:
+    for name, (base, tr, te, _np) in results:
         print(f"{name:>16} {base:>10.4f} {tr:>10.4f} {te:>10.4f} {base/max(te,1e-6):>11.1f}x")
     print(f"{'='*70}")
     print("KEY: if test_err < 0.01, spectral-KV + correction = effectively lossless")

@@ -47,7 +47,7 @@ def test_find_block_list():
     """Test that block list detection works."""
     print("\n[find_block_list]")
     model = SimpleModel()
-    parent, attr, blocks = _find_block_list(model)
+    _parent, attr, blocks = _find_block_list(model)
     assert attr == "layers"
     assert len(blocks) == 4
     print(f"  Found {len(blocks)} blocks via {attr}")
@@ -144,7 +144,7 @@ def test_reconstruct_with_nanoquant():
     """Test reconstruction with actual NanoQuant layers."""
     print("\n[reconstruct_nanoquant]")
     from forge.engine.quant.novel_quant_r48 import (
-        NanoQuantLinear, quantize_model_nanoquant,
+        quantize_model_nanoquant,
     )
 
     torch.manual_seed(42)

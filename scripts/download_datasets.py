@@ -208,7 +208,7 @@ def download_dataset(entry: dict, base_dir: Path) -> bool:
     print(f"    -> {local}")
     print(f"    Note: {note}")
     if is_large:
-        print(f"    [LARGE DATASET — may take a while]")
+        print("    [LARGE DATASET — may take a while]")
 
     t0 = time.time()
     try:
@@ -277,14 +277,14 @@ def main():
                 failed_list.append(entry["name"])
 
     print(f"\n{'='*60}")
-    print(f"  SUMMARY")
+    print("  SUMMARY")
     print(f"{'='*60}")
     print(f"  Total:   {total}")
     print(f"  Success: {success}")
     print(f"  Failed:  {failed}")
     print(f"  Skipped: {skipped}")
     if failed_list:
-        print(f"  Failed datasets:")
+        print("  Failed datasets:")
         for name in failed_list:
             print(f"    - {name}")
     print(f"{'='*60}")

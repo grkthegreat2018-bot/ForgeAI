@@ -1,16 +1,20 @@
 """Test TextToWeightsKey — build a model from raw text, no training."""
-import sys, os, time
+import os
+import sys
+import time
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
+
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 def log(m): print(m, flush=True)
 
 def main():
-    from tests.fixtures.keys.architecture.text_to_weights_key import TextToWeightsKey
     from forge.config import get_config
     from forge.model_loader import ConfigurableResearchLLM
     from research.tokenizer_cache import get_tokenizer_no_wrap as load_tokenizer
+    from tests.fixtures.keys.architecture.text_to_weights_key import TextToWeightsKey
 
     # Use a small config for fast testing, but with real vocab size
     config_name = "lfm25_tiny"

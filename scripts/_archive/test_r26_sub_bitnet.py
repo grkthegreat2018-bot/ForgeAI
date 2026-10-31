@@ -29,7 +29,11 @@ FIVE NOVEL APPROACHES (informed by SOTA research):
 
 All tested on real V9-1.2B weights. Compared against BitNet post-training baseline.
 """
-import os, sys, math, time
+import math
+import os
+import sys
+import time
+
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
@@ -491,9 +495,9 @@ def main():
         except Exception as e:
             print(f"\n  SKIP {label}: {e}")
 
-    print(f"\n  KEY: Target is < 1.58 bits/w (0.1975 bytes/w) with SQNR > 6.61 dB (BitNet post-training).")
-    print(f"  BitNet base-3 pack = 1.6 bits = same quality, less memory (free win).")
-    print(f"  BinSalient/LoRT/BinCB/TernPrep must beat BitNet SQNR at similar-or-lower bpw.")
+    print("\n  KEY: Target is < 1.58 bits/w (0.1975 bytes/w) with SQNR > 6.61 dB (BitNet post-training).")
+    print("  BitNet base-3 pack = 1.6 bits = same quality, less memory (free win).")
+    print("  BinSalient/LoRT/BinCB/TernPrep must beat BitNet SQNR at similar-or-lower bpw.")
 
 
 if __name__ == "__main__":

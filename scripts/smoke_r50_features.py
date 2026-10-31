@@ -9,19 +9,18 @@ Run: venv/Scripts/python.exe scripts/smoke_r50_features.py
 """
 import os
 import sys
-import tempfile
 
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from forge.config import get_config, ModelConfig
-from forge.model.llm import ConfigurableResearchLLM
-from forge.engine.decoding import StandardDecoding, DoLaDecoding, build_decoding
+from forge.config import get_config
+from forge.engine.decision_head import fit_prm, score_steps
+from forge.engine.decoding import DoLaDecoding, StandardDecoding, build_decoding
 from forge.engine.engine_common import _dry_penalties
 from forge.engine.kv.filler_kv import FillerKVCache, filler_token_ids
 from forge.engine.kv_backend import build_kv_cache
-from forge.engine.decision_head import fit_prm, score_steps
+from forge.model.llm import ConfigurableResearchLLM
 from research.merge_models import depth_upscale, parse_layer_map
 
 PASS = []
@@ -159,7 +158,7 @@ def test_depth_upscale():
     # duplicate conv sources 0,1 (type-consistent map).
     layer_map = parse_layer_map("0-3,0-1")  # 4 -> 6 blocks
     new_types = cfg.layer_types + ["conv", "conv"]
-    out, meta = depth_upscale(state, layer_map, layer_types=new_types)
+    out, _meta = depth_upscale(state, layer_map, layer_types=new_types)
     check("new state has 6 blocks",
           any(k.startswith("blocks.5.") for k in out))
     check("duplicated weights identical",

@@ -26,10 +26,8 @@ sys.path.insert(0, ROOT)
 
 import torch
 
-from forge.exp.harness import (QWEN_ID, load_engine, bench_decode,
-                               log_result, wikitext_docs)
-from forge.exp.dynscale import (HeadGateController, EarlyExitController,
-                                DiagTempScaler)
+from forge.exp.dynscale import DiagTempScaler, EarlyExitController, HeadGateController
+from forge.exp.harness import QWEN_ID, bench_decode, load_engine, log_result, wikitext_docs
 from forge.model_loader import unpack_output_with_kv
 
 PROMPT = ("The quick brown fox jumps over the lazy dog and runs through "
@@ -193,7 +191,7 @@ def main():
 
     # wiring sanity: manual full-depth decode must match model() greedy
     res_b, tps_b = timed_ee_decode(ee, eng, ids, N_TOKENS, tau=None)
-    res_b2, tps_b2 = timed_ee_decode(ee, eng, ids, N_TOKENS, tau=None)
+    _res_b2, tps_b2 = timed_ee_decode(ee, eng, ids, N_TOKENS, tau=None)
     tps_b = max(tps_b, tps_b2)
     ref_tokens = model_greedy_tokens(eng, ids, N_TOKENS)
     parity = sum(a == b for a, b in zip(res_b["tokens"], ref_tokens)) / N_TOKENS

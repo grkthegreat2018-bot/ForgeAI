@@ -1,5 +1,8 @@
 """Wrapper to run sft_train QAT with proper output flushing."""
-import sys, os, subprocess
+import os
+import subprocess
+import sys
+
 sys.stdout.reconfigure(encoding="utf-8")
 os.environ["PYTHONPATH"] = "."
 os.environ["PYTHONIOENCODING"] = "utf-8"

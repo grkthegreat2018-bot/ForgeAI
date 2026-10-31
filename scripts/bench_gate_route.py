@@ -37,12 +37,15 @@ QUESTIONS = [
 def main() -> None:
     from forge.engine.forge_engine import ForgeEngine
     from forge.engine.gated import REASONED_TAIL, THINK_HINT
-    from forge.self_play.discovery.qwen_adapter import (
-        render_messages_for_config)
+    from forge.self_play.discovery.qwen_adapter import render_messages_for_config
     from forge_gui.api.master_prompt import get_default_prompt_for_config
     from forge_gui_server.services.chat_loop import (
-        _DIRECT_SUFFIX, _FORCE_ANSWER_SUFFIX, _THINK_MAX_TOKENS,
-        _route_p_easy, _think_cap_processor)
+        _DIRECT_SUFFIX,
+        _FORCE_ANSWER_SUFFIX,
+        _THINK_MAX_TOKENS,
+        _route_p_easy,
+        _think_cap_processor,
+    )
 
     engine = ForgeEngine.from_checkpoint(
         checkpoint=str(ROOT / "research/checkpoints/ForgeLM_V2.safetensors"),

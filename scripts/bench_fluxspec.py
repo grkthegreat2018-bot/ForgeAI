@@ -4,13 +4,16 @@ Trains a small FluxLM on a repetitive+natural mixed stream, then
 times generate() at speculate=0 (pipelined) vs K in {4,8,12} — also
 verifies bit-identical outputs.
 """
-import os, sys, time
+import os
+import sys
+import time
 from pathlib import Path
 
 ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, str(ROOT))
 
 import torch
+
 from forge.model.flux import FluxConfig, FluxLM
 
 V = 4096
@@ -23,10 +26,10 @@ def main():
     seq = (([7, 8, 9, 10] * 120)
            + torch.randint(0, V, (2400,), generator=rng).tolist()
            + ([7, 8, 9, 10] * 60))
-    cfg = dict(vocab_size=V, device="cuda", cuda_primary=True,
-               orders=(1, 2, 3, 4, 6, 8), use_knn=False,
-               sparse_taps=(), class_orders=(), word_orders=(),
-               hybrid_taps=())
+    cfg = {"vocab_size": V, "device": "cuda", "cuda_primary": True,
+               "orders": (1, 2, 3, 4, 6, 8), "use_knn": False,
+               "sparse_taps": (), "class_orders": (), "word_orders": (),
+               "hybrid_taps": ()}
     m = FluxLM(FluxConfig(**cfg))
     m.ingest(seq, tag="t")
     prompt = [7, 8, 9]

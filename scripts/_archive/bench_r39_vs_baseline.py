@@ -12,9 +12,9 @@ from __future__ import annotations
 import math
 import random
 
+import pytest
 import torch
 import torch.nn as nn
-import pytest
 
 torch.manual_seed(42)
 
@@ -185,7 +185,7 @@ class MockTokenizer:
                 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/'
             )
         self._vocab = [""] + list(vocab_chars)
-        self._id_to_char = {i: c for i, c in enumerate(self._vocab)}
+        self._id_to_char = dict(enumerate(self._vocab))
         self._char_to_id = {c: i for i, c in enumerate(self._vocab)}
 
     def convert_ids_to_tokens(self, ids):
@@ -220,27 +220,24 @@ class CountingModel:
 
 # ── Imports under test ─────────────────────────────────────────────────────
 
-from forge.engine.compat.arch_adapters import (  # noqa: E402
-    convert_qwen3_checkpoint,
+from forge.engine.cascade import ModelCascade
+from forge.engine.compat.arch_adapters import (
     convert_gemma3_checkpoint,
     convert_llama4_checkpoint,
+    convert_qwen3_checkpoint,
     detect_architecture,
-    convert_checkpoint,
-    gemma3_layer_types,
 )
-from forge.engine.decoding import (  # noqa: E402
+from forge.engine.decoding import (
     SelfSpeculativeSparse,
     StandardDecoding,
 )
-from forge.engine.structured.xgrammar import XGrammarConstrainer  # noqa: E402
-from forge.engine.test_time_scaling import (  # noqa: E402
-    FirstFinishSearch,
+from forge.engine.structured.xgrammar import XGrammarConstrainer
+from forge.engine.test_time_scaling import (
     BeamSearch,
+    FirstFinishSearch,
     MCTSDecoder,
 )
-from forge.moe.routers import LASERRouter, METRORouter  # noqa: E402
-from forge.engine.cascade import ModelCascade  # noqa: E402
-
+from forge.moe.routers import LASERRouter, METRORouter
 
 # ── 1. Arch Adapters ───────────────────────────────────────────────────────
 

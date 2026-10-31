@@ -19,11 +19,15 @@ sys.path.insert(0, ROOT)
 
 import torch
 
-from forge.exp.harness import (QWEN_ID, load_engine, wikitext_docs,
-                               bench_decode, log_result)
-from forge.exp.prevtok import (PrevTokenHead, SelfCorrectingDecoder,
-                              train_prev_head, eval_prev_head, save_head,
-                              seq_prev_nll)
+from forge.exp.harness import QWEN_ID, bench_decode, load_engine, log_result, wikitext_docs
+from forge.exp.prevtok import (
+    PrevTokenHead,
+    SelfCorrectingDecoder,
+    eval_prev_head,
+    save_head,
+    seq_prev_nll,
+    train_prev_head,
+)
 
 HEAD_PATH = os.path.join(ROOT, ".devin", "exp_prevtok_head.pt")
 

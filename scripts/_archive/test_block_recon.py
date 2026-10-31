@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import argparse
-import copy
-import gc
 import time
+
 import torch
 import torch.nn as nn
-
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from forge.engine.quant.novel_quant_r48 import (
-    quantize_model_nanoquant, quantize_model_ternary_ptq,
-    estimate_r48_memory,
-)
+
 from forge.engine.quant.block_recon import BlockReconstructor
+from forge.engine.quant.novel_quant_r48 import (
+    estimate_r48_memory,
+    quantize_model_nanoquant,
+    quantize_model_ternary_ptq,
+)
 
 
 def compute_perplexity(model, input_ids, device):
@@ -154,7 +154,7 @@ def main():
     # PPL after reconstruction
     ppl_after = compute_perplexity(model_quant, input_ids, device)
     print(f"\n{'='*70}")
-    print(f"RESULTS")
+    print("RESULTS")
     print(f"{'='*70}")
     print(f"FP16 PPL:              {fp16_ppl:.4f}")
     print(f"PPL before recon:      {ppl_before:.4f} (delta={ppl_before-fp16_ppl:+.4f})")

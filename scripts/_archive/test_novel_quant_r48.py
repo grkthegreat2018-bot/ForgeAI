@@ -7,23 +7,25 @@ Measures perplexity, speed, memory, and reconstruction error.
 from __future__ import annotations
 
 import argparse
-import copy
 import gc
 import json
 import time
-import sys
 
 import torch
 import torch.nn as nn
 
-from forge.engine.quant.novel_quant_r48 import (
-    NanoQuantLinear, BTCQuantLinear, TernaryPTQLinear,
-    quantize_model_nanoquant, quantize_model_btc, quantize_model_ternary_ptq,
-    estimate_r48_memory,
+from forge.engine.quant.novel_quant_r46 import (
+    collect_activations as collect_acts_r46,
 )
 from forge.engine.quant.novel_quant_r46 import (
-    quantize_model_awq_fp4, collect_activations as collect_acts_r46,
     estimate_r46_memory,
+    quantize_model_awq_fp4,
+)
+from forge.engine.quant.novel_quant_r48 import (
+    estimate_r48_memory,
+    quantize_model_btc,
+    quantize_model_nanoquant,
+    quantize_model_ternary_ptq,
 )
 from forge.engine.quant.nvfp4_quant import quantize_model_nvfp4
 
@@ -213,7 +215,7 @@ def main():
     needs_calib = any(METHODS.get(m, {}).get('needs_cal', False) for m in methods)
     activations = None
     if needs_calib:
-        print(f"\nCollecting calibration activations...")
+        print("\nCollecting calibration activations...")
         all_acts = {}
         for calib_input_ids in calib_input_ids_list:
             acts = collect_acts_r46(model_fp, calib_input_ids,
@@ -355,7 +357,7 @@ def main():
     }
     with open('scripts/r48_quant_results.json', 'w') as f:
         json.dump(out, f, indent=2)
-    print(f"\nResults saved to scripts/r48_quant_results.json")
+    print("\nResults saved to scripts/r48_quant_results.json")
 
 
 if __name__ == "__main__":

@@ -28,8 +28,8 @@ Also tests: DCT (discrete cosine transform, JPEG-style) vs DFT.
 Runs on CUDA.
 """
 import math
+
 import torch
-import torch.nn.functional as F
 from safetensors import safe_open
 
 DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -135,7 +135,7 @@ def test_real_weight(label, W_key):
             continue
         r_dct, n_dct = dct_2d(W, keep_frac)
         e_dct = rel_err(x @ r_dct, y_ref)
-        print(f"  {target_params:>10} {'DCT(keep=%.2f)' % keep_frac:>22} {n_dct:>10} "
+        print(f"  {target_params:>10} {'DCT(keep={:.2f})'.format(keep_frac):>22} {n_dct:>10} "
               f"{dense_params/max(n_dct,1):>9.1f}x {e_dct:>10.4f}")
 
         # DCT + sparse (70% DCT, 30% sparse budget)
@@ -148,7 +148,7 @@ def test_real_weight(label, W_key):
         else:
             r_ds, n_ds = dct_2d_plus_sparse(W, keep_frac2, sparse_frac)
             e_ds = rel_err(x @ r_ds, y_ref)
-            print(f"  {target_params:>10} {'DCT+sparse(%.2f+%.3f)' % (keep_frac2, sparse_frac):>22} "
+            print(f"  {target_params:>10} {'DCT+sparse({:.2f}+{:.3f})'.format(keep_frac2, sparse_frac):>22} "
                   f"{n_ds:>10} {dense_params/max(n_ds,1):>9.1f}x {e_ds:>10.4f}")
 
     if DEV.type == 'cuda':

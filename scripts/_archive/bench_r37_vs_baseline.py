@@ -17,21 +17,19 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
 import torch
 import torch.nn as nn
-import pytest
-from dataclasses import fields as dataclass_fields
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
-from forge.keys.architecture.mamba3_key import Mamba3Key, MAMBA3_PASSTHROUGH, MAMBA3_COMPLEX_NORMS
-from forge.keys.architecture.kronecker_embed_key import KroneckerEmbedKey, KroneckerEmbedding
+from forge.config import get_config
+from forge.keys.architecture.kronecker_embed_key import KroneckerEmbedding, KroneckerEmbedKey
+from forge.keys.architecture.mamba3_key import MAMBA3_COMPLEX_NORMS, Mamba3Key
 from forge.keys.architecture.pit_tying_key import PITKey
 from forge.keys.attention.outro_key import OutRoKey
 from tests.fixtures.keys.architecture.forge_hybrid_key import ForgeHybridKey
-from forge.config import get_config, MODEL_CONFIGS
-
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 

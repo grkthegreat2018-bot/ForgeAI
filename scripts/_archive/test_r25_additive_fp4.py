@@ -38,7 +38,11 @@ BIT BUDGET MATH (hand-computed per §F):
 
 Runs on real V9 weights. Compares against IRI-FP4 at matched bpw.
 """
-import os, sys, math, time
+import math
+import os
+import sys
+import time
+
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
@@ -50,13 +54,14 @@ DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float32
 CKPT = r"D:\windsurf\ForgeAI\research\checkpoints\ForgeLM_V2_Light.safetensors"
 
-from forge.engine.quant.nvfp4_quant import (
-    _FP4_MAGNITUDES, _FP4_BOUNDARIES, _quantize_to_fp4, _dequantize_fp4,
-)
 from forge.engine.quant.novel_quant import (
-    _optimal_fp4_scale, _quantize_to_fp4_adaptive, quantize_iri_fp4,
+    _optimal_fp4_scale,
+    quantize_iri_fp4,
 )
-
+from forge.engine.quant.nvfp4_quant import (
+    _FP4_BOUNDARIES,
+    _FP4_MAGNITUDES,
+)
 
 # ──────────────────────────────────────────────────────────────────────────
 # Metrics
@@ -93,7 +98,7 @@ def kmeans_codebook(data: torch.Tensor, n_codes: int, n_iters: int = 20,
         codebook: (n_codes, D) float tensor
         assignments: (N,) long tensor — index of nearest codebook entry per point
     """
-    N, D = data.shape
+    N, _D = data.shape
     g = torch.Generator(device=data.device).manual_seed(seed)
     # Initialize: random subset of data points
     perm = torch.randperm(N, generator=g, device=data.device)[:n_codes]
@@ -171,7 +176,7 @@ def quantize_additive_fp4_scalar(W: torch.Tensor, block_size: int = 32,
         # Subsample for k-means speed (k-means on 16M points is slow)
         N = res_flat.shape[0]
         max_kmeans_N = 200_000
-        if N > max_kmeans_N:
+        if max_kmeans_N < N:
             g = torch.Generator(device=W.device).manual_seed(42 + k)
             sub_idx = torch.randperm(N, generator=g, device=W.device)[:max_kmeans_N]
             res_sub = res_flat[sub_idx]
@@ -256,7 +261,7 @@ def quantize_additive_fp4_vector(W: torch.Tensor, block_size: int = 32,
         # Subsample for k-means speed
         N = res_vecs.shape[0]
         max_kmeans_N = 100_000
-        if N > max_kmeans_N:
+        if max_kmeans_N < N:
             g = torch.Generator(device=W.device).manual_seed(42 + k)
             sub_idx = torch.randperm(N, generator=g, device=W.device)[:max_kmeans_N]
             res_sub = res_vecs[sub_idx]
@@ -323,7 +328,7 @@ def benchmark_weight(label, W_key, x_dim=None):
     print(f"  {'Algorithm':<28} {'bpw':>6} {'frob_err':>10} {'SQNR(dB)':>10} {'out_err':>10} {'time':>7}")
     print(f"  {'-'*28} {'-'*6} {'-'*10} {'-'*10} {'-'*10} {'-'*7}")
 
-    for name, fn, target_bpw in configs:
+    for name, fn, _target_bpw in configs:
         try:
             t0 = time.time()
             result = fn(W)
@@ -362,8 +367,8 @@ def main():
         except Exception as e:
             print(f"\n  SKIP {label}: {e}")
 
-    print(f"\n  KEY: AdditiveFP4 must beat IRI-FP4 at matched bpw.")
-    print(f"  Win condition: higher SQNR at same-or-lower bytes/weight.")
+    print("\n  KEY: AdditiveFP4 must beat IRI-FP4 at matched bpw.")
+    print("  Win condition: higher SQNR at same-or-lower bytes/weight.")
 
 
 if __name__ == "__main__":

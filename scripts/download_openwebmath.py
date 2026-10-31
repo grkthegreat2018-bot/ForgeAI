@@ -10,7 +10,6 @@
 
 import json
 import os
-import sys
 import time
 
 # Repo-root anchored (EC-078 — previously wrote into scripts/).
@@ -98,7 +97,7 @@ def main():
               f"({current_file_bytes / 1e6:.1f} MB)")
 
     elapsed = time.time() - start_time
-    print(f"\n[OpenWebMath] DONE")
+    print("\n[OpenWebMath] DONE")
     print(f"  Total articles written: {total_written:,}")
     print(f"  Total articles skipped: {total_skipped:,}")
     print(f"  Total size: {total_bytes / 1e9:.2f} GB ({total_bytes:,} bytes)")

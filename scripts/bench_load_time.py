@@ -12,7 +12,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from forge.runtime.configure import configure  # noqa: E402
+from forge.runtime.configure import configure
+
 configure()
 
 _t0 = time.perf_counter()
@@ -30,7 +31,7 @@ def main():
     import torch
 
     t = time.perf_counter()
-    from forge.engine.forge_engine import ForgeEngine  # noqa: F401
+    from forge.engine.forge_engine import ForgeEngine
     mark("import ForgeEngine", t)
 
     t = time.perf_counter()

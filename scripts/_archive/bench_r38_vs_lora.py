@@ -12,27 +12,28 @@ LoRAAdapter from bitnet_lora.py:
 
 All tests run on CPU with small (64x128) matrices.
 """
-import os, sys
+import sys
+
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import math
+
+import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import pytest
 
 torch.manual_seed(42)
 
+from forge.training.adapter_variants import (
+    AdaLoRAClass,
+    PiSSAInitializer,
+    rsLoRALinear,
+)
 from forge.training.bitnet_lora import LoRAAdapter
 from forge.training.dlora import DLoRAAdapter
 from forge.training.dora import DoRALinear
-from forge.training.adapter_variants import (
-    PiSSAInitializer,
-    AdaLoRAClass,
-    rsLoRALinear,
-)
 from forge.training.forge_adapter import ForgeAdapter
-
 
 # ── helpers ──────────────────────────────────────────────────────────────
 

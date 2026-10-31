@@ -21,35 +21,31 @@ import copy
 import gc
 import json
 import time
-import sys
 
 import torch
 import torch.nn as nn
 
-# R45 algorithms
-from forge.engine.quant.novel_quant_r45 import (
-    WaveletLiftLinear,
-    SchurABFP4Linear,
-    SVDLiftBinaryLinear,
-    LloydMaxRotatedKVQuantizer,
-    requant_refine_model,
-    quantize_model_wavelet_lift,
-    quantize_model_schur_ab_fp4,
-    quantize_model_svd_lift_binary,
-    estimate_r45_memory,
+from forge.engine.quant.novel_quant_r44 import (
+    estimate_quantized_memory as estimate_r44_memory,
 )
 
 # R44 algorithms (for comparison + ReQuant refinement)
 from forge.engine.quant.novel_quant_r44 import (
-    AdaptiveBlockFP4Linear,
     quantize_model_adaptive_block_fp4,
-    estimate_quantized_memory as estimate_r44_memory,
 )
 
-# Baselines
-from forge.quant.inference_quant import quantize_model_int4
+# R45 algorithms
+from forge.engine.quant.novel_quant_r45 import (
+    LloydMaxRotatedKVQuantizer,
+    estimate_r45_memory,
+    quantize_model_schur_ab_fp4,
+    quantize_model_svd_lift_binary,
+    quantize_model_wavelet_lift,
+    requant_refine_model,
+)
 from forge.engine.quant.nvfp4_quant import quantize_model_nvfp4
 
+# Baselines
 
 # ──────────────────────────────────────────────────────────────────────────
 # Utilities (shared with R44 test)
@@ -356,7 +352,7 @@ def run_test(model_id, methods, device, max_seq_len=512, n_gen_tokens=50,
     }
     with open('scripts/r45_quant_results.json', 'w') as f:
         json.dump(output, f, indent=2)
-    print(f"\nResults saved to scripts/r45_quant_results.json")
+    print("\nResults saved to scripts/r45_quant_results.json")
 
 
 def test_kv_cache_quantization(model_id, device, bits_list=(2, 3)):
@@ -407,7 +403,7 @@ def test_kv_cache_quantization(model_id, device, bits_list=(2, 3)):
         for layer_idx in range(len(past_key_values)):
             k_cache, v_cache = past_key_values[layer_idx]
             # k_cache: (batch, heads, seq, head_dim)
-            for kv_tensor, name in [(k_cache, 'K'), (v_cache, 'V')]:
+            for kv_tensor, _name in [(k_cache, 'K'), (v_cache, 'V')]:
                 packed = quantizer.quantize(kv_tensor.float())
                 recon = quantizer.dequantize(packed)
 

@@ -25,14 +25,12 @@ Features:
 The base model stays frozen. Only the topic expert is updated.
 This prevents base model size growth and allows dynamic compute.
 """
+import json
 import os
 import sys
-import time
-import json
-import copy
-import torch
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+
+import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -47,7 +45,7 @@ N_LAYERS = 28
 
 # ─── Data Loading ──────────────────────────────────────────────────────
 
-def load_training_data(path: str) -> List[Dict[str, str]]:
+def load_training_data(path: str) -> list[dict[str, str]]:
     """Load training data from JSON, JSONL, TXT, or CSV.
 
     Returns list of {"prompt": str, "completion": str} dicts.
@@ -60,7 +58,7 @@ def load_training_data(path: str) -> List[Dict[str, str]]:
     samples = []
 
     if ext == ".json":
-        with open(p, "r", encoding="utf-8") as f:
+        with open(p, encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, list):
             for item in data:
@@ -74,7 +72,7 @@ def load_training_data(path: str) -> List[Dict[str, str]]:
             samples = data["examples"]
 
     elif ext == ".jsonl":
-        with open(p, "r", encoding="utf-8") as f:
+        with open(p, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -87,7 +85,7 @@ def load_training_data(path: str) -> List[Dict[str, str]]:
 
     elif ext == ".csv":
         import csv
-        with open(p, "r", encoding="utf-8", newline="") as f:
+        with open(p, encoding="utf-8", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 prompt = row.get("prompt", row.get("input", ""))
@@ -96,7 +94,7 @@ def load_training_data(path: str) -> List[Dict[str, str]]:
                     samples.append({"prompt": prompt, "completion": completion})
 
     elif ext == ".txt":
-        with open(p, "r", encoding="utf-8") as f:
+        with open(p, encoding="utf-8") as f:
             text = f.read()
         # Split on blank lines (paragraphs) or double newlines
         blocks = [b.strip() for b in text.split("\n\n") if b.strip()]
@@ -118,7 +116,7 @@ def load_training_data(path: str) -> List[Dict[str, str]]:
 
 # ─── Expert Save/Load ──────────────────────────────────────────────────
 
-def compress_expert_svd(w: torch.Tensor, svd_energy: float = 0.99) -> Dict[str, torch.Tensor]:
+def compress_expert_svd(w: torch.Tensor, svd_energy: float = 0.99) -> dict[str, torch.Tensor]:
     """SVD compress an expert weight matrix (near-lossless at 0.99 energy)."""
     U, S, Vh = torch.linalg.svd(w.float(), full_matrices=False)
     cumsum = (S ** 2).cumsum(0)
@@ -170,15 +168,15 @@ def save_expert(model, topic: str, v4_dir: str, svd_energy: float = 0.99):
     return n_saved
 
 
-def update_manifest(v4_dir: str, topic: str, keywords: List[str] = None,
-                    label: str = None):
+def update_manifest(v4_dir: str, topic: str, keywords: list[str] | None = None,
+                    label: str | None = None):
     """Update manifest.json with a new/updated topic entry."""
     manifest_path = Path(v4_dir) / "manifest.json"
     if not manifest_path.exists():
         print(f"  WARNING: No manifest at {manifest_path}")
         return
 
-    with open(manifest_path, "r", encoding="utf-8") as f:
+    with open(manifest_path, encoding="utf-8") as f:
         manifest = json.load(f)
 
     # Update topics dict
@@ -295,10 +293,10 @@ def load_seed_expert(model, seed_idx: int = 3, v2_path: str = V2_CHECKPOINT):
 
 # ─── Fine-tuning ───────────────────────────────────────────────────────
 
-def finetune_expert(model, tokenizer, samples: List[Dict[str, str]],
+def finetune_expert(model, tokenizer, samples: list[dict[str, str]],
                     device: str = "cuda", lr: float = 2e-5,
                     label_smoothing: float = 0.15, grad_accum: int = 4,
-                    max_length: int = 512) -> Dict:
+                    max_length: int = 512) -> dict:
     """Fine-tune expert 0 on (prompt, completion) pairs via LoRA.
 
     Only trains LoRA adapters on expert 0's FFN weights (last 8 layers).
@@ -434,7 +432,7 @@ def finetune_expert(model, tokenizer, samples: List[Dict[str, str]],
     return {"n_batches": n_batches, "avg_loss": avg_loss}
 
 
-def snapshot_expert(model) -> Dict:
+def snapshot_expert(model) -> dict:
     """Snapshot expert 0 weights across all layers."""
     state = {}
     for i, block in enumerate(model.blocks):
@@ -448,7 +446,7 @@ def snapshot_expert(model) -> Dict:
     return state
 
 
-def restore_expert(model, state: Dict):
+def restore_expert(model, state: dict):
     """Restore expert 0 weights from snapshot."""
     for i, block in enumerate(model.blocks):
         if i in state and hasattr(block.ffn, "experts") and len(block.ffn.experts) > 0:
@@ -460,7 +458,7 @@ def restore_expert(model, state: Dict):
 
 # ─── Evaluation ────────────────────────────────────────────────────────
 
-def evaluate_expert(model, tokenizer, val_samples: List[Dict[str, str]],
+def evaluate_expert(model, tokenizer, val_samples: list[dict[str, str]],
                     device: str = "cuda", max_tokens: int = 100) -> float:
     """Evaluate expert on validation samples.
 
@@ -510,15 +508,16 @@ def evaluate_expert(model, tokenizer, val_samples: List[Dict[str, str]],
 def train_supervised(topic: str, data_path: str, v4_dir: str = V4_DIR,
                      epochs: int = 3, lr: float = 2e-5, patience: int = 2,
                      val_ratio: float = 0.15, svd_energy: float = 0.99,
-                     seed_expert: int = 3, keywords: List[str] = None,
-                     label: str = None, device: str = "cuda"):
+                     seed_expert: int = 3, keywords: list[str] | None = None,
+                     label: str | None = None, device: str = "cuda"):
     """Train an expert on external data (supervised mode).
 
     Works for ANY domain: math, science, history, code, etc.
     """
+    from transformers import AutoTokenizer
+
     from forge.config import get_config
     from forge.model_loader import ModelLoader
-    from transformers import AutoTokenizer
 
     print("=" * 70)
     print(f"Train Expert: {topic} (supervised)")
@@ -527,7 +526,7 @@ def train_supervised(topic: str, data_path: str, v4_dir: str = V4_DIR,
     print("=" * 70)
 
     # 1. Load data
-    print(f"\n[1] Loading training data...")
+    print("\n[1] Loading training data...")
     samples = load_training_data(data_path)
     if len(samples) < 2:
         print("  ERROR: Need at least 2 samples to train")
@@ -543,7 +542,7 @@ def train_supervised(topic: str, data_path: str, v4_dir: str = V4_DIR,
     print(f"  Split: {len(train_samples)} train / {len(val_samples)} val")
 
     # 2. Load model
-    print(f"\n[2] Loading model...")
+    print("\n[2] Loading model...")
     cfg = get_config("forgelm_v2", device=device)
     model = ModelLoader.build_model_fast(
         cfg, checkpoint_path=V2_CHECKPOINT, moe_top_k=0)
@@ -558,12 +557,12 @@ def train_supervised(topic: str, data_path: str, v4_dir: str = V4_DIR,
         load_seed_expert(model, seed_idx=seed_expert)
 
     # 4. Evaluate baseline
-    print(f"\n[4] Evaluating baseline...")
+    print("\n[4] Evaluating baseline...")
     baseline_acc = evaluate_expert(model, tokenizer, val_samples, device)
     print(f"  Baseline accuracy: {baseline_acc:.1%}")
 
     # 5. Train
-    print(f"\n[5] Training...")
+    print("\n[5] Training...")
     best_acc = baseline_acc
     best_state = None
     epochs_no_improve = 0
@@ -585,7 +584,7 @@ def train_supervised(topic: str, data_path: str, v4_dir: str = V4_DIR,
             epochs_no_improve += 1
             print(f"  No improvement ({epochs_no_improve}/{patience})")
             if epochs_no_improve >= patience:
-                print(f"  Early stopping")
+                print("  Early stopping")
                 break
 
     # 6. Restore best
@@ -594,14 +593,14 @@ def train_supervised(topic: str, data_path: str, v4_dir: str = V4_DIR,
         print(f"\n  Restored best expert (acc: {best_acc:.1%})")
 
     # 7. Save
-    print(f"\n[6] Saving expert...")
+    print("\n[6] Saving expert...")
     if best_acc > baseline_acc:
         save_expert(model, topic, v4_dir, svd_energy)
         update_manifest(v4_dir, topic, keywords, label)
         print(f"\n  IMPROVED: {baseline_acc:.1%} -> {best_acc:.1%}")
     else:
         print(f"\n  No improvement over baseline ({baseline_acc:.1%})")
-        print(f"  Expert NOT saved (baseline unchanged)")
+        print("  Expert NOT saved (baseline unchanged)")
 
     # Summary
     print(f"\n{'='*70}")

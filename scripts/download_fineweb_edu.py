@@ -10,7 +10,6 @@
 
 import json
 import os
-import sys
 import time
 
 # Repo-root anchored (EC-078 — previously wrote into scripts/).
@@ -111,7 +110,7 @@ def main():
               f"({current_file_bytes / 1e6:.1f} MB)")
 
     elapsed = time.time() - start_time
-    print(f"\n[FineWeb-Edu] DONE")
+    print("\n[FineWeb-Edu] DONE")
     print(f"  Total articles written: {total_written:,}")
     print(f"  Skipped (score < {MIN_SCORE}): {total_skipped_score:,}")
     print(f"  Skipped (chars < {MIN_CHARS}): {total_skipped_chars:,}")

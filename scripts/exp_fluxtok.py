@@ -8,15 +8,18 @@ Variants: pure order mixture -> +knn -> +deep orders -> +sparse taps.
 Metrics: teacher-forced NLL/token + top1 on held-out docs bytes,
 VRAM/RAM, ingest/eval seconds.  Reference: HF Qwen NLL same text.
 """
-import os, sys, time
+import os
+import sys
+import time
 from pathlib import Path
 
 ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, str(ROOT))
 
 import torch
+
+from forge.exp.harness import hf_nll, load_hf, log_result
 from forge.model.flux import FluxConfig, FluxLM
-from forge.exp.harness import log_result, load_hf, hf_nll, vram_gb
 
 V = 151936
 
@@ -50,9 +53,9 @@ def tf(model_proto, ids):
 def run(name, train, held, **kw):
     torch.cuda.reset_peak_memory_stats()
     t0 = time.perf_counter()
-    cfg = dict(vocab_size=V, device="cuda", cuda_primary=True,
-               sparse_taps=(), class_orders=(), word_orders=(),
-               hybrid_taps=())
+    cfg = {"vocab_size": V, "device": "cuda", "cuda_primary": True,
+               "sparse_taps": (), "class_orders": (), "word_orders": (),
+               "hybrid_taps": ()}
     cfg.update(kw)
     m = FluxLM(FluxConfig(**cfg))
     m.ingest(train, tag="train")
@@ -88,7 +91,7 @@ def main():
     torch.cuda.empty_cache()
 
     if which == "all":
-        base = dict(use_knn=False)
+        base = {"use_knn": False}
         run("bpe-o1248", train, held,
             orders=(1, 2, 3, 4, 6, 8, 12, 16, 24, 32), **base)
         run("bpe-o1248-knn", train, held,
@@ -109,8 +112,8 @@ def main():
             orders=(1, 2, 3, 4, 6, 8, 12, 16, 24, 32),
             sparse_taps=((0, 2), (0, 2, 4), (0, 2, 4, 6),
                          (1, 3), (1, 3, 5)))
-        oc = dict(orders=(1, 2, 3, 4, 6, 8, 12, 16, 24, 32),
-                  cls_table=tuple(cls))
+        oc = {"orders": (1, 2, 3, 4, 6, 8, 12, 16, 24, 32),
+                  "cls_table": tuple(cls)}
         run("bpe-o1248-cls", train, held,
             class_orders=(2, 3, 4), **oc)
         run("bpe-o1248-cls-gv", train, held, class_orders=(2, 3, 4),
@@ -126,9 +129,9 @@ def main():
             emb, n_cls=256, special_ids=set(tok.all_special_ids))
         del _hf2
         torch.cuda.empty_cache()
-        eo = dict(orders=(1, 2, 3, 4, 6, 8, 12, 16, 24, 32),
-                  cls_table=tuple(ecls),
-                  cls_members=tuple(tuple(m) for m in emem))
+        eo = {"orders": (1, 2, 3, 4, 6, 8, 12, 16, 24, 32),
+                  "cls_table": tuple(ecls),
+                  "cls_members": tuple(tuple(m) for m in emem)}
         run("bpe-o1248-embc", train, held,
             class_orders=(2, 3), **eo)
         run("bpe-o1248-embc-gv", train, held, class_orders=(2, 3),

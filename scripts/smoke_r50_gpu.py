@@ -30,9 +30,9 @@ def show(text):
 
 
 def main():
-    from forge.model_loader import load_default_model
-    from forge.engine.decoding import StandardDecoding, DoLaDecoding
+    from forge.engine.decoding import DoLaDecoding, StandardDecoding
     from forge.engine.engine_common import _dry_penalties
+    from forge.model_loader import load_default_model
 
     torch.manual_seed(0)
     print("Loading ForgeLM V2 (bf16, cuda)...")
@@ -97,10 +97,12 @@ def main():
 
     # Convert the real checkpoint state dict via KDAKey.convert_model_state
     import dataclasses
+
     from safetensors.torch import load_file
+
     from forge.config import get_config
-    from forge.model.llm import ConfigurableResearchLLM
     from forge.keys.attention.kda_key import KDAKey
+    from forge.model.llm import ConfigurableResearchLLM
     from research.paths import V2_CHECKPOINT
 
     cfg_kda = dataclasses.replace(get_config("forgelm_v2"), use_kda=True)

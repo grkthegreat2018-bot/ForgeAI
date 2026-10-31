@@ -23,10 +23,15 @@ sys.path.insert(0, ROOT)
 import torch
 import torch.nn.functional as F
 
+from forge.exp.cxlmem import (
+    TieredKV,
+    attach_tiered_kv,
+    detach_tiered_kv,
+    kv_bytes_per_token,
+    unwrap_ffn_tiered,
+    wrap_ffn_tiered,
+)
 from forge.exp.harness import QWEN_ID, load_engine, log_result, wikitext_docs
-from forge.exp.cxlmem import (TieredKV, attach_tiered_kv, detach_tiered_kv,
-                              kv_bytes_per_token, unwrap_ffn_tiered,
-                              wrap_ffn_tiered)
 from forge.model_loader import unpack_output_with_kv
 
 # Qwen2.5-0.5B KV geometry
@@ -251,7 +256,7 @@ def run_model():
 
     # baseline: full GPU-resident KV
     torch.cuda.reset_peak_memory_stats()
-    tok_s, logits0, gen0, _ = decode_run(eng, ids, n_tok)
+    tok_s, _logits0, gen0, _ = decode_run(eng, ids, n_tok)
     base_vram = torch.cuda.max_memory_allocated() / 1e9
     log_result("cxl", phase="decode_full_gpu", ctx=ctx, n_tok=n_tok,
                tok_s=round(tok_s, 1), ms_per_tok=round(1e3 / tok_s, 2),
@@ -315,7 +320,7 @@ def run_model():
     tier = TieredKV(N_LAYERS, gpu_window_tokens=1024, page_tokens=128,
                     cxl_capacity_tokens=ctx2 + 4096, burst_pages=32,
                     prefetch_ahead=True, device="cuda")
-    tok_s, logits, gen, _ = decode_run(eng, ids2, 32, tier=tier,
+    tok_s, _logits, gen, _ = decode_run(eng, ids2, 32, tier=tier,
                                        mode="stream")
     st = tier.stats()
     log_result(

@@ -37,7 +37,6 @@ from pathlib import Path
 import numpy as np
 import torch
 
-
 # ── GGUF → HF tensor name map (llama arch) ────────────────────────────────────
 _BLOCK_MAP = {
     "attn_q": "self_attn.q_proj",

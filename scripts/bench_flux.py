@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from forge.model.flux import FluxConfig, FluxLM  # noqa: E402
+from forge.model.flux import FluxConfig, FluxLM
 
 
 def main() -> int:
@@ -65,7 +65,7 @@ def main() -> int:
     rep = m.memory_report()
     line = f"memory_est: {rep['total_MB_est']:.0f} MB"
     if tracemalloc.is_tracing():
-        cur, peak = tracemalloc.get_traced_memory()
+        _cur, peak = tracemalloc.get_traced_memory()
         line += f" | tracemalloc peak: {peak / 1e6:.0f} MB"
     if torch.cuda.is_available() and args.device == "cuda":
         line += (f" | vram: {torch.cuda.memory_allocated() / 1e6:.0f} MB "

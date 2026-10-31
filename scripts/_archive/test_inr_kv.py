@@ -17,6 +17,7 @@ rope_base=1e6. Tests at seq_len=512, 2048, 8192 to see scaling.
 Runs on CPU in seconds. No GPU/checkpoint needed.
 """
 import math
+
 import torch
 import torch.nn.functional as F
 
@@ -107,7 +108,7 @@ def s4r_baseline(k, v, rank, budget_bytes):
     """S4R-style: low-rank approximation of [seq, D] as [seq, rank] @ [rank, D].
     budget_bytes = rank * (seq + D) * 2 (bf16). Match to spectral-KV budget.
     """
-    seq, D = k.shape
+    _seq, _D = k.shape
     U, S, Vh = torch.linalg.svd(k.float(), full_matrices=False)
     k_recon = (U[:, :rank] * S[:rank]) @ Vh[:rank, :]
     U2, S2, Vh2 = torch.linalg.svd(v.float(), full_matrices=False)
@@ -119,7 +120,7 @@ def attention_output(q, k, v):
     """Standard attention: q [seq, n_heads, hd], k/v [seq, n_kv, hd].
     GQA: each kv head serves n_heads/n_kv query heads.
     """
-    seq, n_heads, hd = q.shape
+    _seq, n_heads, hd = q.shape
     n_kv = k.shape[1]
     rep = n_heads // n_kv
     k_rep = k.repeat_interleave(rep, dim=1)  # [seq, n_heads, hd]

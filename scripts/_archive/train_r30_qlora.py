@@ -36,7 +36,6 @@ import json
 import math
 import os
 import random
-import sys
 import time
 from pathlib import Path
 
@@ -91,7 +90,7 @@ def convert_dataset(input_path: str, output_path: str, max_examples: int = 0) ->
     """Convert hf_dataset JSONL (prompt/solution) to sft_train format (prompt/response)."""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     n = 0
-    with open(input_path, "r", encoding="utf-8") as fin, \
+    with open(input_path, encoding="utf-8") as fin, \
          open(output_path, "w", encoding="utf-8") as fout:
         for line in fin:
             line = line.strip()
@@ -132,7 +131,7 @@ def prepare_datasets(dataset_names: list[str], max_per_dataset: int = 0) -> str:
     total = 0
     with open(output, "w", encoding="utf-8") as fout:
         for path in all_examples:
-            with open(path, "r", encoding="utf-8") as fin:
+            with open(path, encoding="utf-8") as fin:
                 for line in fin:
                     fout.write(line)
                     total += 1
@@ -338,7 +337,7 @@ def load_v10_quantized(device: str = "cuda"):
     return engine, model
 
 
-def add_qlora(model: nn.Module, rank: int, alpha: int = None) -> tuple:
+def add_qlora(model: nn.Module, rank: int, alpha: int | None = None) -> tuple:
     """Add QLoRA adapters to V10 FFN-trio at all 16 layers."""
     from forge.training.bitnet_lora import add_lora_adapters
     if alpha is None:
@@ -467,7 +466,7 @@ def train_qlora(
             from forge.training.optim.hybrid_offload import CPUAdamW
             optimizer = CPUAdamW(lora_params, lr=lr, weight_decay=0.01,
                                  betas=(0.9, 0.95))
-            print(f"  Optimizer: CPUAdamW (offloaded states)")
+            print("  Optimizer: CPUAdamW (offloaded states)")
         except Exception as e:
             print(f"  CPUAdamW unavailable ({e}), falling back to AdamW")
             optimizer = torch.optim.AdamW(lora_params, lr=lr, weight_decay=0.01,
@@ -475,7 +474,7 @@ def train_qlora(
     else:
         optimizer = torch.optim.AdamW(lora_params, lr=lr, weight_decay=0.01,
                                       betas=(0.9, 0.95))
-        print(f"  Optimizer: AdamW")
+        print("  Optimizer: AdamW")
 
     # ── LR schedule ──
     def get_lr(step):
@@ -508,7 +507,7 @@ def train_qlora(
                 pad_id=tokenizer.pad_token_id,
             )
             prefetcher.set_transfer_on_consume(True)
-            print(f"  Async prefetcher: enabled (4 batches ahead)")
+            print("  Async prefetcher: enabled (4 batches ahead)")
         except Exception as e:
             print(f"  Async prefetcher: skipped ({e})")
             prefetcher = None
@@ -523,9 +522,10 @@ def train_qlora(
     val_losses = []
     pad_id = tokenizer.pad_token_id
 
-    from forge.training.bitnet_lora import freeze_unfreeze_lora, get_active_lora_params
+    from forge.training.bitnet_lora import (
+        freeze_unfreeze_lora, get_active_layers_for_step)
 
-    for epoch in range(epochs):
+    for _epoch in range(epochs):
         # ── Build batch iterator for this epoch ──
         if prefetcher is not None:
             # AsyncPrefetcher is an iterator: __iter__ starts the background thread
@@ -667,7 +667,7 @@ def train_qlora(
     # ── Restore EMA before merge ──
     if ema is not None:
         restore_ema(ema, model)
-        print(f"  EMA restored before merge")
+        print("  EMA restored before merge")
 
     # ── Merge LoRA into IRI-FP4 ──
     if save_path:
@@ -757,11 +757,11 @@ def main():
     # 3. Load V10 + add QLoRA
     print("\n[3/4] Loading V10 + adding QLoRA adapters...")
     from research.tokenizer_cache import get_tokenizer
-    engine, model = load_v10_quantized()
+    _engine, model = load_v10_quantized()
     tokenizer = get_tokenizer(str(TOKENIZER_DIR))
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    n_adapters, lora_params = add_qlora(model, rank=rank)
+    _n_adapters, lora_params = add_qlora(model, rank=rank)
 
     # Resume from LoRA checkpoint if specified
     if args.resume_from:
@@ -795,7 +795,7 @@ def main():
         resume_step=args.resume_step,
     )
 
-    print(f"\n=== R30 v2 complete ===")
+    print("\n=== R30 v2 complete ===")
     print(f"  Checkpoint: {save_path}")
     print(f"  Final loss: {sum(losses[-20:]) / min(20, len(losses)):.4f}")
     if val_losses:
