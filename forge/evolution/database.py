@@ -51,18 +51,56 @@ class FindingsDB:
     """SQLite-backed persistent storage for ForgeEvolve findings."""
 
     def __init__(self, db_path: str | Path = "forge_evolve.db"):
+        if db_path is None or str(db_path).strip() in ("", "None"):
+            # A stray `db_path=None` used to become a real file literally
+            # named "None" — a 119MB orphan showed up at the repo root.
+            # Fail fast so the caller's missing-path bug surfaces at the
+            # call site, not as a junk artifact.
+            raise ValueError(
+                f"FindingsDB needs a real db_path, got {db_path!r}")
         self.db_path = str(db_path)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        # WAL mode + tuned PRAGMAs: 10-100x faster commits, concurrent reads
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.execute("PRAGMA cache_size=-65536")    # 64MB cache (was 10MB)
-        self.conn.execute("PRAGMA temp_store=MEMORY")    # temp tables in RAM
-        self.conn.execute("PRAGMA mmap_size=268435456")  # 256MB memory-mapped I/O
-        self.conn.execute("PRAGMA busy_timeout=30000")   # wait 30s on lock contention
-        self._lock = threading.Lock()
+        self._conn: sqlite3.Connection | None = None
+        self._closed = False
+        self._lock = threading.RLock()
+        self._connect()
         self._init_tables()
+
+    def _connect(self) -> None:
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        # busy_timeout FIRST — parallel campaign runs on a FRESH db race
+        # the WAL switch below: the second connect used to fail instantly
+        # with "database is locked" before the handler was registered.
+        self._conn.execute("PRAGMA busy_timeout=30000")   # wait 30s on lock contention
+        # WAL mode + tuned PRAGMAs: 10-100x faster commits, concurrent reads
+        for _ in range(50):
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError:
+                time.sleep(0.2)
+        else:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA cache_size=-65536")    # 64MB cache (was 10MB)
+        self._conn.execute("PRAGMA temp_store=MEMORY")    # temp tables in RAM
+        self._conn.execute("PRAGMA mmap_size=268435456")  # 256MB memory-mapped I/O
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """Live connection — lazily reconnects after release(). Callers
+        (CodeEvolve campaign rounds, Mutator.note) treat FindingsDB as
+        long-lived; an open WAL conn per run pins frames, so run()
+        releases between rounds and the next access transparently
+        reopens. close() is terminal — it raises here."""
+        if self._closed:
+            raise sqlite3.ProgrammingError(
+                "Cannot operate on a closed database.")
+        if self._conn is None:
+            with self._lock:
+                if self._conn is None and not self._closed:
+                    self._connect()
+        return self._conn
 
     # Current schema version. Bump when adding columns/tables; migration
     # logic below auto-upgrades existing DBs idempotently.
@@ -1067,8 +1105,27 @@ class FindingsDB:
             "device": r[6], "end_time": r[7],
         } for r in rows]
 
+    def release(self) -> None:
+        """Transient disconnect — drops the WAL handle between campaign
+        rounds; the next conn access lazily reconnects. Idempotent."""
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
+
     def close(self):
-        self.conn.close()
+        """Terminal close — conn access raises after this."""
+        with self._lock:
+            self._closed = True
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
 
     def __enter__(self):
         return self
@@ -1077,6 +1134,8 @@ class FindingsDB:
         self.close()
 
     def __del__(self):
-        if hasattr(self, 'conn'):
+        # Check _conn directly — hasattr(self, 'conn') would run the
+        # property and OPEN a fresh connection just to close it.
+        if getattr(self, "_conn", None) is not None:
             self.close()
 

@@ -174,7 +174,8 @@ class LLMDomainGenerator:
         if self.engine is not None:
             try:
                 code = self._generate_with_llm(topic)
-                if code and self._validate_code(code):
+                if (code and self._validate_code(code)
+                        and self._sanity_check(code, topic)):
                     domain = GeneratedDomain(
                         name=topic.name,
                         code=code,
@@ -205,20 +206,49 @@ class LLMDomainGenerator:
         """
         prompt = self._build_prompt(topic)
         try:
-            # Use ForgeEngine to generate code
+            # ChatML wrap — engine.generate takes literal text; a raw
+            # prompt to a chat-tuned ckpt is what made the proposer emit
+            # token soup before the _wrap fix (same failure here).
+            # \x3c keeps the literal consistent with LLMProposer._wrap.
+            i = prompt.rfind("```python")
+            prime = prompt[i + len("```python"):] if i >= 0 else ""
+            user = prompt[:i] if i >= 0 else prompt
+            # LFM3-family engines need the official template shape:
+            # startoftext BOS + the empty think-prefill its jinja
+            # renders for enable_thinking=False. Detected from the
+            # tokenizer BOS (renamed ckpt dirs still carry it).
+            _tok = getattr(self.engine, "tokenizer", None)
+            _bos = getattr(_tok, "bos_token", "") or ""
+            _lfm3 = ("startoftext" in _bos
+                     or "lfm3" in str(getattr(
+                         self.engine, "checkpoint_path", "")).lower())
+            wrapped = (("\x3c|startoftext|>" if _lfm3 else "")
+                       + "\x3c|im_start|>user\n" + user
+                       + "\x3c|im_end|>\n\x3c|im_start|>assistant\n"
+                       + ("\x3cthink>\x3c/think>" if _lfm3 else "")
+                       + ("```python" + prime if prime else ""))
             response = self.engine.generate(
-                prompt, max_new_tokens=2048, temperature=0.3
-            )
-            # Extract code from response
-            code = self._extract_code(response)
+                wrapped, max_new_tokens=2048, temperature=0.3,
+                stop=["\x3c|im_end|>"])
+            # Body continuations start with 'def'/docstring — the
+            # extractor would treat that as a restart and drop the
+            # class-line prime, so splice it back on ourselves.
+            code = self._extract_code(
+                (prime + response) if prime else response, "",
+                required=[self._safe_class_name(topic.name)])
             return code
         except Exception:
             return None
 
     def _build_prompt(self, topic: OptimizationTopic) -> str:
-        """Build the LLM prompt for domain generation."""
+        """Build the LLM prompt for domain generation.
+
+        Ends mid-class (unclosed fence + header) — the model continues
+        the body rather than deciding whether to fence, restart, or
+        chatter. Same primed-continuation trick as the CodeEvolve
+        proposer."""
         return textwrap.dedent(f"""\
-            You are an expert AI optimization researcher. Generate a Python class
+            You are an expert AI optimization researcher. Write a Python class
             that defines an evolution search domain for optimizing: {topic.name}
 
             Category: {topic.category}
@@ -238,9 +268,8 @@ class LLMDomainGenerator:
             For feature flags, score based on expected speedup/quality tradeoff.
             For config params, score based on known-good ranges from literature.
 
-            Generate ONLY the Python class code, no explanations.
-            Use torch for tensor operations.
-            Keep it under 100 lines.
+            Use torch for tensor operations. Keep it under 100 lines.
+            Complete the class body below — do not restart, no explanations.
 
             ```python
             # Generated domain for {topic.name}
@@ -249,21 +278,30 @@ class LLMDomainGenerator:
             import numpy as np
 
             class {self._safe_class_name(topic.name)}(BaseDomain):
-                # ... implementation ...
-            ```""")
+            """)
 
     def _safe_class_name(self, name: str) -> str:
-        """Convert a topic name to a valid Python class name."""
-        parts = name.replace("-", "_").replace(".", "_").split("_")
-        return "".join(p.capitalize() for p in parts) + "Domain"
-
-    def _extract_code(self, response: str) -> str | None:
-        """Extract Python code from an LLM response."""
-        # Look for ```python ... ``` blocks
+        """Convert a topic name to a valid Python class name — scanner
+        topics can carry spaces/punctuation/leading digits that would
+        make the emitted `class <name>(BaseDomain):` line unparseable
+        (guaranteed validation failure -> silent GenericDomain fallback)."""
         import re
-        match = re.search(r'```python\n(.*?)```', response, re.DOTALL)
-        if match:
-            return match.group(1)
+        parts = [p for p in re.sub(r"[^0-9a-zA-Z]+", "_", name)
+                 .strip("_").split("_") if p]
+        cls = "".join(p.capitalize() for p in parts) or "Generic"
+        if not cls[0].isalpha():
+            cls = "T" + cls
+        return cls + "Domain"
+
+    def _extract_code(self, response: str, prime: str = "",
+                      required: list | None = None) -> str | None:
+        """Extract Python code from an LLM response - delegates to the
+        hardened CodeEvolve extractor (think-strip, unclosed fences,
+        primed continuations, prose salvage, required-name preference)."""
+        from forge.evolution.code_evolve import _extract_code
+        code = _extract_code(response, prime, required=required)
+        if code and "class" in code:
+            return code
         # Try without code fence
         if "class " in response and "BaseDomain" in response:
             return response
@@ -294,6 +332,47 @@ class LLMDomainGenerator:
                         break
 
         return has_domain_class
+
+    def _sanity_check(self, code: str, topic: OptimizationTopic) -> bool:
+        """Execute-gate: a parseable BaseDomain subclass can still be
+        garbage — constant evaluate(), evaluate() that crashes on plain
+        configs, or a class that can't instantiate. Exec it, run
+        evaluate() on two spread configs, and require finite scores
+        with SOME variance before it counts as a real domain."""
+        try:
+            import math
+            namespace = {"BaseDomain": BaseDomain,
+                         "torch": __import__("torch"),
+                         "np": __import__("numpy", fromlist=["numpy"])}
+            exec(code, namespace)
+            cls = next(
+                (o for o in namespace.values()
+                 if isinstance(o, type) and issubclass(o, BaseDomain)
+                 and o is not BaseDomain), None)
+            if cls is None:
+                return False
+            try:
+                inst = cls()
+            except TypeError:
+                return True         # arg'd __init__ — can't smoke it;
+                                    # accept and let registration decide
+            scores = []
+            for v in (0.1, 0.9):
+                cfg = {p: v for p in (topic.parameters or ["x"])}
+                try:
+                    r = inst.evaluate(cfg)
+                    s = (r or {}).get("score")
+                    if not isinstance(s, (int, float)) \
+                            or not math.isfinite(s):
+                        return False
+                    scores.append(float(s))
+                except Exception:
+                    return False
+            # constant-score domain = no gradient to search on;
+            # GenericDomain is the better fallback
+            return len(set(scores)) > 1
+        except Exception:
+            return False
 
     def register_domains(self, domains: list[GeneratedDomain]) -> list[str]:
         """Register validated domains in the global DOMAINS registry.

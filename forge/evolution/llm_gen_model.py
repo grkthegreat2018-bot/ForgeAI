@@ -275,7 +275,12 @@ class LLMGenModel:
         if not path.exists():
             return False
 
-        state = torch.load(str(path), map_location="cpu", weights_only=False)
+        try:
+            state = torch.load(str(path), map_location="cpu",
+                               weights_only=True)
+        except Exception:
+            state = torch.load(str(path), map_location="cpu",
+                               weights_only=False)
 
         # Check if saved config matches current config
         saved_config = state.get("config", {})

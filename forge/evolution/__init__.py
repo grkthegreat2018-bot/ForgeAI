@@ -9,17 +9,38 @@ Architecture:
 
 Key insight: 1000 candidates generated, only 50 evaluated → 20:1 compression.
 Surrogate learns which configs tend to work, so its top-50 predictions improve over time.
+
+Lazy exports (PEP 562): the names below resolve on first attribute access.
+Eager importing used to pull torch + engine + gen-model chains into EVERY
+spawn-context eval worker (eval_pool._worker_main is resolved by importing
+this package) — ~335MB RSS and multi-second boot per worker for code the
+worker never touches. Submodules (eval_pool, code_evolve, mutator, ...) are
+still importable directly; ``forge.evolution.<submodule>`` attribute access
+also lazily resolves.
 """
-from .archive import MapElitesArchive
-from .checker_model import HeuristicChecker, SharedCheckerModel, get_checker, reset_checker
-from .curriculum_finetuner import CurriculumFineTuner
-from .database import FindingsDB
-from .engine import ForgeEvolve, ForgeEvolveConfig
-from .gen_model_manager import GenModelManager
-from .generators import BatchedGenerator, GeneratorPopulation, TemplateGenerator
-from .llm_gen_model import LLMGenModel
-from .surrogate import SurrogateModel
-from .trainer import GeneratorTrainer
+from __future__ import annotations
+
+import importlib
+
+# Public name -> owning submodule (resolved on first access).
+_EXPORTS = {
+    "MapElitesArchive": "archive",
+    "HeuristicChecker": "checker_model",
+    "SharedCheckerModel": "checker_model",
+    "get_checker": "checker_model",
+    "reset_checker": "checker_model",
+    "CurriculumFineTuner": "curriculum_finetuner",
+    "FindingsDB": "database",
+    "ForgeEvolve": "engine",
+    "ForgeEvolveConfig": "engine",
+    "GenModelManager": "gen_model_manager",
+    "BatchedGenerator": "generators",
+    "GeneratorPopulation": "generators",
+    "TemplateGenerator": "generators",
+    "LLMGenModel": "llm_gen_model",
+    "SurrogateModel": "surrogate",
+    "GeneratorTrainer": "trainer",
+}
 
 __all__ = [
     "BatchedGenerator",
@@ -39,3 +60,23 @@ __all__ = [
     "get_checker",
     "reset_checker",
 ]
+
+
+def __getattr__(name: str):
+    sub = _EXPORTS.get(name)
+    if sub is not None:
+        mod = importlib.import_module(f".{sub}", __name__)
+        val = getattr(mod, name)
+        globals()[name] = val          # one lazy hit, then direct attribute
+        return val
+    try:
+        return importlib.import_module(f".{name}", __name__)
+    except ModuleNotFoundError as e:
+        if e.name != f"{__name__}.{name}":
+            raise   # a real nested-import failure — surface it
+        raise AttributeError(
+            f"module {__name__!r} has no attribute {name!r}") from None
+
+
+def __dir__():
+    return sorted(set(globals()) | set(__all__))

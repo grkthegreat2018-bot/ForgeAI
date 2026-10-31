@@ -147,10 +147,75 @@ def _discover_json_domains() -> dict[str, type[BaseDomain]]:
             continue
     return registry
 
-DOMAINS: dict[str, type[BaseDomain]] = _discover_domains()
-# Merge in JSON-specified domains (they override Python classes with the same
-# CamelCase name — JSON is the canonical source of truth when both exist)
-DOMAINS.update(_discover_json_domains())
+class _DomainRegistry(dict):
+    """DOMAINS registry — Python domains eager, JSON-spec domains merged
+    on first access.
+
+    _discover_json_domains() needs domain_spec, and domain_spec needs
+    BaseDomain from THIS module — a real cycle once the package init
+    stopped loading domains first (lazy forge.evolution __init__):
+    code_evolve -> scout -> domain_spec -> domains -> domain_spec
+    (partial). Deferring the merge to first registry access breaks it:
+    by then whichever side loaded first is fully initialized.
+    """
+    _merged = False
+
+    def _merge(self):
+        if self._merged:
+            return
+        self._merged = True
+        try:
+            self.update(_discover_json_domains())
+        except Exception:
+            pass
+
+    def __getitem__(self, k):
+        self._merge(); return super().__getitem__(k)
+
+    def __setitem__(self, k, v):
+        self._merge(); return super().__setitem__(k, v)
+
+    def __delitem__(self, k):
+        self._merge(); return super().__delitem__(k)
+
+    def __contains__(self, k):
+        self._merge(); return super().__contains__(k)
+
+    def __iter__(self):
+        self._merge(); return super().__iter__()
+
+    def __len__(self):
+        self._merge(); return super().__len__()
+
+    def __eq__(self, other):
+        self._merge(); return super().__eq__(other)
+
+    def __repr__(self):
+        self._merge(); return super().__repr__()
+
+    def get(self, *a):
+        self._merge(); return super().get(*a)
+
+    def keys(self):
+        self._merge(); return super().keys()
+
+    def items(self):
+        self._merge(); return super().items()
+
+    def values(self):
+        self._merge(); return super().values()
+
+    def pop(self, *a):
+        self._merge(); return super().pop(*a)
+
+    def setdefault(self, *a):
+        self._merge(); return super().setdefault(*a)
+
+
+DOMAINS: dict[str, type[BaseDomain]] = _DomainRegistry(_discover_domains())
+# JSON-specified domains merge lazily on first registry access (they
+# override Python classes with the same CamelCase name — JSON is the
+# canonical source of truth when both exist).
 
 def get_domain(name: str, **kwargs) -> BaseDomain:
     """Instantiate a domain by class name."""
