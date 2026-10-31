@@ -148,6 +148,68 @@ unless the user explicitly overrides them for a specific task.
 - **Bisectability**: every commit must build and pass tests. If a commit
   breaks tests, fix it or revert before pushing.
 
+## Security Posture (updated 2026-02 audit+hardening)
+
+Hard guarantees now enforced:
+- `research/persistent_executor.py` is THE sandbox: PEP 578 audit hook
+  (denies process/network/ctypes/frame/code-obj events, confines open() +
+  all fs ops to a per-worker jail), restricted builtins, env scrub
+  (secrets never reach workers), per-exec builtins/sys.modules restore,
+  Windows Job Object (tree-kill + memory cap). `build_once_script()`
+  provides the same containment for one-shot executions.
+- All model-generated code paths route through it:
+  `forge/self_play/self_play_sandbox.py` (persistent + once fallback —
+  the old two-stage wrapper's import hook ran in the WRONG process and
+  was inert; the in-process `exec(all_code)` self_critique is gone),
+  `forge/self_play/infinite_curriculum.py` (_execute_sandbox).
+- `forge/evolution/eval_pool.py` + `_candidate_eval.py` + `code_evolve.py`:
+  secret-env scrub before candidate exec, Job Object on pool workers,
+  `__RESULT__` marker parsed from the LAST line only.
+- `forge_gui/api/agent_tools.py`: run_python env-scrubbed + timeout
+  capped; run_tests args filtered to a safe pytest flag allowlist.
+- `forge_gui_server/app.py`: loopback-only CORS + WebSocket Origin check
+  (was wildcard CORS + no WS origin check = browser drive-by RCE on
+  localhost).
+- `forge/engine/forge_server.py`: default bind 127.0.0.1 (was 0.0.0.0),
+  FORGE_API_KEY now gates ALL /v1 methods (was mutating-only — GETs
+  leaked task history/security config), loopback-only CORS (was
+  wildcard+credentials), lora_adapter/adapter_path confined to repo +
+  FORGE_LORA_ROOTS.
+- `forge/engine/tool_security.py`: default blacklist (.env/.ssh/.git/
+  sandbox.json) is a NON-REMOVABLE floor — /v1/security/config PATCH can
+  only add patterns.
+- `forge/engine/library.py`: entry_id validated [A-Za-z0-9_-]{1,128} —
+  was HTTP-controlled path traversal in entry files.
+- `forge/checkpoint_io.py` + `forge/model/loader.py` +
+  `forge/engine/engine_checkpoints.py`: safetensors header/tensor-count/
+  size bounds (100MB header, 100k tensors, 128GB file, shape×dtype ==
+  blob range) — corrupt safetensors can't OOM/OOB the loaders.
+- `forge/aux_models.py`: manifest `kind=="module"` imports confined to
+  project roots + FORGE_AUX_MODULE_ROOTS (was arbitrary class
+  instantiation = RCE via remote manifest).
+- `forge/evolution/llm_domain_gen.py`: AST gate before in-process exec.
+- `forge/training/crash_recovery.py`: RLock (signal-handler deadlock),
+  weights_only fallbacks now warn loudly everywhere.
+
+Honest residuals — NOT guaranteed:
+- "100% memory safe" is unattainable for a Python/CUDA/Triton codebase:
+  audit hooks and Job Objects contain Python-level escapes, not
+  interpreter bugs, native-extension memory errors, or GPU kernel OOB.
+- Audit-hook jail assumes no buggy native code in the worker; a
+  memory-corruption primitive in the sandboxed process could in
+  principle defeat the hook (that's why Job tree-kill + mem cap exist).
+- eval_pool/candidate workers intentionally keep full capabilities
+  (torch.compile subprocess, CUDA) — only env secrets are stripped;
+  treat evolved candidate code as hostile-but-jailed, not harmless.
+- `weights_only=False` torch.load sites remain for genuinely
+  pickle-required formats (flux snapshots, optimizer/RNG resume
+  bundles): load only self-produced artifacts; all now warn.
+- forge_gui_server binds 127.0.0.1 but has no auth — any local process
+  can call it; do not port-forward it or serve it on LAN.
+- `tempfile`/os.stat inside the jail are fine (confined); os.stat on
+  outside paths is a file-existence oracle only.
+
+
 ## Current Canonical Layout
 
 Production code: `forge/` (was `research/`, migrated commit f1a7542)

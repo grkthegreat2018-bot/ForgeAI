@@ -47,8 +47,14 @@ torchao>=0.17
 vastai>=1.4.0,<1.5.5
 paramiko>=3.4,<5.0
 
-# Serving (optional — only needed for chat_ui.py)
-# gradio>=4.0  # Uncomment if using research/serving/chat_ui.py
+# Serving — required by forge/engine/forge_server.py and forge_gui_server/
+# (FastAPI app + uvicorn runner). Install with: pip install -e ".[serving]"
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.0
+# Optional: crash_recovery zstd snapshots, GGUF vocab via llama.cpp
+# zstandard>=0.22
+# llama-cpp-python  # needs a C++ toolchain to build
 
 # Dev / testing (install with: pip install -e ".[dev]")
 # pytest>=8.0

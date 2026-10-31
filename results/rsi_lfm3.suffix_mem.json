@@ -1,0 +1,1 @@
+{"run_id": "cev_4b1d06ff06", "target": "suffix_mem", "evals": 31, "dry": 40, "promos": 0, "metric": "us_per_token", "goal": "min", "incumbent": 21.665809999952522, "incumbent_score": -19.849846666693338, "baseline_score": -45.0496966666833, "stage_counts": {"dup": 11}, "stop_reason": null, "ts": 1793377450.8504653}

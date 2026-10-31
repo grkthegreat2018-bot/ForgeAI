@@ -1,0 +1,1 @@
+{"run_id": "cev_9b424b96d3", "target": "auto_jsd", "evals": 11, "dry": 49, "promos": 0, "metric": "ms_per_call", "goal": "min", "incumbent": 2.715688889010279, "incumbent_score": -0.14877777781900173, "baseline_score": -2.8340666667645564, "stage_counts": {"dup": 4, "undefined": 2, "syntax": 2, "incomplete": 13, "missing": 1}, "stop_reason": null, "ts": 1793371263.28833}

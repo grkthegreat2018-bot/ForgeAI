@@ -194,7 +194,7 @@ codebook indices. Pareto-optimal below 3 bits.
 
 | # | Algorithm | Year | Core idea | Bits | Status |
 |---|-----------|------|-----------|------|--------|
-| 116 | **ForgeQuant** | R32 | INT4 dense + INT8 sparse outlier (INVERTS SharQ for SM120: int4 fast, int8 for outliers). ~3.6 eff bits. | 3.6 | **[IMPL]** (forge_quant) |
+| 116 | **ForgeQuant** | R32 | INT4 dense + INT8 outlier rows (top-10% by row L2 norm, RTN, no calibration; OWQ/SpQR/GRINQH-class prior art). ~4.9 eff bits — NOT 3.6 as originally logged. | 4.9 | **[IMPL]** (forge_quant) |
 | 117 | **GRINQH** | R32 | Graded Input-Based Quantization Hierarchy — dynamic per-channel precision. | dynamic | **[IMPL]** (grinqh) |
 | 118 | **MixLLM** | R32 | Global mixed-precision across output features. | mixed | **[IMPL]** (mixllm) |
 | 119 | **ACBQ** | R32 (ACL 2026) | Adaptive Cross-Block Quantization. | mixed | **[IMPL]** (acbq) |

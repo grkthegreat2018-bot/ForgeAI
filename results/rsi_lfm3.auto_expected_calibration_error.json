@@ -1,0 +1,1 @@
+{"run_id": "cev_9825caf830", "target": "auto_expected_calibration_error", "evals": 19, "dry": 48, "promos": 0, "metric": "ms_per_call", "goal": "min", "incumbent": 0.6663555554782592, "incumbent_score": -0.6663555554782592, "baseline_score": -0.6663555554782592, "stage_counts": {"dup": 2, "syntax": 3, "incomplete": 13, "missing": 4}, "stop_reason": null, "ts": 1793370711.5459466}

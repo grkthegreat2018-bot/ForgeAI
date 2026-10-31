@@ -187,10 +187,7 @@ None
 scratch/
 logs/
 
-# llama.cpp vendored binaries — redistributables, not repo content
-tools/llama/
-
-# all local CUDA/ggml binaries — parity-test assets, not repo content
+# all local CUDA/ggml binaries â€” parity-test assets, not repo content
 tools/llama/
 parity_*.txt
 

@@ -4,8 +4,18 @@
 - **AGENTS.md** — Agent operating directives (A-H), canonical layout, build/test commands
 - **docs/CHANGELOG.md** — Historical R&D round notes, refactor retrospectives (extracted from AGENTS.md)
 - **docs/CODEBASE_CRITIQUE_2026-09-09.md** — 25-issue audit driving the 2026-09-09 refactor
+- **docs/CODEBASE_CRITIQUE_2026-09-10_followup.md** — follow-up critique pass
+- **docs/CODEBASE_CRITIQUE_2026-09-16.md** — second critique pass
 - **docs/project_overview.md** — High-level project overview
 - **docs/forge_engine_guide.md** — ForgeEngine inference engine guide
+- **docs/EVOLVE_ROADMAP.md** — Evolve-loop roadmap: shipped/queued work + theory
+- **docs/ENGINE_IMPROVEMENT_PLAN.md** — ForgeEngine improvement plan (research-complete, awaiting execution)
+- **docs/ENGINE_CRITIQUE_DB.md** — Living catalogue of ForgeEngine weaknesses, dead code, and improvement opportunities
+
+## Design Documents
+- **docs/V14_RSI_DESIGN.md** — ForgeLM V14-RSI ~2.5B RSI-loop coder design (preset `forgelm_v14_rsi`)
+- **docs/LIVET_DESIGN.md** — LiveT live-training design (journaled GDN2/Titan/NGram live surfaces)
+- **docs/STRATA_M1_DESIGN.md** — STRATA M1 model-dynamics design (FluxLM successor)
 
 ## R&D Round Notes (chronological)
 - `rd_round_32.md` through `rd_round_49_plan.md` — Per-round research notes
@@ -22,9 +32,12 @@
 - `Gemini deep research.md` — Gemini deep research notes
 - `RND_PLAN_V8_AND_NOVEL_ARCH.md` — V8 and novel architecture plan
 - `WebScrappers.md` — Web scraping tools reference
+- `evolve_research.md` — Evolve-loop web-research digest
+- `FLUX_IMPROVEMENT_ROADMAP.md` — FluxLM RSI-loop improvement roadmap (R54+)
+- `docs/research/` — Long-form research notes (component atlas, technique survey, key-mapping/novelty audits, ideation docs)
 
 ## Bug Tracking
-- `BUG_LOG.md` — Resolved bug log (see `.devin/skills/log-bug` for workflow)
+- `BUG_LOG.md` — Resolved bug log (see `log-bug` in `~/.codeium/windsurf/skills/` for the workflow)
 
 ## Notes
 - R&D round numbering has gaps (rounds 1-31 are documented in CHANGELOG.md,

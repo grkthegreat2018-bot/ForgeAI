@@ -1,0 +1,1 @@
+{"run_id": "cev_56ef06f913", "target": "prefix_hash", "evals": 7, "dry": 45, "promos": 0, "metric": "us_per_chain", "goal": "min", "incumbent": 64.49374999798844, "incumbent_score": -64.49374999798844, "baseline_score": -64.49374999798844, "stage_counts": {"dup": 12, "syntax": 3, "missing": 12}, "stop_reason": null, "ts": 1793363659.4285133}

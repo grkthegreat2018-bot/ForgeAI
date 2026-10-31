@@ -32,8 +32,15 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.6",
 ]
+# Deps actually imported by forge/engine/forge_server.py and
+# forge_gui_server/ (EC-074 — gradio was listed but never imported).
+# Optional extras used by the serving path: `zstandard` (crash_recovery
+# snapshot compression) and `llama-cpp-python` (GGUF vocab in forge_loader).
 serving = [
-    "gradio>=4.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.0",
+    "zstandard>=0.22",
 ]
 data = [
     "datasets>=4.0",

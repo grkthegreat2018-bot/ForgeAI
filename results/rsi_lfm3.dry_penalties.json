@@ -1,0 +1,1 @@
+{"run_id": "cev_1925e95a7a", "target": "dry_penalties", "evals": 3, "dry": 40, "promos": 0, "metric": "us_per_call", "goal": "min", "incumbent": 99.11588236076676, "incumbent_score": -99.11588236076676, "baseline_score": -99.11588236076676, "stage_counts": {"dup": 37, "syntax": 1}, "stop_reason": null, "ts": 1793378566.3444805}

@@ -1,0 +1,1 @@
+{"run_id": "cev_3712b32c5f", "target": "fast_softmax", "evals": 3, "dry": 52, "promos": 0, "metric": "ms_per_call", "goal": "min", "incumbent": 0.09273699999539531, "incumbent_score": -0.09273699999539531, "baseline_score": -0.09273699999539531, "stage_counts": {"dup": 51}, "stop_reason": null, "ts": 1793363926.1819062}

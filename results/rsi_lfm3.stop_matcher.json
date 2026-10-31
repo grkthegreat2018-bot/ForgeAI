@@ -1,0 +1,1 @@
+{"run_id": "cev_8b331b467f", "target": "stop_matcher", "evals": 2, "dry": 1, "promos": 0, "metric": "us_per_push", "goal": "min", "incumbent": 3.8463866666764566, "incumbent_score": -3.8463866666764566, "baseline_score": -3.8463866666764566, "stage_counts": {"dup": 1}, "stop_reason": null, "ts": 1793362540.013096}

@@ -1,5 +1,9 @@
 # Bug Log
 
+> NOTE: entries before ~2026-10 cite pre-migration `research/` paths â€”
+> production code moved to `forge/` (commit f1a7542). Map `research/<x>`
+> to `forge/<x>` when looking up old references.
+
 ## 2026-08-11 â€” Self-play instability: model corruption, crashes, stalls
 
 ### Symptom
@@ -521,11 +525,11 @@ the same cleanup commit (see git log).
 
 ### Symptom
 1. Bare greetings (`Hello`) burned ~150 think tokens parroting the master
-   prompt, then emitted a bland `Answer:` — route probe scored p_easy
+   prompt, then emitted a bland `Answer:` ï¿½ route probe scored p_easy
    ~0.10 on prompts that should route direct.
 2. Tool turns looped: conv-exit fired on the tool-continuation round, the
    forced `Answer:` made the model restate its plan and re-emit the SAME
-   web_search 5x — never synthesized.
+   web_search 5x ï¿½ never synthesized.
 3. Direct-routed tool turns persisted think-voice musing as the visible
    reply; a mid-think `<tool_call>` left the think block unclosed so
    reasoning leaked into the persisted reply (`thinking escapes the tool
@@ -534,23 +538,23 @@ the same cleanup commit (see git log).
    ordinary tokens bypassed the id-based EOS and the model hallucinated
    its own tool results.
 4. `check the news` returned portal homepages (cnn.com/) + y.js ad
-   redirectors — zero real headlines; `web_fetch` stripped all markup so
+   redirectors ï¿½ zero real headlines; `web_fetch` stripped all markup so
    link names/urls were destroyed and long pages had no paging.
 
 ### Root Cause
 1. `_route_p_easy` scored the production render including the ~17-schema
-   `<tools>` block; gate_r probes were trained tools-free — the schema
+   `<tools>` block; gate_r probes were trained tools-free ï¿½ the schema
    block collapses h_mean, dragging p_easy ~0.25 under the 0.2 threshold
    (`Hello`: 0.355 tools-free vs 0.098 with tools). gate_r also has no
    chit-chat class.
-2. Route probe + conv observer ran on EVERY round — both are OOD on
+2. Route probe + conv observer ran on EVERY round ï¿½ both are OOD on
    tool-continuation (synthesis) turns.
 3. No repeat-call detection; direct-path pre-call musing persisted
    verbatim; `<tool_call>` (531) unmasked while think open (trained
    order: think ? </think> ? text ? call); generated `<think>` (541)
-   unbanned; no `reasoning_content` split — the template supports it
+   unbanned; no `reasoning_content` split ï¿½ the template supports it
    but the loop never populated it.
-4. DDG HTML returns portal homepages + ad redirectors for news queries —
+4. DDG HTML returns portal homepages + ad redirectors for news queries ï¿½
    a data problem, not a gating/restriction problem; single-engine search
    had no fallback when an endpoint bot-walls; `html_to_text` flattened
    pages to one line with zero link/structure info.
@@ -575,7 +579,7 @@ the same cleanup commit (see git log).
 - `master_prompt.py`: enforceable blunt/brief contract (lead with the
   answer, bullets over paragraphs, match length to question) + actionable
   tool-use policy instead of soft guidelines.
-- `web_primitives.py`: `fetch_url` reads any http(s) URL — bare
+- `web_primitives.py`: `fetch_url` reads any http(s) URL ï¿½ bare
   domains auto-https, redirects followed (`final_url`), HTML ?
   markdown-ish text via a streaming `HTMLParser` (headings/lists/links
   kept; `[label](url)` inline + deduped `links` list; script/style/
@@ -606,10 +610,10 @@ the same cleanup commit (see git log).
   test_gui_server.py test_gui_chat_store.py test_gui_tool_harness.py
   test_jamba_tool_format.py test_chat_features.py test_thinking_pipeline.py
   test_gui_agent_tools.py test_gui_mcp_client.py test_agent_safety_backup.py`
-  — 281 passed.
+  ï¿½ 281 passed.
 - `npm run build` (tsc + vite) clean.
 
-## 2026-09-21 — RSI loop: SFT trained a fake chat format + reasoning leaked into exported code
+## 2026-09-21 ï¿½ RSI loop: SFT trained a fake chat format + reasoning leaked into exported code
 
 ### Symptom
 RSI (self-play) epochs produced little/no improvement on the eval gate:
@@ -617,20 +621,20 @@ the model stayed prone to overthinking and weak at short, simple answers
 even though those are exactly what the loop should be sharpening.
 
 ### Root Cause
-1. **SFT rendered a non-existent chat format (CRITICAL)** — `sft_train.py`
+1. **SFT rendered a non-existent chat format (CRITICAL)** ï¿½ `sft_train.py`
    emitted `<|startofsegment|>`/`<|endofsegment|>` + `<|tool_call_start|>`/
    `<|tool_call_end|>` markers. None exist in the ForgeLM V2 (Jamba
-   Reasoning 3B) tokenizer — they tokenize as literal text fragments.
+   Reasoning 3B) tokenizer ï¿½ they tokenize as literal text fragments.
    Every SFT epoch trained completions conditioned on a format the model
    never sees at inference (`<|im_start|>` ChatML + `<tool_call>` ids
-   531/532). The module docstring already claimed im_start markers —
+   531/532). The module docstring already claimed im_start markers ï¿½
    the code was left stale through the Jamba migration.
-2. **Reasoning leaked into training data** — the solver's post-fence
+2. **Reasoning leaked into training data** ï¿½ the solver's post-fence
    musing was captured as `#` comments/docstrings inside exported
    solutions (observed in `azr_epoch1.jsonl`: 40+ comment lines of
    second-guessing before the actual function). SFT literally taught
    "write a wall of reasoning comments before the answer".
-3. **No direct-answer training signal** — epoch data was 100% code
+3. **No direct-answer training signal** ï¿½ epoch data was 100% code
    tasks; nothing taught "easy prompt ? short direct answer", so the
    `concise` eval category could never move.
 4. **First-pass selection** exported the first passing attempt, not the
@@ -640,7 +644,7 @@ even though those are exactly what the loop should be sharpening.
 ### Resolution
 1. `sft_train.py` renders via the canonical
    `chat_template.apply_chat_template` (`<|im_start|>`/`<|im_end|>`,
-   `<tool_call>`/`<tool_response>`, thinking=False direct answers) —
+   `<tool_call>`/`<tool_response>`, thinking=False direct answers) ï¿½
    verified real special ids 518/519/531/532/539 in encoded output.
 2. `infinite_curriculum._assemble_solution` AST-cleans every reply
    (`_clean_code` + `_DocstringStripper`): comments + docstrings dropped,
@@ -648,11 +652,11 @@ even though those are exactly what the loop should be sharpening.
    verification still fails them naturally. Applies to SFT export AND
    GRPO group completions.
 3. `infinite_loop._concise_qa_pairs` mixes `concise_qa_per_epoch`
-   (default 12) verified short-answer pairs per epoch — computed answers
+   (default 12) verified short-answer pairs per epoch ï¿½ computed answers
    (math/string/list/logic/conversions) + curated facts, ~half with
    explicit brevity hints, half bare so brevity becomes the default.
 4. Export picks the SHORTEST passing attempt; `_concise_adjusted_rewards`
-   adds `grpo_concise_bonus` (default 0.1) length-efficiency shaping —
+   adds `grpo_concise_bonus` (default 0.1) length-efficiency shaping ï¿½
    correctness still dominates; all-pass groups regain nonzero advantage.
 
 ### Files Modified
@@ -670,7 +674,7 @@ even though those are exactly what the loop should be sharpening.
 - Tokenizer check: rendered examples now encode ids 518/519/531/532/539
   (previously literal text).
 
-## 2026-10-08 — Continuation-forward causal mask + prefill-logits VRAM spike + decode-capture corruption (Hermes-3/llama31_8b)
+## 2026-10-08 ï¿½ Continuation-forward causal mask + prefill-logits VRAM spike + decode-capture corruption (Hermes-3/llama31_8b)
 
 ### Symptom
 "VRAM spikes when prompting, response corrupted" during the Hermes-3 8B
@@ -682,7 +686,7 @@ ghost context on prefix-cache hits for hybrid models; cross-request state
 leakage.
 
 ### Root Causes
-1. **SDPA is_causal top-left on continuation forwards (CRITICAL)** —
+1. **SDPA is_causal top-left on continuation forwards (CRITICAL)** ï¿½
    `GroupedQueryAttention` called `flash_attention(is_causal=True)` whenever
    T>1, even with a non-empty past_kv. PyTorch SDPA anchors the causal mask
    TOP-LEFT on non-square (T<S) shapes, so a T>1 continuation forward
@@ -692,25 +696,25 @@ leakage.
    corrupted text. Same defect in `fused_qk_norm_rope_cache.py`.
    File: `forge/model/layers.py` (~L348), `forge/engine/attention/fused_qk_norm_rope_cache.py` (~L295)
 
-2. **Full [1,T,V] prefill logits** — every DecodingStrategy prefilled via
+2. **Full [1,T,V] prefill logits** ï¿½ every DecodingStrategy prefilled via
    `model(ids, use_cache=True)` without `logits_last_only` (only the last
    position is ever read): ~512MB bf16 transient at 4k tokens / V=128256.
    File: `forge/engine/decoding.py` (x7 sites), `forge/engine/prefix_cache.py` (suffix forward)
 
-3. **_finish_to_stop re-fed the last emitted token** — the decode loop
+3. **_finish_to_stop re-fed the last emitted token** ï¿½ the decode loop
    already consumed it into past_kv; re-feeding appended a duplicate KV
    position and corrupted the <=32-token continuation tail. Fired whenever
    output hit max_new_tokens without EOS (finish_sentence=True default).
    File: `forge/engine/engine_generation.py` (~L1953)
 
-4. **Prefix cache stored end-of-generation KV under a prompt-only key** —
+4. **Prefix cache stored end-of-generation KV under a prompt-only key** ï¿½
    `cache_prompt_prefix` sliced `model._forge_last_kv` (prompt+generated).
    Tuple entries slice fine, but dict recurrent (mamba/SSM) entries can't be
    sliced, so generated tokens leaked into a prompt-keyed entry -> ghost
    context on hybrid-model hits.
    File: `forge/engine/prefix_cache.py` (~L263)
 
-5. **Stale decode captures across requests** — `_forge_last_kv` was never
+5. **Stale decode captures across requests** ï¿½ `_forge_last_kv` was never
    cleared; strategies that don't set it (NGram/ExternalDraft/Medusa/DSpark/
    Eagle3/MTPSelfSpec/SelfSpecSparse) left the previous request's KV visible
    to `_cache_prompt_prefix` and `_finish_to_stop` (poisoned entries /
@@ -727,14 +731,14 @@ leakage.
 3. Decode loops stash `_forge_last_logits` alongside `_forge_last_kv`
    (decoding.py x3, engine_generation._decode_tokens); `_finish_to_stop`
    uses them (zero extra forwards), falls back to `_prefill(output_ids)`
-   when absent — never re-feeds the last token.
+   when absent ï¿½ never re-feeds the last token.
 4. `_forge_prefill_kv` captured at the prompt boundary (StandardDecoding,
    engine `_prefill`, prefix-cache hit path); `cache_prompt_prefix` prefers
    it, so stored dict state is at the true boundary.
 5. `_generate_impl` clears `_forge_last_kv`/`_forge_last_logits`/
    `_forge_prefill_kv` at request start.
 
-### Known remaining issues (confirmed by audit, logged — outside this path)
+### Known remaining issues (confirmed by audit, logged ï¿½ outside this path)
 - Spec strategies (NGram/ExternalDraft/MTP/SelfSpecSparse) never roll back
   KV on reject -> corrupt past_kv (decoding.py:338/446); `uno.py`/`dspark.py`
   dormant/broken paths (singular kwarg TypeError, no snapshot/restore).
@@ -752,17 +756,17 @@ leakage.
   `forge/engine/decoding.py`, `forge/engine/prefix_cache.py`,
   `forge/engine/kv/cacheblend.py`, `forge/engine/prefill/__init__.py`,
   `forge/engine/engine_generation.py`
-- `tests/unit/test_forge_engine_fixes.py` — regression tests
-- `scripts/test_hermes_w4_generate.py` — real-model verify harness
+- `tests/unit/test_forge_engine_fixes.py` ï¿½ regression tests
+- `scripts/test_hermes_w4_generate.py` ï¿½ real-model verify harness
 
 ### Verification
 - `pytest tests/unit/test_forge_engine_fixes.py tests/unit/test_llama31_w4.py
   tests/unit/test_rd14_speedup.py tests/unit/test_engine_concurrency_fixes.py
-  tests/unit/test_replay_ssm.py tests/unit/test_r60_kv.py` — all pass
+  tests/unit/test_replay_ssm.py tests/unit/test_r60_kv.py` ï¿½ all pass
   (145, incl. 9 new regression tests).
 - TestContinuationForwardCausalMask (cpu+cuda parametrized): continuation
   logits match single-pass prefill <1e-4 on both devices.
-- Real-model: `scripts/test_hermes_w4_generate.py` on RTX 5070 12GB —
+- Real-model: `scripts/test_hermes_w4_generate.py` on RTX 5070 12GB ï¿½
   Hermes-3 8B loads W4 (~5.6 GiB resident); prefix-cache HIT output equals
   no-cache reference; peak transient ~0.5-0.8 GiB (was GBs at long prompts).
 

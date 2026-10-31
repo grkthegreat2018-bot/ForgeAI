@@ -1,0 +1,1 @@
+{"run_id": "cev_8f55b51585", "target": "quantize_4bit", "evals": 13, "dry": 50, "promos": 0, "metric": "ms_per_call", "goal": "min", "incumbent": 1.5336433333383561, "incumbent_score": -0.23937999994814163, "baseline_score": -1.6770566666915936, "stage_counts": {"dup": 25, "syntax": 6, "incomplete": 5}, "stop_reason": null, "ts": 1793378402.084301}

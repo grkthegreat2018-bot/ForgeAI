@@ -79,7 +79,7 @@ fit within the 12GB VRAM budget.
 - **VRAM**: Same as INT4 (with optional W2 for FFN: half the FFN VRAM)
 - **Tests**: 3 (forward, quantize model with named modules, mixed precision)
 
-### R32-6: ForgeQuant — Novel SM120-Tuned INT4 Dense + INT8 Sparse (FLAGSHIP)
+### R32-6: ForgeQuant — SM120-Tuned INT4 Dense + INT8 Outlier Rows (see audit correction below)
 - **File**: `research/inference/quant/forge_quant.py` (ForgeQuantLinear + quantize_model_forge_quant)
 - **Wiring**: `research/inference/forge_engine.py` ("forge_quant" quant mode)
 - **Source**: Novel combination of SharQ (arXiv 2606.26587) + GRINQH
@@ -94,13 +94,28 @@ fit within the 12GB VRAM budget.
   subtracting them from the dense path, the dense INT4 quantization has
   much smaller dynamic range → lower error.
 - **VRAM**: V10: ~680MB (INT4 dense ~600MB + INT8 sparse ~80MB)
-- **Effective bitwidth**: ~3.6 bits (vs 4.0 for NVFP4)
+- **Effective bitwidth**: ~3.6 bits (vs 4.0 for NVFP4) — **WRONG, actual ~4.9; see audit correction below**
 - **Tests**: 7 (roundtrip, forward, outlier preservation, quantize model,
   LoRA merge, beats INT4 on outliers, engine dispatch)
 - **Design fix during implementation**: Originally used 2-bit for sparse
   path — this was WRONG. Outliers need MORE precision, not less. Changed
   to INT8 for sparse path. The 2-bit approach had 93% relative error on
   outlier channels; INT8 brings it to <5% on those channels.
+- **Audit correction (2026-10-29)**: several claims above were overhyped.
+  (a) "~3.6 effective bits" is wrong — outlier rows are zeroed but still
+  stored at INT4, so the real cost is ~4.9 bits/param (compare vs W5
+  baselines). (b) The scheme is a recombination of published prior art —
+  OWQ/LLM.int8 (high-precision outlier channels), SpQR/SqueezeLLM
+  (dense+sparse residual), GRINQH (per-channel precision, which unlike
+  FQ uses activation stats + calibration). (c) The Triton GEMV uses no
+  tensor cores — the "mma.sync INT4" rationale is inaccurate; the benefit
+  is bandwidth only. (d) Selection by weight L2 norm is weaker than
+  activation-aware selection (AWQ finding). (e) The "smaller dense
+  dynamic range" mechanism is a no-op — scales are per-(row,group), so
+  removing outlier rows does not lower other rows' INT4 error; the only
+  benefit is the outlier rows themselves living at INT8. Measured since: 3B _fq ~
+  41 tok/s fused vs torchao int4 59.7; dNLL +0.47 on Qwen2.5-0.5B.
+  Treat ForgeQuant as a calibration-free RTN-class format, not SOTA.
 
 ## Engine Integration
 

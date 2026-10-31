@@ -1,0 +1,1 @@
+{"run_id": "cev_0aaccc8965", "target": "auto_w8a8_quantize_activation", "evals": 3, "dry": 15, "promos": 1, "metric": "ms_per_call", "goal": "min", "incumbent": 0.07881176472937132, "incumbent_score": -0.0830372549292709, "baseline_score": -0.08653529410224234, "stage_counts": {"undefined": 1}, "stop_reason": null, "ts": 1793299445.7347898}

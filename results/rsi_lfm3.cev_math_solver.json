@@ -1,0 +1,1 @@
+{"run_id": "cev_7638574bda", "target": "cev_math_solver", "evals": 3, "dry": 44, "promos": 0, "metric": "accuracy", "goal": "max", "incumbent": 0.595, "incumbent_score": 0.595, "baseline_score": 0.595, "stage_counts": {"syntax": 1, "missing": 1}, "stop_reason": null, "ts": 1793364283.668152}

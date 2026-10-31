@@ -447,7 +447,12 @@ class TestEngineDispatch:
         from forge.engine.kv.hyquant_kv import HyQuantKVCache
         assert isinstance(cache, HyQuantKVCache), "hyquant dispatch failed"
 
-    def test_build_kv_cache_unknown_falls_back(self):
-        from forge.engine.kv_backend import StandardKVCache, build_kv_cache
-        cache = build_kv_cache("nonexistent_strategy")
-        assert isinstance(cache, StandardKVCache)
+    def test_build_kv_cache_unknown_raises(self):
+        # Fail-closed since 65e7795 ("report effective state, not
+        # requested"): an unknown strategy must NOT silently fall back —
+        # a silent StandardKVCache lies about the effective cache.
+        import pytest
+        from forge.engine.errors import ActivationError
+        from forge.engine.kv_backend import build_kv_cache
+        with pytest.raises(ActivationError):
+            build_kv_cache("nonexistent_strategy")

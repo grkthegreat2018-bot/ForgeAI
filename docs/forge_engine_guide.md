@@ -1,6 +1,6 @@
 # ForgeEngine — Agent Guide
 
-> **File**: `research/inference/forge_engine.py`
+> **File**: `forge/engine/forge_engine.py`
 > **Purpose**: Unified inference engine for ForgeAI models. Orchestrates
 > KV cache strategies, decoding strategies, quantization, acceleration,
 > and 40+ opt-in inference optimizations.
@@ -14,12 +14,12 @@ features.
 ## Quick Start
 
 ```python
-from research.inference.forge_engine import ForgeEngine
+from forge.engine.forge_engine import ForgeEngine
 
 engine = ForgeEngine.from_checkpoint(
-    checkpoint="research/checkpoints/ForgeLM_V2_BSP.safetensors",
-    config_name="forgelm_v4",
-    tokenizer_path="research/checkpoints/lfm25_tokenizer",
+    checkpoint="research/checkpoints/ForgeLM_V2.safetensors",
+    config_name="forgelm_v2",
+    tokenizer_path="research/checkpoints/forgelm_v2_tokenizer",
 )
 engine.activate_optimal()  # best defaults for RTX 5070
 output = engine.generate("def fibonacci(n):", max_new_tokens=50)
@@ -91,90 +91,90 @@ fully implemented** — none are stubs.
 | Parameter | Module | Effect |
 |---|---|---|
 | `use_compile` | `torch.compile` | 1.3-2x decode speedup (reduce-overhead mode) |
-| `use_triton_conv` | `research/decoding/triton_conv.py` | Fused Triton conv kernel (89% conv bottleneck cut) |
-| `use_fused_qk_norm_rope_cache` | `research/inference/attention/fused_qk_norm_rope_cache.py` | Fuse QK-Norm+RoPE+KV-cache-write (5-10% decode) |
-| `use_block_fusion` | `research/inference/graphs/block_fusion.py` | Per-block CUDA graph + compile (1.3-1.5x) |
-| `use_compile_autotune` | `research/inference/graphs/compile_autotune.py` | Auto-benchmark compile modes, pick best |
-| `use_breakable_cuda_graph` | `research/inference/graphs/breakable_cuda_graph.py` | Segmented graph capture (1.7-1.93x) |
-| `use_foundry` | `research/inference/graphs/foundry.py` | Template-based CUDA graph (10x faster startup) |
+| `use_triton_conv` | `forge/decoding/triton_conv.py` | Fused Triton conv kernel (89% conv bottleneck cut) |
+| `use_fused_qk_norm_rope_cache` | `forge/engine/attention/fused_qk_norm_rope_cache.py` | Fuse QK-Norm+RoPE+KV-cache-write (5-10% decode) |
+| `use_block_fusion` | `forge/engine/graphs/block_fusion.py` | Per-block CUDA graph + compile (1.3-1.5x) |
+| `use_compile_autotune` | `forge/engine/graphs/compile_autotune.py` | Auto-benchmark compile modes, pick best |
+| `use_breakable_cuda_graph` | `forge/engine/graphs/breakable_cuda_graph.py` | Segmented graph capture (1.7-1.93x) |
+| `use_foundry` | `forge/engine/graphs/foundry.py` | Template-based CUDA graph (10x faster startup) |
 
 #### Attention optimizations
 
 | Parameter | Module | Effect |
 |---|---|---|
-| `use_wavelength_pruning` | `research/inference/attention/atflash.py` | ATFlash per-RoPE-wavelength pruning (37-48% attn) |
-| `use_pod_attention` | `research/inference/attention/pod_attention.py` | POD prefill-decode overlap (28% for hybrid batches) |
-| `use_cosa` | `research/inference/attention/cosa.py` | CoSA sparse attention (4.93x at 128K) |
-| `use_seq_split` | `research/inference/attention/seq_aware_split.py` | Seq-aware split for low-head-count (21-24% SM) |
-| `use_compact_attn` | `research/inference/attention/compact_attention.py` | CompactAttention for chunked prefill (2.72x at 128K) |
-| `use_fa4` | `research/inference/attention/fa4_attention.py` | FlashAttention-4 for Blackwell (1.3x prefill) |
-| `use_aoh` | `research/inference/kv/aoh_retmask.py` | Autonomy-of-Heads sparse attention (66% decode cut) |
+| `use_wavelength_pruning` | `forge/engine/attention/atflash.py` | ATFlash per-RoPE-wavelength pruning (37-48% attn) |
+| `use_pod_attention` | `forge/engine/attention/pod_attention.py` | POD prefill-decode overlap (28% for hybrid batches) |
+| `use_cosa` | `forge/engine/attention/cosa.py` | CoSA sparse attention (4.93x at 128K) |
+| `use_seq_split` | `forge/engine/attention/seq_aware_split.py` | Seq-aware split for low-head-count (21-24% SM) |
+| `use_compact_attn` | `forge/engine/attention/compact_attention.py` | CompactAttention for chunked prefill (2.72x at 128K) |
+| `use_fa4` | `forge/engine/attention/fa4_attention.py` | FlashAttention-4 for Blackwell (1.3x prefill) |
+| `use_aoh` | `forge/engine/kv/aoh_retmask.py` | Autonomy-of-Heads sparse attention (66% decode cut) |
 
 #### KV cache compression / eviction
 
 | Parameter | Module | Effect |
 |---|---|---|
-| `use_kara_kv` | `research/inference/kv/kara_kv.py` | KARA sliding-window compression + Token2Chunk |
-| `use_moment_kv` | `research/inference/kv/moment_kv.py` | MomentKV moment-statistics eviction |
-| `use_kvpop` | `research/inference/kv/kvpop.py` | KVpop predictive online pruning |
-| `use_conf_kv` | `research/inference/kv/conf_kv.py` | CONF-KV confidence-aware eviction + mixed-precision |
-| `use_mosa` | `research/inference/kv/mosa.py` | MoSA mixture of sparse attention (27% better ppl) |
+| `use_kara_kv` | `forge/engine/kv/kara_kv.py` | KARA sliding-window compression + Token2Chunk |
+| `use_moment_kv` | `forge/engine/kv/moment_kv.py` | MomentKV moment-statistics eviction |
+| `use_kvpop` | `forge/engine/kv/kvpop.py` | KVpop predictive online pruning |
+| `use_conf_kv` | `forge/engine/kv/conf_kv.py` | CONF-KV confidence-aware eviction + mixed-precision |
+| `use_mosa` | `forge/engine/kv/mosa.py` | MoSA mixture of sparse attention (27% better ppl) |
 
 #### Prefix caching / scheduling
 
 | Parameter | Module | Effect |
 |---|---|---|
 | `use_prefix_cache` | (built-in dict) | Cache KV for repeated prompt prefixes |
-| `use_chunked_prefill` | `research/inference/prefill/chunked_prefill.py` | Split long prompts into 512-token chunks |
-| `use_hybrid_prefill` | `research/inference/prefill/hybrid_prefill.py` | Adaptive chunked prefill (+2-5% throughput) |
-| `use_learned_prefix_cache` | `research/inference/kv/learned_prefix_cache.py` | ML-guided prefix cache eviction (18-47% size cut) |
-| `use_hotprefix` | `research/inference/scheduler/hotprefix.py` | Hotness-aware GPU/CPU prefix promotion |
-| `use_unified_radix` | `research/inference/scheduler/unified_radix.py` | Hybrid prefix caching (HiCache L1/L2/L3) |
+| `use_chunked_prefill` | `forge/engine/prefill/` (merged `__init__`) | Split long prompts into 512-token chunks |
+| `use_hybrid_prefill` | `forge/engine/prefill/` (merged `__init__`) | Adaptive chunked prefill (+2-5% throughput) |
+| `use_learned_prefix_cache` | `forge/engine/kv/learned_prefix_cache.py` | ML-guided prefix cache eviction (18-47% size cut) |
+| `use_hotprefix` | `forge/engine/scheduler/hotprefix.py` | Hotness-aware GPU/CPU prefix promotion |
+| `use_unified_radix` | `forge/engine/scheduler/unified_radix.py` | Hybrid prefix caching (HiCache L1/L2/L3) |
 
 #### Speculative decoding extensions
 
 | Parameter | Module | Effect |
 |---|---|---|
-| `use_adaptive_spec` | `research/decoding/adaptive_speculative.py` | n-gram + EAGLE-3 combo (up to 4.9x on code) |
-| `use_suffix_spec` | `research/decoding/suffix_decoding.py` | Suffix decoding (training-free, code/RAG) |
-| `use_peagle` | `research/decoding/peagle.py` | P-EAGLE parallel speculative (1.69x over EAGLE-3) |
-| `use_lookahead_gate` | `research/decoding/lookahead_gate.py` | Lookahead quality gate (2.6-7.9x block acceptance) |
-| `use_faser` | `research/inference/attention/faser.py` | FASER dynamic spec length + early exit + frontier |
+| `use_adaptive_spec` | `forge/decoding/adaptive_speculative.py` | n-gram + EAGLE-3 combo (up to 4.9x on code) |
+| `use_suffix_spec` | `forge/decoding/suffix_decoding.py` | Suffix decoding (training-free, code/RAG) |
+| `use_peagle` | `forge/decoding/peagle.py` | P-EAGLE parallel speculative (1.69x over EAGLE-3) |
+| `use_lookahead_gate` | `forge/decoding/lookahead_gate.py` | Lookahead quality gate (2.6-7.9x block acceptance) |
+| `use_faser` | `forge/engine/attention/faser.py` | FASER dynamic spec length + early exit + frontier |
 
 #### Scheduling / serving
 
 | Parameter | Module | Effect |
 |---|---|---|
-| `use_triroute` | `research/inference/scheduler/triroute.py` | Unified attention mode + KV bits routing |
-| `use_corun` | `research/inference/scheduler/corun.py` | CoRun deterministic inference (padding + fixed graph) |
-| `use_fastserve` | `research/inference/scheduler/fastserve.py` | FastServe skip-join MLFQ (6.1x throughput) |
-| `use_libra` | `research/inference/scheduler/libra.py` | Libra micro-request partitioning (1.91x goodput) |
-| `use_kairos` | `research/inference/scheduler/kairos.py` | Kairos SLO-aware prefill+decode scheduling |
+| `use_triroute` | `forge/engine/scheduler/triroute.py` | Unified attention mode + KV bits routing |
+| `use_corun` | `forge/engine/scheduler/corun.py` | CoRun deterministic inference (padding + fixed graph) |
+| `use_fastserve` | `forge/engine/scheduler/fastserve.py` | FastServe skip-join MLFQ (6.1x throughput) |
+| `use_libra` | `forge/engine/scheduler/libra.py` | Libra micro-request partitioning (1.91x goodput) |
+| `use_kairos` | `forge/engine/scheduler/kairos.py` | Kairos SLO-aware prefill+decode scheduling |
 
 #### Position encoding
 
 | Parameter | Module | Effect |
 |---|---|---|
-| `use_jet_long` | `research/inference/scheduler/jet_long.py` | Jet-Long dynamic bifocal RoPE (zero-shot 128K) |
-| `use_rope_id` | `research/inference/position/rope_id.py` | RoPE-ID in-distribution high-freq rotation |
-| `use_lerope` | `research/inference/position/lerope.py` | LeRoPE learnable frequencies (3.4% less compute) |
-| `use_lampe` | `research/inference/scheduler/lampe.py` | LaMPE length-aware multi-grained positional encoding |
+| `use_jet_long` | `forge/engine/scheduler/jet_long.py` | Jet-Long dynamic bifocal RoPE (zero-shot 128K) |
+| `use_rope_id` | `forge/engine/position/` (merged `__init__`) | RoPE-ID in-distribution high-freq rotation |
+| `use_lerope` | `forge/engine/position/` (merged `__init__`) | LeRoPE learnable frequencies (3.4% less compute) |
+| `use_lampe` | `forge/engine/scheduler/lampe.py` | LaMPE length-aware multi-grained positional encoding |
 
 #### MoE optimizations
 
 | Parameter | Module | Effect |
 |---|---|---|
-| `use_elbow_moe` | `research/inference/scheduler/moe_optim.py` | Elbow dynamic top-k routing (5.3% latency cut) |
-| `use_alloc_moe` | `research/inference/scheduler/moe_optim.py` | Alloc-MoE budget-aware expert activation (1.34x) |
-| `use_lda_moe` | `research/inference/scheduler/moe_optim.py` | LDA distribution-consistent routing |
+| `use_elbow_moe` | `forge/engine/scheduler/moe_optim.py` | Elbow dynamic top-k routing (5.3% latency cut) |
+| `use_alloc_moe` | `forge/engine/scheduler/moe_optim.py` | Alloc-MoE budget-aware expert activation (1.34x) |
+| `use_lda_moe` | `forge/engine/scheduler/moe_optim.py` | LDA distribution-consistent routing |
 
 #### Quantization extensions
 
 | Parameter | Module | Effect |
 |---|---|---|
-| `use_adamx` | `research/quantization/adaptive_quant.py` | AdaMX adaptive microscaling (83% MXFP4 loss removed) |
-| `use_sharq` | `research/quantization/adaptive_quant.py` | SharQ sparse-dense FP4 activation quant (2.2-2.4x) |
-| `use_mosaic_quant` | `research/quantization/adaptive_quant.py` | MosaicQuant inlier-outlier disaggregation 4-bit |
+| `use_adamx` | `forge/quant/adaptive_quant.py` | AdaMX adaptive microscaling (83% MXFP4 loss removed) |
+| `use_sharq` | `forge/quant/adaptive_quant.py` | SharQ sparse-dense FP4 activation quant (2.2-2.4x) |
+| `use_mosaic_quant` | `forge/quant/adaptive_quant.py` | MosaicQuant inlier-outlier disaggregation 4-bit |
 
 ---
 
@@ -282,7 +282,7 @@ Pre-quantized BitNet? (metadata _bitnet_prequant=1)
 To add a new opt-in technique to `activate()`:
 
 1. **Create the module** under the appropriate subdirectory
-   (`research/inference/attention/`, `research/inference/kv/`, etc.).
+   (`forge/engine/attention/`, `forge/engine/kv/`, etc.).
 2. **Add a `use_<name>: bool = False` parameter** to `activate()`.
 3. **Add a lazy import + application block** following the existing
    pattern (e.g. `10r`, `10s`, etc.):

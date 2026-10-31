@@ -1,0 +1,1 @@
+{"run_id": "cev_67df9f9dc0", "target": "auto_complex_rmsnorm", "evals": 13, "dry": 50, "promos": 0, "metric": "ms_per_call", "goal": "min", "incumbent": 1.97085999995276, "incumbent_score": -0.09543333338418354, "baseline_score": -3.0874333332273336, "stage_counts": {"syntax": 3, "incomplete": 24, "missing": 2}, "stop_reason": null, "ts": 1793368637.9545162}

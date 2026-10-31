@@ -245,6 +245,6 @@ The most universally deployed quant format. Single self-contained file, CPU/GPU/
 ### SM120 (RTX 5070) specific notes:
 - INT4 GEMM is fast via `mma.sync.aligned.m16n8k16.s32` (SM80 instruction set)
 - FP4 (NVFP4/MXFP4) needs the blackwell-geforge patches — not as fast as on SM100
-- ForgeQuant (already in ForgeAI) exploits this: INT4 dense + INT8 sparse outliers
+- ForgeQuant (already in ForgeAI) stores dense at INT4 + INT8 outlier rows — benefits via bandwidth (~0.6 B/weight GEMV read); its Triton kernel does NOT use mma.sync, so the tensor-core point applies to Marlin-class INT4 kernels, not FQ's current kernel
 - For extreme <2-bit: VPTQ/LiftQuant/AQLM decode is codebook LUT lookup (not tensor-core GEMM), so SM120's lack of tcgen05 doesn't hurt them
 - HQQ's Marlin/torchao fused kernels work on SM120 (SM80-compatible)

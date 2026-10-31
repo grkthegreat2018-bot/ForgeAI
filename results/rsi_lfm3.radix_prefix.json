@@ -1,0 +1,1 @@
+{"run_id": "cev_7245bed703", "target": "radix_prefix", "evals": 2, "dry": 9, "promos": 0, "metric": "us_per_lookup", "goal": "min", "incumbent": 0.18064999858324882, "incumbent_score": -0.18064999858324882, "baseline_score": -0.18064999858324882, "stage_counts": {"dup": 9}, "stop_reason": null, "ts": 1793378667.574079}

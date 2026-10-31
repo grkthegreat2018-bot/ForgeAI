@@ -1,0 +1,1 @@
+{"run_id": "cev_00ec3d86f6", "target": "min_k_filter", "evals": 4, "dry": 52, "promos": 0, "metric": "ms_per_call", "goal": "min", "incumbent": 1.0535241025559698, "incumbent_score": -1.0535241025559698, "baseline_score": -1.0535241025559698, "stage_counts": {"dup": 52}, "stop_reason": null, "ts": 1793377301.3336082}
