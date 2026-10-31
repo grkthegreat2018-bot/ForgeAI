@@ -15,7 +15,7 @@ import pytest
 from forge_gui_server.hub import EventHub
 from forge_gui_server.services.engine_rt import EngineService
 from forge_gui_server.services.procs import ProcessService
-
+import contextlib
 
 # â”€â”€ EventHub â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -32,13 +32,18 @@ def test_hub_publish_replay():
 
 
 def test_hub_fanout_and_drops_slow():
-    hub = EventHub()
-    q = hub.subscribe(replay=False)
-    # overflow the subscriber queue â€” it gets dropped, publisher unaffected
-    for _ in range(600):
-        hub.publish("spam", {})
-    assert hub.subscriber_count == 0
-    hub.publish("still", {"ok": True})  # must not raise
+    async def _run():
+        hub = EventHub()
+        hub.bind_loop(asyncio.get_running_loop())
+        hub.subscribe(replay=False)
+        # overflow the subscriber queue; it gets dropped, publisher unaffected
+        for _ in range(600):
+            hub.publish("spam", {})
+        await asyncio.sleep(0.1)  # drain _fanout callbacks
+        assert hub.subscriber_count == 0
+        hub.publish("still", {"ok": True})  # must not raise
+        await asyncio.sleep(0)
+    asyncio.run(_run())
 
 
 def test_hub_unsubscribe():
@@ -66,9 +71,8 @@ def _ready_service() -> EngineService:
 
 def test_lease_requires_ready():
     svc = EngineService(EventHub())
-    with pytest.raises(RuntimeError, match="not loaded"):
-        with svc.acquire(timeout_s=0.1):
-            pass
+    with pytest.raises(RuntimeError, match="not loaded"), svc.acquire(timeout_s=0.1):
+        pass
 
 
 def test_lease_serializes_generation():
@@ -76,9 +80,8 @@ def test_lease_serializes_generation():
     with svc.acquire(timeout_s=1.0) as eng:
         assert isinstance(eng, _FakeEngine)
         # second acquire blocks and times out â€” generation is serialized
-        with pytest.raises(RuntimeError, match="busy"):
-            with svc.acquire(timeout_s=0.2):
-                pass
+        with pytest.raises(RuntimeError, match="busy"), svc.acquire(timeout_s=0.2):
+            pass
     # lease released â€” next acquire works again
     with svc.acquire(timeout_s=1.0):
         pass
@@ -326,7 +329,7 @@ def test_agent_bind_loop_keeps_loop_method():
     """bind_loop must not shadow the _loop drive method (regression:
     self._loop was used for both the asyncio loop and the agent loop,
     causing 'ProactorEventLoop object is not callable')."""
-    from forge_gui_server.services.agent_loop import AgentRun, AgentService
+    from forge_gui_server.services.agent_loop import AgentService
     svc = AgentService(EventHub(), runtime=object())
     loop = asyncio.new_event_loop()
     try:
@@ -414,8 +417,8 @@ def test_agent_steer_and_detail():
 
 
 def test_agent_workspace_projects_dir(tmp_path, monkeypatch):
-    from forge_gui_server.routes import chat as chat_routes
     from forge_gui.api import status_reader
+    from forge_gui_server.routes import chat as chat_routes
     monkeypatch.setattr(status_reader, "project_root", lambda: tmp_path)
     body = chat_routes.AgentStartRequest(task="Build a Todo CLI App")
     ws, project = chat_routes._agent_workspace(body)
@@ -434,6 +437,7 @@ def test_agent_workspace_projects_dir(tmp_path, monkeypatch):
 def _watch_fixture(tmp_path):
     """Services stand-in wired to a tmp-dir EventsReader + real hub."""
     from types import SimpleNamespace
+
     from forge_gui.api.events_reader import EventsReader
     from forge_gui_server.deps import Services
     sp = tmp_path / "self_play"
@@ -461,6 +465,7 @@ def test_selfplay_watch_publishes_events(tmp_path):
     q = svc.hub.subscribe(replay=False)
 
     async def run():
+        svc.hub.bind_loop(asyncio.get_running_loop())
         t = asyncio.create_task(watch(svc))
         await asyncio.sleep(0.6)  # let the watcher discover the file
         ev_file = sp / "events.jsonl"
@@ -474,10 +479,8 @@ def test_selfplay_watch_publishes_events(tmp_path):
                 break
             await asyncio.sleep(0.05)
         t.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await t
-        except asyncio.CancelledError:
-            pass
 
     asyncio.run(run())
     got = [e for e in _drain(q, timeout=0.3) if e["type"] == "selfplay_event"]
@@ -494,16 +497,15 @@ def test_selfplay_watch_status_push(tmp_path):
     q = svc.hub.subscribe(replay=False)
 
     async def run():
+        svc.hub.bind_loop(asyncio.get_running_loop())
         t = asyncio.create_task(watch(svc))
         for _ in range(40):
             if not q.empty():
                 break
             await asyncio.sleep(0.05)
         t.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await t
-        except asyncio.CancelledError:
-            pass
 
     asyncio.run(run())
     got = [e for e in _drain(q, timeout=0.3)
@@ -523,6 +525,7 @@ def test_selfplay_watch_survives_truncation(tmp_path):
     q = svc.hub.subscribe(replay=False)
 
     async def run():
+        svc.hub.bind_loop(asyncio.get_running_loop())
         t = asyncio.create_task(watch(svc))
         await asyncio.sleep(0.6)
         # simulate run start: file wiped, then fresh events — each write
@@ -542,10 +545,8 @@ def test_selfplay_watch_survives_truncation(tmp_path):
                 break
             await asyncio.sleep(0.05)
         t.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await t
-        except asyncio.CancelledError:
-            pass
 
     asyncio.run(run())
     kinds = [e["payload"]["kind"] for e in _drain(q, timeout=0.3)

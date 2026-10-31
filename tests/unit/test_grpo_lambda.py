@@ -11,11 +11,10 @@ Covers:
   - GoalScorer minimalism toggle (set_minimalism_active)
   - GoalScorer weight redistribution when minimalism disabled
 """
-import pytest
 import torch
 
-from forge.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
 from forge.evaluation.goal_scorer import GoalScorer
+from forge.self_play.grpo_trainer import GRPOConfig, GRPOTrainer
 
 
 def _make_trainer(config=None):

@@ -6,7 +6,8 @@ Tests R21 training-time features that R23 wires into the V8 training loop:
 - TopKGradientOptimizer: wraps any optimizer, sparsifies gradients to top-K%
   with EF21 error feedback (10x fewer gradient transfers)
 """
-import os, sys, tempfile, math
+import sys
+
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import torch
@@ -269,8 +270,7 @@ def test_gradtopk_ratio_sweep():
 
 def test_fp8_gradtopk_combined():
     """FP8ActivationLinear + TopKGradientOptimizer should reduce loss + memory."""
-    from forge.training.optim.r21_cross_domain import (
-        FP8ActivationLinear, TopKGradientOptimizer)
+    from forge.training.optim.r21_cross_domain import FP8ActivationLinear, TopKGradientOptimizer
 
     torch.manual_seed(42)
     d = 128

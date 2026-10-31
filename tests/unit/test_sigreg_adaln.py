@@ -10,14 +10,11 @@ Covers:
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
-import pytest
 
-from forge.training.losses.sigreg import SIGRegLoss
-from forge.training.losses.adaln_zero import AdaLNZeroModulation, AdaLNZero
 from forge.config import ModelConfig
 from forge.model_loader import ConfigurableResearchLLM
-
+from forge.training.losses.adaln_zero import AdaLNZero, AdaLNZeroModulation
+from forge.training.losses.sigreg import SIGRegLoss
 
 # ── SIGReg tests ──────────────────────────────────────────────────────────────
 

@@ -43,11 +43,8 @@ Usage:
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from forge.keys.misc.base import Key, KeyClass, KeyResult
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Weight name mappings
@@ -282,10 +279,7 @@ class MambaKey(Key):
                 elif hf_key == "lm_head.weight":
                     forge_state["head.weight"] = tensor
                     mapped = True
-                elif hf_key == "model.norm.weight":
-                    forge_state["ln_f.weight"] = tensor
-                    mapped = True
-                elif hf_key == "model.final_layernorm.weight":
+                elif hf_key == "model.norm.weight" or hf_key == "model.final_layernorm.weight":
                     forge_state["ln_f.weight"] = tensor
                     mapped = True
 

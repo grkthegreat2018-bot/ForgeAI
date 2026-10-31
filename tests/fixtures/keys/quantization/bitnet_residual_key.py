@@ -20,6 +20,7 @@ Two components:
 from __future__ import annotations
 
 import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -54,7 +55,7 @@ def compute_residual(w: torch.Tensor, residual_frac: float
         residual_mask: bool mask [out, in] (True = dense residual)
         residual_values: bf16 values for masked elements [n_residual]
     """
-    w_t, scale = ternary_quantize(w)
+    w_t, _scale = ternary_quantize(w)
     err = (w - w_t).abs()
     k = int(w.numel() * residual_frac)
     if k == 0:
@@ -129,7 +130,7 @@ class BitNetResidualLinear(nn.Module):
     def _compute_residual_mask(self):
         """Compute the element-level residual mask from current weights."""
         with torch.no_grad():
-            w_t, scale = ternary_quantize(self.weight.data.float())
+            w_t, _scale = ternary_quantize(self.weight.data.float())
             err = (self.weight.data.float() - w_t).abs()
             k = int(self.weight.numel() * self.residual_frac)
             if k == 0:
@@ -143,7 +144,7 @@ class BitNetResidualLinear(nn.Module):
     def _ternary_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward with ternary weights + residual (STE)."""
         scale = self.qscale if self.qscale is not None else None
-        w_q, s = ternary_quantize(self.weight.float(), scale)
+        w_q, _s = ternary_quantize(self.weight.float(), scale)
         # Apply residual: use full-precision values at masked positions
         w_q = w_q.to(self.weight.dtype)
         if self.residual_mask.any():

@@ -1,5 +1,9 @@
 ﻿"""Test novel quantization algorithms (AS-FP4, ResidualFP4) vs NVFP4 baseline."""
-import os, sys, time, math
+import math
+import os
+import sys
+import time
+
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
@@ -12,20 +16,30 @@ import torch.nn as nn
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float32  # compute in fp32 for accuracy, regardless of device
 
-from forge.engine.quant.nvfp4_quant import (
-    NVFP4Linear, quantize_model_nvfp4, _quantize_to_fp4, _dequantize_fp4,
-)
-from forge.engine.quant.novel_quant import (
-    ASFP4Linear, ResidualFP4Linear,
-    _optimal_fp4_scale, _quantize_to_fp4_adaptive, _quantize_to_fp4_residual,
-    quantize_model_asfp4, quantize_model_residual_fp4,
-)
 # Round 15 novel algorithms
 from forge.engine.quant.novel_quant import (
-    quantize_hw_fp4, quantize_tsd_fp4, quantize_sr_fp4,
-    quantize_oc_hybrid, quantize_hpr_fp4, quantize_bn_fp4,
-    quantize_saas_fp4, quantize_awr_fp4, quantize_iri_fp4,
-    quantize_pcba, quantize_asfp4_dequant,
+    ASFP4Linear,
+    ResidualFP4Linear,
+    _quantize_to_fp4_adaptive,
+    _quantize_to_fp4_residual,
+    quantize_asfp4_dequant,
+    quantize_awr_fp4,
+    quantize_bn_fp4,
+    quantize_hpr_fp4,
+    quantize_hw_fp4,
+    quantize_iri_fp4,
+    quantize_model_asfp4,
+    quantize_model_residual_fp4,
+    quantize_oc_hybrid,
+    quantize_pcba,
+    quantize_saas_fp4,
+    quantize_sr_fp4,
+    quantize_tsd_fp4,
+)
+from forge.engine.quant.nvfp4_quant import (
+    NVFP4Linear,
+    _dequantize_fp4,
+    _quantize_to_fp4,
 )
 
 
@@ -417,7 +431,7 @@ def test_r15_benchmark():
     # --- Summary: rank by output error (the metric that matters) ---
     print("\n  --- Ranking by OUTPUT error (lower = better) ---")
     ranked = sorted(results, key=lambda r: r[4])
-    for i, (name, fe, mse, snr, oe, extra) in enumerate(ranked, 1):
+    for i, (name, _fe, _mse, snr, oe, _extra) in enumerate(ranked, 1):
         marker = " <-- WINNER" if i == 1 else ""
         print(f"  {i:>2}. {name:<16} out_err={oe:.4f}  sqnr={snr:6.2f}dB{marker}")
 
@@ -437,11 +451,11 @@ def test_r15_distribution_sweep():
     print("-" * 78)
 
     configs = [
-        ("clean gaussian",   dict(std=0.05, outlier_frac=0.0,  outlier_mult=1.0, asym_mean=0.0)),
-        ("mild outliers",    dict(std=0.05, outlier_frac=0.01, outlier_mult=5.0, asym_mean=0.0)),
-        ("heavy outliers",   dict(std=0.05, outlier_frac=0.03, outlier_mult=8.0, asym_mean=0.0)),
-        ("asymmetric",       dict(std=0.05, outlier_frac=0.01, outlier_mult=5.0, asym_mean=0.01)),
-        ("large std",        dict(std=0.15, outlier_frac=0.01, outlier_mult=3.0, asym_mean=0.0)),
+        ("clean gaussian",   {"std": 0.05, "outlier_frac": 0.0,  "outlier_mult": 1.0, "asym_mean": 0.0}),
+        ("mild outliers",    {"std": 0.05, "outlier_frac": 0.01, "outlier_mult": 5.0, "asym_mean": 0.0}),
+        ("heavy outliers",   {"std": 0.05, "outlier_frac": 0.03, "outlier_mult": 8.0, "asym_mean": 0.0}),
+        ("asymmetric",       {"std": 0.05, "outlier_frac": 0.01, "outlier_mult": 5.0, "asym_mean": 0.01}),
+        ("large std",        {"std": 0.15, "outlier_frac": 0.01, "outlier_mult": 3.0, "asym_mean": 0.0}),
     ]
 
     algos = {
@@ -461,7 +475,7 @@ def test_r15_distribution_sweep():
         W = _make_llm_weights(512, 1024, **cfg)
         H = _make_hessian(1024, concentration=0.3).unsqueeze(0).expand(512, 1024).contiguous()
         row = f"  {cfg_name:<18}"
-        for aname, afn in algos.items():
+        for _aname, afn in algos.items():
             W_dq = afn(W, H)
             snr = _sqnr(W, W_dq)
             row += f"{snr:>10.2f}dB"
@@ -565,7 +579,7 @@ def test_r15_hadamard_invariance():
     kurt_after = block_kurtosis(W_rot)
     print(f"  Mean per-block kurtosis before rotation: {kurt_before:.2f}")
     print(f"  Mean per-block kurtosis after rotation:  {kurt_after:.2f}")
-    print(f"  (Gaussian kurtosis = 3.0; lower = more uniform = better for FP4)")
+    print("  (Gaussian kurtosis = 3.0; lower = more uniform = better for FP4)")
     # Rotation should reduce kurtosis (spread outliers)
     assert kurt_after < kurt_before, "Hadamard rotation should reduce kurtosis"
     # Norm preservation
@@ -611,7 +625,6 @@ def test_r15_combined():
 
 
 def main_r15():
-    import math  # noqa: F811 (ensure available for _sqnr)
     test_r15_benchmark()
     test_r15_distribution_sweep()
     test_r15_block_size_sweep()
@@ -635,10 +648,10 @@ def main_r15():
 # Standard model configurations (GQA 32 heads / 8 KV heads, SwiGLU FFN)
 # Calibrated so total params (layers x per-layer + embeddings) ~ target.
 MODEL_CONFIGS = {
-    "1B":  dict(d_model=2048, n_layers=16, intermediate=8192,  vocab=65536,  n_heads=32, n_kv_heads=8),
-    "5B":  dict(d_model=4096, n_layers=20, intermediate=16384, vocab=65536,  n_heads=32, n_kv_heads=8),
-    "8B":  dict(d_model=4096, n_layers=34, intermediate=14336, vocab=128256, n_heads=32, n_kv_heads=8),
-    "10B": dict(d_model=5120, n_layers=28, intermediate=17920, vocab=128256, n_heads=32, n_kv_heads=8),
+    "1B":  {"d_model": 2048, "n_layers": 16, "intermediate": 8192,  "vocab": 65536,  "n_heads": 32, "n_kv_heads": 8},
+    "5B":  {"d_model": 4096, "n_layers": 20, "intermediate": 16384, "vocab": 65536,  "n_heads": 32, "n_kv_heads": 8},
+    "8B":  {"d_model": 4096, "n_layers": 34, "intermediate": 14336, "vocab": 128256, "n_heads": 32, "n_kv_heads": 8},
+    "10B": {"d_model": 5120, "n_layers": 28, "intermediate": 17920, "vocab": 128256, "n_heads": 32, "n_kv_heads": 8},
 }
 
 
@@ -754,10 +767,14 @@ def test_r16_multiscale_benchmark():
 
     # Algorithms to test (functions that take W and return dequantized W)
     from forge.engine.quant.novel_quant import (
-        quantize_hw_fp4, quantize_tsd_fp4, quantize_sr_fp4,
-        quantize_oc_hybrid, quantize_hpr_fp4, quantize_bn_fp4,
-        quantize_saas_fp4, quantize_awr_fp4, quantize_iri_fp4,
-        quantize_pcba, quantize_asfp4_dequant,
+        quantize_asfp4_dequant,
+        quantize_hpr_fp4,
+        quantize_iri_fp4,
+        quantize_oc_hybrid,
+        quantize_pcba,
+        quantize_saas_fp4,
+        quantize_sr_fp4,
+        quantize_tsd_fp4,
     )
 
     algos = {
@@ -785,7 +802,7 @@ def test_r16_multiscale_benchmark():
 
         # Synthetic activations for output error (per input dim)
         activations = {}
-        for name, W, out_f, in_f in weights:
+        for name, W, _out_f, _in_f in weights:
             n_act = min(32, 64)
             X = _randn(n_act, W.shape[1], seed=123) * 0.1
             X[:, ::32] *= 3.0  # activation outliers
@@ -800,7 +817,7 @@ def test_r16_multiscale_benchmark():
         for algo_name, algo_fn in algos.items():
             sqnrs = []
             out_errs = []
-            for name, W, out_f, in_f in weights:
+            for name, W, _out_f, _in_f in weights:
                 W_dq = algo_fn(W)
                 sqnrs.append(_sqnr(W, W_dq))
                 X = activations[name]
@@ -811,7 +828,7 @@ def test_r16_multiscale_benchmark():
             avg_oe = sum(out_errs) / len(out_errs)
 
             # VRAM estimate
-            bpw, overhead, desc = _algo_vram_info(algo_name, cfg)
+            bpw, overhead, _desc = _algo_vram_info(algo_name, cfg)
             quant_vram = _estimate_quant_vram(cfg, bpw, overhead)
             compression = bf16_vram / quant_vram if quant_vram > 0 else 0
             fits = "YES" if quant_vram < 12.0 else "NO"
@@ -832,7 +849,7 @@ def test_r16_multiscale_benchmark():
 
     # Summary table across scales
     print(f"\n  {'=' * 86}")
-    print(f"  Cross-scale summary (avg SQNR dB across all weight types per scale)")
+    print("  Cross-scale summary (avg SQNR dB across all weight types per scale)")
     print(f"  {'=' * 86}")
     header = f"  {'algorithm':<14}" + "".join(f"  {s:>10}" for s in MODEL_CONFIGS)
     print(header)
@@ -845,7 +862,7 @@ def test_r16_multiscale_benchmark():
         for scale, cfg in MODEL_CONFIGS.items():
             weights = _generate_model_weights(cfg, seed=42)
             sqnrs = []
-            for name, W, out_f, in_f in weights:
+            for name, W, _out_f, _in_f in weights:
                 W_dq = algo_fn(W)
                 sqnrs.append(_sqnr(W, W_dq))
             avg = sum(sqnrs) / len(sqnrs)
@@ -854,7 +871,7 @@ def test_r16_multiscale_benchmark():
 
     # VRAM summary
     print(f"\n  {'=' * 86}")
-    print(f"  VRAM summary (GB, fits-in-12GB marked *)")
+    print("  VRAM summary (GB, fits-in-12GB marked *)")
     print(f"  {'=' * 86}")
     header = f"  {'algorithm':<14}" + "".join(f"  {s:>10}" for s in MODEL_CONFIGS)
     print(header)
@@ -870,7 +887,7 @@ def test_r16_multiscale_benchmark():
             marker = "*" if vram < 12.0 else " "
             row += f"  {vram:>8.2f}GB{marker}"
         print(row)
-    print(f"  (* = fits in 12GB VRAM RTX 5070)")
+    print("  (* = fits in 12GB VRAM RTX 5070)")
 
     print("\n  PASS\n")
 
@@ -893,8 +910,12 @@ def test_r16_pareto_frontier():
     bf16_vram = total_params * 2 / (1024**3)
 
     from forge.engine.quant.novel_quant import (
-        quantize_sr_fp4, quantize_tsd_fp4, quantize_hpr_fp4,
-        quantize_saas_fp4, quantize_iri_fp4, quantize_asfp4_dequant,
+        quantize_asfp4_dequant,
+        quantize_hpr_fp4,
+        quantize_iri_fp4,
+        quantize_saas_fp4,
+        quantize_sr_fp4,
+        quantize_tsd_fp4,
     )
 
     weights = _generate_model_weights(cfg, seed=42)
@@ -914,7 +935,7 @@ def test_r16_pareto_frontier():
 
     for name, fn, bpw, overhead in algo_list:
         sqnrs = []
-        for wname, W, _, _ in weights:
+        for _wname, W, _, _ in weights:
             W_dq = fn(W)
             sqnrs.append(_sqnr(W, W_dq))
         avg_sqnr = sum(sqnrs) / len(sqnrs)
@@ -938,7 +959,7 @@ def test_r16_pareto_frontier():
         print(f"  {name:<14} {vram:>9.2f}GB {sqnr:>9.2f}dB {marker:>10}")
 
     # ASCII chart
-    print(f"\n  SQNR vs VRAM (8B model, each ≈ = 2dB, each . = 0.5GB):")
+    print("\n  SQNR vs VRAM (8B model, each ≈ = 2dB, each . = 0.5GB):")
     min_v = min(p[0] for p in points)
     max_v = max(p[0] for p in points)
     min_s = min(p[1] for p in points) - 1
@@ -969,11 +990,14 @@ def main_r16():
 # ===========================================================================
 
 from forge.engine.quant.novel_quant import (
-    quantize_hw_fp4_v2, compute_hessian_proxy,
-    HWFP4CalibratedLinear, calibrate_hw_fp4_model, quantize_model_hw_fp4_v2,
-    quantize_hpr_iri_fp4, HPRIRIFP4Linear,
+    HPRIRIFP4Linear,
+    HWFP4CalibratedLinear,
     _optimal_sign_hadamard,
-    analyze_weight_distribution, quantize_model_adaptive,
+    analyze_weight_distribution,
+    compute_hessian_proxy,
+    quantize_hpr_iri_fp4,
+    quantize_hw_fp4_v2,
+    quantize_model_adaptive,
 )
 
 
@@ -1107,7 +1131,7 @@ def test_r17_optimal_sign_hadamard():
     W_rot_rand = W @ Q_rand
 
     # Optimal signs
-    Q_opt, kurt_opt = _optimal_sign_hadamard(W, max_iters=30)
+    Q_opt, _kurt_opt = _optimal_sign_hadamard(W, max_iters=30)
     W_rot_opt = W @ Q_opt
 
     # Per-block kurtosis
@@ -1127,7 +1151,7 @@ def test_r17_optimal_sign_hadamard():
     print(f"  Random Hadamard kurtosis:       {kurt_rand:.3f}")
     print(f"  Optimal Hadamard kurtosis:      {kurt_opt_val:.3f}")
     print(f"  Optimal vs random improvement:  {(1-kurt_opt_val/kurt_rand)*100:+.1f}%")
-    print(f"  (Gaussian = 3.0; lower = better for FP4)")
+    print("  (Gaussian = 3.0; lower = better for FP4)")
 
     # FP4 quality after each rotation
     W_dq_orig = quantize_asfp4_dequant(W, 32)
@@ -1220,7 +1244,8 @@ def test_r17_multiscale():
     print("-" * 90)
 
     from forge.engine.quant.novel_quant import (
-        quantize_hpr_iri_fp4, quantize_hw_fp4_v2,
+        quantize_hpr_iri_fp4,
+        quantize_hw_fp4_v2,
     )
 
     # Only test the new R17 algorithms + key baselines.
@@ -1243,7 +1268,7 @@ def test_r17_multiscale():
         weights = _generate_model_weights(cfg, seed=42)
         # Generate real activations per layer (on GPU)
         activations = {}
-        for name, W, out_f, in_f in weights:
+        for name, W, _out_f, _in_f in weights:
             X = _randn(min(64, 128), W.shape[1], seed=123) * 0.1
             X[:, ::32] *= 3.0
             activations[name] = X
@@ -1251,7 +1276,7 @@ def test_r17_multiscale():
         for algo_name, algo_fn in algos.items():
             sqnrs = []
             out_errs = []
-            for name, W, out_f, in_f in weights:
+            for name, W, _out_f, _in_f in weights:
                 X = activations[name]
                 W_dq = algo_fn(W, X)
                 sqnrs.append(_sqnr(W, W_dq))
@@ -1286,7 +1311,9 @@ def test_r18_mixed_codebook_iri():
     print("-" * 90)
 
     from forge.engine.quant.novel_quant import (
-        quantize_mixed_iri_fp4, quantize_iri_fp4, quantize_asfp4_dequant,
+        quantize_asfp4_dequant,
+        quantize_iri_fp4,
+        quantize_mixed_iri_fp4,
     )
 
     W = _make_llm_weights(512, 1024, seed=42, outlier_frac=0.02, outlier_mult=6.0)
@@ -1329,7 +1356,9 @@ def test_r18_adaptive_iri():
     print("-" * 90)
 
     from forge.engine.quant.novel_quant import (
-        quantize_adaptive_iri_fp4, quantize_iri_fp4, quantize_asfp4_dequant,
+        quantize_adaptive_iri_fp4,
+        quantize_asfp4_dequant,
+        quantize_iri_fp4,
     )
 
     W = _make_llm_weights(512, 1024, seed=42, outlier_frac=0.02, outlier_mult=6.0)
@@ -1364,7 +1393,8 @@ def test_r18_learned_codebook():
     print("-" * 90)
 
     from forge.engine.quant.novel_quant import (
-        quantize_learned_codebook_fp4, quantize_asfp4_dequant,
+        quantize_asfp4_dequant,
+        quantize_learned_codebook_fp4,
     )
 
     W = _make_llm_weights(256, 512, seed=42, outlier_frac=0.02, outlier_mult=6.0)
@@ -1445,7 +1475,9 @@ def test_r18_gradient_fp4():
     print("-" * 90)
 
     from forge.engine.quant.novel_quant import (
-        quantize_gradient_fp4, quantize_asfp4_dequant, quantize_hw_fp4,
+        quantize_asfp4_dequant,
+        quantize_gradient_fp4,
+        quantize_hw_fp4,
     )
 
     W = _make_llm_weights(256, 512, seed=42, outlier_frac=0.02, outlier_mult=6.0)
@@ -1487,9 +1519,12 @@ def test_r18_multiscale():
     print("-" * 90)
 
     from forge.engine.quant.novel_quant import (
-        quantize_mixed_iri_fp4, quantize_adaptive_iri_fp4,
-        quantize_learned_codebook_fp4, quantize_gradient_fp4,
-        quantize_iri_fp4, quantize_hpr_iri_fp4, quantize_asfp4_dequant,
+        quantize_adaptive_iri_fp4,
+        quantize_asfp4_dequant,
+        quantize_hpr_iri_fp4,
+        quantize_iri_fp4,
+        quantize_learned_codebook_fp4,
+        quantize_mixed_iri_fp4,
     )
 
     algos = {
@@ -1509,7 +1544,7 @@ def test_r18_multiscale():
 
         weights = _generate_model_weights(cfg, seed=42)
         activations = {}
-        for name, W, out_f, in_f in weights:
+        for name, W, _out_f, _in_f in weights:
             X = _randn(min(64, 128), W.shape[1], seed=123) * 0.1
             X[:, ::32] *= 3.0
             activations[name] = X
@@ -1517,7 +1552,7 @@ def test_r18_multiscale():
         for algo_name, algo_fn in algos.items():
             sqnrs = []
             out_errs = []
-            for name, W, out_f, in_f in weights:
+            for name, W, _out_f, _in_f in weights:
                 X = activations[name]
                 W_dq = algo_fn(W, X)
                 sqnrs.append(_sqnr(W, W_dq))

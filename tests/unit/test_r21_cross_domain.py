@@ -1,5 +1,6 @@
 """Tests for R&D Round 21: Cross-domain parameter formats + training acceleration."""
-import os, sys
+import sys
+
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import torch
@@ -61,7 +62,7 @@ def test_hashed_nlrq_compression():
     out_f, in_f, rank = 256, 256, 64
     for hc in [4, 8, 16]:
         hn = HashedNLRQ(out_f, in_f, rank=rank, hash_compression=hc).to(_DEV)
-        h_params, d_params = hn.param_count()
+        h_params, _d_params = hn.param_count()
         cr = hn.compression_ratio()
         nlrq_cr = hn.nlrq_compression_ratio()
         print(f"  HashedNLRQ r={rank} h={hc}: {h_params} params, "
@@ -211,7 +212,7 @@ def test_fp8_activation_training_mode():
 
     # Check that FP8 activation was stored
     assert lin._fp8_act is not None, "FP8 activation should be stored"
-    fp8_data, scale = lin._fp8_act
+    _fp8_data, _scale = lin._fp8_act
     fp8_mem = lin.get_compressed_activation_memory()
     bf16_mem = 16 * 64 * 2  # bf16
     compression = bf16_mem / fp8_mem

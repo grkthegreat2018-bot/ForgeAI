@@ -3,11 +3,11 @@
 QSA (Qwen Sparse Attention), Gated Residual, N-gram Embedding.
 All run on GPU (CUDA) with fp32. CPU fallback only if CUDA unavailable.
 """
-import os, sys
+import sys
+
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import torch
-import torch.nn.functional as F
 
 _DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _DTYPE = torch.float32
@@ -30,7 +30,7 @@ def test_qsa_identity_warm_start():
     ).to(_DEV, _DTYPE)
 
     x = torch.randn(B, T, d_model, device=_DEV, dtype=_DTYPE)
-    out, cache = layer(x, use_cache=True)
+    out, _cache = layer(x, use_cache=True)
 
     # Output should have the right shape
     assert out.shape == (B, T, d_model), f"Wrong shape: {out.shape}"
@@ -318,7 +318,7 @@ def test_r19_vram_analysis():
     print(f"\n  Total GPU VRAM overhead: "
           f"{qsa_vram_mb + gr_vram_mb + ngram_gpu_mb:.1f} MB")
     print(f"  Total host RAM:          {ngram_host_gb:.1f} GB")
-    print(f"  Base model VRAM:         ~2340 MB (bf16)")
+    print("  Base model VRAM:         ~2340 MB (bf16)")
     print(f"  With R19 keys:           ~{2340 + qsa_vram_mb + gr_vram_mb:.0f} MB "
           f"(fits 12GB easily)")
 

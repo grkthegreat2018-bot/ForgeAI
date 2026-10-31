@@ -25,12 +25,9 @@ import torch.nn as nn
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
-from forge.engine.decoding import (
-    SpecBoundDecoding, StandardDecoding, build_decoding)
-from forge.self_play.grpo_trainer import (
-    ExGRPOReplayBuffer, GRPOConfig, GRPOTrainer)
+from forge.engine.decoding import SpecBoundDecoding, StandardDecoding, build_decoding
+from forge.self_play.grpo_trainer import ExGRPOReplayBuffer, GRPOConfig, GRPOTrainer
 from forge.self_play.infinite_loop import InfiniteSelfPlayLoop, LoopConfig
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Stubs
@@ -151,8 +148,8 @@ def test_specbound_greedy_equals_standard_stub():
     reject+correct path (draft table differs at token 19)."""
     stub = _BigramStub(vocab=40, draft_mismatches={19: 30})
     prompt = torch.tensor([[10]], dtype=torch.long)
-    kw = dict(max_new_tokens=15, temperature=0.0, top_p=1.0,
-              top_k=0, repetition_penalty=1.0)
+    kw = {"max_new_tokens": 15, "temperature": 0.0, "top_p": 1.0,
+              "top_k": 0, "repetition_penalty": 1.0}
     std = StandardDecoding().generate(stub, prompt, **kw)
     d = SpecBoundDecoding(draft_len=4)
     spec = d.generate(stub, prompt, **kw)
@@ -168,8 +165,8 @@ def test_specbound_greedy_equals_standard_stub_all_accept():
     """draft == full → every draft accepted; still identical output."""
     stub = _BigramStub(vocab=40)  # no mismatches
     prompt = torch.tensor([[10]], dtype=torch.long)
-    kw = dict(max_new_tokens=12, temperature=0.0, top_p=1.0,
-              top_k=0, repetition_penalty=1.0)
+    kw = {"max_new_tokens": 12, "temperature": 0.0, "top_p": 1.0,
+              "top_k": 0, "repetition_penalty": 1.0}
     std = StandardDecoding().generate(stub, prompt, **kw)
     d = SpecBoundDecoding(draft_len=3)
     spec = d.generate(stub, prompt, **kw)
@@ -186,8 +183,8 @@ def test_specbound_greedy_equals_standard_tiny_model():
     torch.manual_seed(0)
     model = _build_tiny(vocab=64)
     prompt = torch.tensor([[3, 5, 8]], dtype=torch.long)
-    kw = dict(max_new_tokens=14, temperature=0.0, top_p=1.0,
-              top_k=0, repetition_penalty=1.0)
+    kw = {"max_new_tokens": 14, "temperature": 0.0, "top_p": 1.0,
+              "top_k": 0, "repetition_penalty": 1.0}
     std = StandardDecoding().generate(model, prompt, **kw)
     spec = SpecBoundDecoding(exit_layer=1, draft_len=4)
     out = spec.generate(model, prompt, **kw)

@@ -1,8 +1,7 @@
 """CPU tests for forge/exp/loopdepth.py (E-loop recurrent depth)."""
 import torch
 
-from forge.exp.loopdepth import (LoopGates, looped_prefill,
-                                 looped_decode_step)
+from forge.exp.loopdepth import LoopGates, looped_decode_step, looped_prefill
 
 
 def _tiny_attn_model():

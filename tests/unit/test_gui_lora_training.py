@@ -22,7 +22,7 @@ class TestLoraTrainingToolDefs:
 
     def test_train_lora_has_category_param(self):
         defs = lora_training_tool_defs()
-        train_def = [d for d in defs if d["function"]["name"] == "train_lora"][0]
+        train_def = next(d for d in defs if d["function"]["name"] == "train_lora")
         props = train_def["function"]["parameters"]["properties"]
         assert "category" in props
         assert "rank" in props

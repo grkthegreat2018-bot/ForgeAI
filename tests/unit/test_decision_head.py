@@ -15,12 +15,12 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from forge.engine.decision_head import (  # noqa: E402
+from forge.engine.decide import SystemOneEvaluator
+from forge.engine.decision_head import (
     DecisionScorer,
     expected_calibration_error,
     fit_decision_scorer,
 )
-from forge.engine.decide import SystemOneEvaluator  # noqa: E402
 
 
 def _tiny_model():

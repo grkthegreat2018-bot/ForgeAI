@@ -1,14 +1,16 @@
 """Test DPO preference data generation: candidate scoring, doom-loop detection, pair construction."""
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from forge.training.runners.curriculum_sft import ngram_repetition_ratio
 from forge.training.runners.dpo_data_gen import (
+    JUDGE_SYSTEM_PROMPT,
     Candidate,
     construct_preference_pair,
     load_prompts,
-    JUDGE_SYSTEM_PROMPT,
 )
-from forge.training.runners.curriculum_sft import ngram_repetition_ratio
 
 
 def test_candidate_dataclass():
@@ -16,9 +18,9 @@ def test_candidate_dataclass():
     c = Candidate(text="hello world", temperature=0.8, is_greedy=False)
     assert c.text == "hello world"
     assert c.temperature == 0.8
-    assert c.is_greedy == False
+    assert not c.is_greedy
     assert c.judge_score == 0.0
-    assert c.is_loop == False
+    assert not c.is_loop
     print("PASS: Candidate dataclass works")
 
 
@@ -35,8 +37,8 @@ def test_construct_pair_normal():
     assert pair["rejected"] == "Bad answer that is wrong."
     assert pair["chosen_score"] == 8.0
     assert pair["rejected_score"] == 3.0
-    assert pair["chosen_is_loop"] == False
-    assert pair["rejected_is_loop"] == False
+    assert not pair["chosen_is_loop"]
+    assert not pair["rejected_is_loop"]
     print("PASS: construct_preference_pair (normal case)")
 
 
@@ -56,10 +58,10 @@ def test_construct_pair_with_doom_loop():
     assert pair is not None
     # Chosen should be the best non-looping (score 7.0)
     assert pair["chosen"] == "Good non-looping answer."
-    assert pair["chosen_is_loop"] == False
+    assert not pair["chosen_is_loop"]
     # Rejected should be the doom-loop (even though it has score 9.0)
     assert pair["rejected"] == loop_text
-    assert pair["rejected_is_loop"] == True
+    assert pair["rejected_is_loop"]
     print("PASS: construct_preference_pair rejects doom-loop even with high judge score")
 
 
@@ -104,7 +106,7 @@ def test_construct_pair_greedy_vs_temp():
 
 def test_load_prompts():
     """Load prompts from a JSONL file."""
-    import tempfile, json
+    import tempfile
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
         f.write('{"prompt": "What is 2+2?", "response": "4"}\n')
         f.write('{"prompt": "What is 3+3?", "response": "6"}\n')

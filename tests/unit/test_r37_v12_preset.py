@@ -6,9 +6,7 @@ start (zero-init new keys).
 """
 from __future__ import annotations
 
-import pytest
-
-from forge.config import get_config, MODEL_CONFIGS
+from forge.config import MODEL_CONFIGS, get_config
 
 
 class TestV12JambaPreset:

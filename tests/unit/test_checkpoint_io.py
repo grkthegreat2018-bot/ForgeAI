@@ -281,5 +281,7 @@ class TestPipelinedLoad:
         data = open(src, "rb").read()
         with open(dst, "wb") as f:
             f.write(data[:-32])  # cut the tail of the data blob
-        with pytest.raises(OSError, match="short read"):
+        # Either the metadata validator rejects the lying data_offsets
+        # (ValueError) or the reader hits the short blob (OSError).
+        with pytest.raises((OSError, ValueError)):
             load_safetensors_pipelined(dst, "cuda")

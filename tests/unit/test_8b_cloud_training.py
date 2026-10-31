@@ -26,7 +26,6 @@ import torch.nn.functional as F
 
 from forge.training.optim.badam import BAdam
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 def _tiny_v7_8b_config(config_name="forgelm_v2", **extra_overrides):
@@ -39,23 +38,23 @@ def _tiny_v7_8b_config(config_name="forgelm_v2", **extra_overrides):
     training) or need many layers (hyperloop, lisa).
     """
     from forge.config import get_config
-    overrides = dict(
-        vocab_size=256, d_model=64, n_layers=4, n_heads=4, n_kv_heads=2,
-        intermediate_size=128, max_seq_len=128, titan_memory_rank=16,
-        embed_factorized_rank=32, mtp_n_heads=2,
-        use_triton_kernels=False, use_varlen=False,
-        bitnet_int8_training=False, use_gradient_checkpointing=False,
-        use_hyperloop=False, use_lisa=False,
+    overrides = {
+        "vocab_size": 256, "d_model": 64, "n_layers": 4, "n_heads": 4, "n_kv_heads": 2,
+        "intermediate_size": 128, "max_seq_len": 128, "titan_memory_rank": 16,
+        "embed_factorized_rank": 32, "mtp_n_heads": 2,
+        "use_triton_kernels": False, "use_varlen": False,
+        "bitnet_int8_training": False, "use_gradient_checkpointing": False,
+        "use_hyperloop": False, "use_lisa": False,
         # Explicitly enable V7-8B features (not on by default in V10)
-        use_mtp=True, use_bitnet=True, attn_type="gta",
-        use_titan_memory=True, use_mod=True, use_mhc=True,
-        use_attn_residual=True, use_value_residual=True,
-        use_sandwich_norm=True, use_learned_sink=True,
-        use_pit=True, use_factorized_embeddings=True,
-        ffn_compression="nlrq", nlrq_rank=32,
+        "use_mtp": True, "use_bitnet": True, "attn_type": "gta",
+        "use_titan_memory": True, "use_mod": True, "use_mhc": True,
+        "use_attn_residual": True, "use_value_residual": True,
+        "use_sandwich_norm": True, "use_learned_sink": True,
+        "use_pit": True, "use_factorized_embeddings": True,
+        "ffn_compression": "nlrq", "nlrq_rank": 32,
         # Disable V10's IRI-FP4 + SpectralKV + BitNetResidual (not compatible with V7-8B feature tests)
-        use_iri_fp4=False, use_spectral_kv=False, use_bitnet_residual=False,
-    )
+        "use_iri_fp4": False, "use_spectral_kv": False, "use_bitnet_residual": False,
+    }
     overrides.update(extra_overrides)
     cfg = get_config(config_name, **overrides)
     cfg.device = "cpu"
@@ -118,7 +117,7 @@ def test_badam_crashes_on_dead_only_block_without_freeze():
     ids = torch.randint(0, 16, (2, 4))
 
     crashed = False
-    for step in range(opt._n_blocks + 2):
+    for _step in range(opt._n_blocks + 2):
         opt.zero_grad()
         out = model(ids)
         loss = out.float().pow(2).mean()
@@ -201,7 +200,7 @@ def test_tiny_v7_8b_b_backward_and_badam_step():
     ids = torch.randint(0, cfg.vocab_size, (1, 16))
 
     losses = []
-    for step in range(opt._n_blocks + 2):
+    for _step in range(opt._n_blocks + 2):
         opt.zero_grad()
         loss = _manual_ce_loss(model, ids, cfg.vocab_size)
         loss.backward()
@@ -220,7 +219,7 @@ def test_tiny_v7_8b_d_backward_and_badam_step():
     opt = BAdam(model, lr=1e-3, switch_every=1, verbose=False)
     ids = torch.randint(0, cfg.vocab_size, (1, 16))
 
-    for step in range(opt._n_blocks + 2):
+    for _step in range(opt._n_blocks + 2):
         opt.zero_grad()
         loss = _manual_ce_loss(model, ids, cfg.vocab_size)
         loss.backward()
@@ -232,10 +231,10 @@ def test_tiny_v7_8b_d_backward_and_badam_step():
 
 def test_nlrq_factor_training_enables_on_8b_d():
     """enable_factor_training_all_ creates STE masters on NLRQ layers."""
-    from forge.training.runners.train_8b_all import enable_factor_training_all_
     from forge.keys.compression.nlrq_ffn_key import NLRQLinear
+    from forge.training.runners.train_8b_all import enable_factor_training_all_
 
-    model, cfg = _build_tiny_model("forgelm_v2", nlrq_rank=16)
+    model, _cfg = _build_tiny_model("forgelm_v2", nlrq_rank=16)
     n = enable_factor_training_all_(model)
     assert n > 0, "Should enable factor training on NLRQ layers"
 
@@ -260,10 +259,9 @@ def test_nlrq_factor_training_grads_reach_masters():
     from forge.keys.compression.nlrq_ffn_key import NLRQLinear
     has_grad = False
     for m in model.modules():
-        if isinstance(m, NLRQLinear):
-            if m.U_m is not None and m.U_m.grad is not None:
-                has_grad = True
-                break
+        if isinstance(m, NLRQLinear) and m.U_m is not None and m.U_m.grad is not None:
+            has_grad = True
+            break
     assert has_grad, "At least one NLRQ master should have gradients"
 
 
@@ -271,9 +269,9 @@ def test_nlrq_factor_training_grads_reach_masters():
 
 def test_snapshot_state_strips_nlrq_masters():
     """snapshot_state exports INT8 buffers and strips STE masters."""
-    from forge.training.runners.train_8b_all import snapshot_state, enable_factor_training_all_
+    from forge.training.runners.train_8b_all import enable_factor_training_all_, snapshot_state
 
-    model, cfg = _build_tiny_model("forgelm_v2", nlrq_rank=16)
+    model, _cfg = _build_tiny_model("forgelm_v2", nlrq_rank=16)
     enable_factor_training_all_(model)
 
     state = snapshot_state(model, step=42)
@@ -285,8 +283,8 @@ def test_snapshot_state_strips_nlrq_masters():
 
 def test_checkpoint_roundtrip_preserves_forward_output():
     """Save → load → forward gives same output (within quantization tolerance)."""
-    from forge.training.runners.train_8b_all import snapshot_state, enable_factor_training_all_
     from forge.model_loader import ConfigurableResearchLLM
+    from forge.training.runners.train_8b_all import enable_factor_training_all_, snapshot_state
 
     model, cfg = _build_tiny_model("forgelm_v2", nlrq_rank=16)
     enable_factor_training_all_(model)
@@ -302,7 +300,7 @@ def test_checkpoint_roundtrip_preserves_forward_output():
 
     # Build a fresh model and load
     model2 = ConfigurableResearchLLM(cfg)
-    missing, unexpected = model2.load_state_dict(sd, strict=False)
+    _missing, unexpected = model2.load_state_dict(sd, strict=False)
     assert not unexpected, f"Unexpected keys: {unexpected[:5]}"
 
     with torch.no_grad():
@@ -324,7 +322,7 @@ def test_sft_train_freezes_dead_params_for_8b():
     """
     from forge.training.runners.train_8b_all import freeze_dead_params_
 
-    model, cfg = _build_tiny_model("forgelm_v2")
+    model, _cfg = _build_tiny_model("forgelm_v2")
     mtp = getattr(model, "mtp_module", None)
     assert mtp is not None, "8B-B should have MTP module"
 
@@ -353,8 +351,8 @@ def test_sft_train_nlrq_factor_training_for_8b_d():
 
     Without this, only S (singular values) train — U/V factors stay frozen.
     """
-    from forge.training.runners.train_8b_all import enable_factor_training_all_
     from forge.keys.compression.nlrq_ffn_key import NLRQLinear
+    from forge.training.runners.train_8b_all import enable_factor_training_all_
 
     model, cfg = _build_tiny_model("forgelm_v2", nlrq_rank=16)
     assert cfg.ffn_compression == "nlrq"
@@ -384,10 +382,12 @@ def test_from_scratch_init_normalizes_logit_scale():
     tiny test model the std may already be <1.0, so the function scales UP.
     The invariant is: |std_after - 1.0| < |std_before - 1.0|.
     """
-    from forge.training.runners.train_8b_all import (
-        normalize_logit_scale_, forward_model,
-    )
     from types import SimpleNamespace
+
+    from forge.training.runners.train_8b_all import (
+        forward_model,
+        normalize_logit_scale_,
+    )
 
     model, cfg = _build_tiny_model("forgelm_v2")
     # Blow up the head to simulate the confidently-wrong init
@@ -414,10 +414,10 @@ def test_from_scratch_init_normalizes_logit_scale():
 
 def test_from_scratch_init_disables_bitnet_qat():
     """disable_bitnet_qat_ turns off ternary QAT (wasteful on random init)."""
-    from forge.training.runners.train_8b_all import disable_bitnet_qat_
     from forge.keys.quantization.bitnet_b158_key import BitNetLinear
+    from forge.training.runners.train_8b_all import disable_bitnet_qat_
 
-    model, cfg = _build_tiny_model("forgelm_v2")
+    model, _cfg = _build_tiny_model("forgelm_v2")
     bitnet_layers = [m for m in model.modules() if isinstance(m, BitNetLinear)]
     assert len(bitnet_layers) > 0, "8B-B should have BitNet layers"
 
@@ -441,7 +441,9 @@ def test_full_8b_training_cycle_on_cpu():
     does, but on a tiny model that fits in CPU memory.
     """
     from forge.training.runners.train_8b_all import (
-        freeze_dead_params_, enable_factor_training_all_, snapshot_state,
+        enable_factor_training_all_,
+        freeze_dead_params_,
+        snapshot_state,
     )
 
     model, cfg = _build_tiny_model("forgelm_v2", nlrq_rank=16)
@@ -460,7 +462,7 @@ def test_full_8b_training_cycle_on_cpu():
     # 4. Train for a few steps
     ids = torch.randint(0, cfg.vocab_size, (1, 16))
     losses = []
-    for step in range(3):
+    for _step in range(3):
         opt.zero_grad()
         loss = _manual_ce_loss(model, ids, cfg.vocab_size)
         loss.backward()
@@ -477,7 +479,7 @@ def test_full_8b_training_cycle_on_cpu():
     from forge.model_loader import ConfigurableResearchLLM
     model2 = ConfigurableResearchLLM(cfg)
     sd = {k: v for k, v in state.items() if "." in k}
-    missing, unexpected = model2.load_state_dict(sd, strict=False)
+    _missing, unexpected = model2.load_state_dict(sd, strict=False)
     assert not unexpected
 
     # 7. Fresh model should produce similar output

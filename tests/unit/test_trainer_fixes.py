@@ -8,14 +8,12 @@ Validates the specific bugs fixed in the refactor commit:
 5. Gradient checkpointing warns on unknown strategy
 """
 import sys
+
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
-import pytest
-import torch
-import os
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+
+import torch
 
 
 class TestLoadAnchorCached:
@@ -26,8 +24,9 @@ class TestLoadAnchorCached:
         assert callable(load_anchor_cached)
 
     def test_caches_by_path_mtime(self, tmp_path):
-        from forge.training.training_utils import load_anchor_cached, _ANCHOR_CACHE
         from safetensors.torch import save_file
+
+        from forge.training.training_utils import _ANCHOR_CACHE, load_anchor_cached
 
         # Create a fake anchor checkpoint
         anchor_path = str(tmp_path / "anchor.safetensors")
@@ -47,10 +46,9 @@ class TestLoadAnchorCached:
 
     def test_lru_eviction(self, tmp_path):
         """Cache should evict oldest entries when over _ANCHOR_CACHE_MAX."""
-        from forge.training.training_utils import (
-            load_anchor_cached, _ANCHOR_CACHE, _ANCHOR_CACHE_MAX
-        )
         from safetensors.torch import save_file
+
+        from forge.training.training_utils import _ANCHOR_CACHE, _ANCHOR_CACHE_MAX, load_anchor_cached
 
         _ANCHOR_CACHE.clear()
 
@@ -115,8 +113,9 @@ class TestGradientCheckpointingWarning:
 
     def test_warns_on_unknown_strategy(self):
         import warnings
-        from forge.model_loader import ConfigurableResearchLLM
+
         from forge.config import get_config
+        from forge.model_loader import ConfigurableResearchLLM
 
         cfg = get_config("forgelm_tiny")
         cfg.vocab_size = 64
@@ -140,8 +139,9 @@ class TestGradientCheckpointingWarning:
 
     def test_no_warning_on_valid_strategy(self):
         import warnings
-        from forge.model_loader import ConfigurableResearchLLM
+
         from forge.config import get_config
+        from forge.model_loader import ConfigurableResearchLLM
 
         cfg = get_config("forgelm_tiny")
         cfg.vocab_size = 64

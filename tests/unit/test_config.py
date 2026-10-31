@@ -149,6 +149,7 @@ class TestHeadDim:
     def test_gqa_explicit_head_dim_shapes(self):
         """GQA module shapes follow explicit head_dim, not d_model/n_heads."""
         import torch
+
         from forge.model.layers import GroupedQueryAttention
         attn = GroupedQueryAttention(d_model=2560, n_heads=32, n_kv_heads=8,
                                      head_dim=128, use_qk_norm=True)

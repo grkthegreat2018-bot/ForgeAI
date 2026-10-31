@@ -24,7 +24,6 @@ from forge.engine.engine_tools import EngineToolRegistry
 from forge.engine.tool_security import ToolSecurityManager
 from forge.web_primitives import fetch_url, is_public_host
 
-
 # ── fakes ──────────────────────────────────────────────────────────────────
 
 class _FakeHotswap:

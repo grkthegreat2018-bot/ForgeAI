@@ -5,11 +5,11 @@ use_hashed_nlrq) are actually consumed by model_loader.py when building
 ConfigurableResearchLLM. The keys exist in config.py but were not previously
 checked by model_loader — R23 wires them in.
 """
-import os, sys, tempfile, math
+import sys
+
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import torch
-import torch.nn as nn
 
 _DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -21,21 +21,21 @@ def _tiny_v8_config(**extra_overrides):
     hashed NLRQ) must be explicitly enabled via overrides.
     """
     from forge.config import get_config
-    overrides = dict(
-        vocab_size=256, d_model=64, n_layers=4, n_heads=4, n_kv_heads=2,
-        intermediate_size=128, max_seq_len=128, titan_memory_rank=16,
-        embed_factorized_rank=32, mtp_n_heads=2,
-        use_triton_kernels=False, use_varlen=False,
-        bitnet_int8_training=False, use_gradient_checkpointing=False,
-        use_hyperloop=False, use_lisa=False,
-        ngram_host=False,  # disable host table for CPU tests
+    overrides = {
+        "vocab_size": 256, "d_model": 64, "n_layers": 4, "n_heads": 4, "n_kv_heads": 2,
+        "intermediate_size": 128, "max_seq_len": 128, "titan_memory_rank": 16,
+        "embed_factorized_rank": 32, "mtp_n_heads": 2,
+        "use_triton_kernels": False, "use_varlen": False,
+        "bitnet_int8_training": False, "use_gradient_checkpointing": False,
+        "use_hyperloop": False, "use_lisa": False,
+        "ngram_host": False,  # disable host table for CPU tests
         # Explicitly enable V8 features (not on by default in V10)
-        use_qsa=True, use_gated_residual=True, use_ngram_embedding=True,
-        use_hashed_nlrq=True, ffn_compression="nlrq", nlrq_rank=32,
-        use_bitnet=False,
+        "use_qsa": True, "use_gated_residual": True, "use_ngram_embedding": True,
+        "use_hashed_nlrq": True, "ffn_compression": "nlrq", "nlrq_rank": 32,
+        "use_bitnet": False,
         # Disable V10's IRI-FP4 + SpectralKV + BitNetResidual (not compatible with V8 feature tests)
-        use_iri_fp4=False, use_spectral_kv=False, use_bitnet_residual=False,
-    )
+        "use_iri_fp4": False, "use_spectral_kv": False, "use_bitnet_residual": False,
+    }
     overrides.update(extra_overrides)
     cfg = get_config("forgelm_v2", **overrides)
     cfg.device = "cpu"
@@ -83,7 +83,7 @@ def test_v8_model_forward():
     B, T = 2, 16
     input_ids = torch.randint(0, cfg.vocab_size, (B, T), device=_DEV)
     with torch.no_grad():
-        logits, loss = model(input_ids)
+        logits, _loss = model(input_ids)
 
     assert logits is not None, "Should return logits"
     assert logits.shape == (B, T, cfg.vocab_size), \
@@ -97,8 +97,8 @@ def test_v8_model_forward():
 
 def test_v8_qsa_wired():
     """use_qsa=True should produce QSALayer modules; False should not."""
-    from forge.model_loader import ConfigurableResearchLLM
     from forge.keys.attention.qsa_key import QSALayer
+    from forge.model_loader import ConfigurableResearchLLM
 
     # With QSA enabled
     cfg_on = _tiny_v8_config(use_qsa=True)
@@ -121,8 +121,8 @@ def test_v8_qsa_wired():
 
 def test_v8_gated_residual_wired():
     """use_gated_residual=True should produce GatedResidualLayer modules."""
-    from forge.model_loader import ConfigurableResearchLLM
     from forge.keys.architecture.gated_residual_key import GatedResidualLayer
+    from forge.model_loader import ConfigurableResearchLLM
 
     # With GatedResidual enabled
     cfg_on = _tiny_v8_config(use_gated_residual=True)
@@ -145,8 +145,8 @@ def test_v8_gated_residual_wired():
 
 def test_v8_ngram_embedding_wired():
     """use_ngram_embedding=True should produce NGramEmbeddingLayer modules."""
-    from forge.model_loader import ConfigurableResearchLLM
     from forge.keys.knowledge.ngram_embedding_key import NGramEmbeddingLayer
+    from forge.model_loader import ConfigurableResearchLLM
 
     # With NgramEmbedding enabled (host=False for CPU)
     cfg_on = _tiny_v8_config(use_ngram_embedding=True, ngram_host=False)
@@ -169,9 +169,9 @@ def test_v8_ngram_embedding_wired():
 
 def test_v8_hashed_nlrq_wired():
     """use_hashed_nlrq=True should produce HashedNLRQ in FFN; False → NLRQLinear."""
+    from forge.keys.compression.nlrq_ffn_key import NLRQLinear
     from forge.model_loader import ConfigurableResearchLLM
     from forge.training.optim.r21_cross_domain import HashedNLRQ
-    from forge.keys.compression.nlrq_ffn_key import NLRQLinear
 
     # With HashedNLRQ enabled
     cfg_on = _tiny_v8_config(use_hashed_nlrq=True)
@@ -205,7 +205,7 @@ def test_v8_backward():
     input_ids = torch.randint(0, cfg.vocab_size, (B, T), device=_DEV)
     targets = torch.randint(0, cfg.vocab_size, (B, T), device=_DEV)
 
-    logits, loss = model(input_ids, targets=targets)
+    _logits, loss = model(input_ids, targets=targets)
     assert loss is not None, "Should return loss when targets provided"
     loss.backward()
 
@@ -241,7 +241,7 @@ def test_v8_loss_decreases():
     initial_loss = None
     for step in range(10):
         opt.zero_grad()
-        logits, loss = model(input_ids, targets=targets)
+        _logits, loss = model(input_ids, targets=targets)
         if loss.requires_grad:
             loss.backward()
             opt.step()

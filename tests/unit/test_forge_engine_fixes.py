@@ -9,13 +9,15 @@ Validates the specific bugs fixed in the refactor commit:
 6. continue_session doesn't use 'generated_ids' in dir() hack
 """
 import sys
+
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
+
+import threading
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import torch
-import threading
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 
 class TestCheckpointCacheThreadSafety:
@@ -188,10 +190,10 @@ class TestCrashRecoveryWeakref:
     itself only via weakref so engine teardown stays collectable."""
 
     def test_manager_collectable_after_install(self, tmp_path):
-        import atexit
         import gc
         import signal
         import weakref
+
         from forge.engine.crash_recovery import CrashRecoveryManager
         old_term = signal.getsignal(signal.SIGTERM)
         old_int = signal.getsignal(signal.SIGINT)
@@ -210,6 +212,7 @@ class TestCrashRecoveryWeakref:
 
     def test_close_unregisters_and_disables(self, tmp_path):
         import signal
+
         from forge.engine.crash_recovery import CrashRecoveryManager
         old_term = signal.getsignal(signal.SIGTERM)
         old_int = signal.getsignal(signal.SIGINT)
@@ -295,7 +298,8 @@ class TestStreamStopStrings:
         # force a non-EOS argmax every step so the loop runs 5 tokens
         force = torch.zeros(1, tiny_model.config.vocab_size)
         force[0, 5] = 1.0
-        proc = lambda logits, ids: force
+        def proc(logits, ids):
+            return force
         out = "".join(eng.generate_stream(
             "hi", max_new_tokens=5, temperature=0.0,
             stop=["STOP"], logits_processor=proc,
@@ -330,8 +334,8 @@ def forge_engine_fixture():
     Uses a mock tokenizer to avoid filesystem dependency on tokenizer location.
     """
     from forge.config import get_config
-    from forge.model_loader import ConfigurableResearchLLM
     from forge.engine.forge_engine import ForgeEngine
+    from forge.model_loader import ConfigurableResearchLLM
 
     cfg = get_config("forgelm_tiny")
     cfg.vocab_size = 256
@@ -566,8 +570,8 @@ class TestFinishToStopNoDoubleFeed:
     appended a duplicate cache entry and corrupted the continuation."""
 
     def test_no_spurious_last_token_forward(self, tiny_model):
-        from forge.engine.forge_engine import ForgeEngine
         from forge.engine.engine_common import SamplingParams
+        from forge.engine.forge_engine import ForgeEngine
         from forge.model_loader import unpack_output_with_kv
         tok = MagicMock()
         tok.eos_token_id = 0
@@ -601,8 +605,8 @@ class TestFinishToStopNoDoubleFeed:
             f"{[t.tolist() for t, _ in fed]}")
 
     def test_prefill_fallback_when_no_stored_logits(self, tiny_model):
-        from forge.engine.forge_engine import ForgeEngine
         from forge.engine.engine_common import SamplingParams
+        from forge.engine.forge_engine import ForgeEngine
         tok = MagicMock()
         tok.eos_token_id = 0
         tok.return_value.input_ids = torch.tensor([[1, 2, 3, 4]])
@@ -611,7 +615,7 @@ class TestFinishToStopNoDoubleFeed:
         eng._library_enabled = False
 
         ids = torch.tensor([[1, 2, 3, 4]])
-        logits, past_kv = eng._prefill(ids)
+        _logits, past_kv = eng._prefill(ids)
         tiny_model._forge_last_logits = None  # decoder never stored them
 
         fed = []
@@ -656,8 +660,7 @@ class TestCachePromptPrefixBoundary:
 
     def test_prefers_forge_prefill_kv(self, tiny_model):
         from forge.engine.forge_engine import ForgeEngine
-        from forge.engine.prefix_cache import (
-            cache_prompt_prefix, cache_key, _PREFIX_CACHE_KEY_LENGTH)
+        from forge.engine.prefix_cache import _PREFIX_CACHE_KEY_LENGTH, cache_key, cache_prompt_prefix
         tok = MagicMock()
         tok.eos_token_id = 0
         eng = ForgeEngine(tiny_model, tok, device="cpu")

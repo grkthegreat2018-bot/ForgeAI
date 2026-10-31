@@ -7,19 +7,21 @@ All CPU-runnable.
 import os
 import sys
 
+import pytest
 import torch
 import torch.nn as nn
-import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
+from forge.decoding.acceptance_losses import eal_loss, expected_accepted_length, wtv_loss
 from forge.training.optim.sf_spectral_optimizers import (
-    SAMuonLite, SAMuonLiteWithAuxAdam, _newton_schulz_5, _top_singular_pair,
-    build_samuon_lite)
-from forge.decoding.acceptance_losses import (
-    eal_loss, expected_accepted_length, wtv_loss)
-
+    SAMuonLite,
+    SAMuonLiteWithAuxAdam,
+    _newton_schulz_5,
+    _top_singular_pair,
+    build_samuon_lite,
+)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SAMuon-lite

@@ -13,13 +13,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-from forge.engine.structured.xgrammar import XGrammarConstrainer
 from forge.engine.decoding import (
     SelfSpeculativeSparse,
     StandardDecoding,
     build_decoding,
 )
-
+from forge.engine.structured.xgrammar import XGrammarConstrainer
 
 # ═══════════════════════════════════════════════════════════════════════
 # Mock tokenizer for XGrammar tests
@@ -46,7 +45,7 @@ class MockTokenizer:
                 '_-/'
             )
         self._vocab = [""] + list(vocab_chars)  # token 0 = empty
-        self._id_to_char = {i: c for i, c in enumerate(self._vocab)}
+        self._id_to_char = dict(enumerate(self._vocab))
         self._char_to_id = {c: i for i, c in enumerate(self._vocab)}
 
     def convert_ids_to_tokens(self, ids):
@@ -375,7 +374,7 @@ class TestXGrammarConstrainer:
 
     def test_get_mask_has_at_least_one_true(self):
         """get_mask should always allow at least one token."""
-        c, tok = self._make_constrainer()
+        c, _tok = self._make_constrainer()
         c.compile_json({"type": "object"})
         mask = c.get_mask(0)
         assert mask.any(), "Mask should allow at least one token"
@@ -645,7 +644,7 @@ class TestXGrammarEngineIntegration:
 
     def test_build_xgrammar_processor_returns_callable(self):
         """_build_xgrammar_processor should return a callable."""
-        engine, tok, _ = self._make_engine()
+        engine, _tok, _ = self._make_engine()
         schema = {"type": "object", "properties": {"name": {"type": "string"}}}
         proc = engine._build_xgrammar_processor(schema)
         assert callable(proc), "Processor should be callable"
@@ -771,7 +770,8 @@ class TestXGrammarEngineIntegration:
         model._favoured = brace_id
 
         # A no-op processor that should be overridden.
-        dummy_proc = lambda logits, ids: logits
+        def dummy_proc(logits, ids):
+            return logits
         schema = {"type": "object"}
         result = engine.generate_raw(
             "test", max_new_tokens=2, temperature=0.0,

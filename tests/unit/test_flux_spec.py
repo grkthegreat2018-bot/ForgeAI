@@ -15,9 +15,9 @@ from forge.model.flux import FluxConfig, FluxLM
 
 
 def _cfg(**kw):
-    base = dict(vocab_size=64, orders=(1, 2, 3, 4), use_knn=False,
-                sparse_taps=(), class_orders=(), word_orders=(),
-                hybrid_taps=())
+    base = {"vocab_size": 64, "orders": (1, 2, 3, 4), "use_knn": False,
+                "sparse_taps": (), "class_orders": (), "word_orders": (),
+                "hybrid_taps": ()}
     base.update(kw)
     return FluxConfig(**base)
 

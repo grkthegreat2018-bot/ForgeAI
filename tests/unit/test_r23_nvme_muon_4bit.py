@@ -5,7 +5,10 @@ MuonBitNet4Bit (4-bit momentum + Newton-Schulz orthogonalization) into a
 single NvmeMuon4Bit optimizer class, registered as "nvme_muon_4bit" in
 configure_optimizer().
 """
-import os, sys, tempfile, math
+import os
+import sys
+import tempfile
+
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import torch
@@ -139,8 +142,7 @@ def test_nvme_muon_4bit_one_block_in_ram():
 
 def test_nvme_muon_4bit_4bit_quantization():
     """4-bit momentum quantization should round-trip with <15% error."""
-    from forge.training.optim.r20_memory_optimizers import (
-        _quantize_4bit, _dequantize_4bit)
+    from forge.training.optim.r20_memory_optimizers import _dequantize_4bit, _quantize_4bit
 
     torch.manual_seed(42)
     t = torch.randn(10000) * 0.01  # typical momentum scale
@@ -233,7 +235,7 @@ def test_nvme_muon_4bit_memory_budget():
     # Total RAM = master + active block
     total_ram_gb = master_gb + active_block_gb
 
-    print(f"  V8-8B NvmeMuon4Bit memory budget:")
+    print("  V8-8B NvmeMuon4Bit memory budget:")
     print(f"    Active block (1 layer): {active_block_gb:.2f} GB RAM")
     print(f"    NVMe storage (all):     {nvme_total_gb:.1f} GB")
     print(f"    Master weights (bf16):  {master_gb:.1f} GB RAM")
@@ -283,7 +285,7 @@ def test_nvme_muon_4bit_block_switching():
         print(f"  Initial block: {initial_block}")
 
         # Run switch_every - 1 steps (should not switch yet)
-        for i in range(switch_every - 1):
+        for _i in range(switch_every - 1):
             opt.zero_grad()
             loss = nn.MSELoss()(model(x), y)
             loss.backward()

@@ -3,14 +3,18 @@
 Tests that the updated chat_template.py correctly renders and parses
 Jamba's JSON tool call format with  /  markers.
 """
-import json
 import pytest
 
 from forge.self_play.discovery.chat_template import (
-    render_tool_calls, parse_tool_calls, apply_chat_template,
-    TOOL_CALL_START, TOOL_CALL_END,
-    TOOL_RESP_START, TOOL_RESP_END,
-    THINK_START, THINK_END,
+    THINK_END,
+    THINK_START,
+    TOOL_CALL_END,
+    TOOL_CALL_START,
+    TOOL_RESP_END,
+    TOOL_RESP_START,
+    apply_chat_template,
+    parse_tool_calls,
+    render_tool_calls,
 )
 
 
@@ -48,7 +52,7 @@ class TestJambaToolCallFormat:
     def test_parse_multiple_tool_calls(self):
         """Parse multiple JSON tool calls in one output."""
         text = f'{TOOL_CALL_START}\n{{"name": "read_file", "arguments": {{"path": "a.py"}}}}\n{{"name": "list_dir", "arguments": {{"dir": "/tmp"}}}}\n{TOOL_CALL_END}'
-        calls, musing = parse_tool_calls(text)
+        calls, _musing = parse_tool_calls(text)
         assert calls is not None
         assert len(calls) == 2
         assert calls[0]["name"] == "read_file"
@@ -134,7 +138,7 @@ class TestBackwardCompat:
         legacy_end = bytes.fromhex(
             "3c7c746f6f6c5f63616c6c5f656e647c3e").decode("ascii")
         text = f'{legacy_start}[read_file(path="/tmp/test.py")]{legacy_end}'
-        calls, musing = parse_tool_calls(text)
+        calls, _musing = parse_tool_calls(text)
         assert calls is not None
         assert calls[0]["name"] == "read_file"
         assert calls[0]["args"]["path"] == "/tmp/test.py"

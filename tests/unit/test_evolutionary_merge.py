@@ -10,29 +10,27 @@ State dicts use the ForgeAI key convention:
 import pytest
 import torch
 
+from forge.checkpoint_io import load_checkpoint, save_checkpoint
 from research.merge_models import (
-    crossover_blockwise,
-    crossover_block_random,
-    crossover_uniform,
-    mutate_gaussian,
-    mutate_quant_perturb,
-    mutate_block_swap,
-    select_tournament,
-    select_rank,
-    select_roulette,
-    select_diversity,
-    scale_fitness_sigma,
-    scale_fitness_rank,
-    _state_distance,
-    _population_centroid,
-    _population_diversity,
-    evolve,
     _block_index,
     _n_blocks,
     _non_block_keys,
+    _population_diversity,
+    _state_distance,
+    crossover_block_random,
+    crossover_blockwise,
+    crossover_uniform,
+    evolve,
+    mutate_block_swap,
+    mutate_gaussian,
+    mutate_quant_perturb,
+    scale_fitness_rank,
+    scale_fitness_sigma,
+    select_diversity,
+    select_rank,
+    select_roulette,
+    select_tournament,
 )
-from forge.checkpoint_io import save_checkpoint, load_checkpoint
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 

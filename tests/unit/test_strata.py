@@ -8,10 +8,21 @@ import pytest
 import torch
 
 from forge.model.strata import (
-    BlockStore, CellBlock, KnobSet, ParamSet, StrataConfig,
-    count_lut, quantize_counts, decode_counts, pack_follower,
-    foll_tok, foll_cntq, foll_valid, cell_bytes,
-    save_store, load_store, DEFAULT_KNOBS,
+    DEFAULT_KNOBS,
+    BlockStore,
+    CellBlock,
+    KnobSet,
+    ParamSet,
+    cell_bytes,
+    count_lut,
+    decode_counts,
+    foll_cntq,
+    foll_tok,
+    foll_valid,
+    load_store,
+    pack_follower,
+    quantize_counts,
+    save_store,
 )
 
 DEV = "cpu"
@@ -61,7 +72,7 @@ def test_block_add_read():
     toks = torch.arange(1, 200) % 5000
     d = torch.ones(199)
     b.add(keys, toks, d, wtag=1)
-    t, c, tot, f = b.read(keys)
+    t, _c, tot, f = b.read(keys)
     assert f.all()
     assert (t[:, 0] == toks).all()
     assert tot == pytest.approx(torch.ones(199), rel=0.06)
@@ -70,9 +81,9 @@ def test_block_add_read():
 def test_block_merge_counts():
     b = CellBlock("o8", 0, 1024, 8, torch.device(DEV))
     k = torch.tensor([12345])
-    for i in range(5):
+    for _i in range(5):
         b.add(k, torch.tensor([7]), torch.tensor([1.0]), wtag=0)
-    t, c, tot, f = b.read(k)
+    t, _c, tot, f = b.read(k)
     assert f.item()
     assert (t[0] == 7).sum() == 1                 # merged, not duplicated
     assert tot[0].item() == pytest.approx(5.0, rel=0.08)
@@ -83,7 +94,7 @@ def test_batch_dup_keys_accumulate():
     b = CellBlock("o8", 0, 1024, 8, torch.device(DEV))
     k = torch.tensor([777, 777])
     b.add(k, torch.tensor([42, 42]), torch.tensor([1.0, 1.0]), wtag=0)
-    _, c, tot, _ = b.read(torch.tensor([777]))
+    _, _c, tot, _ = b.read(torch.tensor([777]))
     assert tot[0].item() == pytest.approx(2.0, rel=0.08)
 
 
@@ -134,7 +145,7 @@ def test_revert_tag_preserves_other_tags():
     b.add(torch.tensor([55]), torch.tensor([10]),
           torch.tensor([1.0]), wtag=2, seq=1)
     b.revert_tag(2)
-    t, c, tot, f = b.read(torch.tensor([55]))
+    t, _c, _tot, f = b.read(torch.tensor([55]))
     assert f.item() and (t[0] == 9).any() and not (t[0] == 10).any()
 
 

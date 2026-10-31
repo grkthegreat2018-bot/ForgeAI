@@ -1,13 +1,17 @@
 """Test CPT data pipeline: loading, tokenization, packing, mixed sampling."""
-import sys, os, tempfile
+import os
+import sys
+import tempfile
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import torch
+
 from forge.training.runners.cpt_train import (
+    MixedDataSampler,
     load_jsonl_examples,
     render_cpt_text,
     tokenize_and_pack,
-    MixedDataSampler,
 )
 
 
@@ -35,7 +39,7 @@ def test_render_cpt_text():
     assert "What is 2+2?" in rendered
     assert "2+2=4" in rendered
     assert rendered.endswith("\n\n")
-    print(f"PASS: render_cpt_text produces correct format")
+    print("PASS: render_cpt_text produces correct format")
 
 
 def test_tokenize_and_pack():

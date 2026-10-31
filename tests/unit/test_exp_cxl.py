@@ -1,15 +1,20 @@
 """CPU tests for forge/exp/cxlmem.py — tier logic, round-trip
 correctness, stats counters, capacity math, streamed attention, and the
 GQA/FFN wrappers. All on CPU (pinned memory is skipped off-CUDA)."""
-import math
 
 import torch
 import torch.nn.functional as F
 
-from forge.exp.cxlmem import (CxLLink, TieredFFN, TieredKV,
-                              attach_tiered_kv, detach_tiered_kv,
-                              kv_bytes_per_token, unwrap_ffn_tiered,
-                              wrap_ffn_tiered)
+from forge.exp.cxlmem import (
+    CxLLink,
+    TieredFFN,
+    TieredKV,
+    attach_tiered_kv,
+    detach_tiered_kv,
+    kv_bytes_per_token,
+    unwrap_ffn_tiered,
+    wrap_ffn_tiered,
+)
 
 
 def _mk(seq_cap=4096, window=64, page=16, n_layers=3, burst_pages=2):
@@ -68,7 +73,7 @@ def test_spill_page_granular():
         assert st.hot_len <= 16
         assert st.cold_len + st.hot_len == t + 1
         assert st.cold_len % 4 == 0          # cold grows page-wise
-    kk, vv = tier.materialize(0)
+    kk, _vv = tier.materialize(0)
     assert kk.shape[2] == 40
 
 
@@ -115,7 +120,7 @@ def test_stats_counters():
     assert st["d2h_bytes"] == 2 * 2 * 8 * tok_bytes
     assert st["spill_events"] == 4
     # materialize layer 0: 16 cold tokens = 4 pages
-    kk, _ = tier.materialize(0)
+    _kk, _ = tier.materialize(0)
     assert st["materialize_calls"] == 1
     assert st["misses"] == 4
     assert st["h2d_bytes"] == 16 * tok_bytes
@@ -143,7 +148,7 @@ def test_capacity_math():
 # ── streamed attention vs SDPA reference ──────────────────────────────
 
 def _ref_attn(q, k, v, causal):
-    B, H, T, hd = q.shape
+    _B, H, T, _hd = q.shape
     G = k.shape[1]
     kf = k.repeat_interleave(H // G, dim=1)
     vf = v.repeat_interleave(H // G, dim=1)
@@ -216,7 +221,7 @@ def _mk_gqa(d_model=32, n_heads=4, n_kv=2, hd=8):
 def _ref_gqa_decode(attn, x_seq, xs):
     """Reference: plain GQA forward with growing cat'd past."""
     with torch.no_grad():
-        out0, past = attn(x_seq, use_cache=True)
+        _out0, past = attn(x_seq, use_cache=True)
         outs = []
         for xt in xs:
             o, past = attn(xt, past_key_value=past, use_cache=True)
@@ -250,7 +255,7 @@ def test_attach_stream_matches_plain_decode():
     for a, b in zip(outs, outs_ref):
         assert torch.allclose(a, b, atol=1e-4)
     detach_tiered_kv(model)
-    o2, p2 = attn(torch.randn(1, 1, 32), use_cache=True)
+    _o2, p2 = attn(torch.randn(1, 1, 32), use_cache=True)
     assert p2 is not None                      # orig path restored
 
 

@@ -1,20 +1,13 @@
 """Tests for the agentic distillation client."""
 import json
-import os
-import tempfile
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
 
 from forge.distillation.agentic_distill import (
     AgenticDistillClient,
     AgenticTrajectory,
-    _schemas_to_openai_tools,
     _is_filler_task,
+    _schemas_to_openai_tools,
 )
-from forge.distillation.distill_client import DistillModel, MODEL_POOL
-
+from forge.distillation.distill_client import DistillModel
 
 # ── Schema conversion tests ──────────────────────────────────────────────
 

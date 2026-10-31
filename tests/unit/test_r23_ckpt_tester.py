@@ -8,12 +8,11 @@ The checkpoint tester loads a checkpoint and runs a 50-question probe:
   - 10 format (proper tool-use format, JSON, markdown)
 Plus a val-loss delta vs prior checkpoint for regression detection.
 """
-import os, sys, tempfile, math, time
+import sys
+
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 _DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -23,14 +22,14 @@ _DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def _tiny_v8_config(**extra):
     """Create a tiny V8-8B config that builds on CPU in <1s."""
     from forge.config import get_config
-    overrides = dict(
-        vocab_size=256, d_model=64, n_layers=4, n_heads=4, n_kv_heads=2,
-        intermediate_size=128, max_seq_len=128, titan_memory_rank=16,
-        embed_factorized_rank=32, mtp_n_heads=2,
-        use_triton_kernels=False, use_varlen=False,
-        bitnet_int8_training=False, use_gradient_checkpointing=False,
-        use_hyperloop=False, use_lisa=False, ngram_host=False,
-    )
+    overrides = {
+        "vocab_size": 256, "d_model": 64, "n_layers": 4, "n_heads": 4, "n_kv_heads": 2,
+        "intermediate_size": 128, "max_seq_len": 128, "titan_memory_rank": 16,
+        "embed_factorized_rank": 32, "mtp_n_heads": 2,
+        "use_triton_kernels": False, "use_varlen": False,
+        "bitnet_int8_training": False, "use_gradient_checkpointing": False,
+        "use_hyperloop": False, "use_lisa": False, "ngram_host": False,
+    }
     overrides.update(extra)
     cfg = get_config("forgelm_v2", **overrides)
     cfg.device = "cpu"

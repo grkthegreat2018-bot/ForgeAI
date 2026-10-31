@@ -1,5 +1,4 @@
 """Tests for FluxLM domain lanes (domain-mixed order keys)."""
-import numpy as np
 
 from forge.model.flux import FluxConfig, FluxLM
 

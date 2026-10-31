@@ -3,11 +3,15 @@
 Verifies that the hybrid offload optimizer works with the real 1.2B model,
 fits in 12GB VRAM, and produces correct training steps.
 """
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import torch
+
 from forge.training.optim.hybrid_offload import CPUAdamW, estimate_memory
+
 
 def test_forgelm_cpuadamw():
     from forge.config import get_config

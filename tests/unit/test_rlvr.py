@@ -1,16 +1,17 @@
 """Test RLVR pipeline: math answer extraction, verification, reward computation."""
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from forge.training.runners.rlvr_train import (
-    extract_math_answer,
-    normalize_answer,
-    math_verify,
-    extract_gold_answer,
-    load_math_tasks,
     VerifiableTask,
+    extract_gold_answer,
+    extract_math_answer,
+    load_math_tasks,
+    math_verify,
+    normalize_answer,
 )
-from forge.training.runners.curriculum_sft import is_doom_loop
 
 
 def test_extract_math_answer_gsm8k():
@@ -96,7 +97,7 @@ def test_extract_gold_answer():
 
 def test_load_math_tasks():
     """Load math tasks from a JSONL file."""
-    import tempfile, json
+    import tempfile
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
         f.write('{"prompt": "What is 2+2?", "solution": "2+2=4.\\n#### 4"}\n')
         f.write('{"prompt": "What is 3*3?", "solution": "3*3=9.\\n#### 9"}\n')

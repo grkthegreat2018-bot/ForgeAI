@@ -10,8 +10,6 @@ R34-6: SIREN — streaming safety guardrails
 from __future__ import annotations
 
 import torch
-import pytest
-
 
 # ── R34-1: TriLens ────────────────────────────────────────────────────────
 
@@ -307,7 +305,7 @@ class TestSIREN:
                            categories=["harmful"])
         guard.set_probes({"harmful": torch.randn(4, 64) * 10})
         states = {i: torch.randn(64) for i in range(4)}
-        is_safe, cat = guard.check_token("test", states)
+        is_safe, _cat = guard.check_token("test", states)
         assert isinstance(is_safe, bool)
 
     def test_reset(self):

@@ -92,9 +92,9 @@ def test_export_with_system_prompt(store):
     store.append_message(conv["id"], "user", "q")
     i = store.append_message(conv["id"], "assistant", "a")
     store.rate_message(conv["id"], i, "good")
-    out, n = store.export_training_data()
-    msgs = [json.loads(l)["messages"] for l in
-            out.read_text(encoding="utf-8").splitlines() if l.strip()][0]
+    out, _n = store.export_training_data()
+    msgs = next(json.loads(l)["messages"] for l in
+            out.read_text(encoding="utf-8").splitlines() if l.strip())
     assert msgs[0]["role"] == "system"
     assert msgs[0]["content"] == "You are Forge."
 
@@ -106,7 +106,7 @@ def test_export_selected_convs_only(store):
         store.append_message(c["id"], "user", "q")
         i = store.append_message(c["id"], "assistant", "a")
         store.rate_message(c["id"], i, "good")
-    out, n = store.export_training_data(conv_ids=[c1["id"]])
+    _out, n = store.export_training_data(conv_ids=[c1["id"]])
     assert n == 1
 
 

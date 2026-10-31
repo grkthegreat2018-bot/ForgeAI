@@ -16,20 +16,22 @@ Covers the port-first contract plus the GDN2-specific differentiator:
 import os
 import sys
 
-import torch
 import pytest
+import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
+from forge.config import MODEL_CONFIGS, ModelConfig
 from forge.keys.attention.gdn2_key import (
-    GDN2Key, GDN2Layer, GDN2_PARAM_SUFFIXES, kda_state_to_gdn2,
+    GDN2_PARAM_SUFFIXES,
+    GDN2Key,
+    GDN2Layer,
+    kda_state_to_gdn2,
 )
 from forge.keys.attention.kda_key import KDAKey, KDALayer
 from forge.keys.misc.base import KeyClass
-from forge.config import ModelConfig, MODEL_CONFIGS
 from forge.model.layers import ModularBlock
-
 
 D_MODEL = 64
 N_HEADS = 4
@@ -136,7 +138,7 @@ def test_convert_model_state():
     for k, v in state.items():
         assert torch.equal(res.weights[k], v)
     res2 = key.convert_model_state(state, indices=[1])
-    assert f"blocks.1._gdn2.gate" in res2.weights
+    assert "blocks.1._gdn2.gate" in res2.weights
     assert "blocks.0._gdn2.gate" not in res2.weights
     res3 = key.convert_model_state(res.weights)
     assert not res3.success

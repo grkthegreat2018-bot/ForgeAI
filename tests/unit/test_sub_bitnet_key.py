@@ -10,22 +10,21 @@ import math
 import pytest
 import torch
 
+from forge.engine.quant.novel_quant_r44 import _hadamard_matrix
 from forge.keys.misc.base import KeyClass
 from tests.fixtures.keys.quantization.sub_bitnet_key import (
     SubBitnetKey,
     SubBitnetLinear,
     SubBitnetLinearBiLLM,
     apply_sub_bitnet,
-    quantize_sub_bitnet,
-    dequantize_sub_bitnet,
-    quantize_sub_bitnet_billm,
-    dequantize_sub_bitnet_billm,
-    quantize_sub_bitnet_billm_gptq,
     binary_quantize_round,
-    convert_model_to_sub_bitnet,
     build_sub_bitnet_linear,
+    convert_model_to_sub_bitnet,
+    dequantize_sub_bitnet,
+    dequantize_sub_bitnet_billm,
+    quantize_sub_bitnet,
+    quantize_sub_bitnet_billm,
 )
-from forge.engine.quant.novel_quant_r44 import _hadamard_matrix
 
 
 def _sqnr(w: torch.Tensor, w_hat: torch.Tensor) -> float:
@@ -393,7 +392,7 @@ _DTYPE = torch.bfloat16 if _HAS_CUDA else torch.float32
 def _qwen_available() -> bool:
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa
-        from huggingface_hub import try_to_load_from_cache  # noqa
+        from huggingface_hub import try_to_load_from_cache
         path = try_to_load_from_cache(_QWEN_ID, "config.json")
         return path is not None and not isinstance(path, Exception)
     except Exception:
@@ -497,7 +496,7 @@ class TestQwenRealWeights:
 
     def test_irb_rounds_improve_real_weights(self, linear_weights):
         """More IRB rounds → strictly lower MSE on real Qwen weights."""
-        w = linear_weights[list(linear_weights.keys())[0]]
+        w = linear_weights[next(iter(linear_weights.keys()))]
         mses = []
         for k in (1, 2, 3):
             packed = quantize_sub_bitnet(w, n_rounds=k, rank=0)
@@ -507,7 +506,7 @@ class TestQwenRealWeights:
 
     def test_low_rank_residual_helps_real_weights(self, linear_weights):
         """SVD low-rank residual must reduce (or not increase) error on real weights."""
-        w = linear_weights[list(linear_weights.keys())[0]]
+        w = linear_weights[next(iter(linear_weights.keys()))]
         packed0 = quantize_sub_bitnet(w, n_rounds=1, rank=0)
         err0 = _weight_mse(w, dequantize_sub_bitnet(packed0, torch.float32))
         packed1 = quantize_sub_bitnet(w, n_rounds=1, rank=32)
@@ -517,7 +516,7 @@ class TestQwenRealWeights:
 
     def test_sub_bitnet_linear_forward_matches_quantize(self, linear_weights):
         """SubBitnetLinear.forward uses the same dequant path as the standalone fn."""
-        w = linear_weights[list(linear_weights.keys())[0]]
+        w = linear_weights[next(iter(linear_weights.keys()))]
         lin = torch.nn.Linear(w.shape[1], w.shape[0], bias=False).to(w.device)
         with torch.no_grad():
             lin.weight.copy_(w)
@@ -552,7 +551,7 @@ class TestQwenRealWeights:
 
     def test_effective_bits_on_real_layer(self, linear_weights):
         """A real Qwen layer's effective bit-width is sub-bitnet (< 1.58)."""
-        w = linear_weights[list(linear_weights.keys())[0]]
+        w = linear_weights[next(iter(linear_weights.keys()))]
         sub = SubBitnetLinear(w.shape[1], w.shape[0], bias=False,
                               n_rounds=1, rank=0, use_hadamard=True)
         bpw = sub.effective_bits_per_weight()
@@ -582,6 +581,7 @@ class TestQwenRealWeights:
         (no NaN/inf), not that quality is preserved.
         """
         import copy
+
         import torch.nn as nn
         model, tok = qwen
         model_q = copy.deepcopy(model)
@@ -614,6 +614,7 @@ class TestQwenRealWeights:
         PPL ~30 (2.4x degradation, no QAT). Threshold < 80 gives margin.
         """
         import copy
+
         import torch.nn as nn
         model, tok = qwen
         model_q = copy.deepcopy(model)
@@ -645,6 +646,7 @@ class TestQwenRealWeights:
         makes sub-bitnet viable without QAT.
         """
         import copy
+
         import torch.nn as nn
         model, tok = qwen
         text = ("Quantization is a technique used to reduce the memory footprint "
@@ -698,7 +700,7 @@ class TestQwenRealWeights:
 
     def test_billm_effective_bits_sub_bitnet(self, linear_weights):
         """BiLLM effective bit-width is sub-bitnet (< 1.58)."""
-        w = linear_weights[list(linear_weights.keys())[0]]
+        w = linear_weights[next(iter(linear_weights.keys()))]
         sub = SubBitnetLinearBiLLM(w.shape[1], w.shape[0], bias=False,
                                    use_hadamard=True, salient_frac=0.05)
         bpw = sub.effective_bits_per_weight()
@@ -718,6 +720,7 @@ class TestQwenRealWeights:
         (smaller, harder) we expect higher but still functional (< 500).
         """
         import copy
+
         import torch.nn as nn
         model, tok = qwen
         text = ("Quantization is a technique used to reduce the memory footprint "
@@ -775,6 +778,7 @@ class TestQwenRealWeights:
         Uses GPTQ error compensation with calibration activations.
         """
         import copy
+
         import torch.nn as nn
         model, tok = qwen
         text = ("Quantization is a technique used to reduce the memory footprint "
@@ -801,7 +805,7 @@ class TestQwenRealWeights:
             if _HAS_CUDA:
                 torch.cuda.empty_cache()
 
-        for frac, bpw, ppl in results:
+        for frac, _bpw, ppl in results:
             print(f"  [BiLLM+SVD sweep] salient_frac={frac:.2f}: "
                   f"PPL={ppl:.2f}")
         # At least one config should give functional PPL (< 5000)

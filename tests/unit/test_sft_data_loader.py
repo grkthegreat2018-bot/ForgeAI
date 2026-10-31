@@ -7,8 +7,8 @@ Validates that ``load_examples``:
   - still loads valid rows alongside bad ones when ``strict_data=False``
 """
 import json
-import sys
 import logging
+import sys
 
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 

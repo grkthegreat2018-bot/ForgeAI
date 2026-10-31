@@ -14,13 +14,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-from forge.keys.misc.base import Key, KeyClass, KeyResult
 from forge.keys.architecture.kronecker_embed_key import (
-    KroneckerEmbedKey,
     KroneckerEmbedding,
+    KroneckerEmbedKey,
     _ids_to_bytes,
 )
-
+from forge.keys.misc.base import Key, KeyClass
 
 # ── Test fixtures ─────────────────────────────────────────────────────────────
 
@@ -161,7 +160,7 @@ class TestForward:
     def test_forward_projection_from_svd(self, key, standard_embedding):
         """Projection should contain SVD right singular vectors (scaled by S)."""
         W = standard_embedding.weight.float()
-        U, S, Vt = torch.linalg.svd(W, full_matrices=False)
+        _U, S, Vt = torch.linalg.svd(W, full_matrices=False)
         k = min(D_CHAR * MAX_CHAR_LEN, min(VOCAB, D_MODEL))
 
         result = key.forward({"weight": standard_embedding.weight})
@@ -328,7 +327,7 @@ class TestRoundTrip:
         # the singular structure of W.
         proj = fwd.weights["projection"].float()
         W_f = W.float()
-        U, S, Vt = torch.linalg.svd(W_f, full_matrices=False)
+        _U, S, Vt = torch.linalg.svd(W_f, full_matrices=False)
         k = min(D_CHAR * MAX_CHAR_LEN, min(VOCAB, D_MODEL))
         expected_topk = S[:k].unsqueeze(1) * Vt[:k, :]
         assert torch.allclose(proj[:k, :], expected_topk, atol=1e-4)
@@ -336,7 +335,7 @@ class TestRoundTrip:
     def test_round_trip_svd_quality(self, key, standard_embedding):
         """The SVD projection captures the top-k singular values of W."""
         W = standard_embedding.weight.float()
-        U, S, Vt = torch.linalg.svd(W, full_matrices=False)
+        _U, S, _Vt = torch.linalg.svd(W, full_matrices=False)
         k = min(D_CHAR * MAX_CHAR_LEN, min(VOCAB, D_MODEL))
 
         fwd = key.forward({"weight": standard_embedding.weight})

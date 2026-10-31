@@ -1,4 +1,4 @@
-"""Unit tests for R44 novel quantization algorithms.
+r"""Unit tests for R44 novel quantization algorithms.
 
 Tests the two working novel algorithms (AB-FP4 and SR-INT4) plus
 the dead-end lifting methods for regression protection.
@@ -10,16 +10,14 @@ import torch
 import torch.nn as nn
 
 from forge.engine.quant.novel_quant_r44 import (
-    HadamardLiftLinear,
     AdaptiveBlockFP4Linear,
+    HadamardLiftLinear,
     SparseResidualINT3Linear,
     TernaryLiftLinear,
-    quantize_model_hadamard_lift,
+    _hadamard_matrix,
+    estimate_quantized_memory,
     quantize_model_adaptive_block_fp4,
     quantize_model_sparse_residual_int3,
-    quantize_model_ternary_lift,
-    estimate_quantized_memory,
-    _hadamard_matrix,
 )
 
 

@@ -1,8 +1,7 @@
 """CPU tests for forge/exp/diffdraft.py."""
 import torch
 
-from forge.exp.diffdraft import (DiffusionDraftHead, _truncate_pasts,
-                                 spec_verify)
+from forge.exp.diffdraft import DiffusionDraftHead, _truncate_pasts, spec_verify
 
 
 def _tiny_attn_model():

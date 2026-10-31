@@ -8,25 +8,22 @@ Verifies:
   5. Gradients flow through the quantization (STE)
   6. Quamba2 is better than naive W8A8 on SSM (lower error)
 """
-import sys
 import os
+import sys
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 # Ensure the forge package is importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
 from forge.quant.quamba2 import (
-    Quamba2Linear,
-    Quamba2Conv1d,
     Quamba2Block,
-    Quamba2Quantizer,
+    Quamba2Conv1d,
+    Quamba2Linear,
     quantize_model_quamba2,
 )
-
 
 # ─── Test helpers ───────────────────────────────────────────────────────────
 
@@ -99,8 +96,8 @@ def test_quamba2_block_forward():
 
     x = torch.randn(2, 16, d_model, dtype=torch.float32)
     with torch.no_grad():
-        ref_out, ref_present = block(x, use_cache=True)
-        q_out, q_present = q_block(x, use_cache=True)
+        ref_out, _ref_present = block(x, use_cache=True)
+        q_out, _q_present = q_block(x, use_cache=True)
 
     assert q_out.shape == ref_out.shape
     rel_err = (ref_out - q_out).abs().mean() / ref_out.abs().mean().clamp(min=1e-6)

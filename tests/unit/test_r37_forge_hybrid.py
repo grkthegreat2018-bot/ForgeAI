@@ -1,11 +1,11 @@
 """Tests for R37-5: ForgeHybrid Key — Sink-Aware SSM+Attention Routing."""
 from __future__ import annotations
 
-import torch
 import pytest
+import torch
 
-from tests.fixtures.keys.architecture.forge_hybrid_key import ForgeHybridKey
 from forge.keys.misc.base import KeyClass
+from tests.fixtures.keys.architecture.forge_hybrid_key import ForgeHybridKey
 
 
 class TestForgeHybridKey:

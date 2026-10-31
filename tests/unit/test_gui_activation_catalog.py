@@ -5,10 +5,7 @@ that presets resolve, and that normalize/validate helpers work.
 """
 import dataclasses
 
-import pytest
-
 from forge_gui.api import activation_catalog as cat
-
 
 # ── ActivationConfig mirror ────────────────────────────────────────────
 

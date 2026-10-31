@@ -11,7 +11,6 @@ import torch.nn as nn
 
 from forge.quant.protocol import QuantizedLinearMixin, is_quantized_linear
 
-
 # ── 1. All known quantized linear classes have the protocol ────────────────
 
 def _make_linear(in_f=64, out_f=64, bias=True):
@@ -254,7 +253,7 @@ def test_merge_lora_adapters_dispatches_to_quant_linear():
 
 def test_merge_lora_adapters_on_nf4_linear():
     """merge_lora_adapters works on a real NF4Linear."""
-    from forge.training.bitnet_lora import NF4Linear, LoRAAdapter, merge_lora_adapters
+    from forge.training.bitnet_lora import LoRAAdapter, NF4Linear, merge_lora_adapters
 
     nf4 = NF4Linear(64, 64, bias=False, group_size=64)
     # Load some weights so merge has something to work with.

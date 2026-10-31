@@ -1,10 +1,15 @@
 """Test the LFM2.5-Thinking pipeline orchestration."""
-import sys, os, tempfile
+import os
+import sys
+import tempfile
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from forge.self_play.infinite_loop import (
-    ThinkingPipeline, ThinkingPipelineConfig,
-    LoopConfig, InfiniteSelfPlayLoop,
+    InfiniteSelfPlayLoop,
+    LoopConfig,
+    ThinkingPipeline,
+    ThinkingPipelineConfig,
 )
 
 

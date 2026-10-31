@@ -15,21 +15,19 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import torch
 
-from forge.engine.prefix_cache import (
-    ChunkedPrefixCache,
-    _chunk_hash,
-    _prefix_hash,
-    _slice_past_kv,
-)
-from forge.engine.kv.cpu_kv_offload import DiskKVCache
 from forge.engine.kv.cacheblend import (
+    BlendAssembler,
     CacheBlend,
     ChunkStore,
     RangeMatcher,
-    BlendAssembler,
     reposition_keys,
 )
-
+from forge.engine.kv.cpu_kv_offload import DiskKVCache
+from forge.engine.prefix_cache import (
+    ChunkedPrefixCache,
+    _chunk_hash,
+    _slice_past_kv,
+)
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -92,7 +90,7 @@ def test_chunked_prefix_cache_full_hit():
 
     hit = cache.lookup_longest_prefix(ids)
     assert hit is not None
-    matched_len, past_kv, conv_snap = hit
+    matched_len, past_kv, _conv_snap = hit
     assert matched_len == 200
     assert past_kv is not None
 

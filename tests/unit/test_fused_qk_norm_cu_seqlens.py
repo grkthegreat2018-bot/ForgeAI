@@ -19,7 +19,6 @@ raised. CPU-only, no real weights.
 """
 import torch
 import torch.nn as nn
-import pytest
 
 from forge.engine.attention.fused_qk_norm_rope_cache import (
     FusedQKNormRopeCacheWrapper,
@@ -62,7 +61,7 @@ class _MockAttention(nn.Module):
                 attention_bias=None, position_ids=None,
                 cu_seqlens=None):
         self.last_kwargs = {"cu_seqlens": cu_seqlens, "use_cache": use_cache}
-        B, T, C = x.shape
+        _B, _T, _C = x.shape
         return x, (past_key_value if use_cache else None)
 
 

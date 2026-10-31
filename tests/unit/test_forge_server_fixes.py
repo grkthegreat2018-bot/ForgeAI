@@ -20,7 +20,7 @@ import pytest
 import torch
 from fastapi.testclient import TestClient
 
-from forge.engine.forge_server import ForgeServer, _MAX_BATCH_PROMPTS
+from forge.engine.forge_server import _MAX_BATCH_PROMPTS, ForgeServer
 from forge.engine.model_registry import (
     EngineEntry,
     ModelRegistry,
@@ -190,11 +190,10 @@ class TestRegistryFixes:
             time.sleep(0.01)
         assert reg._entries[MODEL].in_flight == 1
 
-        with reg._lock:
-            with pytest.raises(VRAMBudgetExceeded):
-                # More than the idle model's budget — would have to evict
-                # the busy model too, which is refused.
-                reg._evict_lru(10 ** 9, exclude=None)
+        with reg._lock, pytest.raises(VRAMBudgetExceeded):
+            # More than the idle model's budget — would have to evict
+            # the busy model too, which is refused.
+            reg._evict_lru(10 ** 9, exclude=None)
         assert not eng.sleep_calls           # busy engine untouched
         assert idle.sleep_calls == [1]       # idle one was slept
         eng._gen_gate.set()
@@ -464,7 +463,7 @@ class TestTaskSerialization:
         """EC-198: two concurrent POSTs produce user/assistant pairs in
         order — not interleaved user,user,assistant,assistant."""
         monkeypatch.delenv("FORGE_API_KEY", raising=False)
-        server, eng = _server()
+        server, _eng = _server()
         server.batch_queue.start()
         try:
             c = TestClient(server.app)
@@ -478,7 +477,7 @@ class TestTaskSerialization:
                     r = c.post(f"/v1/tasks/{tid}/messages",
                                json={"content": f"m{i}"})
                     assert r.status_code == 200, r.text
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     errors.append(e)
 
             threads = [threading.Thread(target=post, args=(i,))

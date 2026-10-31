@@ -1,7 +1,5 @@
 """Tests for the cold-tier weight bank (FluxBank + spill/regulate)."""
 import numpy as np
-import pytest
-import torch
 
 from forge.model.flux import FluxConfig, FluxLM
 from forge.model.flux.bank import FluxBank
@@ -181,6 +179,6 @@ def test_disk_spill_via_regulate(tmp_path):
     k0 = int(b._load_shard(0).keys[0])
     cell, tot = b.cell(k0)
     assert cell and tot > 0
-    p, awake = m._channel_prob(f"o2", next(iter(cell)), {2: k0},
+    p, awake = m._channel_prob("o2", next(iter(cell)), {2: k0},
                              None, float(m._total) + 64)
     assert awake and p > 0

@@ -4,21 +4,20 @@ KTO (arXiv:2402.01306, ICML 2024) uses binary good/bad labels instead of
 paired preference data. These tests verify the loss function, KL reference
 point EMA, gradient flow, and data format compatibility.
 """
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import torch
-import torch.nn.functional as F
 
 from forge.training.runners.dpo_align import (
-    kto_loss,
     KLReferencePoint,
     build_kto_sample,
-    dpo_loss,
     build_preference_sample,
+    dpo_loss,
+    kto_loss,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

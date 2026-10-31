@@ -11,22 +11,22 @@ Tests:
 8. Mamba2Key handles extra norm weights
 9. Cross-arch Mamba1To2Key converts A_log correctly
 """
-import torch
-import torch.nn as nn
 import os
 import sys
 
 import pytest
+import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
 from forge.keys.architecture.mamba_probe import MambaLayer
-from tests.fixtures.keys.architecture.mamba_key import (
-    MambaKey, Mamba2Key, Mamba1To2Key,
-    MAMBA1_WEIGHTS, MAMBA2_EXTRA_WEIGHTS,
-)
 from forge.keys.misc.base import KeyClass
+from tests.fixtures.keys.architecture.mamba_key import (
+    Mamba1To2Key,
+    Mamba2Key,
+    MambaKey,
+)
 
 
 class TestMambaLayerWeights:
@@ -338,8 +338,8 @@ class TestMambaLayerIntegration:
 
     def test_layer_type_mamba(self):
         """ModularBlock creates MambaLayer when layer_types=['mamba']."""
-        from forge.model_loader import ModularBlock
         from forge.config import ModelConfig
+        from forge.model_loader import ModularBlock
 
         config = ModelConfig(
             d_model=64, n_layers=1, n_heads=8, n_kv_heads=4,
@@ -356,8 +356,8 @@ class TestMambaLayerIntegration:
 
     def test_layer_type_attention_still_works(self):
         """ModularBlock still creates attention when layer_types=['attention']."""
-        from forge.model_loader import ModularBlock
         from forge.config import ModelConfig
+        from forge.model_loader import ModularBlock
 
         config = ModelConfig(
             d_model=64, n_layers=1, n_heads=8, n_kv_heads=4,
@@ -370,8 +370,8 @@ class TestMambaLayerIntegration:
 
     def test_mixed_layer_types(self):
         """ModularBlock handles mixed mamba/attention layers."""
-        from forge.model_loader import ModularBlock
         from forge.config import ModelConfig
+        from forge.model_loader import ModularBlock
 
         config = ModelConfig(
             d_model=64, n_layers=4, n_heads=8, n_kv_heads=4,

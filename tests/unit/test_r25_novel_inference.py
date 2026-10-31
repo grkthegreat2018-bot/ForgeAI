@@ -7,10 +7,7 @@ Tests:
   4. ResidualStreamCache KV strategy (R3-2 KV-Direct)
   5. ReasoningBudgetController (R3-17 Budget Guidance)
 """
-import pytest
 import torch
-import torch.nn.functional as F
-
 
 # ─── Min-p / Min-k Sampling ─────────────────────────────────────────────
 
@@ -199,7 +196,7 @@ class TestIntraExpertSparsity:
                        shared_expert=True, intra_sparsity=0.2)
         moe.eval()
         x = torch.randn(2, 4, 32)
-        out, aux_loss = moe(x)
+        out, _aux_loss = moe(x)
         assert out.shape == (2, 4, 32)
         assert not torch.isnan(out).any()
 
@@ -211,7 +208,7 @@ class TestShortcutDecoder:
 
     def test_should_not_terminate_before_min_steps(self):
         """Should not terminate before min_steps."""
-        from forge.engine.reasoning import ShortcutDecoder, ShortcutConfig
+        from forge.engine.reasoning import ShortcutConfig, ShortcutDecoder
         decoder = ShortcutDecoder(ShortcutConfig(
             min_steps=3, entropy_threshold=0.5, entropy_window=2))
         logits = torch.randn(1, 100)
@@ -226,7 +223,7 @@ class TestShortcutDecoder:
 
     def test_high_entropy_does_not_terminate(self):
         """High entropy (uncertain) should not trigger termination."""
-        from forge.engine.reasoning import ShortcutDecoder, ShortcutConfig
+        from forge.engine.reasoning import ShortcutConfig, ShortcutDecoder
         decoder = ShortcutDecoder(ShortcutConfig(min_steps=2, entropy_threshold=0.5))
         # Uniform logits = high entropy.
         logits = torch.zeros(1, 100)
@@ -258,7 +255,7 @@ class TestShortcutDecoder:
 
     def test_answer_trigger_tokens(self):
         """Answer trigger tokens should cause immediate termination."""
-        from forge.engine.reasoning import ShortcutDecoder, ShortcutConfig
+        from forge.engine.reasoning import ShortcutConfig, ShortcutDecoder
         decoder = ShortcutDecoder(ShortcutConfig(
             min_steps=2, answer_trigger_tokens={42}))
         logits = torch.randn(1, 100)
@@ -272,7 +269,7 @@ class TestSyncThinkTerminator:
 
     def test_should_not_terminate_before_min_steps(self):
         """Should not terminate before min_steps."""
-        from forge.engine.reasoning import SyncThinkTerminator, SyncThinkConfig
+        from forge.engine.reasoning import SyncThinkConfig, SyncThinkTerminator
         terminator = SyncThinkTerminator(SyncThinkConfig(min_steps=5))
         attn = torch.randn(1, 100)
         for step in range(5):
@@ -280,7 +277,7 @@ class TestSyncThinkTerminator:
 
     def test_boundary_attention_triggers_termination(self):
         """High attention on boundary positions should trigger termination."""
-        from forge.engine.reasoning import SyncThinkTerminator, SyncThinkConfig
+        from forge.engine.reasoning import SyncThinkConfig, SyncThinkTerminator
         terminator = SyncThinkTerminator(SyncThinkConfig(
             min_steps=2, boundary_attention_threshold=0.3))
         # Create attention where most mass is on position 0 (boundary).
@@ -294,7 +291,7 @@ class TestSyncThinkTerminator:
 
     def test_low_boundary_attention_does_not_terminate(self):
         """Low attention on boundary should not trigger termination."""
-        from forge.engine.reasoning import SyncThinkTerminator, SyncThinkConfig
+        from forge.engine.reasoning import SyncThinkConfig, SyncThinkTerminator
         terminator = SyncThinkTerminator(SyncThinkConfig(
             min_steps=2, boundary_attention_threshold=0.5))
         # Attention spread evenly (low boundary mass).
@@ -365,7 +362,7 @@ class TestReasoningBudgetController:
 
     def test_predict_budget_default(self):
         """Should predict a budget within configured range."""
-        from forge.engine.reasoning import ReasoningBudgetController, BudgetConfig
+        from forge.engine.reasoning import BudgetConfig, ReasoningBudgetController
         controller = ReasoningBudgetController(BudgetConfig(
             min_budget=128, max_budget=4096, gamma_shape=2.0, gamma_scale=512.0))
         budget = controller.predict_budget()
@@ -395,7 +392,7 @@ class TestReasoningBudgetController:
 
     def test_apply_guidance_before_start(self):
         """Guidance should not be applied before start fraction."""
-        from forge.engine.reasoning import ReasoningBudgetController, BudgetConfig
+        from forge.engine.reasoning import BudgetConfig, ReasoningBudgetController
         controller = ReasoningBudgetController(BudgetConfig(
             guidance_start_fraction=0.8, guidance_strength=0.3))
         controller.predict_budget(difficulty=0.5)
@@ -407,7 +404,7 @@ class TestReasoningBudgetController:
 
     def test_apply_guidance_near_budget(self):
         """Guidance should be applied near the budget."""
-        from forge.engine.reasoning import ReasoningBudgetController, BudgetConfig
+        from forge.engine.reasoning import BudgetConfig, ReasoningBudgetController
         controller = ReasoningBudgetController(BudgetConfig(
             guidance_start_fraction=0.5, guidance_strength=0.5,
             min_budget=100, max_budget=200))

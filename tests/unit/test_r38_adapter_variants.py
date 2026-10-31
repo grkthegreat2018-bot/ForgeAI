@@ -10,21 +10,22 @@ Covers:
 
 All tests run on CPU with small (64x128) matrices.
 """
-import os, sys
+import sys
+
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import math
+
 import torch
 import torch.nn as nn
 
 from forge.training.adapter_variants import (
-    PiSSAInitializer,
+    AdaLoRAClass,
     MiCAInitializer,
     MiCALinear,
-    AdaLoRAClass,
+    PiSSAInitializer,
     rsLoRALinear,
 )
-
 
 # ── R38-3: PiSSA ─────────────────────────────────────────────────────────
 
@@ -57,7 +58,7 @@ def test_pissa_selects_top_singular_values():
     """PiSSA must keep the LARGEST singular values, not arbitrary ones."""
     torch.manual_seed(7)
     W = torch.randn(64, 128)
-    U, S, Vh = torch.linalg.svd(W, full_matrices=False)
+    _U, S, _Vh = torch.linalg.svd(W, full_matrices=False)
     A, B = PiSSAInitializer.initialize(W, rank=4)
     # energy kept by PiSSA == sum of top-4 squared singular values
     kept = float((B @ A).pow(2).sum())
@@ -99,7 +100,7 @@ def test_pissa_merge_adds_delta():
 def test_pissa_rank_clamp():
     """rank > min(dims) is clamped, not an error, by default."""
     W = torch.randn(64, 128)
-    A, B = PiSSAInitializer.initialize(W, rank=999)
+    A, _B = PiSSAInitializer.initialize(W, rank=999)
     assert A.shape[0] == 64  # clamped to min(64,128)
 
 
@@ -126,8 +127,8 @@ def test_mica_selects_minor_subspace():
     """B must span the BOTTOM-r singular directions (inverse of PiSSA)."""
     torch.manual_seed(11)
     W = torch.randn(64, 128)
-    U, S, Vh = torch.linalg.svd(W, full_matrices=False)
-    A, B = MiCAInitializer.initialize(W, rank=4)
+    U, _S, _Vh = torch.linalg.svd(W, full_matrices=False)
+    _A, B = MiCAInitializer.initialize(W, rank=4)
     # B columns must equal the last-4 left singular vectors (up to sign)
     minor = U[:, -4:]
     # |B^T minor| should be ~identity → B lies in the minor subspace
@@ -143,7 +144,7 @@ def test_mica_selects_minor_subspace():
 def test_mica_b_is_orthonormal():
     """B = U[:, -r:] columns are orthonormal (SVD property)."""
     W = torch.randn(64, 128)
-    A, B = MiCAInitializer.initialize(W, rank=8)
+    _A, B = MiCAInitializer.initialize(W, rank=8)
     gram = B.T @ B
     assert torch.allclose(gram, torch.eye(8), atol=1e-5)
 
@@ -178,7 +179,7 @@ def test_mica_forward_and_merge():
 
 def test_mica_rank_clamp_and_raise():
     W = torch.randn(64, 128)
-    A, B = MiCAInitializer.initialize(W, rank=999)
+    _A, B = MiCAInitializer.initialize(W, rank=999)
     assert B.shape[1] == 64  # clamped to min(64,128)
     try:
         MiCAInitializer.initialize(W, rank=999, clamp_rank=False)

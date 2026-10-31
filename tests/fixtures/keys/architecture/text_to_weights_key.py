@@ -34,11 +34,11 @@ Theory:
     The network architecture defines a computation graph. We compute weights
     that make that graph implement the statistical language model directly.
 """
-import torch
-import torch.nn.functional as F
+from collections import Counter
+
 import numpy as np
-from collections import defaultdict, Counter
-from typing import Optional
+import torch
+
 
 class TextToWeightsKey:
     """Synthesize model weights from raw text using analytical methods."""
@@ -92,7 +92,7 @@ class TextToWeightsKey:
 
         # ── Step 1: Tokenize corpus and build co-occurrence ──
         log("Step 1: Tokenizing corpus and building co-occurrence matrix...")
-        cooc, token_freq = self._build_cooccurrence(
+        cooc, _token_freq = self._build_cooccurrence(
             text_path, tokenizer, vocab, self.cooc_window, max_lines, log)
 
         # ── Step 2: SVD → embeddings ──
@@ -140,14 +140,14 @@ class TextToWeightsKey:
 
     def _build_cooccurrence(self, text_path, tokenizer, vocab, window, max_lines, log):
         """Build sparse co-occurrence matrix from tokenized text."""
-        from scipy.sparse import lil_matrix, csr_matrix
+        from scipy.sparse import csr_matrix, lil_matrix
 
         cooc = lil_matrix((vocab, vocab), dtype=np.float32)
         token_freq = Counter()
         total_tokens = 0
         lines_read = 0
 
-        with open(text_path, 'r', encoding='utf-8', errors='replace') as f:
+        with open(text_path, encoding='utf-8', errors='replace') as f:
             for line in f:
                 if max_lines > 0 and lines_read >= max_lines:
                     break
@@ -234,7 +234,7 @@ class TextToWeightsKey:
 
         log(f"  SVD rank={k}...")
         try:
-            U, S, Vt = svds(ppmi.astype(np.float64), k=k)
+            U, S, _Vt = svds(ppmi.astype(np.float64), k=k)
         except Exception:
             log("  SVD failed — using random embeddings")
             embed = np.random.randn(vocab, d).astype(np.float32) * 0.02

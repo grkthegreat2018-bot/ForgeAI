@@ -5,12 +5,10 @@ avoid fp8 CPU limitations in some torch builds.
 """
 from __future__ import annotations
 
-import pytest
 import torch
 
 from forge.engine.kv.matryoshka_kv import MatryoshkaKVCache
 from forge.engine.kv_backend import build_kv_cache
-
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -100,7 +98,7 @@ class TestMatryoshkaKVBasic:
         cache.append(k, v, position=0)
         result = cache.get_past_kv()
         assert result is not None
-        k_out, v_out = result
+        k_out, _v_out = result
         assert k_out.shape == (2, 4, 4, head_dim)
 
 
@@ -198,7 +196,7 @@ class TestMatryoshkaKVReconstruction:
         k, v = _make_kv(seq=16, head_dim=head_dim)
         cache.append(k, v, position=0)
 
-        k_out, v_out = cache.get(positions=None)
+        k_out, _v_out = cache.get(positions=None)
         k_flat = k.reshape(-1, head_dim)
         k_out_flat = k_out.reshape(-1, head_dim)
         cos_sim = torch.nn.functional.cosine_similarity(
@@ -242,7 +240,7 @@ class TestMatryoshkaKVClear:
         # Reuse
         k2, v2 = _make_kv(seq=6, head_dim=head_dim, seed=99)
         cache.append(k2, v2, position=0)
-        k_out, v_out = cache.get(positions=None)
+        k_out, _v_out = cache.get(positions=None)
         assert k_out.shape == (2, 4, 6, head_dim)
 
     def test_clear_resets_importance(self):
@@ -288,7 +286,7 @@ class TestMatryoshkaKVImportance:
             dtypes=[torch.float32, torch.float16, torch.float16],
         )
         cache.append(k, v, position=0)
-        k_out, v_out = cache.get(positions=None)
+        k_out, _v_out = cache.get(positions=None)
 
         # Compute per-dimension reconstruction error
         k_err = (k - k_out).abs()
@@ -331,7 +329,7 @@ class TestMatryoshkaKVImportance:
         cache.append(k, v, position=0)
         assert cache.importance_ema.abs().sum() > 0
 
-        k_out, v_out = cache.get(positions=None)
+        k_out, _v_out = cache.get(positions=None)
         assert k_out.shape == (2, 4, 8, head_dim)
 
 
@@ -352,7 +350,7 @@ class TestMatryoshkaKVFactory:
         )
         k, v = _make_kv(seq=4, head_dim=64)
         cache.append(k, v, position=0)
-        k_out, v_out = cache.get(positions=None)
+        k_out, _v_out = cache.get(positions=None)
         assert k_out.shape == (2, 4, 4, 64)
 
 
@@ -389,7 +387,7 @@ class TestMatryoshkaKVConfig:
         )
         k, v = _make_kv(seq=8, head_dim=head_dim)
         cache.append(k, v, position=0)
-        k_out, v_out = cache.get(positions=None)
+        k_out, _v_out = cache.get(positions=None)
         assert k_out.shape == (2, 4, 8, head_dim)
         # Single level float32 → compression = 1.0
         assert abs(cache.info()["compression"] - 1.0) < 0.01

@@ -13,9 +13,7 @@ import torch
 from forge.config import get_config
 from forge.engine.kv_backend import build_kv_cache
 from forge.model.ngram_mem import SuffixMemory
-from scripts.convert_gguf_forge import (gguf_to_hf_name,
-                                      unpermute_rope_rows)
-
+from scripts.convert_gguf_forge import gguf_to_hf_name, unpermute_rope_rows
 
 # ── preset ──────────────────────────────────────────────────────────────────
 

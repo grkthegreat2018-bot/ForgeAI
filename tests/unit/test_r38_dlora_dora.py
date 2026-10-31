@@ -2,16 +2,17 @@
 
 CPU-only. Uses a small nn.Linear(in=64, out=128) for all tests.
 """
-import os, sys
+import sys
+
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
-import math
 import torch
 from torch import nn
 
-from forge.training.dlora import DLoRAAdapter, DLoRA, apply_to_model as dlora_apply
-from forge.training.dora import DoRALinear, DoRA, apply_to_model as dora_apply
-
+from forge.training.dlora import DLoRA, DLoRAAdapter
+from forge.training.dlora import apply_to_model as dlora_apply
+from forge.training.dora import DoRALinear
+from forge.training.dora import apply_to_model as dora_apply
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -136,7 +137,7 @@ def test_dlora_grow_rank_by_idx():
 
 def test_dlora_apply_to_model():
     model = _model()
-    mgr, n, params = dlora_apply(model, initial_rank=4, max_rank=16,
+    _mgr, n, params = dlora_apply(model, initial_rank=4, max_rank=16,
                                  min_size=32)
     assert n == 2  # fc1 (64→128), fc2 (128→64)
     assert len(params) == 4  # 2 adapters × (A, B)
@@ -262,7 +263,7 @@ def test_dora_merge_with_delta():
 
 def test_dora_apply_to_model():
     model = _model()
-    mgr, n, params = dora_apply(model, rank=8, min_size=32)
+    _mgr, n, params = dora_apply(model, rank=8, min_size=32)
     assert n == 2
     # fc1, fc2 replaced with DoRALinear.
     assert isinstance(model.fc1, DoRALinear)
@@ -283,7 +284,7 @@ def test_dora_apply_preserves_forward():
     with torch.no_grad():
         base_out = model(x)
     # Apply DoRA (replaces linears, B zero → lossless).
-    mgr, n, _ = dora_apply(model, rank=8, min_size=32)
+    _mgr, _n, _ = dora_apply(model, rank=8, min_size=32)
     with torch.no_grad():
         dora_out = model(x)
     assert torch.allclose(base_out, dora_out, atol=1e-4)
@@ -292,7 +293,7 @@ def test_dora_apply_preserves_forward():
 def test_dora_merge_back_to_linear():
     """merge() replaces DoRALinear with nn.Linear holding merged weight."""
     model = _model(seed=2)
-    mgr, n, _ = dora_apply(model, rank=8, min_size=32)
+    mgr, _n, _ = dora_apply(model, rank=8, min_size=32)
     # Inject a small delta.
     with torch.no_grad():
         model.fc1.lora_B.add_(torch.randn(128, 8) * 0.01)

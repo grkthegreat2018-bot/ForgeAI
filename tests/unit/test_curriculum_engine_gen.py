@@ -13,12 +13,12 @@ Covers:
 
 All CPU-only — engine is a MagicMock, the model is a tiny stub.
 """
-import torch
 from unittest.mock import MagicMock
+
+import torch
 
 from forge.engine.batched_decoding import BatchedDecoding
 from forge.self_play.infinite_curriculum import (
-    CHAT_PROPOSE_PROMPT,
     InfiniteCurriculum,
     ProposedTask,
     _strip_reply,
@@ -176,7 +176,7 @@ class TestSolveTasksBatch:
         # All first attempts went through ONE batched engine call
         eng.generate_batch.assert_called_once()
         assert eng.generate_raw.call_count == 0  # no retries needed
-        for task, result, elapsed_ms in results:
+        for _task, result, elapsed_ms in results:
             assert result["final_success"] is True
             assert result["rounds_used"] == 1
             assert elapsed_ms > 0

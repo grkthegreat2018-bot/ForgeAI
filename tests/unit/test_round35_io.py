@@ -10,9 +10,6 @@ R35-6: Progressive GGUF loading
 from __future__ import annotations
 
 import torch
-import pytest
-import time
-
 
 # ── R35-3: Virtual Tensor ─────────────────────────────────────────────────
 

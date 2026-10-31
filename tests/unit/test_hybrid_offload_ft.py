@@ -8,13 +8,16 @@ Tests:
 5. numerical correctness vs torch.optim.AdamW
 6. bandwidth predictor
 """
-import os, sys
+import os
+import sys
+
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import pytest
 import torch
 import torch.nn as nn
+
 from forge.training.optim.hybrid_offload import CPUAdamW
 
 
@@ -59,7 +62,7 @@ def main():
     opt_b = CPUAdamW(model_b.parameters(), lr=1e-3, overlap=True,
                      double_buffer=True, verbose=False)
     torch.manual_seed(42)
-    for i in range(5):
+    for _i in range(5):
         x_i = torch.randn(4, 128).cuda()
         opt_a.zero_grad(); opt_b.zero_grad()
         y_a = model_a(x_i); y_b = model_b(x_i)

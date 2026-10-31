@@ -221,7 +221,7 @@ def test_csem_cpu_bounded():
     # eviction entries are journaled: revert restores evicted rows
     n_evict_entries = sum(1 for e in m.journal.entries
                         if e[0] == "s" and e[1] not in
-                        {k for k in m._csem_cpu})
+                        set(m._csem_cpu))
     assert n_evict_entries >= 0     # journaled, restore path exists
     logits = m._predict()
     assert torch.isfinite(logits).all()
@@ -719,7 +719,7 @@ def test_graft_teacher_and_snapshot(tmp_path):
     m.ingest(_ids("already learned "), tag="x")
     try:
         m.graft_teacher(E)
-        assert False, "graft after learning should raise"
+        raise AssertionError("graft after learning should raise")
     except RuntimeError:
         pass
     # snapshot roundtrip restores the grafted matrix
@@ -996,7 +996,7 @@ def test_cuda_compiled_logits_parity():
     m.ingest([rnd.randrange(512) for _ in range(300)], tag="t")
     end = torch.tensor(m._count - 1, dtype=torch.int64,
                        device=m._dev)
-    slot, found, ev, live_k, cok, dok, dk, pk = m._probes_at(end)
+    slot, found, _ev, live_k, cok, dok, dk, _pk = m._probes_at(end)
     kb = m._knn_rows()
     kv, kvt = (m._knn_votes_dev(kb) if kb > 0
                else (torch.zeros(m.vocab_size, device=m._dev),
@@ -1161,7 +1161,7 @@ def test_sparse_tap_channels_wired():
     """p<j> channels exist in channels/_chix and tables fill on learn."""
     taps = ((0, 2), (1, 3))
     m = FluxLM(_cfg(sparse_taps=taps))
-    assert f"p0" in m._chix and f"p1" in m._chix
+    assert "p0" in m._chix and "p1" in m._chix
     assert m.channels[m._chix["p0"]] == "p0"
     m.ingest(_ids("abcdefgh" * 20), tag="t")
     assert all(len(m._ptabs[t]) > 0 for t in taps)
@@ -1699,8 +1699,8 @@ def test_gcell_fused_seq_bit_equal():
     import random
     rnd = random.Random(0)
     row = [rnd.randrange(512) for _ in range(24)]
-    kw = dict(device="cuda", cuda_primary=True, gcell=True,
-              adaptive_read=False)
+    kw = {"device": "cuda", "cuda_primary": True, "gcell": True,
+              "adaptive_read": False}
     m1 = FluxLM(_cfg(**kw))
     m2 = FluxLM(_cfg(**kw))
     m1._fused_seq(row)
@@ -2302,7 +2302,7 @@ def test_teach_generalize_flag_isolates_gen_writes():
     """generalize=False writes ONLY the recall cells - the gen stores
     stay bit-identical, proving the gen-channel writes are the head's
     share of a live teach rather than a side effect of cell writes."""
-    kw = dict(gen_live=1.0, gsyn_deep=True, dnet=True)
+    kw = {"gen_live": 1.0, "gsyn_deep": True, "dnet": True}
     ctx, tgt = _ids("the capital of france is"), _ids(" paris")
     m_g, m_e = FluxLM(_cfg_rlive(**kw)), FluxLM(_cfg_rlive(**kw))
     for m in (m_g, m_e):
@@ -2396,7 +2396,7 @@ def test_knn_dedup_merges_repeats(gpu_available):
     model's bank rows but adds almost none under dedup - retention
     hygiene without losing coverage."""
     text = "the same paragraph about shared context windows. " * 6
-    kw = dict(device="cuda", cuda_primary=True, write_gate=False)
+    kw = {"device": "cuda", "cuda_primary": True, "write_gate": False}
     m_d = FluxLM(_cfg(knn_dedup_sim=0.9, knn_dedup_win=4096, **kw))
     m_p = FluxLM(_cfg(**kw))
     for m in (m_d, m_p):
@@ -2793,8 +2793,8 @@ def test_knob_head_attach_remix_and_open_system(tmp_path):
 def test_knob_head_engine_routing(tmp_path):
     """ForgeEngine passthrough: attach_head + generate route through
     the remix on the memory-model path."""
-    from forge.model.flux import KnobHead
     from forge.engine.forge_engine import ForgeEngine
+    from forge.model.flux import KnobHead
     eng = ForgeEngine.from_flux(config=_cfg(vocab_size=65536))
     eng.model.ingest(_ids("engine head routing " * 6), tag="boot")
     head = KnobHead()

@@ -9,12 +9,11 @@ Verifies:
   - speculative decode scenario (generate, verify, reject, rollback, re-gen)
   - replay gives the same result as saving/restoring state directly
 """
+import pytest
 import torch
 import torch.nn as nn
-import pytest
 
 from forge.engine.kv.replay_ssm import ReplaySSMCache
-
 
 # ── Test fixtures ──────────────────────────────────────────────────────────
 
@@ -457,7 +456,7 @@ class TestSpeculativeScenario:
             cache.cache_inputs(0, prefill[:, t:t+1, :])
         all_accepted_inputs.append(prefill)
 
-        for round_idx in range(3):
+        for _round_idx in range(3):
             cp = cache.checkpoint()
             draft = torch.randn(1, 4, 8)
             for t in range(4):

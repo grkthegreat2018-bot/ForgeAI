@@ -10,12 +10,22 @@ sys.path.insert(0, r"D:\windsurf\ForgeAI")
 import pytest
 import torch
 
-from forge.evolution.program_vm import (
-    OPS, ProgramSpec, decode_params, encode_program, program_from_lists,
-    prog_from_config, render, run_programs, stack_programs, steps_used,
-)
 from forge.evolution.domains.math_prog_domain import (
-    MathProgDomain, KIND_FUNC, KIND_GOAL, KIND_GOAL_IO,
+    KIND_FUNC,
+    KIND_GOAL,
+    KIND_GOAL_IO,
+    MathProgDomain,
+)
+from forge.evolution.program_vm import (
+    OPS,
+    ProgramSpec,
+    decode_params,
+    prog_from_config,
+    program_from_lists,
+    render,
+    run_programs,
+    stack_programs,
+    steps_used,
 )
 from forge.evolution.simulators.math_prog_sim import program_metrics
 
@@ -287,7 +297,7 @@ class TestDomain:
                                 "min", "max", "neg", "abs", "floor", "round")]
         d = MathProgDomain(op_ids=cheapdiv)
         rng = torch.Generator().manual_seed(1)
-        banned = {i for i in range(len(OPS))} - set(cheapdiv)
+        banned = set(range(len(OPS))) - set(cheapdiv)
         for _ in range(200):
             prog = decode_params(torch.rand(d.output_dim(), generator=rng),
                                  d.spec_vm, 4)
@@ -309,6 +319,7 @@ class TestDomain:
     def test_elite_mutants(self):
         """Program-space mutants of elites: well-formed, whitelisted, differ."""
         from types import SimpleNamespace
+
         from forge.evolution.program_vm import config_dict
         d = MathProgDomain(target_fn=torch.tanh, fit_k=1, seed=9)
         S, M, K = d.spec_vm.n_steps, d.spec_vm.n_consts, d.spec_vm.max_inputs

@@ -8,16 +8,12 @@ import json
 import struct
 import time
 
-import pytest
-
 from forge_gui.api.lora_store import (
-    LoRAEntry,
     _base_hint,
     _human_bytes,
     read_adapter_header,
     scan_lora_adapters,
 )
-
 
 # ── _human_bytes ───────────────────────────────────────────────────────
 

@@ -1,16 +1,20 @@
 """Test curriculum SFT data pipeline: doom-loop detection, CoT classification, mix distillation."""
-import sys, os, tempfile, json
+import json
+import os
+import sys
+import tempfile
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from forge.training.runners.curriculum_sft import (
-    ngram_repetition_ratio,
-    is_doom_loop,
-    filter_doom_loops,
-    estimate_token_count,
-    has_cot_markers,
     classify_cot_length,
-    mix_distillation,
+    estimate_token_count,
+    filter_doom_loops,
+    has_cot_markers,
+    is_doom_loop,
     load_jsonl,
+    mix_distillation,
+    ngram_repetition_ratio,
     save_jsonl,
 )
 

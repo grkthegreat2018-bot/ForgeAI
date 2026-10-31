@@ -3,20 +3,14 @@
 Tests MCPManager config persistence, MCPServerConfig, MCPTool conversion,
 and mock client behavior. Pure stdlib — no Qt/torch.
 """
-import json
-from unittest.mock import MagicMock, patch
 
-import pytest
 
 from forge_gui.api.mcp_client import (
     HTTPMCPClient,
-    MCPClient,
     MCPManager,
     MCPServerConfig,
     MCPTool,
-    StdioMCPClient,
 )
-
 
 # ── MCPServerConfig ────────────────────────────────────────────────────
 

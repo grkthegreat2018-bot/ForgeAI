@@ -3,8 +3,7 @@ import math
 
 import torch
 
-from forge.exp.ndp import attn_partial, ndp_combine, ndp_attention, \
-    transfer_bytes
+from forge.exp.ndp import attn_partial, ndp_attention, transfer_bytes
 
 
 def _ref_attention(q, K, V):
@@ -28,7 +27,7 @@ def test_partial_single_tier_matches_softmax():
     torch.manual_seed(1)
     q = torch.randn(4, 16)
     K, V = torch.randn(4, 128, 16), torch.randn(4, 128, 16)
-    m, s, acc = attn_partial(q, K, V)
+    _m, s, acc = attn_partial(q, K, V)
     assert torch.allclose(acc / s.unsqueeze(-1), _ref_attention(q, K, V),
                           atol=1e-5)
 

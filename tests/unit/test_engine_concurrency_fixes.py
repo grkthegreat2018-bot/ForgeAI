@@ -17,14 +17,14 @@ Covers:
     seeding (no global RNG leak).
 """
 import sys
+
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import threading
+from unittest.mock import MagicMock
 
 import pytest
 import torch
-from unittest.mock import MagicMock
-
 
 # ── Shared tiny-model fixture ─────────────────────────────────────────────
 
@@ -163,8 +163,7 @@ class TestCachePromptPrefix:
     def test_no_second_prefill(self, tiny_model):
         """cache_prompt_prefix must store the captured KV, not re-run the
         model (the old path paid a second full prefill per prompt)."""
-        from forge.engine.prefix_cache import (
-            ChunkedPrefixCache, cache_prompt_prefix)
+        from forge.engine.prefix_cache import ChunkedPrefixCache, cache_prompt_prefix
 
         engine = MagicMock()
         engine.model = tiny_model
@@ -200,8 +199,7 @@ class TestCachePromptPrefix:
 
     def test_skips_when_no_kv(self, tiny_model):
         """past_kv=None (streaming strategies) → skip, never re-prefill."""
-        from forge.engine.prefix_cache import (
-            ChunkedPrefixCache, cache_prompt_prefix)
+        from forge.engine.prefix_cache import ChunkedPrefixCache, cache_prompt_prefix
         engine = MagicMock()
         engine.model = tiny_model
         engine._prefix_cache = ChunkedPrefixCache()
@@ -262,7 +260,7 @@ class TestSessionKVVerification:
         # trusted as covering all 5 cached tokens.
         k = torch.zeros(1, 8, 2, 16)
         sess.past_kv = [(k, k.clone()), None]
-        ids, past_kv, cached_len, recurrent = scm.continue_session("s1", "hi")
+        _ids, past_kv, cached_len, _recurrent = scm.continue_session("s1", "hi")
         assert cached_len == 0
         assert past_kv is None
         eng._log.assert_called()  # warn logged
@@ -276,7 +274,7 @@ class TestSessionKVVerification:
         sess.token_ids = [1, 2, 3]
         k = torch.zeros(1, 8, 3, 16)
         sess.past_kv = [(k, k.clone()), None]
-        ids, past_kv, cached_len, recurrent = scm.continue_session("s1", "hi")
+        _ids, past_kv, cached_len, _recurrent = scm.continue_session("s1", "hi")
         assert cached_len == 3
         assert past_kv is not None
 
@@ -331,8 +329,7 @@ class TestConvStateBoundary:
     def test_prefix_hit_matches_full_prefill(self, tiny_model):
         """Cached-prefix continuation must produce identical logits to a
         fresh full prefill — conv boundary state restored via snapshot."""
-        from forge.engine.prefix_cache import (
-            apply_recurrent_state_prefix)
+        from forge.engine.prefix_cache import apply_recurrent_state_prefix
         from forge.model_loader import unpack_output_with_kv
 
         torch.manual_seed(0)
@@ -409,8 +406,7 @@ class TestFlashAttentionFallback:
 class TestBatchQueue:
     def test_boot_key_groups_configs(self):
         """Requests with different boot configs must not share a batch."""
-        from forge.engine.session_manager import (
-            BatchQueue, SessionManager, TaskBootConfig)
+        from forge.engine.session_manager import BatchQueue, SessionManager, TaskBootConfig
         sm = SessionManager()
         bq = BatchQueue(registry=MagicMock(), session_manager=sm)
         t1 = sm.create_task("m", boot_config=TaskBootConfig(kv_cache="paged"))
@@ -422,9 +418,9 @@ class TestBatchQueue:
         assert bq._boot_key(r3) == ()
 
     def test_push_stream_without_loop_falls_back(self):
-        from forge.engine.session_manager import (
-            BatchQueue, PendingRequest, SessionManager)
         from concurrent.futures import Future
+
+        from forge.engine.session_manager import BatchQueue, PendingRequest, SessionManager
         bq = BatchQueue(registry=MagicMock(), session_manager=SessionManager())
         req = PendingRequest(task_id=None, model_id="m", prompt="p",
                              max_tokens=4, temperature=0.0, top_p=1.0,
@@ -436,8 +432,8 @@ class TestBatchQueue:
 
     def test_submit_captures_running_loop(self):
         import asyncio
-        from forge.engine.session_manager import (
-            BatchQueue, SessionManager)
+
+        from forge.engine.session_manager import BatchQueue, SessionManager
         bq = BatchQueue(registry=MagicMock(), session_manager=SessionManager())
 
         async def _submit():

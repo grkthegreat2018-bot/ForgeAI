@@ -20,7 +20,7 @@ if os.name == "nt":
 import pytest
 import torch
 
-from forge.config import ModelConfig, get_config
+from forge.config import get_config
 
 CUDA_AVAILABLE = torch.cuda.is_available()
 
@@ -79,8 +79,8 @@ def forge_engine(tiny_config_gpu):
       - RotorQuant KV cache, torch.compile, Triton conv, prefix cache,
         fused QK-Norm+RoPE+Cache-Write, chunked prefill, seq split, warmup.
     """
-    from forge.model_loader import ConfigurableResearchLLM
     from forge.engine.forge_engine import ForgeEngine
+    from forge.model_loader import ConfigurableResearchLLM
     from research.tokenizer_cache import get_tokenizer
 
     old_dtype = torch.get_default_dtype()

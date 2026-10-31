@@ -11,11 +11,13 @@ These tests use hypothesis-style property-based testing without the
 hypothesis dependency — we use fixed seeds and parameterized cases.
 """
 
-import sys
 import importlib.util
+import sys
+
+import pytest
 import torch
 import torch.nn as nn
-import pytest
+
 
 # Load keys dynamically (avoid importing full research package which may
 # have missing dependencies on some systems).

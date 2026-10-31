@@ -1,10 +1,7 @@
 """CPU tests for forge/exp/abshead.py."""
 import torch
-import torch.nn.functional as F
 
-from forge.exp.abshead import (LatentThoughtHead, collect_pairs,
-                               future_pairs, hint_logits, hint_nll,
-                               train_latent)
+from forge.exp.abshead import LatentThoughtHead, collect_pairs, future_pairs, hint_logits, hint_nll, train_latent
 
 
 def _tiny_attn_model():
@@ -64,7 +61,7 @@ def test_future_pairs_embed_mean():
     ids = torch.arange(10).unsqueeze(0)
     emb = torch.randn(64, 8)
     hidden = torch.randn(1, 10, 8)
-    src, tgt = future_pairs(ids, hidden, emb, k=2, mode="embed")
+    _src, tgt = future_pairs(ids, hidden, emb, k=2, mode="embed")
     # position t=0 target = mean(embed(tok1), embed(tok2))
     assert torch.allclose(tgt[0, 0], (emb[1] + emb[2]) / 2)
     # position t=7 target = mean(embed(tok8), embed(tok9))

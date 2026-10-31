@@ -8,13 +8,12 @@ All tests are CPU-only and don't make real API calls. They test:
   - ReplayBuffer integration
   - License safety (no Llama/Gemma models in pool)
 """
-import os
-import pytest
 
 from forge.distillation.distill_client import (
-    DistillationClient, DistillModel, MODEL_POOL, DistillResult,
+    MODEL_POOL,
+    DistillationClient,
+    DistillResult,
 )
-
 
 # ── Model Pool Safety ─────────────────────────────────────────────────────
 
@@ -30,6 +29,7 @@ class TestModelPoolSafety:
 
     def test_no_llama_models(self):
         """Llama Community License forbids using outputs to train other LLMs."""
+        # OpenRouter :free models that are Llama-based would also be banned
         for m in MODEL_POOL:
             assert "llama" not in m.model_id.lower(), \
                 f"{m.model_id} is a Llama model — license forbids distillation"
@@ -90,7 +90,7 @@ class TestModelPoolSafety:
 
     def test_no_nvidia_own_models(self):
         """NVIDIA's own models (Nemotron etc.) are BANNED per Eval Agreement §2.6."""
-        from forge.distillation.distill_client import _nvidia_filter, DistillModel
+        from forge.distillation.distill_client import DistillModel, _nvidia_filter
         # NVIDIA's own model should be filtered out
         nemotron = DistillModel(
             "nvidia", "nvidia/nemotron-3-super-120b", "NVIDIA-Eval", 131072,
@@ -169,20 +169,6 @@ class TestModelPoolSafety:
         """Cohere free tier is non-commercial only."""
         cohere = [m for m in MODEL_POOL if m.provider == "cohere"]
         assert len(cohere) == 0, "Cohere is non-commercial only — excluded"
-
-    def test_no_llama_models(self):
-        """Llama license prohibits using outputs to improve other LLMs."""
-        llama = [m for m in MODEL_POOL
-                 if "llama" in m.model_id.lower() and m.provider != "openrouter"]
-        # OpenRouter :free models that are Llama-based would also be banned
-        llama_all = [m for m in MODEL_POOL if "llama" in m.model_id.lower()]
-        assert len(llama_all) == 0, \
-            "Llama license prohibits distillation — should be excluded"
-
-    def test_no_gemma_models(self):
-        """Gemma terms restrict distilled models as Model Derivatives."""
-        gemma = [m for m in MODEL_POOL if "gemma" in m.model_id.lower()]
-        assert len(gemma) == 0, "Gemma distillation restricted — excluded"
 
     def test_at_least_10_providers(self):
         """Should have at least 10 distinct providers for max redundancy."""

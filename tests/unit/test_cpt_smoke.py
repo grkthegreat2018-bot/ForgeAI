@@ -1,16 +1,22 @@
 """Smoke test: CPT training loop with tiny model + CPUAdamW."""
-import sys, os, tempfile
+import os
+import sys
+import tempfile
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import torch
+import torch.nn.functional as F
+
 from forge.config import get_config
 from forge.model_loader import ModelLoader
-from research.tokenizer_cache import get_tokenizer
-from forge.training.runners.cpt_train import (
-    load_jsonl_examples, tokenize_and_pack, MixedDataSampler,
-)
 from forge.training.optim.hybrid_offload import CPUAdamW
-import torch.nn.functional as F
+from forge.training.runners.cpt_train import (
+    MixedDataSampler,
+    load_jsonl_examples,
+    tokenize_and_pack,
+)
+from research.tokenizer_cache import get_tokenizer
 
 
 def test_cpt_training_smoke():

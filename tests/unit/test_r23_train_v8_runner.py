@@ -4,11 +4,14 @@ The V8 runner adds 5 warm-start modes (scratch, lora-seed, dlora-warmstart,
 hypercloning, ligo), ETA projection, rolling checkpoint retention, resume
 bundles, VRAM preflight, and NaN guards on top of the V7-8B training path.
 """
-import os, sys, tempfile, math, time
+import math
+import os
+import sys
+import tempfile
+
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 _DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -22,18 +25,18 @@ def _tiny_v8_config(**extra):
     V10 is a plain GQA port — V8 features (MTP, etc.) must be explicitly enabled.
     """
     from forge.config import get_config
-    overrides = dict(
-        vocab_size=256, d_model=64, n_layers=4, n_heads=4, n_kv_heads=2,
-        intermediate_size=128, max_seq_len=128, titan_memory_rank=16,
-        embed_factorized_rank=32, mtp_n_heads=2,
-        use_triton_kernels=False, use_varlen=False,
-        bitnet_int8_training=False, use_gradient_checkpointing=False,
-        use_hyperloop=False, use_lisa=False, ngram_host=False,
+    overrides = {
+        "vocab_size": 256, "d_model": 64, "n_layers": 4, "n_heads": 4, "n_kv_heads": 2,
+        "intermediate_size": 128, "max_seq_len": 128, "titan_memory_rank": 16,
+        "embed_factorized_rank": 32, "mtp_n_heads": 2,
+        "use_triton_kernels": False, "use_varlen": False,
+        "bitnet_int8_training": False, "use_gradient_checkpointing": False,
+        "use_hyperloop": False, "use_lisa": False, "ngram_host": False,
         # Explicitly enable V8 features (not on by default in V10)
-        use_mtp=True, use_bitnet=False,
+        "use_mtp": True, "use_bitnet": False,
         # Disable V10's IRI-FP4 + SpectralKV + BitNetResidual (not compatible with V8 feature tests)
-        use_iri_fp4=False, use_spectral_kv=False, use_bitnet_residual=False,
-    )
+        "use_iri_fp4": False, "use_spectral_kv": False, "use_bitnet_residual": False,
+    }
     overrides.update(extra)
     cfg = get_config("forgelm_v2", **overrides)
     cfg.device = "cpu"
@@ -146,7 +149,7 @@ def test_train_v8_rolling_checkpoints():
 
 def test_train_v8_resume_bundle():
     """Resume bundle should save and restore step, BAdam state, RNG, best_val."""
-    from forge.training.runners.train_v8 import save_resume_bundle, load_resume_bundle
+    from forge.training.runners.train_v8 import load_resume_bundle, save_resume_bundle
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Create a fake resume bundle
@@ -175,11 +178,12 @@ def test_train_v8_resume_bundle():
 
 def test_train_v8_vram_preflight():
     """preflight_vram_check should return dict with ok, est_inc_gb, available_gb."""
-    from forge.training.runners.train_v8 import preflight_vram_check
-    from forge.training.optim.badam import BAdam
     from types import SimpleNamespace
 
-    model, cfg = _build_tiny_v8()
+    from forge.training.optim.badam import BAdam
+    from forge.training.runners.train_v8 import preflight_vram_check
+
+    model, _cfg = _build_tiny_v8()
     from forge.training.runners.train_8b_all import freeze_dead_params_
     freeze_dead_params_(model, torch.device("cpu"), use_flce=False)
 
@@ -201,9 +205,9 @@ def test_train_v8_vram_preflight():
 
 def test_train_v8_nan_guard():
     """NaN guard should skip a step when loss is NaN instead of crashing."""
-    from forge.training.runners.train_v8 import nan_guard_step
     from forge.training.optim.badam import BAdam
     from forge.training.runners.train_8b_all import freeze_dead_params_
+    from forge.training.runners.train_v8 import nan_guard_step
 
     model, cfg = _build_tiny_v8()
     freeze_dead_params_(model, torch.device("cpu"), use_flce=False)
@@ -248,7 +252,7 @@ def test_train_v8_dead_param_freeze():
     """freeze_dead_params_ should freeze MTP params when mtp_weight=0."""
     from forge.training.runners.train_8b_all import freeze_dead_params_
 
-    model, cfg = _build_tiny_v8(mtp_weight=0.0)
+    model, _cfg = _build_tiny_v8(mtp_weight=0.0)
     mtp = getattr(model, "mtp_module", None)
     if mtp is None:
         # Some configs name it differently
@@ -284,7 +288,7 @@ def test_train_v8_loss_decreases():
 
     ids = torch.randint(0, cfg.vocab_size, (2, 32))
     losses = []
-    for step in range(10):
+    for _step in range(10):
         opt.zero_grad()
         loss = _manual_ce_loss(model, ids, cfg.vocab_size)
         loss.backward()
@@ -304,8 +308,8 @@ def test_train_v8_loss_decreases():
 
 def test_train_v8_checkpoint_roundtrip():
     """Save checkpoint, load into new model, forward pass should match."""
-    from forge.training.runners.train_8b_all import snapshot_state
     from forge.model_loader import ConfigurableResearchLLM
+    from forge.training.runners.train_8b_all import snapshot_state
 
     model, cfg = _build_tiny_v8()
     ids = torch.randint(0, cfg.vocab_size, (1, 16))
@@ -318,7 +322,7 @@ def test_train_v8_checkpoint_roundtrip():
     sd = {k: v for k, v in state.items() if "." in k}
 
     model2 = ConfigurableResearchLLM(cfg)
-    missing, unexpected = model2.load_state_dict(sd, strict=False)
+    _missing, unexpected = model2.load_state_dict(sd, strict=False)
     assert not unexpected, f"Unexpected keys: {unexpected[:5]}"
 
     with torch.no_grad():

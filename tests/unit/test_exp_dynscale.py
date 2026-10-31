@@ -14,10 +14,8 @@ Covers:
 """
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from forge.config import get_config
-from forge.model_loader import ConfigurableResearchLLM, unpack_output_with_kv
 from forge.exp.dynscale import (
     DiagTempScaler,
     EarlyExitController,
@@ -27,6 +25,7 @@ from forge.exp.dynscale import (
     confidence,
     find_linear,
 )
+from forge.model_loader import ConfigurableResearchLLM, unpack_output_with_kv
 
 LAYERS = 3
 HEADS = 4
@@ -216,7 +215,7 @@ def test_ee_early_exit_skips_blocks_and_kv():
     for i, kv in enumerate(res["past"]):
         L = kv[0].shape[-2] if kv is not None else 0
         # layers 0,1 ran 4 decode steps; layers ≥2 were skipped → P only
-        assert L == (P + 4 if i < 2 else P)
+        assert (P + 4 if i < 2 else P) == L
 
 
 def test_exit_nll_tau_inf_parity():

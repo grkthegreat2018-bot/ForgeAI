@@ -18,14 +18,13 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from forge.engine.decide import (  # noqa: E402
+from forge.engine.decide import (
     QuestionValidationError,
     SystemOneEvaluator,
     _jsonable,
     _parse_question,
     _peaked_confidence,
 )
-
 
 # â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -291,6 +290,7 @@ class _StubEngine:
 @pytest.fixture(scope="module")
 def route_client(evaluator):
     from fastapi.testclient import TestClient
+
     from forge.engine.forge_server import ForgeServer
     server = ForgeServer(registry=_StubRegistry(_StubEngine(evaluator)))
     return TestClient(server.app)

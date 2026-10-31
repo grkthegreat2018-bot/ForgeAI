@@ -1,16 +1,14 @@
 """Tests for Mamba-3 forward pass module (complex states, MIMO, exp-trapezoidal)."""
 from __future__ import annotations
 
-import torch
 import pytest
+import torch
 
 from forge.engine.mamba3 import (
     Mamba3Block,
     Mamba3Cache,
     exp_trapezoidal_discretize,
-    complex_rmsnorm,
 )
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -55,12 +53,12 @@ class TestMamba3ForwardShape:
 
     def test_forward_shape_seq(self, small_block):
         x = torch.randn(2, 16, 32)
-        out, present = small_block(x, use_cache=False)
+        out, _present = small_block(x, use_cache=False)
         assert out.shape == (2, 16, 32), f"Expected (2,16,32), got {out.shape}"
 
     def test_forward_shape_single_step(self, small_block):
         x = torch.randn(1, 1, 32)
-        out, present = small_block(x, use_cache=True)
+        out, _present = small_block(x, use_cache=True)
         assert out.shape == (1, 1, 32)
 
     def test_forward_shape_batch(self, small_block):
@@ -93,7 +91,7 @@ class TestMamba3ComplexState:
 
     def test_scan_produces_complex_state(self, small_block):
         x = torch.randn(1, 8, 32)
-        out, present = small_block(x, use_cache=True)
+        _out, present = small_block(x, use_cache=True)
         # present should contain real and imag parts of the complex state
         assert "ssm_state_real" in present
         assert "ssm_state_imag" in present
@@ -139,7 +137,7 @@ class TestMamba3RecurrentMode:
 
         # Process first 5 tokens in full mode (with cache)
         with torch.no_grad():
-            out_5, present = small_block(x[:, :5, :], use_cache=True)
+            _out_5, present = small_block(x[:, :5, :], use_cache=True)
 
         # Feed the 6th token (index 5) incrementally using the cache
         with torch.no_grad():
@@ -154,7 +152,7 @@ class TestMamba3RecurrentMode:
 
     def test_cache_from_dict(self, small_block):
         x = torch.randn(1, 4, 32)
-        out, present = small_block(x, use_cache=True)
+        _out, present = small_block(x, use_cache=True)
         cache = Mamba3Cache.from_dict(present)
         assert cache is not None
         assert cache.ssm_state_real is not None
@@ -272,7 +270,7 @@ class TestMamba3GradientFlow:
 
     def test_gradient_flow_through_cache(self, small_block):
         x = torch.randn(1, 4, 32)
-        out, present = small_block(x, use_cache=True)
+        out, _present = small_block(x, use_cache=True)
         loss = out.sum()
         loss.backward()
         for name, param in small_block.named_parameters():
@@ -320,7 +318,7 @@ class TestMamba3ExponentialTrapezoidal:
         A = torch.complex(torch.tensor([-1.0, -2.0]), torch.tensor([0.0, 0.0]))
         delta = torch.tensor([0.5]).unsqueeze(-1)  # (1, 1)
         B = torch.complex(torch.ones(2, 1), torch.zeros(2, 1))
-        A_bar, B_bar = exp_trapezoidal_discretize(
+        A_bar, _B_bar = exp_trapezoidal_discretize(
             A.unsqueeze(0), B.unsqueeze(0), delta)
         # A_bar = exp(0.5 * [-1, -2]) = [exp(-0.5), exp(-1.0)]
         expected = torch.exp(torch.tensor([-0.5, -1.0]))
@@ -333,7 +331,7 @@ class TestMamba3ExponentialTrapezoidal:
         A = torch.complex(torch.tensor([-1.0]), torch.tensor([0.0]))  # (1,)
         delta = torch.tensor([1e-8]).unsqueeze(-1)  # (1, 1)
         B = torch.complex(torch.tensor([[2.0]]), torch.tensor([[0.0]]))  # (1, 1)
-        A_bar, B_bar = exp_trapezoidal_discretize(
+        _A_bar, B_bar = exp_trapezoidal_discretize(
             A.unsqueeze(0), B.unsqueeze(0), delta)
         # B_bar ≈ delta * B = 1e-8 * 2 = 2e-8
         expected = torch.tensor([2e-8])
@@ -344,7 +342,7 @@ class TestMamba3ExponentialTrapezoidal:
         A = torch.complex(torch.tensor([-1.0]), torch.tensor([0.0]))  # (1,)
         delta = torch.tensor([1.0]).unsqueeze(-1)  # (1, 1)
         B = torch.complex(torch.tensor([[1.0]]), torch.tensor([[0.0]]))  # (1, 1)
-        A_bar, B_bar = exp_trapezoidal_discretize(
+        _A_bar, B_bar = exp_trapezoidal_discretize(
             A.unsqueeze(0), B.unsqueeze(0), delta)
         da = -1.0  # delta * A = 1.0 * -1.0
         correction = (torch.exp(torch.tensor(da)) - 1) / da  # (exp(-1)-1)/(-1)
@@ -356,7 +354,7 @@ class TestMamba3ExponentialTrapezoidal:
         A = torch.complex(torch.tensor([-2.0]), torch.tensor([0.0]))  # (1,)
         delta = torch.tensor([1.0]).unsqueeze(-1)  # (1, 1)
         B = torch.complex(torch.tensor([[1.0]]), torch.tensor([[0.0]]))  # (1, 1)
-        A_bar, B_bar = exp_trapezoidal_discretize(
+        _A_bar, B_bar = exp_trapezoidal_discretize(
             A.unsqueeze(0), B.unsqueeze(0), delta)
         zoh_B_bar = torch.tensor([1.0])  # ZOH: delta * B = 1.0 * 1.0
         assert not torch.allclose(B_bar[0, 0, 0].real, zoh_B_bar, atol=1e-3), (
@@ -367,7 +365,7 @@ class TestMamba3ExponentialTrapezoidal:
         A = torch.complex(torch.tensor([-1.0]), torch.tensor([0.5]))  # (1,)
         delta = torch.tensor([0.5]).unsqueeze(-1)  # (1, 1)
         B = torch.complex(torch.tensor([[1.0]]), torch.tensor([[0.0]]))  # (1, 1)
-        A_bar, B_bar = exp_trapezoidal_discretize(
+        A_bar, _B_bar = exp_trapezoidal_discretize(
             A.unsqueeze(0), B.unsqueeze(0), delta)
         assert A_bar.is_complex()
         # exp(0.5 * (-1 + 0.5j)) should have nonzero imaginary part
@@ -393,7 +391,7 @@ class TestMamba3CacheIntegration:
 
     def test_cache_create_and_use(self, small_block):
         x = torch.randn(1, 4, 32)
-        out, present = small_block(x, use_cache=True)
+        _out, present = small_block(x, use_cache=True)
 
         # Build cache from present
         cache = Mamba3Cache.from_dict(present)
@@ -413,10 +411,10 @@ class TestMamba3CacheIntegration:
 
         # Step 1
         with torch.no_grad():
-            out1, present1 = small_block(x, use_cache=True)
+            _out1, present1 = small_block(x, use_cache=True)
         # Step 2 (using state from step 1)
         with torch.no_grad():
-            out2, present2 = small_block(x, past_key_value=present1, use_cache=True)
+            _out2, present2 = small_block(x, past_key_value=present1, use_cache=True)
 
         # State should have evolved (not identical)
         assert not torch.equal(present1["ssm_state_real"], present2["ssm_state_real"]), \

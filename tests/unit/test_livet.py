@@ -5,9 +5,7 @@ live surfaces (GDN2 states, TitanMemory fast weights) update on ingest,
 revert is exact, persistent memory survives stream resets, and eval
 never mutates live state. CPU-only, tiny config.
 """
-import copy
 
-import pytest
 import torch
 
 from forge.model.live import LiveConfig, LiveSession, livet_config
@@ -151,7 +149,7 @@ def test_bootstrap_then_live_recall():
 
     def pairs_stream(pair_map, reps=40, sep=200):
         seq = []
-        for r in range(reps):
+        for _r in range(reps):
             for k, v in pair_map.items():
                 seq += [sep, k, v]
         return torch.tensor(seq)
@@ -162,7 +160,7 @@ def test_bootstrap_then_live_recall():
     model.train()
     boot = pairs_stream(boot_map, reps=10)
     for _ in range(8):
-        logits, loss = model(boot[:-1].unsqueeze(0),
+        _logits, loss = model(boot[:-1].unsqueeze(0),
                              targets=boot[1:].unsqueeze(0))
         opt.zero_grad()
         loss.backward()
@@ -227,6 +225,7 @@ def test_ngram_lift_novel_successor_finite():
     to get p=0 -> lift=-inf -> CE=inf -> surprise=inf -> NaN writes.
     The uniform floor must keep every lifted logit finite."""
     import math
+
     from forge.model.ngram_mem import NGramMemory
     mem = NGramMemory(256, orders=(4,), gate=1.0)
     # Teach only tokens < 64 so token 200 keeps unigram=0.

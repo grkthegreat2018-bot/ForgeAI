@@ -9,7 +9,6 @@ import torch
 
 from forge.config import ModelConfig
 
-
 # ── Vision module (small config for CPU testing) ────────────────────────
 
 class TestVisionModules:

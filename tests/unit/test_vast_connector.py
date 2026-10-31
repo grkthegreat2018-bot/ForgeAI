@@ -6,23 +6,18 @@ full ensure→sync→train→download→stop lifecycle can be exercised offline.
 """
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from research.cloud.vast_connector import (
-    DEFAULT_IMAGE,
     REMOTE_CKPT_DIR,
     REMOTE_DATA_DIR,
     REMOTE_OUT_DIR,
-    REMOTE_REPO,
     FileEntry,
     RemoteTrainingSpec,
     VastConnector,
-    VastOffer,
     _compute_file_hash,
     _compute_local_manifest,
     build_spec_from_args,
@@ -247,9 +242,8 @@ def test_wait_for_running_times_out(connector, fake_vast):
     fake_vast.set_instances([{"id": 5, "actual_status": "loading"}])
     with patch("research.cloud.vast_connector.time.sleep"), \
          patch("research.cloud.vast_connector.time.time",
-               side_effect=[0, 1, 2, 9999]):
-        with pytest.raises(TimeoutError):
-            connector.wait_for_running(5, timeout=100, poll=1)
+               side_effect=[0, 1, 2, 9999]), pytest.raises(TimeoutError):
+        connector.wait_for_running(5, timeout=100, poll=1)
 
 
 def test_wait_for_running_succeeds(connector, fake_vast):
@@ -358,7 +352,7 @@ def test_ensure_instance_destroys_poll_trap(connector, fake_vast):
         budget=100.0, est_sec_per_step=1.0,
         min_vram_gb=20, min_reliability=0.9,
     )
-    inst_id, is_new = connector.ensure_instance(spec)
+    _inst_id, is_new = connector.ensure_instance(spec)
     assert is_new is True
     destroy_calls = [c for c in fake_vast.calls if c[0] == "destroy_instance"]
     assert len(destroy_calls) == 1
@@ -415,7 +409,7 @@ def test_ensure_instance_reuse_false_destroys_existing(connector, fake_vast):
         budget=100.0, est_sec_per_step=1.0,
         min_vram_gb=20, min_reliability=0.9,
     )
-    inst_id, is_new = connector.ensure_instance(spec)
+    _inst_id, is_new = connector.ensure_instance(spec)
     assert is_new is True
     destroy_calls = [c for c in fake_vast.calls if c[0] == "destroy_instance"]
     assert len(destroy_calls) == 1

@@ -3,7 +3,10 @@
 Verifies that all 4 optimizers work correctly and that the memory math
 fits the 22.4 GB available RAM on the target system.
 """
-import os, sys, tempfile
+import os
+import sys
+import tempfile
+
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import torch
@@ -53,7 +56,7 @@ def test_adamw4bit_basic():
 
 def test_adamw4bit_memory():
     """Verify 4-bit states use ~1.25 bytes/param."""
-    from forge.training.optim.r20_memory_optimizers import AdamW4Bit, _quantize_4bit
+    from forge.training.optim.r20_memory_optimizers import _quantize_4bit
 
     n = 10000
     t = torch.randn(n)
@@ -196,7 +199,6 @@ def test_ternary_optimizer():
 
 def test_ternary_memory():
     """Verify 2-bit ternary states use ~0.25 bytes/param."""
-    from forge.training.optim.r20_memory_optimizers import TernaryOptimizer
 
     n = 10000
     # 2-bit packed: 4 values per byte

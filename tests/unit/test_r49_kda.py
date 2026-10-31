@@ -13,17 +13,16 @@ Covers the port-first contract:
 import os
 import sys
 
-import torch
 import pytest
+import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
-from forge.keys.attention.kda_key import KDAKey, KDALayer, KDA_PARAM_SUFFIXES
-from forge.keys.misc.base import KeyClass
 from forge.config import ModelConfig
+from forge.keys.attention.kda_key import KDA_PARAM_SUFFIXES, KDAKey, KDALayer
+from forge.keys.misc.base import KeyClass
 from forge.model.layers import ModularBlock
-
 
 D_MODEL = 64
 N_HEADS = 4
@@ -123,7 +122,7 @@ def test_convert_model_state():
         assert torch.equal(res.weights[k], v)
     # subset + double-port guard
     res2 = key.convert_model_state(state, indices=[1])
-    assert f"blocks.1._kda.gate" in res2.weights
+    assert "blocks.1._kda.gate" in res2.weights
     assert "blocks.0._kda.gate" not in res2.weights
     res3 = key.convert_model_state(res.weights)
     assert not res3.success

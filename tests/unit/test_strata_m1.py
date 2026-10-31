@@ -2,7 +2,6 @@
 Mirrors the FluxLM learn/recall probes in test_flux.py on the
 BlockStore/CellBlock substrate. CPU-only."""
 import numpy as np
-import pytest
 import torch
 
 from forge.model.strata import StrataConfig, StrataLM

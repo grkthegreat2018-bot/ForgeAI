@@ -1,13 +1,11 @@
 """Tests for safety guardrails, backup manager, sub-agents, and coding tools."""
-import os
 import tempfile
 import zipfile
 from pathlib import Path
 
 import pytest
 
-from forge_gui.api.safety_checker import check_command, check_edit, check_patterns
-
+from forge_gui.api.safety_checker import check_command, check_patterns
 
 # ── Safety: email/forum/web-send blocking ──────────────────────────────
 
@@ -302,8 +300,8 @@ class TestSubAgentManager:
 
 class TestToolHarnessIntegration:
     def test_backup_tools_in_defs(self):
-        from forge_gui.api.tool_harness import ToolHarness
         from forge_gui.api.backup_manager import BackupManager
+        from forge_gui.api.tool_harness import ToolHarness
         with tempfile.TemporaryDirectory() as td:
             bm = BackupManager(Path(td))
             harness = ToolHarness(td, backup_manager=bm)
@@ -314,8 +312,8 @@ class TestToolHarnessIntegration:
             assert "load_backup" in names
 
     def test_sub_agent_tools_in_defs(self):
-        from forge_gui.api.tool_harness import ToolHarness
         from forge_gui.api.sub_agent import SubAgentManager
+        from forge_gui.api.tool_harness import ToolHarness
         class MockRuntime:
             def acquire(self, timeout_s=30):
                 raise RuntimeError("no engine")
@@ -341,8 +339,8 @@ class TestToolHarnessIntegration:
             assert "git_revert" in names
 
     def test_read_only_hides_backup_tools(self):
-        from forge_gui.api.tool_harness import ToolHarness
         from forge_gui.api.backup_manager import BackupManager
+        from forge_gui.api.tool_harness import ToolHarness
         with tempfile.TemporaryDirectory() as td:
             bm = BackupManager(Path(td))
             harness = ToolHarness(td, backup_manager=bm, read_only=True)

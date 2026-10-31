@@ -8,9 +8,7 @@ Covers the previously-orphaned/wired components and the I/O-focus revamp:
 
 All CPU-only, fast, no model weights required.
 """
-import math
 
-import pytest
 
 from forge.self_play.data_quality import DataQualityPipeline
 from forge.self_play.io_match import io_match, io_similarity

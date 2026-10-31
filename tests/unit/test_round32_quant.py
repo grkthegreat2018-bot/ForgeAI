@@ -9,10 +9,9 @@ R32-6: ForgeQuant (novel SM120-tuned)
 """
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn as nn
-import pytest
-
 
 # ── R32-1: NF4 QLoRA ──────────────────────────────────────────────────────
 
@@ -50,7 +49,7 @@ class TestNF4QLoRA:
         assert n_skip == 0
 
     def test_nf4_lora_adapter(self):
-        from forge.training.bitnet_lora import NF4Linear, LoRAAdapter
+        from forge.training.bitnet_lora import LoRAAdapter, NF4Linear
         lin = NF4Linear(64, 32, bias=False, group_size=32)
         lin.load_from_weight(torch.randn(32, 64) * 0.1)
         lora = LoRAAdapter(64, 32, rank=4, alpha=8)
@@ -60,7 +59,7 @@ class TestNF4QLoRA:
         assert out.shape == (1, 4, 32)
 
     def test_nf4_merge_lora(self):
-        from forge.training.bitnet_lora import NF4Linear, LoRAAdapter
+        from forge.training.bitnet_lora import LoRAAdapter, NF4Linear
         lin = NF4Linear(64, 32, bias=False, group_size=32)
         w_orig = torch.randn(32, 64) * 0.1
         lin.load_from_weight(w_orig)
@@ -73,7 +72,7 @@ class TestNF4QLoRA:
     def test_nf4_skip_small_layers(self):
         from forge.training.bitnet_lora import convert_to_nf4_qlora
         model = nn.Sequential(nn.Linear(32, 16), nn.Linear(16, 8))
-        n_conv, n_skip = convert_to_nf4_qlora(model, min_size=64)
+        n_conv, _n_skip = convert_to_nf4_qlora(model, min_size=64)
         assert n_conv == 0, f"Should skip small layers, got {n_conv}"
 
 
@@ -277,6 +276,20 @@ class TestForgeQuant:
         out = lin(x)
         assert out.shape == (2, 4, 32)
 
+    def test_forge_quant_nondivisible_group_size(self):
+        """Regression: in_features % group_size != 0 broke _dequantize_dense —
+        idx was cropped to in_features before the group reshape, so the padded
+        packed stream couldn't reshape into n_groups groups. Hit in the wild by
+        MoE dense_bypass expert width 1216 (4864/4) with group_size=128."""
+        from forge.engine.quant.forge_quant import ForgeQuantLinear
+        for inf in (1216, 1000):
+            lin = ForgeQuantLinear(inf, 64, bias=False, group_size=128)
+            lin.load_from_weight(torch.randn(64, inf) * 0.1)
+            out = lin(torch.randn(4, inf))
+            assert out.shape == (4, 64)
+            w_dq = lin._dequantize_weight(torch.float32, cache=False)
+            assert w_dq.shape == (64, inf)
+
     def test_forge_quant_outlier_preservation(self):
         """ForgeQuant should preserve outlier channels better than pure INT4."""
         from forge.engine.quant.forge_quant import ForgeQuantLinear
@@ -347,6 +360,73 @@ class TestForgeQuant:
         assert fq_err <= int4_err * 2.0, (
             f"ForgeQuant error {fq_err:.4f} should be <= INT4 {int4_err:.4f} * 2.0")
 
+    def test_forge_quant_rotation(self):
+        """use_rotation=True: Hadamard-rotated dense basis must (a) keep
+        forward == xW^T approx (exact algebra), (b) shrink quant error
+        on outlier-heavy weights, (c) survive non-divisible in_features."""
+        from forge.engine.quant.forge_quant import ForgeQuantLinear, _fwht
+        torch.manual_seed(0)
+        # FWHT sanity: unnormalized involution
+        x = torch.randn(4, 64)
+        assert torch.allclose(_fwht(_fwht(x)), x * 64, atol=1e-4)
+
+        in_f, out_f, gs = 256, 128, 64
+        w = torch.randn(out_f, in_f) * 0.02
+        w[::8] += torch.randn(in_f) * 0.4      # outlier rows
+        w[:, ::7] *= 6.0                        # outlier cols
+        x = torch.randn(8, in_f)
+
+        def fwd_err(lin):
+            lin.load_from_weight(w)
+            return ((lin(x) - x @ w.T).norm() / (x @ w.T).norm()).item()
+
+        direct = ForgeQuantLinear(in_f, out_f, group_size=gs,
+                                  sparse_ratio=0.10)
+        rot = ForgeQuantLinear(in_f, out_f, group_size=gs,
+                               sparse_ratio=0.10, use_rotation=True)
+        e_d, e_r = fwd_err(direct), fwd_err(rot)
+        # measured 0.0366 vs 0.0857 on this construction — keep 30% slack
+        assert e_r < e_d * 0.7, (
+            f"rotated err {e_r:.4f} not < 0.7x direct {e_d:.4f}")
+        # _dequantize_weight reconstructs the ORIGINAL basis
+        assert rot._dequantize_weight(torch.float32).shape == (out_f, in_f)
+        # non-divisible in_features + rotation (1216 = 4864/4, gs=128)
+        lin = ForgeQuantLinear(1216, 64, group_size=128, use_rotation=True)
+        lin.load_from_weight(torch.randn(64, 1216) * 0.1)
+        assert lin(torch.randn(4, 1216)).shape == (4, 64)
+        assert lin._dequantize_weight(torch.float32).shape == (64, 1216)
+        # non-pow2 group_size must refuse rotation
+        import pytest
+        with pytest.raises(ValueError):
+            ForgeQuantLinear(96, 32, group_size=48, use_rotation=True)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA only")
+    def test_forge_quant_fused_gemm(self):
+        """Batched fused Triton path (M<=32): packed-kernel output must
+        match the dequant+matmul fallback, and it must compose with
+        use_rotation."""
+        from forge.engine.quant.forge_quant import ForgeQuantLinear, _HAS_TRITON
+        if not _HAS_TRITON:
+            pytest.skip("no triton")
+        dev = "cuda"
+        torch.manual_seed(0)
+        in_f, out_f = 2048, 1024
+        w = torch.randn(out_f, in_f) * 0.05
+        for rot in (False, True):
+            lin = ForgeQuantLinear(in_f, out_f, group_size=128,
+                                   sparse_ratio=0.10, use_rotation=rot)
+            lin.load_from_weight(w)
+            lin = lin.to(dev)
+            lin._cache_w = False
+            for M in (2, 8, 32):
+                x = torch.randn(M, in_f, device=dev)
+                y_f = lin._fused_gemm_forward(x)
+                lin._fused_gemv = False
+                y_d = lin(x)
+                lin._fused_gemv = True
+                rel = ((y_f - y_d).norm() / y_d.norm()).item()
+                assert rel < 1e-4, f"rot={rot} M={M} rel diff {rel:.2e}"
+
 
 # ── Engine dispatch integration ────────────────────────────────────────────
 
@@ -368,7 +448,6 @@ class TestEngineDispatch:
         assert isinstance(cache, HyQuantKVCache), "hyquant dispatch failed"
 
     def test_build_kv_cache_unknown_falls_back(self):
-        from forge.engine.kv_backend import build_kv_cache
-        from forge.engine.kv_backend import StandardKVCache
+        from forge.engine.kv_backend import StandardKVCache, build_kv_cache
         cache = build_kv_cache("nonexistent_strategy")
         assert isinstance(cache, StandardKVCache)

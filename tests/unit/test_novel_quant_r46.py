@@ -1,24 +1,24 @@
 """Unit tests for R46 novel quantization algorithms."""
 import copy
+
 import pytest
 import torch
 import torch.nn as nn
 
 from forge.engine.quant.novel_quant_r46 import (
-    HadamardRotatedFP4Linear,
-    GPTQFP4Linear,
     AWQFP4Linear,
-    OptimalGridFP4Linear,
+    GPTQFP4Linear,
     HadamardGPTQFP4Linear,
-    quantize_model_hadamard_rotated_fp4,
-    quantize_model_gptq_fp4,
-    quantize_model_awq_fp4,
-    quantize_model_optimal_grid_fp4,
-    quantize_model_hadamard_gptq_fp4,
+    HadamardRotatedFP4Linear,
+    OptimalGridFP4Linear,
     collect_activations,
     estimate_r46_memory,
+    quantize_model_awq_fp4,
+    quantize_model_gptq_fp4,
+    quantize_model_hadamard_gptq_fp4,
+    quantize_model_hadamard_rotated_fp4,
+    quantize_model_optimal_grid_fp4,
 )
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -379,14 +379,14 @@ class TestCollectActivations:
         x = torch.randn(2, 8, 64)
         acts = collect_activations(simple_model, x, n_samples=16)
         assert len(acts) >= 2
-        for name, act in acts.items():
+        for _name, act in acts.items():
             assert act.dim() == 2
             assert act.shape[0] <= 16
 
     def test_collect_n_samples_limit(self, simple_model):
         x = torch.randn(4, 32, 64)  # 128 rows total
         acts = collect_activations(simple_model, x, n_samples=10)
-        for name, act in acts.items():
+        for _name, act in acts.items():
             assert act.shape[0] <= 10
 
 

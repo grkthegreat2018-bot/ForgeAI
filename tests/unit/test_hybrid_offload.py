@@ -3,12 +3,14 @@
 Verifies that the hybrid CPU-GPU optimizer produces the same parameter updates
 as standard AdamW (within fp32 precision), and that the overlap mode works.
 """
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import torch
 import torch.nn as nn
+
 from forge.training.optim.hybrid_offload import CPUAdamW, estimate_memory
 
 
@@ -24,7 +26,7 @@ def test_numerical_equivalence():
     # CPUAdamW with params on CPU (should be identical path)
     opt_cpu = CPUAdamW(model_b.parameters(), lr=1e-3, weight_decay=0.01, verbose=False)
 
-    for step in range(20):
+    for _step in range(20):
         x = torch.randn(8, 64)
         target = torch.randn(8, 32)
 
@@ -40,10 +42,10 @@ def test_numerical_equivalence():
         opt_cpu.step()
 
     # Compare final weights
-    for (n_a, p_a), (n_b, p_b) in zip(model_a.named_parameters(), model_b.named_parameters()):
+    for (n_a, p_a), (_n_b, p_b) in zip(model_a.named_parameters(), model_b.named_parameters()):
         diff = (p_a - p_b).abs().max().item()
         assert diff < 1e-4, f"Param {n_a}: max diff {diff} exceeds 1e-4"
-    print(f"PASS: CPUAdamW matches AdamW (max param diff < 1e-4) over 20 steps")
+    print("PASS: CPUAdamW matches AdamW (max param diff < 1e-4) over 20 steps")
 
 
 def test_gpu_offload():
@@ -61,7 +63,7 @@ def test_gpu_offload():
     opt_ref = torch.optim.AdamW(model_a.parameters(), lr=1e-3, weight_decay=0.01)
     opt_cpu = CPUAdamW(model_b.parameters(), lr=1e-3, weight_decay=0.01, verbose=False)
 
-    for step in range(20):
+    for _step in range(20):
         x = torch.randn(8, 64, device=device)
         target = torch.randn(8, 32, device=device)
 
@@ -76,10 +78,10 @@ def test_gpu_offload():
         loss_b.backward()
         opt_cpu.step()
 
-    for (n_a, p_a), (n_b, p_b) in zip(model_a.named_parameters(), model_b.named_parameters()):
+    for (n_a, p_a), (_n_b, p_b) in zip(model_a.named_parameters(), model_b.named_parameters()):
         diff = (p_a - p_b).abs().max().item()
         assert diff < 1e-3, f"GPU param {n_a}: max diff {diff} exceeds 1e-3 (bf16 transfer tolerance)"
-    print(f"PASS: CPUAdamW GPU offload matches AdamW (max diff < 1e-3) over 20 steps")
+    print("PASS: CPUAdamW GPU offload matches AdamW (max diff < 1e-3) over 20 steps")
 
 
 def test_overlap_mode():
@@ -97,7 +99,7 @@ def test_overlap_mode():
     opt_sync = CPUAdamW(model_a.parameters(), lr=1e-3, weight_decay=0.01, overlap=False, verbose=False)
     opt_overlap = CPUAdamW(model_b.parameters(), lr=1e-3, weight_decay=0.01, overlap=True, verbose=False)
 
-    for step in range(20):
+    for _step in range(20):
         x = torch.randn(8, 64, device=device)
         target = torch.randn(8, 32, device=device)
 
@@ -113,10 +115,10 @@ def test_overlap_mode():
         opt_overlap.step()
         opt_overlap.wait()  # ensure async CPU step completes
 
-    for (n_a, p_a), (n_b, p_b) in zip(model_a.named_parameters(), model_b.named_parameters()):
+    for (n_a, p_a), (_n_b, p_b) in zip(model_a.named_parameters(), model_b.named_parameters()):
         diff = (p_a - p_b).abs().max().item()
         assert diff < 1e-4, f"Overlap param {n_a}: max diff {diff} exceeds 1e-4"
-    print(f"PASS: overlap mode matches sync mode (max diff < 1e-4)")
+    print("PASS: overlap mode matches sync mode (max diff < 1e-4)")
 
 
 def test_memory_estimate():

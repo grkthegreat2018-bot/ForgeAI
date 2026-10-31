@@ -2,17 +2,19 @@
 
 All web access is faked — tests are CPU-only and hermetic.
 """
-import json
 from unittest.mock import MagicMock
 
-import pytest
-
 from forge.self_play.flux_goals import (
-    FluxGoalSampler, FluxKB, FluxTools, TOOL_HEADER, arxiv_goals,
-    dict_goals, goals_from_doc, parse_tool_call, wiki_goals)
-from forge.self_play.infinite_loop import (
-    InfiniteSelfPlayLoop, LoopConfig)
-
+    FluxGoalSampler,
+    FluxKB,
+    FluxTools,
+    arxiv_goals,
+    dict_goals,
+    goals_from_doc,
+    parse_tool_call,
+    wiki_goals,
+)
+from forge.self_play.infinite_loop import InfiniteSelfPlayLoop, LoopConfig
 
 # ── canned source documents ────────────────────────────────────────────
 
@@ -109,9 +111,9 @@ class TestGoalBuilders:
         resp = {g["prompt"]: g for g in goals}
         assert any("part of speech" in p for p in resp)
         assert any("mean" in p for p in resp)
-        pos_g = [g for g in goals if "part of speech" in g["prompt"]][0]
+        pos_g = next(g for g in goals if "part of speech" in g["prompt"])
         assert pos_g["response"] == "adjective"
-        syn_g = [g for g in goals if "synonym" in g["prompt"]][0]
+        syn_g = next(g for g in goals if "synonym" in g["prompt"])
         assert "fleeting" in syn_g["accepts"]
 
     def test_arxiv_goals(self):

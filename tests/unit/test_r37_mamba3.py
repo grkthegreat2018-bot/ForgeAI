@@ -11,18 +11,19 @@ Tests:
 import os
 import sys
 
-import torch
 import pytest
+import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
 from forge.keys.architecture.mamba3_key import (
-    Mamba3Key, MAMBA3_PASSTHROUGH, MAMBA3_COMPLEX_NORMS,
+    MAMBA3_COMPLEX_NORMS,
+    MAMBA3_PASSTHROUGH,
+    Mamba3Key,
 )
-from tests.fixtures.keys.architecture.mamba_key import MambaKey, Mamba2Key
 from forge.keys.misc.base import KeyClass
-
+from tests.fixtures.keys.architecture.mamba_key import Mamba2Key, MambaKey
 
 # ── test fixtures ─────────────────────────────────────────────────────────────
 

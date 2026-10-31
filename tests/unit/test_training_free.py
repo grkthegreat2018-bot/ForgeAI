@@ -13,8 +13,8 @@ from research.training_free import (
     ReflexionBuffer,
     TrainingFreeSolver,
     build_prompt,
+    make_template_reflection,
 )
-from research.training_free import make_template_reflection
 
 
 @pytest.fixture(scope="module")
@@ -184,7 +184,7 @@ class TestRAIN:
             eval_fn=bad_eval, threshold=0.5, rewind_tokens=2,
             max_rewinds=2, max_tokens=8,
         )
-        text, score, scores = gen.generate("solve a b c")
+        _text, score, scores = gen.generate("solve a b c")
         assert gen.rewinds_used == 2
         assert len(scores) == 3  # initial + 2 rewinds
         assert score < 0.5
@@ -195,7 +195,7 @@ class TestRAIN:
             eval_fn=lambda t, l: 0.9, threshold=0.5,
             max_rewinds=3, max_tokens=8,
         )
-        text, score, scores = gen.generate("solve a b c")
+        _text, _score, scores = gen.generate("solve a b c")
         assert gen.rewinds_used == 0
         assert len(scores) == 1
 

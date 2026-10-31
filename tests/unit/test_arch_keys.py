@@ -6,17 +6,16 @@ All run on GPU (CUDA) with bf16. CPU fallback only if CUDA unavailable.
 import pytest
 import torch
 
-from forge.config import ModelConfig, get_config
+from forge.config import get_config
 from forge.keys.architecture.mod_router_key import ModRouter, ModRouterKey
 from forge.keys.architecture.titan_memory_key import TitanMemory, TitanMemoryKey
 from forge.keys.attention.differential_attn_key import (
-    DifferentialAttention,
     DifferentialAttentionKey,
     paper_lambda_init,
 )
 from forge.keys.quantization.bitnet_b158_key import (
-    BitNetLinear,
     BitNetB158Key,
+    BitNetLinear,
     apply_bitnet_b158,
     ternary_quantize,
 )

@@ -8,12 +8,13 @@ Verifies:
 - Gradient flow: LoRA adapters receive gradients during backward
 - Memory: actual VRAM (or CPU RAM) usage of both heads
 """
+import os
+import sys
+
 import pytest
 import torch
 import torch.nn as nn
 
-import sys
-import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from forge.decoding.peagle import PEAGLEDraftHead, PEAGLEDraftHeadTied
@@ -264,8 +265,8 @@ class TestGradientFlow:
         # Check for non-NaN, non-zero gradients
         grad = head_tied.shared_head.weight.grad
         assert not torch.isnan(grad).any(), (
-            f"Shared head gradient contains NaN "
-            f"(likely from cross_attn with small head_dim)")
+            "Shared head gradient contains NaN "
+            "(likely from cross_attn with small head_dim)")
         assert grad.abs().max().item() > 0, (
             "Shared head gradient should be non-zero")
 

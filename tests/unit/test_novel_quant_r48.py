@@ -1,19 +1,27 @@
 """Unit tests for R48 extreme low-bit quantization."""
 from __future__ import annotations
 
-import pytest
 import math
+
+import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from forge.engine.quant.novel_quant_r48 import (
-    NanoQuantLinear, BTCQuantLinear, TernaryPTQLinear,
-    quantize_model_nanoquant, quantize_model_btc, quantize_model_ternary_ptq,
-    estimate_r48_memory,
-    _pack_binary_bits, _unpack_binary_bits,
+    BTCQuantLinear,
+    NanoQuantLinear,
+    NanoQuantQATLinear,
+    TernaryPTQLinear,
     _binary_kmeans,
-    NanoQuantQATLinear, convert_model_to_nanoquant_qat, bake_qat_model,
+    _pack_binary_bits,
+    _unpack_binary_bits,
+    bake_qat_model,
+    convert_model_to_nanoquant_qat,
+    estimate_r48_memory,
+    quantize_model_btc,
+    quantize_model_nanoquant,
+    quantize_model_ternary_ptq,
 )
 
 

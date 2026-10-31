@@ -16,13 +16,12 @@ from typing import Any
 
 import pytest
 
+from forge.engine.cascade import ModelCascade
 from forge.engine.test_time_scaling import (
     BeamSearch,
     FirstFinishSearch,
     MCTSDecoder,
 )
-from forge.engine.cascade import ModelCascade
-
 
 # ─── Mock models ──────────────────────────────────────────────────────────
 

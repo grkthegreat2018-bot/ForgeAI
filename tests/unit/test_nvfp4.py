@@ -1,12 +1,19 @@
 """Test NVFP4 quantization correctness and speed."""
-import os, sys, time
+import os
+import sys
+import time
+
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import torch
 import torch.nn as nn
+
 from forge.engine.quant.nvfp4_quant import (
-    NVFP4Linear, quantize_model_nvfp4, _quantize_to_fp4, _dequantize_fp4,
+    NVFP4Linear,
+    _dequantize_fp4,
+    _quantize_to_fp4,
+    quantize_model_nvfp4,
 )
 
 

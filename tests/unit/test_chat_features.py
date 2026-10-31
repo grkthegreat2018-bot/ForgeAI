@@ -1,13 +1,12 @@
 """Tests for master prompt generator and chat features."""
-import pytest
 
 from forge.config import get_config
 from forge_gui.api.master_prompt import (
-    generate_master_prompt,
-    get_default_prompt_for_config,
     _detect_model_name,
     _format_arch,
     _format_params,
+    generate_master_prompt,
+    get_default_prompt_for_config,
 )
 
 

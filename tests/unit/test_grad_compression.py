@@ -10,8 +10,9 @@ Verifies:
 
 All tests run on GPU (CUDA) with CPU fallback.
 """
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import pytest
@@ -35,7 +36,7 @@ class TestCompressionRatio:
     def test_2d_tensor_ratio(self):
         """bf16 (2 bytes/elem) → packed int4 (0.5 bytes/elem) = 4x."""
         grad = torch.randn(128, 256, dtype=torch.bfloat16, device=DEVICE)
-        packed, scales = _compress_grad_int4(grad)
+        packed, _scales = _compress_grad_int4(grad)
 
         orig_bytes = grad.numel() * grad.element_size()  # 128*256*2 = 65536
         packed_bytes = packed.numel() * packed.element_size()  # (128*256/2)*1
@@ -48,7 +49,7 @@ class TestCompressionRatio:
     def test_1d_tensor_ratio(self):
         """1D tensor also gets 4x compression."""
         grad = torch.randn(1024, dtype=torch.bfloat16, device=DEVICE)
-        packed, scales = _compress_grad_int4(grad)
+        packed, _scales = _compress_grad_int4(grad)
 
         orig_bytes = grad.numel() * grad.element_size()
         packed_bytes = packed.numel() * packed.element_size()

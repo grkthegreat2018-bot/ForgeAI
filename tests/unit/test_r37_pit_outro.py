@@ -7,7 +7,6 @@ OutRo: construction, sink detection, non-causal mask generation, forward
 
 All tests run on CPU with small shapes for speed.
 """
-import pytest
 import torch
 
 from forge.keys.architecture.pit_tying_key import PITKey

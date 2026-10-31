@@ -1,5 +1,4 @@
 """Tests for research.training_free.expert_bake — AirMoE expert consolidation."""
-import os
 
 import torch
 

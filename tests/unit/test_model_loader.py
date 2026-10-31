@@ -7,10 +7,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from forge.config import ModelConfig, get_config
+from forge.config import ModelConfig
 from forge.model_loader import (
     ConfigurableResearchLLM,
-    ModularBlock,
     PreAllocatedKVCache,
     RMSNorm,
     RotaryEmbedding,
@@ -189,7 +188,7 @@ class TestConfigurableResearchLLM:
 
     def test_forward_with_cache(self, model):
         idx = torch.randint(0, model.config.vocab_size, (1, 5))
-        logits, loss, presents = model(idx, use_cache=True)
+        _logits, _loss, presents = model(idx, use_cache=True)
         assert len(presents) == model.config.n_layers
         # Conv layers return None; attention layers return (k, v)
         for p in presents:
@@ -202,7 +201,7 @@ class TestConfigurableResearchLLM:
         idx = torch.randint(0, model.config.vocab_size, (1, 5))
         result = model(idx, return_hidden=True)
         assert len(result) == 3  # logits, loss, hidden
-        logits, loss, hidden = result
+        _logits, _loss, hidden = result
         assert hidden.shape == (1, 5, model.config.d_model)
 
     def test_forward_cache_then_return_hidden(self, model):
@@ -241,7 +240,7 @@ class TestConfigurableResearchLLM:
         """Ensure gradients flow through the model."""
         idx = torch.randint(0, model.config.vocab_size, (1, 5))
         targets = torch.randint(0, model.config.vocab_size, (1, 5))
-        logits, loss = model(idx, targets=targets)
+        _logits, loss = model(idx, targets=targets)
         loss.backward()
         # Check that at least some parameters have gradients
         has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters())
@@ -328,10 +327,44 @@ class TestPreAllocatedKVCache:
         cache.append(1, k1, v1)
         # Both layers should have data at the same position
         k_view_0, _ = cache.get_layer(0)
-        k_view_1, _ = cache.get_layer(1)
+        _k_view_1, _ = cache.get_layer(1)
         assert k_view_0.shape[-2] == 3  # only 3 tokens written to layer 0
         # Layer 1 has zeros for positions 0-2 (from layer 0's write), then data at 3-4
         # This is expected — the position is shared, each layer writes independently
+
+    def test_tensor_pos_append_t(self):
+        """pos_t mode: device-indexed writes at pos_t, no python slicing."""
+        cache = PreAllocatedKVCache(2, 1, 4, 128, 64, torch.float32, torch.device("cpu"))
+        cache.enable_tensor_pos()
+        assert cache.pos_t is not None
+        # Write 3 prompt tokens via the eager append path (T>1).
+        k_pre = torch.randn(1, 4, 3, 64)
+        v_pre = torch.randn(1, 4, 3, 64)
+        cache.append(0, k_pre, v_pre)
+        cache.advance(3)
+        cache.sync_tensor_pos()
+        assert cache.pos_t.item() == 3
+        # Single-token writes land at pos_t regardless of python position.
+        k1 = torch.randn(1, 4, 1, 64)
+        v1 = torch.randn(1, 4, 1, 64)
+        cache.append_t(0, k1, v1)
+        assert torch.equal(cache.k_caches[0][:, :, 3:4], k1)
+        assert torch.equal(cache.v_caches[0][:, :, 3:4], v1)
+        # pos_t itself moves; python position is managed by the caller.
+        cache.pos_t.fill_(4)
+        k2 = torch.randn(1, 4, 1, 64)
+        cache.append_t(0, k2, k2)
+        assert torch.equal(cache.k_caches[0][:, :, 4:5], k2)
+        # reset() clears pos_t.
+        cache.reset()
+        assert cache.pos_t.item() == 0
+
+    def test_sync_tensor_pos(self):
+        cache = PreAllocatedKVCache(1, 1, 4, 32, 64, torch.float32, torch.device("cpu"))
+        cache.enable_tensor_pos()
+        cache.position = 17
+        cache.sync_tensor_pos()
+        assert cache.pos_t.item() == 17
 
 
 class TestKVCacheEquivalence:
@@ -372,6 +405,129 @@ class TestKVCacheEquivalence:
         assert torch.allclose(logits1, logits2, atol=1e-5), "GQA prefill logits differ"
         assert torch.allclose(logits1b, logits2b, atol=1e-5), "GQA decode logits differ"
 
+    def test_gqa_tensor_pos_equivalence(self):
+        """Static-KV decode (pos_t + mask + full-buffer read) must produce
+        token-for-token identical output to the functional past_kv path —
+        the contract CUDA-graph replay depends on."""
+        cfg = ModelConfig(
+            d_model=128, n_heads=4, n_kv_heads=2, attn_type="gqa",
+            max_seq_len=64, vocab_size=256, device="cpu",
+        )
+        model = ConfigurableResearchLLM(cfg)
+        model.eval()
+
+        idx = torch.randint(0, 256, (1, 5))
+
+        # Reference: functional past_kv decode, greedy.
+        with torch.no_grad():
+            logits, _, cur = model(idx, use_cache=True)
+            ref_tokens = []
+            ref_logits = []
+            for _ in range(8):
+                ref_logits.append(logits[:, -1, :].clone())
+                tok = logits[:, -1:, :].argmax(dim=-1)
+                ref_tokens.append(tok.item())
+                logits, _, cur = model(tok, past_key_values=cur, use_cache=True)
+
+        # Static path: preallocated cache + pos_t + mask_buf, same protocol
+        # as StandardDecoding._generate_static.
+        cache = PreAllocatedKVCache(
+            n_layers=cfg.n_layers, batch=1, n_kv_heads=cfg.n_kv_heads,
+            max_seq_len=cfg.max_seq_len, head_dim=cfg.d_model // cfg.n_heads,
+            dtype=torch.float32, device=torch.device("cpu"),
+        )
+        cache.enable_tensor_pos()
+        mask_buf = torch.zeros(1, cache.max_seq_len, dtype=torch.long)
+        with torch.no_grad():
+            pmask = torch.ones(1, 5, dtype=torch.long)
+            logits2, _ = model(idx, attention_mask=pmask,
+                               preallocated_cache=cache, use_cache=False)
+            cache.position = 5
+            mask_buf[:, :5] = 1
+            static_tokens = []
+            static_logits = [logits2[:, -1, :].clone()]
+            for _ in range(8):
+                tok = logits2[:, -1:, :].argmax(dim=-1)
+                static_tokens.append(tok.item())
+                pos = cache.position
+                mask_buf[:, pos] = 1
+                cache.pos_t.fill_(pos)
+                logits2, _ = model(tok, attention_mask=mask_buf,
+                                   preallocated_cache=cache,
+                                   use_cache=False)
+                cache.position += 1
+                static_logits.append(logits2[:, -1, :].clone())
+
+        assert static_tokens == ref_tokens
+        for i, (a, b) in enumerate(zip(static_logits[:-1], ref_logits)):
+            assert torch.allclose(a, b, atol=1e-4), (
+                f"step {i}: static-KV logits diverge from functional KV")
+
+    def test_conv_pad_mask_reads_pos_t_column(self):
+        """Conv layers' _pad_mask must read the CURRENT decode position's
+        mask column, not the bucket view's last column.
+
+        Bug (2026-10-30): under static decode the attention_mask is a
+        fixed bucket view [B, b] whose final column is always 0. The old
+        ``attention_mask[:, -T:]`` slice therefore fed every conv layer a
+        zero mask on each replay — zeroing the gated conv input (Bx *= 0)
+        in all conv blocks and degenerating output to prompt echo. The
+        fix indexes the live column via ``index_select(1, pos_t)`` so the
+        op stays capturable inside the graph.
+        """
+        cfg = ModelConfig(
+            d_model=64, n_heads=4, n_kv_heads=2, attn_type="gqa",
+            n_layers=3, layer_types=["conv", "attention", "conv"],
+            conv_kernel_size=3, max_seq_len=64, vocab_size=256,
+            device="cpu",
+        )
+        model = ConfigurableResearchLLM(cfg)
+        model.eval()
+        conv_blocks = [b for b in model.blocks if getattr(b, "_is_conv", False)]
+        assert len(conv_blocks) == 2
+
+        # _pad_mask is consumed-and-cleared at the ModularBlock boundary —
+        # capture the pad_mask kwarg as each conv layer receives it.
+        seen = []
+        for b in conv_blocks:
+            orig_fwd = b.attn.forward
+            def _spy(*args, _orig=orig_fwd, **kw):
+                seen.append(kw.get("pad_mask"))
+                return _orig(*args, **kw)
+            b.attn.forward = _spy
+
+        cache = PreAllocatedKVCache(
+            n_layers=cfg.n_layers, batch=1, n_kv_heads=cfg.n_kv_heads,
+            max_seq_len=cfg.max_seq_len, head_dim=cfg.d_model // cfg.n_heads,
+            dtype=torch.float32, device=torch.device("cpu"),
+        )
+        cache.enable_tensor_pos()
+        # Bucket view: current position (5) is 1, the view's LAST column
+        # is 0 — the old [:, -1] slice read that zero for every conv.
+        mask_buf = torch.zeros(1, 32, dtype=torch.long)
+        idx = torch.randint(0, 256, (1, 5))
+        with torch.no_grad():
+            model(idx, attention_mask=torch.ones(1, 5, dtype=torch.long),
+                  preallocated_cache=cache, use_cache=False)
+            cache.position = 5
+            cache.view_len = 32      # bucket width == mask view width
+            mask_buf[:, :5] = 1
+            mask_buf[:, 5] = 1
+            cache.pos_t.fill_(5)
+            tok = torch.randint(0, 256, (1, 1))
+            model(tok, attention_mask=mask_buf,
+                  preallocated_cache=cache, use_cache=False)
+
+        # [prefill_b0, prefill_b2, decode_b0, decode_b2] — the decode
+        # step's masks are the last two.
+        assert len(seen) == 4
+        for m in seen[2:]:
+            assert m is not None, "conv layer received no pad_mask"
+            assert int(m.sum()) == 1, (
+                "conv _pad_mask read the bucket-view tail (0) instead of "
+                "the live pos_t column (1) — the gated conv input would "
+                "be zeroed on every graph replay")
+
 
 # ── GPU tests (skipped if no CUDA) ───────────────────────────────────────────
 
@@ -389,7 +545,7 @@ class TestConfigurableResearchLLMGPU:
     def test_forward_on_gpu(self, gpu_model):
         idx = torch.randint(0, gpu_model.config.vocab_size, (1, 8), device="cuda")
         with torch.no_grad():
-            logits, loss = gpu_model(idx)
+            logits, _loss = gpu_model(idx)
         assert logits.is_cuda
         assert logits.shape == (1, 8, gpu_model.config.vocab_size)
 
@@ -397,7 +553,7 @@ class TestConfigurableResearchLLMGPU:
         idx = torch.randint(0, gpu_model.config.vocab_size, (1, 8), device="cuda")
         targets = torch.randint(0, gpu_model.config.vocab_size, (1, 8), device="cuda")
         gpu_model.train()
-        logits, loss = gpu_model(idx, targets=targets)
+        _logits, loss = gpu_model(idx, targets=targets)
         loss.backward()
         has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in gpu_model.parameters())
         assert has_grad
@@ -405,7 +561,7 @@ class TestConfigurableResearchLLMGPU:
     def test_kv_cache_on_gpu(self, gpu_model):
         idx = torch.randint(0, gpu_model.config.vocab_size, (1, 5), device="cuda")
         with torch.no_grad():
-            logits, loss, presents = gpu_model(idx, use_cache=True)
+            _logits, _loss, presents = gpu_model(idx, use_cache=True)
         assert len(presents) == gpu_model.config.n_layers
         # Conv layers return None for their cache entry; attention layers return (k, v)
         for present in presents:
@@ -420,7 +576,7 @@ class TestConfigurableResearchLLMGPU:
         model.eval()
         idx = torch.randint(0, cfg.vocab_size, (1, 4), device="cuda")
         with torch.no_grad():
-            logits, loss = model(idx)
+            logits, _loss = model(idx)
         assert logits.dtype == torch.bfloat16
         assert logits.is_cuda
 

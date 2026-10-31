@@ -29,7 +29,6 @@ This is lossless at warm start (zero-init SSM = identical output to V11).
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 
 from forge.keys.misc.base import Key, KeyClass, KeyResult
 

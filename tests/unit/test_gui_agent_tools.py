@@ -79,7 +79,7 @@ def test_run_python_failure(sandbox):
 
 def test_run_cmd_allowlist(sandbox):
     rec = sandbox.execute("run_cmd", {"command": "del /q important.txt"})["result"]
-    assert not rec.get("exit_code") == 0 or "error" in rec
+    assert rec.get("exit_code") != 0 or "error" in rec
     rec = sandbox.execute("run_cmd", {"command": "format C:"})["result"]
     assert "not in allowlist" in rec["error"]
 

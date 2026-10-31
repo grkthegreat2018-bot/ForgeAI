@@ -1,5 +1,4 @@
 """CPU tests for BAdam and FiraNLRQ optimizers (V7-8B training stack)."""
-import math
 import sys
 from pathlib import Path
 
@@ -151,7 +150,7 @@ def test_badam_fp32_states_and_no_decay():
     _loss(model).backward()
     # Weight (2D) in active block gets decayed; bias (1D) must not be.
     block = opt._blocks[opt._block_idx]
-    w = [p for p in block["params"] if p.ndim == 2][0]
+    w = next(p for p in block["params"] if p.ndim == 2)
     b = [p for p in block["params"] if p.ndim == 1 and p.dim() != 0
          and p.numel() == w.shape[0]]
     assert w.requires_grad
@@ -374,8 +373,10 @@ def test_freeze_dead_params_finds_unused_module():
 def test_normalize_logit_scale_fixes_confidently_wrong_init():
     import math as _math
     from types import SimpleNamespace
-    from forge.training.runners.train_8b_all import forward_model, normalize_logit_scale_
+
     import torch.nn.functional as F
+
+    from forge.training.runners.train_8b_all import forward_model, normalize_logit_scale_
 
     torch.manual_seed(5)
 

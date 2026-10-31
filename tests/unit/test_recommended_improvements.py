@@ -7,10 +7,7 @@
 
 All CPU-only, fast, no CUDA required.
 """
-import os
-import sys
 
-import numpy as np
 import pytest
 import torch
 
@@ -20,7 +17,7 @@ class TestSnapKV4BitCache:
     """Test the combined SnapKV eviction + Hadamard INT4 quantization cache."""
 
     def test_factory_creates_snapkv_4bit(self):
-        from forge.engine.kv_backend import build_kv_cache, SnapKV4BitCache
+        from forge.engine.kv_backend import SnapKV4BitCache, build_kv_cache
         cache = build_kv_cache("snapkv_4bit")
         assert isinstance(cache, SnapKV4BitCache)
 
@@ -101,7 +98,7 @@ class TestGoldenTrajectoryInjection:
 
     def test_replay_buffer_accepted_in_constructor(self):
         """GRPOTrainer should accept a replay_buffer parameter."""
-        from forge.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
+        from forge.self_play.grpo_trainer import GRPOTrainer
         from forge.self_play.replay_buffer import ReplayBuffer
 
         # Create dummy model, tokenizer, ref_model
@@ -119,7 +116,7 @@ class TestGoldenTrajectoryInjection:
 
     def test_inject_golden_replays_skips_small_buffer(self):
         """Should not inject when buffer is below min size."""
-        from forge.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
+        from forge.self_play.grpo_trainer import GRPOTrainer
         from forge.self_play.replay_buffer import ReplayBuffer
 
         model = torch.nn.Linear(10, 10)
@@ -139,13 +136,13 @@ class TestGoldenTrajectoryInjection:
         prompts = ["test prompt"]
         completions = [["comp1", "comp2"]]
         rewards = [[1.0, 0.0]]
-        p, c, r, n = trainer._inject_golden_replays(prompts, completions, rewards)
+        p, _c, _r, n = trainer._inject_golden_replays(prompts, completions, rewards)
         assert n == 0  # should not inject
         assert len(p) == 1  # unchanged
 
     def test_inject_golden_replays_adds_trajectories(self):
         """Should inject golden trajectories when buffer is large enough."""
-        from forge.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
+        from forge.self_play.grpo_trainer import GRPOConfig, GRPOTrainer
         from forge.self_play.replay_buffer import ReplayBuffer
 
         model = torch.nn.Linear(10, 10)
@@ -169,7 +166,7 @@ class TestGoldenTrajectoryInjection:
         completions = [["c1a", "c1b"], ["c2a", "c2b"], ["c3a", "c3b"]]
         rewards = [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]
 
-        p, c, r, n = trainer._inject_golden_replays(prompts, completions, rewards)
+        p, _c, r, n = trainer._inject_golden_replays(prompts, completions, rewards)
         assert n > 0  # should inject some
         assert len(p) == 3 + n  # original + injected
         # Injected trajectories should have reward 1.0
@@ -178,7 +175,7 @@ class TestGoldenTrajectoryInjection:
 
     def test_record_golden_trajectories(self):
         """Should record successful trajectories into replay buffer."""
-        from forge.self_play.grpo_trainer import GRPOTrainer, GRPOConfig
+        from forge.self_play.grpo_trainer import GRPOTrainer
         from forge.self_play.replay_buffer import ReplayBuffer
 
         model = torch.nn.Linear(10, 10)
@@ -362,7 +359,7 @@ class TestFusedQKNormRoPE:
         sin = torch.zeros(T, head_dim)
         eps = 1e-6
 
-        q_out, k_out = fused_qk_norm_rope(
+        q_out, _k_out = fused_qk_norm_rope(
             q, k, q_weight, k_weight, cos, sin, eps, use_triton=False)
 
         # With cos=1, sin=0: output = normed * 1 + rotate_half(normed) * 0 = normed
@@ -422,7 +419,7 @@ class TestFusedQKNormRoPE:
         sin = torch.zeros(T, head_dim)
 
         # Should work (uses PyTorch fallback)
-        q_out, k_out = fused_qk_norm_rope(
+        q_out, _k_out = fused_qk_norm_rope(
             q, k, q_weight, k_weight, cos, sin, use_triton=False)
         assert q_out.shape == q.shape
 
@@ -536,7 +533,6 @@ class TestForgeEngineRefactor:
 
     def test_level_two_wake_re_activates_strategies(self, monkeypatch):
         """Level 2 wake should re-activate strategies after model reload."""
-        import forge.engine.forge_engine as fe_mod
         from forge.engine.prefix_cache import LRUPrefixCache
         from forge.model_loader import ModelLoader
 

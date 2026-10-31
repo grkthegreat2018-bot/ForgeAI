@@ -76,11 +76,11 @@ def test_gv_deletion_via_revert():
     """Partial removal via journaled writes: reverting the writes
     shrinks variant votes by exactly that evidence."""
     m = _mk(gen_variants=True, gen_fix_tail=0, orders=(2,))
-    for i in range(10):                         # journaled writes
+    for _i in range(10):                         # journaled writes
         for t in (97, 66, 99):
             m._learn_token(t)
     n0 = len(m.journal.entries)
-    for i in range(5):
+    for _i in range(5):
         for t in (97, 66, 99):
             m._learn_token(t)
     _ctx(m, [97, 67])

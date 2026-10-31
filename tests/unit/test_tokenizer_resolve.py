@@ -2,8 +2,7 @@
 with the canonical ForgeLM tokenizer (the "Qwen gets 65k vocab" bug)."""
 import os
 
-from research.tokenizer_cache import (CANONICAL_TOKENIZER_PATH,
-                                      _resolve_path)
+from research.tokenizer_cache import CANONICAL_TOKENIZER_PATH, _resolve_path
 
 
 def test_hf_repo_id_passes_through():

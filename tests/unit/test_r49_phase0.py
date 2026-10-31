@@ -3,10 +3,8 @@ import torch
 import torch.nn as nn
 
 from forge.moe.moe import MoELayer, Router
-from forge.training.optim.muon_sf_blockwise import (
-    MuonSFBlockwise, _dion2_update, _muon_update_fallback)
+from forge.training.optim.muon_sf_blockwise import MuonSFBlockwise, _dion2_update, _muon_update_fallback
 from forge.training.optim.qk_clip import QKClipMonitor
-
 
 # ── MoE sigmoid gating (MiniMax-M2 style) ───────────────────────────────────
 
@@ -14,7 +12,7 @@ class TestSigmoidGating:
     def test_weights_renormalized(self):
         torch.manual_seed(0)
         r = Router(8, 4, top_k=2, noisy_gating=False, gating="sigmoid")
-        mask, weights, aux = r(torch.randn(6, 8))
+        _mask, weights, aux = r(torch.randn(6, 8))
         assert torch.allclose(weights.sum(dim=-1), torch.ones(6), atol=1e-5)
         assert torch.isfinite(aux)
 
@@ -44,7 +42,7 @@ class TestSigmoidGating:
     def test_aux_free_sigmoid(self):
         r = Router(8, 4, top_k=2, noisy_gating=False, mode="aux_free",
                    gating="sigmoid")
-        mask, weights, aux = r(torch.randn(5, 8))
+        _mask, _weights, aux = r(torch.randn(5, 8))
         assert torch.isfinite(aux)
         r.update_bias()
         assert torch.isfinite(r.expert_bias).all()

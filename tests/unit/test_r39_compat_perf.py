@@ -5,20 +5,19 @@ R39-7: LASER + METRO MoE load balancing
 """
 from __future__ import annotations
 
-import torch
 import pytest
+import torch
 
 from forge.engine.compat.arch_adapters import (
-    convert_qwen3_checkpoint,
+    convert_checkpoint,
     convert_gemma3_checkpoint,
     convert_llama4_checkpoint,
+    convert_qwen3_checkpoint,
     detect_architecture,
     detect_n_layers,
-    convert_checkpoint,
     gemma3_layer_types,
 )
 from forge.moe.routers import LASERRouter, METRORouter
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 

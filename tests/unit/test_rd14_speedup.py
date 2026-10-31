@@ -11,8 +11,9 @@ Covers:
   - PackedSequenceDataset — cu_seqlens emission
   - Config fields — new fields exist and default correctly
 """
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import pytest
@@ -126,7 +127,7 @@ class TestVarlenAttention:
 
     def test_varlen_attention_matches_manual(self):
         """Varlen attention output should match manual block-diagonal attention."""
-        from forge.model_loader import varlen_attention, _build_block_diag_causal_mask
+        from forge.model_loader import _build_block_diag_causal_mask, varlen_attention
         if not CUDA_AVAILABLE:
             print("SKIP: varlen attention GPU test requires CUDA")
             return
@@ -146,6 +147,56 @@ class TestVarlenAttention:
         # Note: may not be exactly equal if flash_attn varlen is used (different softmax)
         # but should be close. With fallback (no flash_attn), should be exact.
         assert out.shape == ref.shape
+
+
+class TestVarlenMetaCache:
+    """Packed-sequence metadata caching: boundaries/cu computed once per
+    batch, not per layer (the Unsloth/NVIDIA ~14%/batch optimization)."""
+
+    def test_meta_values_correct(self):
+        from forge.model.attention_ops import _varlen_meta
+        cu = torch.tensor([0, 3, 8, 12], dtype=torch.int32)
+        cu_list, max_list, blocks_list = _varlen_meta(cu, torch.device("cpu"))
+        assert cu_list[0].tolist() == [0, 3, 8, 12]
+        assert cu_list[0].dtype == torch.int32
+        assert max_list == [5]
+        assert blocks_list == [[(0, 3), (3, 8), (8, 12)]]
+
+    def test_cache_hit_returns_same_objects(self):
+        from forge.model.attention_ops import _varlen_meta
+        cu = torch.tensor([0, 4, 8], dtype=torch.int32)
+        m1 = _varlen_meta(cu, torch.device("cpu"))
+        m2 = _varlen_meta(cu, torch.device("cpu"))
+        assert m1 is m2 and m1[0][0] is m2[0][0]
+
+    def test_inplace_mutation_recomputes(self):
+        from forge.model.attention_ops import _varlen_meta
+        cu = torch.tensor([0, 4, 8], dtype=torch.int32)
+        m1 = _varlen_meta(cu, torch.device("cpu"))
+        cu[2] = 10  # bumps _version -> stale entry must not be reused
+        m2 = _varlen_meta(cu, torch.device("cpu"))
+        assert m2 is not m1
+        assert m2[2][0] == [(0, 4), (4, 10)]
+        assert m2[1] == [6]
+
+    def test_blocks_path_matches_direct(self):
+        from forge.model.attention_ops import _build_block_diag_causal_mask, _varlen_meta
+        cu = torch.tensor([0, 3, 8], dtype=torch.long)
+        _, _, blocks_list = _varlen_meta(cu, torch.device("cpu"))
+        a = _build_block_diag_causal_mask(
+            cu, 8, torch.device("cpu"), torch.float32)
+        b = _build_block_diag_causal_mask(
+            cu, 8, torch.device("cpu"), torch.float32,
+            blocks=blocks_list[0])
+        assert torch.equal(a, b)
+
+    def test_2d_rows(self):
+        from forge.model.attention_ops import _varlen_meta
+        cu = torch.tensor([[0, 2, 6], [0, 5, 6]], dtype=torch.int32)
+        _cu_list, max_list, blocks_list = _varlen_meta(cu, torch.device("cpu"))
+        assert max_list == [4, 5]
+        assert blocks_list[0] == [(0, 2), (2, 6)]
+        assert blocks_list[1] == [(0, 5), (5, 6)]
 
 
 # ─── PackedSequenceDataset cu_seqlens ───────────────────────────────
@@ -354,7 +405,7 @@ class TestFlashOptim:
 
     def test_companding_roundtrip(self):
         """Companding + quantization round-trip should preserve values approximately."""
-        from forge.training.optim.flashoptim import _compand, _decompand, _quantize_to_uint8, _dequantize_from_uint8
+        from forge.training.optim.flashoptim import _compand, _decompand, _dequantize_from_uint8, _quantize_to_uint8
         x = torch.randn(128, dtype=torch.float32) * 0.1  # small values (like early momentum)
         scale = x.abs().max().clamp(min=1e-12)
         companded = _compand(x, scale)
@@ -374,8 +425,8 @@ class TestConfigFields:
         """New config fields should have correct defaults."""
         from forge.config import ModelConfig
         cfg = ModelConfig()
-        assert cfg.use_varlen == False
-        assert cfg.use_triton_kernels == False
+        assert not cfg.use_varlen
+        assert not cfg.use_triton_kernels
         assert cfg.triton_rms_block_size == 4096
         assert cfg.triton_swiglu_block_size == 16384
         assert cfg.apollo_rank == 8

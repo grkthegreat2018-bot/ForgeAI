@@ -10,8 +10,6 @@ R33-6: AutoContext — automatic context window management (NOVEL)
 from __future__ import annotations
 
 import torch
-import pytest
-
 
 # ── R33-1: EvoSparse ──────────────────────────────────────────────────────
 
@@ -30,7 +28,7 @@ class TestEvoSparse:
         assert cache.seq_len == 16
         # EvoSparse returns the full [0, seq_len) range
         positions = torch.tensor([[0, 1, 2, 3]])
-        k_out, v_out = cache.get(positions)
+        k_out, _v_out = cache.get(positions)
         assert k_out.shape[0] == 1
         assert k_out.shape[1] == 2
         assert k_out.shape[3] == 32
@@ -97,7 +95,7 @@ class TestVegas:
             cache.append(torch.randn(1, 2, 1, 32), torch.randn(1, 2, 1, 32), i)
         # Vegas returns full [0, seq_len) range with evicted positions zeroed
         positions = torch.tensor([[0, 5, 10, 15]])
-        k_out, v_out = cache.get(positions)
+        k_out, _v_out = cache.get(positions)
         assert k_out.shape[0] == 1
         assert k_out.shape[1] == 2
         assert k_out.shape[3] == 32
@@ -153,7 +151,7 @@ class TestHiSparse:
         for i in range(8):
             cache.append(torch.randn(1, 2, 1, 32), torch.randn(1, 2, 1, 32), i)
         positions = torch.tensor([[0, 1, 2, 3]])
-        k_out, v_out = cache.get(positions)
+        k_out, _v_out = cache.get(positions)
         assert k_out.shape == (1, 2, 4, 32)
 
     def test_gpu_cache_overflow_to_cpu(self):
@@ -204,7 +202,7 @@ class TestCapture:
         for i in range(8):
             cache.append(torch.randn(1, 2, 1, 32), torch.randn(1, 2, 1, 32), i)
         positions = torch.tensor([[0, 1, 2, 3]])
-        k_out, v_out = cache.get(positions)
+        k_out, _v_out = cache.get(positions)
         assert k_out.shape == (1, 2, 4, 32)
 
     def test_act_mode_with_projections(self):
@@ -252,7 +250,7 @@ class TestVToken:
             cache.append(torch.randn(1, 2, 1, 32, dtype=torch.bfloat16),
                          torch.randn(1, 2, 1, 32, dtype=torch.bfloat16), i)
         positions = torch.tensor([[0, 5, 10, 15]])
-        k_out, v_out = cache.get(positions)
+        k_out, _v_out = cache.get(positions)
         assert k_out.shape == (1, 2, 4, 32)
 
     def test_mark_dead_and_repack(self):
@@ -393,7 +391,7 @@ class TestAutoContext:
         for i in range(4):
             cache.append(torch.randn(1, 2, 1, 16), torch.randn(1, 2, 1, 16), i)
         positions = torch.tensor([[0, 1, 2, 3]])
-        k_out, v_out = cache.get(positions)
+        k_out, _v_out = cache.get(positions)
         assert k_out.shape == (1, 2, 4, 16)
 
 
@@ -403,38 +401,38 @@ class TestKVDispatch:
     """Verify new KV strategies are wired into the dispatch."""
 
     def test_build_evo_sparse(self):
-        from forge.engine.kv_backend import build_kv_cache
         from forge.engine.kv.evo_sparse import EvoSparseKVCache
+        from forge.engine.kv_backend import build_kv_cache
         cache = build_kv_cache("evo_sparse")
         assert isinstance(cache, EvoSparseKVCache)
 
     def test_build_vegas(self):
-        from forge.engine.kv_backend import build_kv_cache
         from forge.engine.kv.vegas_kv import VegasKVCache
+        from forge.engine.kv_backend import build_kv_cache
         cache = build_kv_cache("vegas")
         assert isinstance(cache, VegasKVCache)
 
     def test_build_hisparse(self):
-        from forge.engine.kv_backend import build_kv_cache
         from forge.engine.kv.hisparse_kv import HiSparseKVCache
+        from forge.engine.kv_backend import build_kv_cache
         cache = build_kv_cache("hisparse")
         assert isinstance(cache, HiSparseKVCache)
 
     def test_build_capture(self):
-        from forge.engine.kv_backend import build_kv_cache
         from forge.engine.kv.capture_kv import CaptureKVCache
+        from forge.engine.kv_backend import build_kv_cache
         cache = build_kv_cache("capture")
         assert isinstance(cache, CaptureKVCache)
 
     def test_build_vtoken(self):
-        from forge.engine.kv_backend import build_kv_cache
         from forge.engine.kv.vtoken_kv import VTokenKVCache
+        from forge.engine.kv_backend import build_kv_cache
         cache = build_kv_cache("vtoken")
         assert isinstance(cache, VTokenKVCache)
 
     def test_build_auto_context(self):
-        from forge.engine.kv_backend import build_kv_cache
         from forge.engine.kv.auto_context import AutoContextKVCache
+        from forge.engine.kv_backend import build_kv_cache
         cache = build_kv_cache("auto_context")
         assert isinstance(cache, AutoContextKVCache)
 

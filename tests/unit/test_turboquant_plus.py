@@ -14,8 +14,8 @@ sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
 import torch
 
-from forge.quant.rotorquant import RotorQuantCache
 from forge.engine.kv_backend import RotorQuantKVCache, build_kv_cache
+from forge.quant.rotorquant import RotorQuantCache
 
 
 def _mk(bits=4, **kw):
@@ -90,7 +90,7 @@ def test_sparse_v_skips_low_attn_positions():
     # attn @ v_hat ≈ attn @ v (skipped positions contribute <1e-6 * |v|)
     v_hat = v_hat.float()
     out_sparse = torch.einsum("bht,bhtd->bhd", attn, v_hat)
-    k2, v2 = c.get()
+    _k2, v2 = c.get()
     out_full = torch.einsum("bht,bhtd->bhd", attn, v2.float())
     assert torch.allclose(out_sparse, out_full, atol=1e-3)
     assert c._sparse_skipped == T - 2
@@ -103,7 +103,7 @@ def test_sparse_v_all_kept_matches_get():
     c.append(torch.randn(1, 2, 6, 16), torch.randn(1, 2, 6, 16))
     c.append(torch.randn(1, 2, 1, 16), torch.randn(1, 2, 1, 16))
     attn = torch.ones(1, 2, 7)
-    v_hat, keep = c.get_sparse_v(attn)
+    v_hat, _keep = c.get_sparse_v(attn)
     _, v2 = c.get()
     assert torch.equal(v_hat, v2)
 

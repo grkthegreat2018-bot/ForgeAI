@@ -5,8 +5,10 @@ import torch
 import torch.nn as nn
 
 from forge.engine.quant.grinqh import (
-    GRINQHQuantizer, GRINQHLinear, quantize_model_grinqh,
+    GRINQHLinear,
+    GRINQHQuantizer,
     _assign_precision_tiers,
+    quantize_model_grinqh,
 )
 
 

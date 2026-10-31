@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import math
 
+import pytest
 import torch
 import torch.nn as nn
-import pytest
 
 
 class TestLlama31Preset:
@@ -36,7 +36,7 @@ class TestLlama31Preset:
         assert rs["original_max_position_embeddings"] == 8192
 
     def test_preset_independent_copy(self):
-        from forge.config import get_config, MODEL_CONFIGS
+        from forge.config import MODEL_CONFIGS, get_config
         c = get_config("llama31_8b", device="cpu")
         c.vocab_size = 1
         assert MODEL_CONFIGS["llama31_8b"].vocab_size == 128256

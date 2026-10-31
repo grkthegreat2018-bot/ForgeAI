@@ -6,23 +6,19 @@ All CPU-runnable; models/tokenizers are deterministic stubs.
 import os
 import sys
 
+import pytest
 import torch
 import torch.nn as nn
-import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
-from forge.engine.engine_common import _dry_penalties, _apply_dry
-from forge.engine.decoding import (
-    DoLaDecoding, StandardDecoding, _sample_from_logits, build_decoding)
+from forge.engine.decision_head import ProcessRewardHead, expected_calibration_error, fit_prm, score_steps
+from forge.engine.decoding import DoLaDecoding, StandardDecoding, _sample_from_logits, build_decoding
+from forge.engine.engine_common import _apply_dry, _dry_penalties
 from forge.engine.kv.filler_kv import FillerKVCache, filler_token_ids
 from forge.engine.kv_backend import FillerKVCacheStrategy, build_kv_cache
-from forge.engine.decision_head import (
-    ProcessRewardHead, score_steps, fit_prm, expected_calibration_error)
-from research.merge_models import (
-    parse_layer_map, depth_upscale, depth_layer_types)
-
+from research.merge_models import depth_layer_types, depth_upscale, parse_layer_map
 
 # ═══════════════════════════════════════════════════════════════════════════
 # DRY repetition penalty
@@ -197,7 +193,7 @@ def test_filler_kv_evicts_fillers_first():
     assert cache.seq_len == 12
     assert cache.filler_evicted == 4
     assert cache.score_evicted == 4
-    kept_k, kept_v = cache.get()
+    kept_k, _kept_v = cache.get()
     # sink + observation window survived
     assert torch.equal(kept_k[0, 0, :4], k[0, 0, :4])
     assert torch.equal(kept_k[0, 0, -4:], k[0, 0, -4:])
@@ -387,7 +383,7 @@ def test_fit_prm_learns_separable_labels():
         steps = [f"reason {i}", f"concl {last}"]
         labels = [1, 1 if i % 2 == 0 else 0]
         dataset.append(("question?", steps, labels))
-    head, metrics = fit_prm(model, tok, "cpu", dataset,
+    _head, metrics = fit_prm(model, tok, "cpu", dataset,
                             epochs=30, val_frac=0.25, progress=False,
                             seed=0)
     assert metrics["n_examples"] == 24

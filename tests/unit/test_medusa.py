@@ -1,10 +1,9 @@
 """Tests for Medusa speculative decoding heads."""
+import pytest
 import torch
 import torch.nn as nn
-import pytest
 
 from forge.decoding.medusa import MedusaHeads, MedusaTrainer, medusa_generate
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixtures

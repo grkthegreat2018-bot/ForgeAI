@@ -1,24 +1,22 @@
 """Unit tests for R45 novel quantization algorithms."""
 import copy
-import math
 
 import pytest
 import torch
 import torch.nn as nn
 
 from forge.engine.quant.novel_quant_r45 import (
-    WaveletLiftLinear,
+    LloydMaxRotatedKVQuantizer,
     SchurABFP4Linear,
     SVDLiftBinaryLinear,
-    LloydMaxRotatedKVQuantizer,
-    requant_refine_model,
-    quantize_model_wavelet_lift,
+    WaveletLiftLinear,
+    _haar_matrix,
+    estimate_r45_memory,
     quantize_model_schur_ab_fp4,
     quantize_model_svd_lift_binary,
-    estimate_r45_memory,
-    _haar_matrix,
+    quantize_model_wavelet_lift,
+    requant_refine_model,
 )
-
 
 # ──────────────────────────────────────────────────────────────────────────
 # Haar wavelet matrix tests
@@ -410,7 +408,7 @@ class TestReQuantRefine:
 
         def compute_err(m1, m2):
             errs = []
-            for (n1, mod1), (n2, mod2) in zip(m1.named_modules(), m2.named_modules()):
+            for (_n1, mod1), (_n2, mod2) in zip(m1.named_modules(), m2.named_modules()):
                 if isinstance(mod1, nn.Linear) and hasattr(mod2, '_dequantize_weight'):
                     w1 = mod1.weight.data.float()
                     w2 = mod2._dequantize_weight(torch.float32)

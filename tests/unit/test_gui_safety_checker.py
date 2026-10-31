@@ -3,7 +3,6 @@
 Tests all three layers (AST, pattern, heuristics) plus the strike tracker.
 Pure stdlib — no Qt or torch needed.
 """
-import pytest
 
 from forge_gui.api.safety_checker import (
     SafetyVerdict,
@@ -15,7 +14,6 @@ from forge_gui.api.safety_checker import (
     check_path_safety,
     check_patterns,
 )
-
 
 # ── Layer 1: AST ───────────────────────────────────────────────────────
 

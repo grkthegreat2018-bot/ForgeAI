@@ -3,12 +3,11 @@
 Tests the unified harness: tool dispatch, safety integration, read-only
 mode, memory tools, and LoRA tools (mocked). Pure stdlib — no Qt/torch.
 """
-from unittest.mock import MagicMock
 
 import pytest
 
-from forge_gui.api.tool_harness import ToolHarness
 from forge_gui.api.lorebook import Lorebook
+from forge_gui.api.tool_harness import ToolHarness
 
 
 @pytest.fixture()

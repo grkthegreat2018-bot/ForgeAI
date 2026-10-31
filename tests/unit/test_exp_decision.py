@@ -15,13 +15,22 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from forge.exp.decision import (  # noqa: E402
-    ACTIONS, CONTINUE, THINK, STOP, VERIFY, N_ACTIONS,
-    DecisionHead, DecisionController,
-    is_sentence_end, label_positions, relabel,
-    train_head, eval_head, greedy_generate, gen_nll,
+from forge.exp.decision import (
+    CONTINUE,
+    N_ACTIONS,
+    STOP,
+    THINK,
+    VERIFY,
+    DecisionController,
+    DecisionHead,
+    eval_head,
+    gen_nll,
+    greedy_generate,
+    is_sentence_end,
+    label_positions,
+    relabel,
+    train_head,
 )
-
 
 # ── fixtures ───────────────────────────────────────────────────────────
 

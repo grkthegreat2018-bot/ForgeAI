@@ -1,7 +1,9 @@
 """Integration test: config fields for HINT4-NLRQ + Tied PEAGLE."""
 import pytest
 import torch
+
 from forge.config import get_config
+
 
 class TestNewTech:
     def test_config_has_new_fields(self):

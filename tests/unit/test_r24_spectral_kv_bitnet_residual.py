@@ -2,8 +2,6 @@
 
 Runs on CPU with small dimensions for fast, GPU-independent testing.
 """
-import math
-import pytest
 import torch
 import torch.nn.functional as F
 
@@ -11,17 +9,15 @@ from forge.engine.kv.spectral_kv import (
     SpectralKVCache,
     SpectralPreAllocatedCache,
     _fourier_basis,
-    _fit_fourier,
 )
 from forge.engine.kv_backend import build_kv_cache
 from tests.fixtures.keys.quantization.bitnet_residual_key import (
-    BitNetResidualLinear,
     BitNetResidualKey,
+    BitNetResidualLinear,
+    apply_bitnet_residual,
     compute_residual,
     ternary_quantize,
-    apply_bitnet_residual,
 )
-
 
 # ── SpectralKV ───────────────────────────────────────────────────────────────
 
@@ -66,7 +62,7 @@ class TestSpectralKVCache:
         v = torch.randn(1, 4, 4, 32)
         cache.append(k, v, position=0)
         assert cache.seq_len == 4
-        k_out, v_out = cache.get()
+        k_out, _v_out = cache.get()
         assert k_out.shape == (1, 4, 4, 32)
         # Sink tokens should be exact
         assert torch.allclose(k_out, k, atol=1e-5)
@@ -80,7 +76,7 @@ class TestSpectralKVCache:
         cache.append(k, v, position=0)
         assert cache.seq_len == seq_len
 
-        k_out, v_out = cache.get()
+        k_out, _v_out = cache.get()
         assert k_out.shape == (1, 4, seq_len, 32)
 
         # Sink tokens (first 4) should be exact
@@ -179,19 +175,19 @@ class TestSpectralPreAllocatedCache:
 class TestTernaryQuantize:
     def test_ternary_values(self):
         w = torch.randn(64, 32) * 0.1
-        q, scale = ternary_quantize(w)
+        q, _scale = ternary_quantize(w)
         assert set(q.unique().tolist()).issubset({-1.0, 0.0, 1.0})
 
     def test_scale_is_positive(self):
         w = torch.randn(64, 32)
-        q, scale = ternary_quantize(w)
+        _q, scale = ternary_quantize(w)
         assert scale > 0
 
 
 class TestComputeResidual:
     def test_residual_shape(self):
         w = torch.randn(64, 32)
-        w_t, mask, res_vals = compute_residual(w, residual_frac=0.10)
+        w_t, mask, _res_vals = compute_residual(w, residual_frac=0.10)
         assert w_t.shape == w.shape
         assert mask.shape == w.shape
         assert mask.dtype == torch.bool
@@ -210,7 +206,7 @@ class TestComputeResidual:
         err_pure = (w - w_t).norm() / w.norm()
 
         # Ternary + 10% residual
-        w_tr, mask, _ = compute_residual(w, residual_frac=0.10)
+        w_tr, _mask, _ = compute_residual(w, residual_frac=0.10)
         err_res = (w - w_tr).norm() / w.norm()
 
         assert err_res < err_pure, f"Residual should reduce error: {err_res} vs {err_pure}"
@@ -218,7 +214,7 @@ class TestComputeResidual:
     def test_zero_residual_fraction(self):
         """0% residual should equal pure ternary."""
         w = torch.randn(32, 16)
-        w_t, mask, res_vals = compute_residual(w, residual_frac=0.0)
+        w_t, mask, _res_vals = compute_residual(w, residual_frac=0.0)
         w_pure, _ = ternary_quantize(w)
         assert torch.allclose(w_t, w_pure)
         assert mask.sum() == 0

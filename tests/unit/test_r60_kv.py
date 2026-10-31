@@ -14,15 +14,14 @@ import os
 import sys
 
 import torch
-import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
-from forge.engine.kv.beacon_kv import BeaconKVCache
 from forge.engine.kv.anchor_kv import AnchorKVCache
+from forge.engine.kv.beacon_kv import BeaconKVCache
 from forge.engine.kv.metakv import MetaKVCache
-from forge.engine.kv_backend import build_kv_cache, KVCacheStrategy
+from forge.engine.kv_backend import KVCacheStrategy, build_kv_cache
 
 
 def _kv(B=1, n_kv=2, T=1, d=4, start=0.0):
@@ -153,7 +152,7 @@ def test_anchor_get_full_reconstructs_length():
     cache = _init(AnchorKVCache(budget=12, sink=2, window=4,
                                 n_anchors=4), max_seq=64, n_kv=1, d=d)
     cache.append(k, v, 0)
-    k_full, v_full = cache.get_full()
+    k_full, _v_full = cache.get_full()
     assert k_full.shape == (1, 1, cache.orig_len, d)
     assert cache.orig_len == T
     # retained positions are bit-exact
@@ -209,7 +208,7 @@ def test_metakv_init_picks_inner_and_delegates():
     # delegation: append/get run on the inner cache
     k, v = _kv(T=8)
     mk.append(k, v, 0)
-    kk, vv = mk.get(None)
+    kk, _vv = mk.get(None)
     assert kk.shape[-2] == 8
 
 
@@ -277,7 +276,6 @@ def test_bridge_noop_without_compact_hook():
 
 
 def test_bridge_watermark_trigger_and_throttle():
-    from forge.engine.engine_generation import _KV_COMPACT_EVERY
     cache = _init(BeaconKVCache(budget=8, sink=2, window=2,
                                 n_beacons=4, slack=4), max_seq=32)
     assert cache.compact_over == 12
@@ -333,6 +331,7 @@ def test_decode_loop_invokes_bridge():
     unpack_output_with_kv — source-level regression guard so the hook
     can't silently go dead again."""
     import inspect
+
     from forge.engine import engine_generation as gen
     src = inspect.getsource(gen._GenerationMixin._decode_tokens)
     assert "_maybe_compact_past_kv(past_kv)" in src

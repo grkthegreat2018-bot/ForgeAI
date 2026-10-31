@@ -3,21 +3,19 @@
 Tests category parsing, MODE_CATEGORY_MAP, and LoraHarness logic
 (mocked runtime — no actual engine loading).
 """
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from forge_gui.api.lora_store import (
+    CATEGORY_INFO,
     LORA_CATEGORIES,
     MODE_CATEGORY_MAP,
-    CATEGORY_INFO,
+    LoRAEntry,
     LoraHarness,
     LoraManager,
-    LoRAEntry,
     parse_category,
-    scan_lora_adapters,
 )
-
 
 # ── Category parsing ───────────────────────────────────────────────────
 
@@ -56,7 +54,7 @@ class TestCategoryConstants:
             assert icon
 
     def test_all_modes_have_categories(self):
-        for mode, cats in MODE_CATEGORY_MAP.items():
+        for _mode, cats in MODE_CATEGORY_MAP.items():
             assert isinstance(cats, list)
             assert len(cats) > 0
             for cat in cats:

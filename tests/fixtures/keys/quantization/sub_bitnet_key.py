@@ -54,15 +54,14 @@ Reuses the normalized Hadamard matrix generator from
 """
 from __future__ import annotations
 
-import math
 from typing import Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from forge.keys.misc.base import Key, KeyClass, KeyResult
 from forge.engine.quant.novel_quant_r44 import _hadamard_matrix
+from forge.keys.misc.base import Key, KeyClass, KeyResult
 
 _BITNET_SCALE_DIVISOR = 0.7  # BitNet b1.58 absmean convention
 _RES_EPS = 1e-8
@@ -279,7 +278,7 @@ def _high_order_residual_pack(
 
     Returns a list of {'mean', 'scale', 'signs'} dicts per round.
     """
-    out_f, n_cols = x.shape
+    _out_f, _n_cols = x.shape
     sum_order = torch.zeros_like(x)
     new_matrix = x.clone() * mask
     results = []
@@ -888,7 +887,7 @@ class SubBitnetLinear(nn.Module):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, n_rounds: int = 1, rank: int = 0,
-                    use_hadamard: bool = True) -> "SubBitnetLinear":
+                    use_hadamard: bool = True) -> SubBitnetLinear:
         """Build from a standard nn.Linear by quantizing its weights (training-free).
 
         The resulting module is moved to the source linear's device so its
@@ -1028,7 +1027,7 @@ class SubBitnetLinearBiLLM(nn.Module):
                     block_size: int = 128,
                     salient_order: int = 2,
                     svd_rank: int = 48,
-                    svd_block_size: int = 32) -> "SubBitnetLinearBiLLM":
+                    svd_block_size: int = 32) -> SubBitnetLinearBiLLM:
         out_f, in_f = lin.weight.shape
         device = lin.weight.device
         # Compute actual h_size (may differ from _hadamard_size if padding > 15%)

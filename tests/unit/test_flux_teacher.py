@@ -8,7 +8,6 @@ Contract under test:
   predicts the stream well must raise w_tch above init share.
 - The lazy teacher object never enters a Flux snapshot.
 """
-import math
 
 import numpy as np
 import pytest
@@ -42,11 +41,11 @@ class _StubTeacher:
 
 
 def _cfg(**kw):
-    base = dict(vocab_size=64, orders=(1, 2), use_knn=False,
-                sparse_taps=(), class_orders=(), word_orders=(),
-                hybrid_taps=(), teacher_channel=True,
-                teacher_bulk_rewards=True,
-                bulk_channel_rewards=True)
+    base = {"vocab_size": 64, "orders": (1, 2), "use_knn": False,
+                "sparse_taps": (), "class_orders": (), "word_orders": (),
+                "hybrid_taps": (), "teacher_channel": True,
+                "teacher_bulk_rewards": True,
+                "bulk_channel_rewards": True}
     base.update(kw)
     return FluxConfig(**base)
 

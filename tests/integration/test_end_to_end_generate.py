@@ -16,8 +16,8 @@ import pytest
 import torch
 
 from forge.config import get_config
-from forge.model_loader import ConfigurableResearchLLM
 from forge.engine.forge_engine import ForgeEngine
+from forge.model_loader import ConfigurableResearchLLM
 
 CUDA_AVAILABLE = torch.cuda.is_available()
 

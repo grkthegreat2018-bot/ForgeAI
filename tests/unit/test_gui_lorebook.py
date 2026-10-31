@@ -6,8 +6,8 @@ MemoryTools dispatch. Uses tmp_path for isolation.
 import pytest
 
 from forge_gui.api.lorebook import (
-    LoreEntry,
     Lorebook,
+    LoreEntry,
     MemoryTools,
     memory_tool_defs,
 )
@@ -56,7 +56,6 @@ class TestLorebookCRUD:
         assert e.id in [x.id for x in lore.entries]
         assert e.category == "user_pref"
         # persisted
-        import json
         assert lore._path.is_file()
 
     def test_add_persists_across_instances(self, lore, tmp_path):

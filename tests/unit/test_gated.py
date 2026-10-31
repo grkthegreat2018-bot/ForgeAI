@@ -7,11 +7,10 @@ fully controlled by probe bias terms.
 """
 import threading
 
-import torch
 import pytest
+import torch
 
-from forge.engine.gated import (GateConfig, GateProbes, GatedDecoder,
-                                GATE_PROBES_VERSION)
+from forge.engine.gated import GATE_PROBES_VERSION, GateConfig, GatedDecoder, GateProbes
 
 
 class _Enc:
@@ -147,8 +146,7 @@ class TestChatRouteGate:
         assert p is not None and p > 0.99
 
     def test_low_score_below_threshold(self):
-        from forge_gui_server.services.chat_loop import (
-            _GATE_T_ROUTE, _route_p_easy)
+        from forge_gui_server.services.chat_loop import _GATE_T_ROUTE, _route_p_easy
         eng = _StubEngine(_probes(route_b=-10.0, doom_b=0.0, conv_b=0.0))
         p = _route_p_easy(eng, 'prompt')
         assert p is not None and p < _GATE_T_ROUTE
@@ -163,9 +161,8 @@ class TestChatRouteGate:
         assert _route_p_easy(eng, 'prompt') is None
 
     def test_direct_suffix_closes_think(self):
+        from forge.self_play.discovery.chat_template import THINK_END, THINK_START
         from forge_gui_server.services.chat_loop import _DIRECT_SUFFIX
-        from forge.self_play.discovery.chat_template import (
-            THINK_END, THINK_START)
         assert _DIRECT_SUFFIX.startswith(THINK_START)
         assert THINK_END in _DIRECT_SUFFIX
 
@@ -232,8 +229,7 @@ class TestThinkCap:
         return m
 
     def test_under_budget_only_bans_rethink(self):
-        from forge_gui_server.services.chat_loop import (
-            _think_cap_processor)
+        from forge_gui_server.services.chat_loop import _think_cap_processor
         proc = _think_cap_processor(4, self.SUFFIX)
         logits = torch.randn(1, 1000)
         out = proc(logits, [1, 2, 3])
@@ -242,16 +238,14 @@ class TestThinkCap:
             logits, self.BASE_BANNED + (531,)))
 
     def test_rethink_banned_after_natural_close(self):
-        from forge_gui_server.services.chat_loop import (
-            _THINK_END_ID, _think_cap_processor)
+        from forge_gui_server.services.chat_loop import _THINK_END_ID, _think_cap_processor
         proc = _think_cap_processor(4, self.SUFFIX)
         logits = torch.randn(1, 1000)
         out = proc(logits, [1, 2, 3, 4, _THINK_END_ID, 9])
         assert torch.equal(out, self._masked(logits))
 
     def test_suffix_injected_in_order(self):
-        from forge_gui_server.services.chat_loop import (
-            _think_cap_processor)
+        from forge_gui_server.services.chat_loop import _think_cap_processor
         proc = _think_cap_processor(4, self.SUFFIX)
         gen = [7, 8, 9, 10]
         for want in self.SUFFIX:
@@ -267,8 +261,7 @@ class TestThinkCap:
     def test_budget_none_means_ban_only(self):
         # direct path: prompt already carries a closed think — the budget
         # never fires but <think> stays banned
-        from forge_gui_server.services.chat_loop import (
-            _think_cap_processor)
+        from forge_gui_server.services.chat_loop import _think_cap_processor
         proc = _think_cap_processor(None, self.SUFFIX)
         logits = torch.randn(1, 1000)
         out = proc(logits, list(range(50)))
@@ -277,8 +270,7 @@ class TestThinkCap:
     def test_exit_flag_injects_suffix_before_budget(self):
         # conv-probe fire must trigger the same force-answer injection
         # well before the token budget is reached
-        from forge_gui_server.services.chat_loop import (
-            _think_cap_processor)
+        from forge_gui_server.services.chat_loop import _think_cap_processor
         state = {"fired": False}
         proc = _think_cap_processor(160, self.SUFFIX,
                                     exit_flag=lambda: state["fired"])
@@ -296,8 +288,7 @@ class TestThinkCap:
         # the "thinking escapes into tool calls" fix: while the prompt-
         # opened <think> is unclosed, 531 must be -inf so a call can only
         # start after the reasoning pass closes.
-        from forge_gui_server.services.chat_loop import (
-            _THINK_END_ID, _think_cap_processor)
+        from forge_gui_server.services.chat_loop import _THINK_END_ID, _think_cap_processor
         proc = _think_cap_processor(160, self.SUFFIX)
         open_out = proc(torch.randn(1, 1000), [1, 2, 3])
         assert open_out[0, 531].item() == float("-inf")
@@ -307,8 +298,7 @@ class TestThinkCap:
     def test_tool_calls_disallowed_bans_call_ids(self):
         # defs dropped (repeat-call guard or tools off): both <tool_call>
         # and </tool_call> are banned outright, even after </think>.
-        from forge_gui_server.services.chat_loop import (
-            _THINK_END_ID, _think_cap_processor)
+        from forge_gui_server.services.chat_loop import _THINK_END_ID, _think_cap_processor
         proc = _think_cap_processor(None, self.SUFFIX,
                                     tool_calls_allowed=False)
         out = proc(torch.randn(1, 1000), [1, _THINK_END_ID, 2])
@@ -318,8 +308,7 @@ class TestThinkCap:
     def test_agent_suffix_without_answer_anchor(self):
         # agent loop injects a bare "\n</think>\n" — after the close the
         # tool_call mask must lift so the capped think can proceed to call
-        from forge_gui_server.services.chat_loop import (
-            _think_cap_processor)
+        from forge_gui_server.services.chat_loop import _think_cap_processor
         proc = _think_cap_processor(2, [542])
         gen = [7, 8]
         out = proc(torch.randn(1, 1000), gen)   # budget hit -> force 542
@@ -336,8 +325,7 @@ class TestConvExitObserver:
     force-answer suffix via the cap processor's exit_flag."""
 
     def test_fires_after_k_consecutive_hits(self):
-        from forge_gui_server.services.chat_loop import (
-            _CONV_K, _CONV_MIN_STEP, _conv_exit_observer)
+        from forge_gui_server.services.chat_loop import _CONV_K, _CONV_MIN_STEP, _conv_exit_observer
         probes = _probes(route_b=0.0, doom_b=0.0, conv_b=10.0)
         obs, fired = _conv_exit_observer(probes, 160)
         gen = list(range(_CONV_MIN_STEP - 1))
@@ -349,8 +337,7 @@ class TestConvExitObserver:
         assert fired()
 
     def test_low_score_never_fires(self):
-        from forge_gui_server.services.chat_loop import (
-            _conv_exit_observer)
+        from forge_gui_server.services.chat_loop import _conv_exit_observer
         probes = _probes(route_b=0.0, doom_b=0.0, conv_b=-10.0)
         obs, fired = _conv_exit_observer(probes, 160)
         gen = list(range(80))
@@ -359,8 +346,7 @@ class TestConvExitObserver:
 
     def test_run_resets_on_miss(self):
         # one low score between hits must reset the consecutive counter
-        from forge_gui_server.services.chat_loop import (
-            _CONV_K, _CONV_MIN_STEP, _conv_exit_observer)
+        from forge_gui_server.services.chat_loop import _CONV_K, _CONV_MIN_STEP, _conv_exit_observer
         assert _CONV_K == 2
         probes = _probes(route_b=0.0, doom_b=0.0, conv_b=10.0)
         obs, fired = _conv_exit_observer(probes, 160)
@@ -374,8 +360,7 @@ class TestConvExitObserver:
         assert fired()
 
     def test_stops_scoring_after_think_end(self):
-        from forge_gui_server.services.chat_loop import (
-            _THINK_END_ID, _conv_exit_observer)
+        from forge_gui_server.services.chat_loop import _THINK_END_ID, _conv_exit_observer
         probes = _probes(route_b=0.0, doom_b=0.0, conv_b=10.0)
         obs, fired = _conv_exit_observer(probes, 160)
         gen = list(range(40)) + [_THINK_END_ID]  # think already closed
@@ -383,8 +368,7 @@ class TestConvExitObserver:
         assert not fired()
 
     def test_emits_gate_event_on_fire(self):
-        from forge_gui_server.services.chat_loop import (
-            _CONV_K, _CONV_MIN_STEP, _conv_exit_observer)
+        from forge_gui_server.services.chat_loop import _CONV_K, _CONV_MIN_STEP, _conv_exit_observer
         probes = _probes(route_b=0.0, doom_b=0.0, conv_b=10.0)
         events = []
         obs, _ = _conv_exit_observer(
@@ -419,8 +403,7 @@ class TestChatLoopGuards:
         assert s[0] == "x" and isinstance(s[1], str)
 
     def test_strip_direct_musing(self):
-        from forge_gui_server.services.chat_loop import (
-            _strip_direct_musing)
+        from forge_gui_server.services.chat_loop import _strip_direct_musing
         musing = ("The user is asking a simple question. I should be "
                   "concise.\n</think>\n\nThe answer is 4.")
         assert _strip_direct_musing(musing) == "The answer is 4."
@@ -464,8 +447,7 @@ class TestReasoningSplit:
         assert _split_reasoning("") == ("", "")
 
     def test_strip_answer_anchor(self):
-        from forge_gui_server.services.chat_loop import (
-            _strip_answer_anchor)
+        from forge_gui_server.services.chat_loop import _strip_answer_anchor
         assert _strip_answer_anchor("Answer: 42") == "42"
         assert _strip_answer_anchor("  Final Answer: 42") == "42"
         assert _strip_answer_anchor("plain reply") == "plain reply"

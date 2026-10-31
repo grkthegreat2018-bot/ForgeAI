@@ -7,7 +7,6 @@ the critique entry.
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 import zipfile
@@ -17,11 +16,10 @@ import pytest
 
 from forge_gui.api.agent_tools import CMD_ALLOWLIST, ToolSandbox
 from forge_gui.api.chat_store import ChatStore
-from forge_gui.api.lorebook import Lorebook
-from forge_gui.api.process_manager import (
-    ProcessPreset, build_command, preset_script_exists)
-from forge_gui.api.status_reader import StatusReader
 from forge_gui.api.events_reader import EventsReader
+from forge_gui.api.lorebook import Lorebook
+from forge_gui.api.process_manager import ProcessPreset, build_command, preset_script_exists
+from forge_gui.api.status_reader import StatusReader
 from forge_gui_server.hub import EventHub
 from forge_gui_server.services.procs import ProcessService, TaskInfo
 from forge_gui_server.services.support import ApprovalChannel, BackupService

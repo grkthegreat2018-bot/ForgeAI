@@ -2,20 +2,28 @@
 import os
 import sys
 
+import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 
-from forge.exp.prevtok import (PrevTokenHead, SelfCorrectingDecoder,
-                              prev_ce_loss, train_prev_head,
-                              eval_prev_head, save_head, load_head,
-                              seq_prev_nll,
-                              kv_truncate, kv_expand, kv_select)
+from forge.exp.prevtok import (
+    PrevTokenHead,
+    SelfCorrectingDecoder,
+    eval_prev_head,
+    kv_expand,
+    kv_select,
+    kv_truncate,
+    load_head,
+    prev_ce_loss,
+    save_head,
+    seq_prev_nll,
+    train_prev_head,
+)
 
 V = D = 48                       # orthogonal embeddings need d == vocab
 A, B, C, E = 0, 1, 2, 3          # token ids used in transition tests
@@ -50,7 +58,7 @@ class FakeLM(nn.Module):
     def forward(self, idx, targets=None, past_key_values=None,
                 use_cache=False, return_hidden=False,
                 logits_last_only=False, **_kw):
-        B, T = idx.shape
+        _B, T = idx.shape
         Vv = self.logit_table.shape[0]
         oh = F.one_hot(idx, Vv).float().unsqueeze(1)          # [B,1,T,V]
         hist = (past_key_values[0][0]

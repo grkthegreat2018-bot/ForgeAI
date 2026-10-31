@@ -13,8 +13,8 @@ import torch
 
 from forge.keys.compression.nlrq_ffn_key import (
     NLRQLinear,
-    _hadamard_matrix,
     _apply_hadamard,
+    _hadamard_matrix,
     _pack_int4,
     _unpack_int4,
 )
@@ -307,7 +307,7 @@ class TestAdaptiveRank:
         W_high = torch.randn(64, 2048, dtype=torch.float32, device=DEVICE) * 0.02
         W = W_low @ W_high  # rank-64
 
-        layer, r = NLRQLinear.from_dense_adaptive(W, energy_threshold=0.99, min_rank=32)
+        _layer, r = NLRQLinear.from_dense_adaptive(W, energy_threshold=0.99, min_rank=32)
         print(f"Adaptive rank for rank-64 matrix: {r}")
         # Should select a small rank (close to 64)
         assert r <= 100, f"Adaptive rank {r} too high for rank-64 matrix"
@@ -317,7 +317,7 @@ class TestAdaptiveRank:
         """A full-rank random matrix should select a high rank."""
         torch.manual_seed(42)
         W = torch.randn(256, 512, dtype=torch.float32, device=DEVICE) * 0.02
-        layer, r = NLRQLinear.from_dense_adaptive(W, energy_threshold=0.99, min_rank=32)
+        _layer, r = NLRQLinear.from_dense_adaptive(W, energy_threshold=0.99, min_rank=32)
         print(f"Adaptive rank for full-rank matrix: {r}")
         # Random matrices have slow singular value decay → high rank
         assert r > 100, f"Adaptive rank {r} too low for full-rank matrix"

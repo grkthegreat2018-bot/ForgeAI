@@ -6,10 +6,11 @@ Verifies:
   3. _grpo_train skips when too few trajectories
   4. CLI arg --training-mode is wired correctly
 """
-import pytest
 from unittest.mock import MagicMock, patch
 
-from forge.self_play.infinite_loop import LoopConfig, InfiniteSelfPlayLoop
+import pytest
+
+from forge.self_play.infinite_loop import InfiniteSelfPlayLoop, LoopConfig
 
 
 class TestGRPOConfig:
@@ -509,8 +510,7 @@ class TestCanonicalSftRender:
         assert "<think>" not in full
 
     def test_tool_call_markers_canonical(self):
-        from forge.training.runners.sft_train import (
-            _TOOL_CALL_END, _TOOL_CALL_START, _render_tool_call)
+        from forge.training.runners.sft_train import _TOOL_CALL_END, _TOOL_CALL_START, _render_tool_call
         assert _TOOL_CALL_START == "<tool_call>"
         assert _TOOL_CALL_END == "</tool_call>"
         out = _render_tool_call({"name": "f", "arguments": {"x": 1}})
@@ -588,8 +588,8 @@ class TestSolutionCleaning:
         assert _clean_code("this is just prose musing, not code") == ""
 
     def test_assemble_solution_strips_comments(self):
-        from forge.self_play.infinite_curriculum import InfiniteCurriculum
         from forge.evaluation.goal_tasks import GoalTask
+        from forge.self_play.infinite_curriculum import InfiniteCurriculum
         cur = InfiniteCurriculum(model=None, tokenizer=None, device="cpu")
         cur.engine = object()  # engine path → chat assemble branch
         task = GoalTask(id="t", domain="math", difficulty="easy",
@@ -764,8 +764,7 @@ class TestDebugRound:
     def test_generate_engine_path_records_trace(self):
         """_generate records rendered prompt, RAW (pre-strip) output and
         the post-strip reply — reasoning must be visible in `raw`."""
-        from forge.self_play.infinite_curriculum import (
-            GenTracer, InfiniteCurriculum)
+        from forge.self_play.infinite_curriculum import GenTracer, InfiniteCurriculum
         tok = MagicMock()
         tok.return_value = MagicMock(input_ids=[1, 2])
         tok.decode = lambda ids: "x"
@@ -817,8 +816,7 @@ class TestSaveTaskSerialization:
     epoch aborted mid-propose)."""
 
     def test_set_valued_args_serialize(self, tmp_path):
-        from forge.self_play.infinite_curriculum import (
-            InfiniteCurriculum, ProposedTask)
+        from forge.self_play.infinite_curriculum import InfiniteCurriculum, ProposedTask
         cur = InfiniteCurriculum(model=None, tokenizer=None, device="cpu",
                                  task_queue_dir=str(tmp_path))
         task = ProposedTask(

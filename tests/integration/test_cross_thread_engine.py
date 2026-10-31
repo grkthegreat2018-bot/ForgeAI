@@ -74,8 +74,8 @@ import pytest
 import torch
 
 from forge.config import get_config
-from forge.model_loader import ConfigurableResearchLLM
 from forge.engine.forge_engine import ForgeEngine
+from forge.model_loader import ConfigurableResearchLLM
 
 
 def _build_engine_cpu(preset="forgelm_tiny", vocab=65536):
