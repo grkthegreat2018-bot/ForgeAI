@@ -442,11 +442,12 @@ class OvEngine:
 class LLMProposer:
     """Brand-new implementations from a coder model.
 
-    Default: the ported forge/evolution/proposer_mla_moe checkpoint when
-    present (Qwen2.5-Coder-0.5B -> ForgeAI MLA+MoE, SFT'd on evolve
-    prompts — runs through ForgeEngine's GLA/MoE path), else
-    Qwen2.5-Coder-0.5B via forge.exp.harness.load_engine — ~1GB VRAM,
-    completion-primed prompt (`primed=True`).
+    Default: research/checkpoints/lfm3_1p7b_cc_fq (LFM3-1.7B Claude-Code
+    finetune, ForgeQuant int4-packed, ~1.4GB) with lfm3_1p7b_cc as the
+    non-quantized fallback — chat-template prompts with a code-fence
+    prefill (`<think></think>```python`) so output is verbatim code.
+    The old Qwen proposer ports are ARCHIVED (verbatim-copy + parse-
+    failure history) — see _model_id for the resolution order.
 
     Local checkpoint dirs try ForgeEngine first (same arch → batched
     generate_batch ~4x); other archs fall back to transformers
