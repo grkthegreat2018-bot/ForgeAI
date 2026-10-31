@@ -9,8 +9,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
-import time
 from typing import Any
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -111,11 +111,9 @@ class GpuMonitor:
                     hub.publish("gpu", snap)
                 except Exception as e:
                     logger.debug("gpu poll failed: %s", e)
-                try:
+                with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(self._stop.wait(),
                                            timeout=self.interval_s)
-                except asyncio.TimeoutError:
-                    pass
 
     def start(self, hub) -> None:
         if self._task is None or self._task.done():
@@ -125,10 +123,8 @@ class GpuMonitor:
     async def stop(self) -> None:
         self._stop.set()
         if self._task:
-            try:
+            with contextlib.suppress(Exception):
                 await asyncio.wait_for(self._task, timeout=3)
-            except Exception:
-                pass
 
 
 monitor = GpuMonitor()

@@ -14,8 +14,6 @@ from forge_gui.api.chat_store import ChatStore
 from forge_gui.api.events_reader import EventsReader
 from forge_gui.api.log_tailer import LogTailer
 from forge_gui.api.lorebook import Lorebook
-from forge_gui.api.master_prompt import (
-    get_default_prompt_for_config, generate_master_prompt)
 from forge_gui.api.mcp_client import MCPManager
 from forge_gui.api.models_index import ModelsIndex
 from forge_gui.api.status_reader import StatusReader, project_root
@@ -29,8 +27,14 @@ from .services.gpu import GpuMonitor
 from .services.lora import LoraService
 from .services.procs import ProcessService
 from .services.support import (
-    ApprovalChannel, BackupService, LibraryService, LoraHarnessAdapter,
-    SubAgentService, TimeService)
+    ApprovalChannel,
+    BackupService,
+    LibraryService,
+    LoraHarnessAdapter,
+    SubAgentService,
+    TimeService,
+)
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +99,7 @@ class Services:
     @property
     def lora_training(self):
         if self._lora_training is None:
-            from forge_gui.api.lora_training_trigger import (
-                LoraTrainingTrigger)
+            from forge_gui.api.lora_training_trigger import LoraTrainingTrigger
             self._lora_training = LoraTrainingTrigger(
                 proc_mgr=self.procs, chat_store=self.chat_store,
                 checkpoint="research/checkpoints/ForgeLM_V2.safetensors")
@@ -267,10 +270,8 @@ class Services:
         t = getattr(self, "_selfplay_task", None)
         if t is not None:
             t.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await t
-            except asyncio.CancelledError:
-                pass
         self.backups.stop()
         self.timers.shutdown()
         self.sub_agents.shutdown()

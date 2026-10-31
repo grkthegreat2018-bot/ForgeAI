@@ -283,7 +283,7 @@ class ChatStore:
 
     @staticmethod
     def preview_title(conv: dict[str, Any]) -> str:
-        good, bad = ChatStore.count_ratings(conv)
+        good, _bad = ChatStore.count_ratings(conv)
         n = len(conv["messages"])
         return f"{conv['title']}  ·  {n} msg" + (f"  ·  ★{good}" if good else "")
 

@@ -6,8 +6,9 @@ connect/emit surface the old code used.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +23,8 @@ class SimpleSignal:
         self._subs.append(fn)
 
     def disconnect(self, fn: Callable) -> None:
-        try:
+        with contextlib.suppress(ValueError):
             self._subs.remove(fn)
-        except ValueError:
-            pass
 
     def emit(self, *args) -> None:
         for fn in list(self._subs):

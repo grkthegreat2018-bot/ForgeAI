@@ -34,7 +34,7 @@ def _is_json(raw: bytes) -> bool:
 
 
 class _EventSource:
-    __slots__ = ("mtime", "offset", "partial", "path", "ctime")
+    __slots__ = ("ctime", "mtime", "offset", "partial", "path")
 
     def __init__(self, path: Path):
         self.path = path

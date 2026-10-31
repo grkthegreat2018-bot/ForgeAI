@@ -10,6 +10,7 @@ Tool schema matches the OpenAI function-calling shape the engine's
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -244,25 +245,33 @@ class ToolSandbox:
     def tool_run_python(self, code: str, timeout_s: float = 0) -> dict:
         if not code.strip():
             return {"error": "empty snippet"}
+        # Code exec in the workspace is the tool's purpose — the boundary
+        # is "agent owns the workspace". Still: scrub secrets out of the
+        # child env, cap the caller-controlled timeout, and tree-kill via
+        # Job Object so snippet children can't outlive the tool call.
+        try:
+            from research.persistent_executor import scrub_environ
+            env = scrub_environ()
+        except Exception:
+            env = None
+        timeout = min(float(timeout_s or self.default_timeout_s), 300.0)
         script = self.workspace / ".agent_snippet.py"
         script.write_text(code, encoding="utf-8")
         try:
             proc = subprocess.run(
                 [sys.executable, str(script)],
                 cwd=str(self.workspace), capture_output=True, text=True,
-                timeout=(timeout_s or self.default_timeout_s),
+                timeout=timeout, env=env,
                 encoding="utf-8", errors="replace",
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             return self._proc_result(proc)
         except subprocess.TimeoutExpired:
-            return {"error": f"timeout after {timeout_s or self.default_timeout_s}s",
+            return {"error": f"timeout after {timeout}s",
                     "stdout": "", "stderr": ""}
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 script.unlink()
-            except OSError:
-                pass
 
     def tool_run_cmd(self, command: str, timeout_s: float = 0) -> dict:
         parts = command.strip().split()
@@ -337,7 +346,7 @@ class ToolSandbox:
     def _git(self, args: list[str], timeout_s: float = 15) -> dict:
         try:
             proc = subprocess.run(
-                ["git"] + args, cwd=str(self.workspace),
+                ["git", *args], cwd=str(self.workspace),
                 capture_output=True, text=True,
                 timeout=timeout_s, encoding="utf-8", errors="replace",
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -590,7 +599,26 @@ class ToolSandbox:
     def tool_run_tests(self, path: str = "tests/", args: str = "") -> dict:
         cmd_parts = ["pytest", path]
         if args:
-            cmd_parts.extend(args.split())
+            # Only benign pytest flags — free-form args admit -p plugin
+            # imports, --rootdir/--confcutdir tricks and --collect-only
+            # of conftest outside the workspace = code exec.
+            import re as _re
+            safe = _re.compile(
+                r'^(-x|-v|-q|-s|-l|--tb=\w+|-k\s+\S+|-m\s+\S+'
+                r'|--durations=\d+|--maxfail=\d+|-n\d*|--lf|--ff'
+                r'|-r[a-zA-Z]+)$')
+            parts = []
+            it = iter(args.split())
+            for tok in it:
+                if safe.fullmatch(tok):
+                    parts.append(tok)
+                    if tok in ("-k", "-m"):
+                        parts.append(next(it, ""))
+                elif tok.startswith(("-k ", "-m ")):
+                    continue
+                else:
+                    return {"error": f"pytest arg not allowed: {tok!r}"}
+            cmd_parts.extend(p for p in parts if p)
         try:
             proc = subprocess.run(
                 cmd_parts, cwd=str(self.workspace), capture_output=True,

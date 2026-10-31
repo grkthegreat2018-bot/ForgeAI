@@ -3,7 +3,6 @@ training-run telemetry."""
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from pathlib import Path
 
@@ -11,12 +10,12 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from ..deps import services
-from .core import _run_dict
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 from forge_gui.api.status_reader import project_root
+import contextlib
 
 OPTIMIZERS = ["muon_sf", "muon_sf_plain", "muon", "fused", "lion",
               "flash_adamw", "flash_lion", "sf_normuon", "amuse", "mona",
@@ -231,10 +230,8 @@ async def selfplay_start(body: SelfPlayStartRequest):
             services.procs.kill(t.id)
     for f in ("events.jsonl", "status.json", "heartbeat.json",
               "STOP_REQUESTED"):
-        try:
+        with contextlib.suppress(OSError):
             (sp_dir / f).unlink(missing_ok=True)
-        except OSError:
-            pass
     venv_py = root / "venv" / "Scripts" / "python.exe"
     cmd = [str(venv_py if venv_py.is_file() else "python"), "-u",
            "-m", "forge.self_play.infinite_loop",

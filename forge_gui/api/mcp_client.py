@@ -36,6 +36,7 @@ Configuration is stored in ``data/mcp/servers.json``:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -239,7 +240,7 @@ class StdioMCPClient(MCPClient):
                     if self._proc.poll() is not None:
                         raise ConnectionError(
                             "MCP subprocess exited while awaiting "
-                            "response")
+                            "response") from None
                     continue
                 if resp is _PROC_EOF:
                     raise ConnectionError("MCP subprocess closed stdout")
@@ -280,7 +281,7 @@ class StdioMCPClient(MCPClient):
         env = os.environ.copy()
         env.update(self.config.env)
         self._proc = subprocess.Popen(
-            [self.config.command] + self.config.args,
+            [self.config.command, *self.config.args],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -473,10 +474,8 @@ class MCPManager:
         except Exception as e:
             # Kill the spawned subprocess — a failed handshake used to
             # orphan the server process until GC/finalizers got to it.
-            try:
+            with contextlib.suppress(Exception):
                 client.close()
-            except Exception:
-                pass
             logger.warning("MCP connect '%s' failed: %s", name, e)
             return False
 

@@ -15,9 +15,10 @@ the server's CLI.
 from __future__ import annotations
 
 import os
+
 os.environ.setdefault("PYTHONUTF8", "1")  # engine prints use → / · (cp1252 breaks)
 
-from forge_gui_server.__main__ import main  # noqa: E402
+from forge_gui_server.__main__ import main
 
 if __name__ == "__main__":
     raise SystemExit(main())

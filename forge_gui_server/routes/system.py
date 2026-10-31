@@ -39,8 +39,7 @@ class LaunchRequest(BaseModel):
 
 def _preset_command(preset_name: str, overrides: dict[str, str]):
     """Resolve a preset name to an argv list, or an error string."""
-    from forge_gui.api.process_manager import (
-        build_command, get_presets, preset_script_exists)
+    from forge_gui.api.process_manager import build_command, get_presets, preset_script_exists
     preset = next((p for p in get_presets()
                    if p.name == preset_name), None)
     if preset is None:
@@ -278,8 +277,7 @@ async def backup_monitor(body: dict):
 
 @router.get("/master_prompt")
 async def master_prompt(config_name: str = ""):
-    from forge_gui.api.master_prompt import (
-        generate_master_prompt, get_default_prompt_for_config)
+    from forge_gui.api.master_prompt import get_default_prompt_for_config
     cfg = config_name or services.engine.info.get(
         "config_name", "forgelm_v2")
     try:

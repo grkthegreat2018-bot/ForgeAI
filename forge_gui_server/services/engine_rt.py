@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from forge_gui.api.status_reader import project_root
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,7 @@ class EngineService:
         self._queued_load: tuple | None = None
         self._learn_task = None
         self._learn_cancel = threading.Event()
+        self._reactivate_task = None
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -308,8 +310,9 @@ class EngineService:
         sizing, activation presets and gate probes (no dense weights,
         no hidden states).  GPU-resident tables when CUDA is up."""
         self._progress(f"loading FLUX memory {ckpt}…")
-        from forge.engine.forge_engine import ForgeEngine  # type: ignore
         import torch
+
+        from forge.engine.forge_engine import ForgeEngine  # type: ignore
         dev = "cuda" if torch.cuda.is_available() else "cpu"
         engine = ForgeEngine.from_flux(
             checkpoint=ckpt, device=dev, cuda_primary=(dev == "cuda"))
@@ -361,6 +364,7 @@ class EngineService:
         unknown: list[str] = []
         try:
             from dataclasses import fields as _dc_fields
+
             from forge.engine.activation import ActivationConfig
             valid = {f.name for f in _dc_fields(ActivationConfig)}
             unknown = sorted(k for k in activation if k not in valid)
@@ -371,9 +375,10 @@ class EngineService:
         loop = self._loop or asyncio.get_event_loop()
         coro = self._reactivate_async(loop, activation)
         if loop.is_running():
-            asyncio.run_coroutine_threadsafe(coro, loop)
+            self._reactivate_task = asyncio.run_coroutine_threadsafe(
+                coro, loop)
         else:
-            asyncio.ensure_future(coro)
+            self._reactivate_task = asyncio.ensure_future(coro)
         out: dict = {"ok": True}
         if unknown:
             # ActivationConfig.from_kwargs drops unknown keys silently —
@@ -531,10 +536,8 @@ class EngineService:
         self._learn_cancel.set()
         lt = self._learn_task
         if lt is not None and not lt.done():
-            try:
+            with contextlib.suppress(Exception):
                 lt.cancel()
-            except Exception:
-                pass
         for fut, timeout in ((self._load_task, 60), (self._learn_task, 30)):
             if fut is None:
                 continue
@@ -546,11 +549,9 @@ class EngineService:
             except (Exception, asyncio.CancelledError):
                 pass
         # Blocking engine teardown off the loop, on the engine pool.
-        try:
+        with contextlib.suppress(Exception):
             await asyncio.get_running_loop().run_in_executor(
                 self._pool, self.unload)
-        except Exception:
-            pass
         self._pool.shutdown(wait=True, cancel_futures=True)
 
 

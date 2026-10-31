@@ -196,7 +196,7 @@ class TimeManager:
                 if self.check_timer(tid) is not None]
 
     # ── condition flags ───────────────────────────────────────────────
-    def check_conditions(self, active_processes: list[str] = None,
+    def check_conditions(self, active_processes: list[str] | None = None,
                          user_prompted: bool = False) -> list[str]:
         """Check timer condition flags and cancel timers whose conditions are met.
 
@@ -226,7 +226,7 @@ class TimeManager:
     def get_fired_timers(self) -> list[dict]:
         """Get all timers that have fired (and clear their fired status)."""
         fired = []
-        for tid, entry in list(self._timers.items()):
+        for _tid, entry in list(self._timers.items()):
             if entry.status == "fired" and not entry.repeat:
                 fired.append({
                     "timer_id": entry.timer_id, "label": entry.label,

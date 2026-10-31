@@ -11,9 +11,9 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from forge_gui.api.status_reader import project_root
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,9 @@ class ProcessService:
         self._log_fhs: dict[str, list] = {}
         self._counter = 0
         self._loop: asyncio.AbstractEventLoop | None = None
+        # asyncio tasks launched without a running loop — kept alive here
+        # so the GC can't collect them mid-flight
+        self._bg_tasks: set[asyncio.Task] = set()
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -95,7 +98,9 @@ class ProcessService:
             asyncio.run_coroutine_threadsafe(coro, loop)
         else:
             try:
-                asyncio.ensure_future(coro)
+                bg = asyncio.ensure_future(coro)
+                self._bg_tasks.add(bg)
+                bg.add_done_callback(self._bg_tasks.discard)
             except RuntimeError:
                 threading.Thread(
                     target=lambda: asyncio.run(coro), daemon=True).start()
@@ -147,10 +152,8 @@ class ProcessService:
         self._flush_log(task_id, force=True)
         ent = self._log_fhs.pop(task_id, None)
         if ent is not None:
-            try:
+            with contextlib.suppress(Exception):
                 ent[0].close()
-            except Exception:
-                pass
         self._hub.publish("task_finished", info.to_dict())
 
     @staticmethod
@@ -164,10 +167,8 @@ class ProcessService:
             return
         ent[1] += 1
         if force or ent[1] >= 32:
-            try:
+            with contextlib.suppress(Exception):
                 ent[0].flush()
-            except Exception:
-                pass
             ent[1] = 0
 
     def _emit_line(self, task_id: str, line: str) -> None:

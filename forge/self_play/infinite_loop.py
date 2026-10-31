@@ -157,6 +157,11 @@ class LoopConfig:
     eval_threshold: float = 0.5      # lenient mode: max fractional quality regression
     strict_promote: bool = True      # promote only if candidate beats/ties best
     device: str = "cuda"
+    # Capability trajectory (COMPETITIVE_AUDIT A14): score a FROZEN probe
+    # on the candidate every epoch inside _evaluate (engine still loaded),
+    # appended to status.json — self-improvement measured by outcome,
+    # not just activity.
+    capability_probe: bool = True
 
     # ── Training mode ──
     # "sft"  = SFT continuation (default, existing path)
@@ -548,6 +553,28 @@ def _concise_adjusted_rewards(comps: list, rews: list,
             for ln, r in zip(lens, rews)]
 
 
+# ── Frozen capability probe (COMPETITIVE_AUDIT A14) ──────────────────
+# Scored on the epoch's candidate every epoch — identical items forever,
+# so the trajectory answers "is the model better at N than at 0?"
+_CAPABILITY_PROBE: list[dict] = [
+    {"category": "math", "prompt": "What is 17*6?", "answer": "102"},
+    {"category": "math", "prompt": "What is 144/12?", "answer": "12"},
+    {"category": "math", "prompt": "What is 5 cubed?", "answer": "125"},
+    {"category": "logic",
+     "prompt": "Complete the sequence: 2, 4, 8, 16, ?", "answer": "32"},
+    {"category": "logic",
+     "prompt": "If all bloops are razzies and all razzies are lazzies, "
+               "are all bloops lazzies?", "answer": "yes"},
+    {"category": "recall", "prompt": "What is the chemical symbol for gold?",
+     "answer": "Au"},
+    {"category": "recall", "prompt": "What planet is closest to the sun?",
+     "answer": "Mercury"},
+    {"category": "recall",
+     "prompt": "In computing, what does 'CPU' stand for?",
+     "answer": "central processing unit"},
+]
+
+
 class InfiniteSelfPlayLoop:
     """The unified AZR self-play → finetune → evaluate → promote loop."""
 
@@ -575,6 +602,8 @@ class InfiniteSelfPlayLoop:
         # run_epoch() directly never touch the filesystem.
         self._status_writer = None
         self._monitor = None
+        # Capability trajectory (A14): one {"epoch", "score"} per epoch.
+        self._capability_history: list[dict] = []
 
     def _init_status_writer(self) -> None:
         """Create the live telemetry writer + failure-mode monitor (idempotent)."""
@@ -2399,6 +2428,7 @@ class InfiniteSelfPlayLoop:
 
         from forge.self_play.discovery.fast_eval import fast_eval
 
+        capability = None
         try:
             results = fast_eval(
                 base_checkpoint=self.best_checkpoint,
@@ -2407,6 +2437,9 @@ class InfiniteSelfPlayLoop:
                 engine=self._engine,           # reuse self-play engine
                 config_name=self.config.config_name,  # V10 config
             )
+            # Engine still holds the candidate weights here — run the
+            # frozen capability probe before _free_engine() (A14).
+            capability = self._capability_probe()
         except Exception as e:
             print(f"  Eval failed: {e}")
             import traceback; traceback.print_exc()
@@ -2436,8 +2469,43 @@ class InfiniteSelfPlayLoop:
             "base_quality": base_q,
             "candidate_quality": cand_q,
             "winner": winner,
+            "capability_probe": capability,
             "details": results,
         }
+
+    def _capability_probe(self) -> dict | None:
+        """Score the engine's current (candidate) weights on the frozen
+        probe set — the A14 capability-trajectory metric. Cheap: 8 short
+        greedy generations on an already-loaded engine."""
+        if not getattr(self.config, "capability_probe", False):
+            return None
+        if self._engine is None:
+            return None
+        from forge.evaluation.ckpt_tester import evaluate_answer
+        correct = 0
+        answers = []
+        try:
+            for item in _CAPABILITY_PROBE:
+                try:
+                    text = self._engine.generate(
+                        item["prompt"], max_new_tokens=40,
+                        temperature=0.0, finish_sentence=False)
+                    if isinstance(text, dict):
+                        text = text.get("text", "")
+                except Exception as e:
+                    text = ""
+                    print(f"  capability probe gen failed: {e}")
+                ok = evaluate_answer(item, text) is True
+                correct += int(ok)
+                answers.append((text or "")[:60])
+        except Exception as e:
+            print(f"  capability probe failed: {e}")
+            return None
+        score = correct / len(_CAPABILITY_PROBE)
+        print(f"  Capability probe: {correct}/{len(_CAPABILITY_PROBE)} "
+              f"({score:.0%})")
+        return {"score": score, "correct": correct,
+                "n": len(_CAPABILITY_PROBE), "answers": answers}
 
     # ── Phase 4: Promote/Demote ──────────────────────────────────────
 
@@ -2569,6 +2637,10 @@ class InfiniteSelfPlayLoop:
         if self._status_writer:
             sp = phases.get("self_play", {})
             ev = phases.get("evaluate", {})
+            cap = ev.get("capability_probe") if isinstance(ev, dict) else None
+            if isinstance(cap, dict) and cap.get("score") is not None:
+                self._capability_history.append(
+                    {"epoch": self.epoch, "score": cap["score"]})
             self._status_writer.epoch_done(
                 self.epoch, self.config.max_epochs,
                 train_rate=sp.get("success_rate", 0.0)
@@ -2577,10 +2649,13 @@ class InfiniteSelfPlayLoop:
                 if isinstance(ev, dict) else 0.0,
                 loss=phases.get("loss", 0.0),
                 promoted=bool(phases.get("promoted", False)),
+                capability_score=cap.get("score") if isinstance(cap, dict)
+                else None,
                 elapsed_s=elapsed,
                 best_checkpoint=self.best_checkpoint)
             self._status_update(
                 step=self.epoch,
+                capability_trajectory=self._capability_history[-25:],
                 topic=sp.get("domain", "") if isinstance(sp, dict) else "")
         print(f"\n  Epoch {self.epoch} done in {elapsed}s")
         print(f"  Best checkpoint: {self.best_checkpoint}")
@@ -2738,6 +2813,9 @@ def main():
                         help="Allow promotion when candidate merely stays within "
                              "--eval-threshold of base (default: strict — must "
                              "beat or tie the old checkpoint)")
+    parser.add_argument("--no-capability-probe", action="store_true",
+                        help="Skip the frozen per-epoch capability probe "
+                             "(A14 telemetry; default: on)")
 
     # ── Training mode ──
     parser.add_argument("--training-mode", type=str, default="sft",
@@ -2969,6 +3047,7 @@ def main():
         task_source=args.task_source,
         eval_threshold=args.eval_threshold,
         strict_promote=not args.lenient_promote,
+        capability_probe=not args.no_capability_probe,
         training_mode=args.training_mode,
         flux_group_size=args.flux_group_size,
         flux_workers=args.flux_workers,

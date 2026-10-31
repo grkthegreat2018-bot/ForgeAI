@@ -219,7 +219,6 @@ class AgentService:
             render_messages_for_config,
         )
         from forge_gui.api.tool_harness import ToolHarness
-
         from forge_gui.api.web_tools import WebTools
         harness = run.tool_harness or ToolHarness(
             run.workspace, enable_safety=True,

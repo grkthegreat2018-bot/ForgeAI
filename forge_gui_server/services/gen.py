@@ -11,8 +11,9 @@ import asyncio
 import logging
 import threading
 import time
+from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, AsyncIterator
+from typing import Any
 
 logger = logging.getLogger(__name__)
 

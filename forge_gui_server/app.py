@@ -3,7 +3,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -33,7 +32,12 @@ def create_app() -> FastAPI:
     app = FastAPI(title="ForgeAI GUI", version="1.0.0",
                   lifespan=lifespan)
     app.add_middleware(
-        CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
+        # Loopback origins only — wildcard CORS on a localhost API lets any
+        # web page drive-by call /api/* (incl. agent tool execution) and
+        # read the responses through the victim's browser.
+        CORSMiddleware,
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
+        allow_methods=["*"],
         allow_headers=["*"])
 
     app.include_router(core.router, prefix="/api")
@@ -43,6 +47,15 @@ def create_app() -> FastAPI:
 
     @app.websocket("/ws")
     async def ws(websocket: WebSocket):
+        # CSWSH guard: browsers send Origin on WS handshakes — reject
+        # anything that isn't a loopback UI (missing Origin = non-browser
+        # client like the desktop webview, which is fine).
+        import re as _re
+        origin = websocket.headers.get("origin")
+        if origin and not _re.fullmatch(
+                r"https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?", origin):
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         q = services.hub.subscribe(replay=True)
         try:

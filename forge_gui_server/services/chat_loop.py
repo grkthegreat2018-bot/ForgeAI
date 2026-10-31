@@ -13,9 +13,8 @@ import json
 import logging
 import re
 import threading
-import time
+from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, AsyncIterator
 
 import torch
 
@@ -329,8 +328,7 @@ async def run_chat(runtime, harness, messages: list[dict],
         loop.call_soon_threadsafe(q.put_nowait, item)
 
     def worker():
-        from forge.self_play.discovery.qwen_adapter import (
-            qwen_parse_tool_calls, render_messages_for_config)
+        from forge.self_play.discovery.qwen_adapter import qwen_parse_tool_calls, render_messages_for_config
         try:
             if not runtime.is_ready():
                 emit(("error", "No model resident — load one on the "
@@ -512,8 +510,7 @@ async def run_chat(runtime, harness, messages: list[dict],
                     emit(("tool_call", call))
                     rec = harness.execute_calls([call])[0]
                     emit(("tool_result", rec))
-                    from forge_gui.api.agent_tools import (
-                        tool_results_to_text)
+                    from forge_gui.api.agent_tools import tool_results_to_text
                     ttext = tool_results_to_text(rec)
                     if len(ttext) > _TOOL_RESULT_MAX_CHARS:
                         ttext = (ttext[:_TOOL_RESULT_MAX_CHARS]

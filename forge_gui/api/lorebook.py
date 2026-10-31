@@ -38,6 +38,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import ClassVar
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +101,8 @@ class Lorebook:
     # entry's identity + provenance (keys double as the trigger contract;
     # letting an update rewrite them silently re-scopes who the memory
     # fires for), and the trigger stats are internal bookkeeping.
-    _MUTABLE_FIELDS = {"content", "constant", "priority", "category",
-                       "enabled"}
+    _MUTABLE_FIELDS: ClassVar[set[str]] = {
+        "content", "constant", "priority", "category", "enabled"}
 
     def __init__(self, root: Path | None = None) -> None:
         self._root = Path(root) if root else Path("data/memory")

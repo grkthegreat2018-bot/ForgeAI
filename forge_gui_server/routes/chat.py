@@ -175,8 +175,7 @@ async def chat_send(body: ChatSendRequest):
     history: list[dict] = []
     sys_prompt = body.system_prompt
     if body.use_master and not sys_prompt:
-        from forge_gui.api.master_prompt import (
-            get_default_prompt_for_config)
+        from forge_gui.api.master_prompt import get_default_prompt_for_config
         cfg = services.engine.info.get("config_name", "forgelm_v2")
         try:
             sys_prompt = get_default_prompt_for_config(
@@ -251,7 +250,7 @@ def _project_slug(text: str, max_len: int = 40) -> str:
     return slug[:max_len].strip("-") or "project"
 
 
-def _agent_workspace(body: "AgentStartRequest") -> tuple[str, str]:
+def _agent_workspace(body: AgentStartRequest) -> tuple[str, str]:
     """Every agent project lives in its own subfolder of ForgeAI_Projects.
 
     Returns (workspace_path, project_name). An explicit workspace path
@@ -365,7 +364,6 @@ async def agent_message(run_id: str, body: dict):
 @router.get("/agent/tools")
 async def agent_tools():
     """Tool defs + category metadata for the agent config panel."""
-    from forge_gui.api.tool_harness import ToolHarness
     harness = services.make_harness()
     defs = harness.tool_defs()
     return {"tools": [{"name": d["function"]["name"],

@@ -27,6 +27,7 @@ from datetime import time as dtime
 from pathlib import Path
 
 from forge_gui.api.status_reader import project_root
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -140,8 +141,7 @@ class SubAgentService:
                 messages.append({"role": "system",
                                  "content": task.system_prompt})
             messages.append({"role": "user", "content": task.prompt})
-            from forge.self_play.discovery.qwen_adapter import (
-                render_messages_for_config)
+            from forge.self_play.discovery.qwen_adapter import render_messages_for_config
             cfg_name = self.engine_runtime.info.get("config_name", "")
             rendered = render_messages_for_config(
                 messages, config_name=cfg_name, add_generation_prompt=True)
@@ -169,11 +169,9 @@ class SubAgentService:
         return self._tasks.get(task_id)
 
     def wait_all(self, timeout_s: float = 120) -> dict[str, SubAgentTask]:
-        for tid, fut in list(self._futures.items()):
-            try:
+        for _tid, fut in list(self._futures.items()):
+            with contextlib.suppress(Exception):
                 fut.result(timeout=timeout_s)
-            except Exception:
-                pass
         self._futures.clear()
         return dict(self._tasks)
 
@@ -358,7 +356,7 @@ class TimeService:
 
     def get_fired_timers(self) -> list[dict]:
         fired = []
-        for tid, entry in list(self._timers.items()):
+        for _tid, entry in list(self._timers.items()):
             if entry.status == "fired" and not entry.repeat:
                 fired.append({"timer_id": entry.timer_id,
                               "label": entry.label,
@@ -540,10 +538,8 @@ class BackupService:
             backups = sorted(self.backup_dir.glob("*.zip"),
                              key=lambda p: p.stat().st_mtime, reverse=True)
             for old in backups[MAX_BACKUPS:]:
-                try:
+                with contextlib.suppress(OSError):
                     old.unlink()
-                except OSError:
-                    pass
             self._hub.publish("backup", {"kind": "created",
                                          "path": str(zip_path)})
             return str(zip_path)

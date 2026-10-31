@@ -19,11 +19,11 @@ from forge_gui.api.lora_store import (
     MODE_CATEGORY_MAP,
     TARGET_PRESETS,
     LoRAEntry,
-    parse_category,
     read_adapter_header,
     scan_lora_adapters,
 )
 from forge_gui.api.status_reader import project_root
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -157,10 +157,8 @@ class LoraService:
                         # unload+load under ONE lease — no window where the
                         # engine runs unadapted while status() claims a mode.
                         self._status(f"swapping adapter → {Path(p).name}…")
-                        try:
+                        with contextlib.suppress(Exception):
                             engine.unload_lora()
-                        except Exception:
-                            pass
                     else:
                         self._status(f"loading adapter {Path(p).name}…")
                     try:
@@ -170,10 +168,8 @@ class LoraService:
                         # Roll back: re-attach the previous adapter and
                         # restore _current so status matches the engine.
                         if prev:
-                            try:
+                            with contextlib.suppress(Exception):
                                 engine.load_lora(prev)
-                            except Exception:
-                                pass
                         self._current = prev
                         raise
                     info = engine.lora_info() or {}

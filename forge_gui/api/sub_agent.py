@@ -166,7 +166,7 @@ class SubAgentManager:
 
     def wait_all(self, timeout_s: float = 120) -> dict[str, SubAgentTask]:
         """Wait for all pending sub-agents to complete. Returns all tasks."""
-        for tid, fut in list(self._futures.items()):
+        for _tid, fut in list(self._futures.items()):
             try:
                 fut.result(timeout=timeout_s)
             except Exception:
