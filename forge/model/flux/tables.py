@@ -4,8 +4,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from .helpers import (_MIX1, _MIX2, _group_add, _group_prefix,
-                      _mix64, _s64)
+from .helpers import _MIX1, _MIX2, _group_add, _group_prefix, _mix64, _s64
+
 
 class _GPUCellTables:
     """orders -> open-addressed context-key -> follower-row tables,

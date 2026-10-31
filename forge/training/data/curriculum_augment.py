@@ -22,10 +22,8 @@ from __future__ import annotations
 import random
 import re
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
-
 
 # ─── Curriculum Learning ───
 
@@ -96,7 +94,6 @@ def compute_mtld(words: list[str]) -> float:
 
     # Handle remainder
     if types:
-        remainder_ttr = len(types) / len(types)  # would need full count
         # Simplified: add partial factor
         factors += (len(types) / len(words)) * 0.5
 
@@ -269,7 +266,7 @@ class DataAugmentor:
     def __init__(self, mask_prob: float = 0.15,
                  replace_prob: float = 0.05,
                  fim_prob: float = 0.1,
-                 offset_probs: dict[int, float] = None):
+                 offset_probs: dict[int, float] | None = None):
         self.mask_prob = mask_prob
         self.replace_prob = replace_prob
         self.fim_prob = fim_prob
@@ -309,7 +306,7 @@ class DataAugmentor:
                 break
 
         # Create target with offset (guard against T <= offset)
-        if offset > 1 and T > offset + 1:
+        if offset > 1 and offset + 1 < T:
             target = torch.cat([input_ids[0, offset:],
                                 torch.zeros(offset, dtype=torch.long,
                                            device=input_ids.device)])

@@ -29,7 +29,7 @@ except ImportError:
 
     class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
         def __init__(self, param_groups):
-            super().__init__(param_groups, dict())
+            super().__init__(param_groups, {})
 
         def step(self, closure=None):
             return None

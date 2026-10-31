@@ -296,7 +296,7 @@ class ACBQLinear(QuantizedLinearMixin):
             codes, scales, zp, pad, n_groups = _quantize_int4(w, group_size, correction)
             packed = _pack_int4(codes)
         else:
-            codes, scales, zp, pad, n_groups = _quantize_int2(w, group_size, correction)
+            codes, scales, zp, _pad, _n_groups = _quantize_int2(w, group_size, correction)
             packed = _pack_int2(codes)
 
         obj.weight_packed = packed

@@ -124,8 +124,7 @@ def _extract_python_code(output):
             if s and not s.startswith(("#", "def ", "class ", "import ",
                                        "from ", "print(", "return ",
                                        "if ", "for ", "while ", "else",
-                                       "elif", "    ", "\t")):
-                if not s.endswith((":", ",")): break
+                                       "elif", "    ", "\t")) and not s.endswith((":", ",")): break
             code_lines.append(line)
     if code_lines: return "\n".join(code_lines).strip()
     return output.strip()
@@ -296,7 +295,7 @@ def _gen_random_code(n: int = 3) -> list[dict]:
         ("prime", "is_prime", lambda k: str(_is_prime_num(k))),
     ]
     for i in range(n):
-        tpl_name, func_name, expected_fn = _rng.choice(templates)
+        tpl_name, _func_name, expected_fn = _rng.choice(templates)
         k = _rng.randint(5, 20)
         name = f"rand_code_{tpl_name}_{k}_{i}"
         if _is_banned(name):
@@ -330,9 +329,7 @@ def _factorial(n):
 
 def _is_prime_num(n):
     if n < 2: return False
-    for i in range(2, int(n**0.5) + 1):
-        if n % i == 0: return False
-    return True
+    return all(n % i != 0 for i in range(2, int(n ** 0.5) + 1))
 
 
 def _gen_needle_haystack(n: int = 3) -> list[dict]:

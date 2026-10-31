@@ -39,7 +39,7 @@ class ChunkedPrefiller:
         self,
         input_ids: torch.Tensor,
         use_cache: bool = True,
-        on_chunk_done: callable = None,
+        on_chunk_done: callable | None = None,
     ) -> tuple[torch.Tensor, list]:
         """Process a long prompt in chunks, accumulating KV cache.
 
@@ -161,14 +161,14 @@ class HybridChunkedPrefiller(ChunkedPrefiller):
         self,
         input_ids: torch.Tensor,
         use_cache: bool = True,
-        on_chunk_done: callable = None,
+        on_chunk_done: callable | None = None,
     ) -> tuple[torch.Tensor, list]:
         """Prefill with adaptive chunking.
 
         If decode is active: use chunked prefill (interleave with decode).
         If decode is NOT active: use continuous prefill (single forward pass).
         """
-        B, T = input_ids.shape
+        _B, T = input_ids.shape
 
         # Decision: chunk only when decode is active AND prompt is long
         use_chunking = self._decode_active and should_chunk(T, self.chunk_size)

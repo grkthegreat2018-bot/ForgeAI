@@ -1,9 +1,9 @@
 """Benchmarking, stats, and diagnostics mixin for ForgeEngine."""
 import time
 
-from .engine_common import *  # noqa: F403
-from .errors import ConfigurationError  # noqa: F401
-from .diagnostics import build_health_report  # noqa: F401
+import torch
+
+from .diagnostics import build_health_report
 from .engine_common import (  # noqa: F401
     _CKPT_CACHE_MAX,
     _DEFAULT_CPU_MEMORY_BYTES,
@@ -19,6 +19,7 @@ from .engine_common import (  # noqa: F401
     _tokenizer_for_vocab,
     logger,
 )
+from .errors import ConfigurationError
 
 
 class _DiagnosticsMixin:

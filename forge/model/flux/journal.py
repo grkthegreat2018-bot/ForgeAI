@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
+
 class FluxJournal:
     """Append-only provenance log for every weight mutation.
 
@@ -22,9 +23,20 @@ class FluxJournal:
                                       targets _wR[regime]/_hmxR[regime]
     """
 
-    __slots__ = ("entries", "cap", "dropped", "vec_ring", "vec_cursor",
-                 "vec_cap", "w_ring", "w_cursor", "w_cap",
-                 "block_bytes", "block_cap", "dropped_blocks")
+    __slots__ = (
+        "block_bytes",
+        "block_cap",
+        "cap",
+        "dropped",
+        "dropped_blocks",
+        "entries",
+        "vec_cap",
+        "vec_cursor",
+        "vec_ring",
+        "w_cap",
+        "w_cursor",
+        "w_ring",
+    )
 
     def __init__(self, cap: int, vec_cap: int, topic_dim: int,
                  n_chan: int, block_cap: int = 1 << 30):
@@ -118,7 +130,11 @@ class FluxJournal:
 def _block_bytes(blk: dict) -> int:
     """Rough retained-payload estimate for a "bc" block: tensor/array
     nbytes + container overhead for sub-journal tuples, epi pairs, and
-    dict snapshots.  A heuristic bound, not exact accounting."""
+    dict snapshots.  A heuristic bound, not exact accounting.
+
+    Flat per-level walk only — the old recursive version descended
+    into ~100k-entry sub-journals every seal (~170M isinstance calls,
+    a third of ingest wall time at 15M scale)."""
     total = 512
     stack = [blk]
     while stack:
@@ -134,8 +150,14 @@ def _block_bytes(blk: dict) -> int:
             total += 232 + 96 * len(x)
             stack.extend(x.values())
         elif isinstance(x, (list, tuple)):
-            total += 56 + 64 * len(x)
-            stack.extend(x)
+            n = len(x)
+            if n > 64:
+                # large flat payload (sub-journal entry tuples, epi
+                # pairs): size as ~tuple-entry cost, no per-elem walk
+                total += 56 + 288 * n
+            else:
+                total += 56 + 64 * n
+                stack.extend(x)
         elif isinstance(x, np.ndarray):
             total += x.nbytes
     return total

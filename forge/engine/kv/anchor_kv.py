@@ -218,7 +218,7 @@ class AnchorKVCache(KVCacheStrategy):
                 continue
             k, v = entry
             T = k.shape[-2]
-            if T <= self.budget:
+            if self.budget >= T:
                 out.append(entry)
                 continue
             keep, _, _, _, _ = self._plan(k, v)
@@ -342,7 +342,7 @@ class AnchorKVCache(KVCacheStrategy):
         total = self.seq_len
         k = self.k_cache[:, :, :total]
         v = self.v_cache[:, :, :total]
-        keep, anchor_idx, a_idx, sk, sv = self._plan(k, v)
+        keep, _anchor_idx, a_idx, sk, sv = self._plan(k, v)
         new_len = int(keep.sum().item())
 
         # Current slots' original positions (identity before the first

@@ -125,7 +125,7 @@ class LaMPE:
         Returns:
             rotated: (B, n_heads, T, head_dim)
         """
-        B, n_h, T, hd = x.shape
+        _B, _n_h, T, hd = x.shape
         device = x.device
         d = hd // 2
 

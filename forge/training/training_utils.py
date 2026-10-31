@@ -1172,6 +1172,7 @@ def vram_gb(device="cuda") -> float:
 
 def write_status_json(path, data: dict):
     """Atomically write a status/progress JSON file (for the GUI monitor)."""
+    _fanout_metrics(data)
     if not path:
         return
     parent = os.path.dirname(str(path))
@@ -1188,6 +1189,87 @@ def write_heartbeat(path):
     import time as _time
 
     write_status_json(path, {"ts": _time.time()})
+
+
+# ---------------------------------------------------------------------------
+# Optional metrics sinks (COMPETITIVE_AUDIT A9): every runner funnels its
+# heartbeat through write_status_json, so a fanout here covers SFT/DPO/CPT/
+# RLVR with zero call-site changes. Opt-in via env vars — no hard deps:
+#   FORGE_WANDB=1            -> wandb.init(project=FORGE_WANDB_PROJECT|"forgeai")
+#   FORGE_WANDB_NAME=name    -> run name
+#   FORGE_TB_DIR=path        -> torch.utils.tensorboard.SummaryWriter(path)
+# ---------------------------------------------------------------------------
+
+_METRICS = {"wandb": None, "tb": None, "tried": False, "step": 0}
+
+
+def _metrics_sinks_init():
+    if _METRICS["tried"]:
+        return
+    _METRICS["tried"] = True
+    if os.environ.get("FORGE_WANDB"):
+        try:
+            import wandb
+            _METRICS["wandb"] = wandb.init(
+                project=os.environ.get("FORGE_WANDB_PROJECT", "forgeai"),
+                name=os.environ.get("FORGE_WANDB_NAME") or None,
+                reinit=True)
+        except Exception as e:
+            print(f"[metrics] wandb unavailable ({e}); file status only")
+    tb_dir = os.environ.get("FORGE_TB_DIR")
+    if tb_dir:
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+            _METRICS["tb"] = SummaryWriter(tb_dir)
+        except Exception as e:
+            print(f"[metrics] tensorboard unavailable ({e}); "
+                  "file status only")
+
+
+def _fanout_metrics(data: dict):
+    try:
+        _metrics_sinks_init()
+        wb, tb = _METRICS["wandb"], _METRICS["tb"]
+        if wb is None and tb is None:
+            return
+        scalars = {k: float(v) for k, v in data.items()
+                   if isinstance(v, (int, float))
+                   and not isinstance(v, bool) and k != "ts"}
+        if not scalars:
+            return
+        step = int(data.get("step") or data.get("global_step")
+                   or _METRICS["step"])
+        _METRICS["step"] = step + 1
+        if wb is not None:
+            try:
+                wb.log(scalars, step=step)
+            except Exception:
+                pass
+        if tb is not None:
+            for k, v in scalars.items():
+                try:
+                    tb.add_scalar(k, v, step)
+                except Exception:
+                    pass
+            tb.flush()
+    except Exception:
+        pass  # metrics are best-effort; never break a training run
+
+
+def close_metrics():
+    """Flush/finish optional metric sinks (call at runner teardown)."""
+    wb, tb = _METRICS["wandb"], _METRICS["tb"]
+    _METRICS["wandb"] = _METRICS["tb"] = None
+    if wb is not None:
+        try:
+            wb.finish()
+        except Exception:
+            pass
+    if tb is not None:
+        try:
+            tb.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

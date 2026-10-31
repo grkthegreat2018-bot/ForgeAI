@@ -80,8 +80,12 @@ class GroupedLatentAttention(nn.Module):
         # K/V down-projection: d_model -> latent_dim (shared for K and V)
         self.kv_down_proj = nn.Linear(d_model, self.latent_dim, bias=attn_bias)
         # K/V up-projections: latent_dim -> full_kv_dim
-        self.k_up_proj = nn.Linear(self.latent_dim, self.full_kv_dim, bias=False)
-        self.v_up_proj = nn.Linear(self.latent_dim, self.full_kv_dim, bias=False)
+        # bias follows attn_bias — Qwen-family ports carry the original
+        # k/v biases here (k = W_KC·latent + b_k).
+        self.k_up_proj = nn.Linear(self.latent_dim, self.full_kv_dim,
+                                   bias=attn_bias)
+        self.v_up_proj = nn.Linear(self.latent_dim, self.full_kv_dim,
+                                   bias=attn_bias)
         # Output projection
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
 
@@ -105,6 +109,7 @@ class GroupedLatentAttention(nn.Module):
         # When gate=0, up-projections are identity and we store full KV.
         # When gate>0, we store only the latent and up-project on read.
         self.compression_gate = nn.Parameter(torch.zeros(1, dtype=torch.float32))
+        self._identity_cache: bool | None = None
 
         # Decoupled RoPE key: separate small projection for positional K
         # Outputs head_dim (sliced to rope_dim in forward) for backward compat.
@@ -114,8 +119,21 @@ class GroupedLatentAttention(nn.Module):
 
     @property
     def _identity(self) -> bool:
-        """Check dynamically so load_state_dict with gate>0 activates full path."""
-        return self.compression_gate.item() == 0.0
+        """Check dynamically so load_state_dict with gate>0 activates full path.
+
+        Cached in eval mode: the raw .item() is a GPU sync + dynamo graph
+        break every layer every forward (24x/token), which also poisons
+        breakable-CUDA-graph capture windows. Training path stays dynamic."""
+        if self.training or self._identity_cache is None:
+            v = self.compression_gate.item() == 0.0
+            if not self.training:
+                self._identity_cache = v
+            return v
+        return self._identity_cache
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        self._identity_cache = None
+        super()._load_from_state_dict(*args, **kwargs)
 
     def set_identity(self, identity: bool):
         """Toggle identity (lossless) vs. full GLA mode."""
@@ -125,6 +143,7 @@ class GroupedLatentAttention(nn.Module):
         else:
             with torch.no_grad():
                 self.compression_gate.fill_(1.0)
+        self._identity_cache = None
 
     def _repeat_kv(self, x):
         return _repeat_kv_shared(x, self.n_rep)
@@ -134,7 +153,7 @@ class GroupedLatentAttention(nn.Module):
                 attention_bias: torch.Tensor | None = None,
                 position_ids: torch.Tensor | None = None,
                 cu_seqlens: torch.Tensor | None = None):
-        B, T, C = x.shape
+        B, T, _C = x.shape
         hd = self.head_dim
 
         if self._identity:
@@ -155,9 +174,17 @@ class GroupedLatentAttention(nn.Module):
                 past_len = preallocated_cache.position
                 q = self.rope(q, offset=past_len, position_ids=position_ids)
                 k = self.rope(k, offset=past_len, position_ids=position_ids)
-                preallocated_cache.append(layer_idx, k, v)
-                k = preallocated_cache.k_caches[layer_idx][:, :, :past_len + T]
-                v = preallocated_cache.v_caches[layer_idx][:, :, :past_len + T]
+                if preallocated_cache.pos_t is not None and T == 1:
+                    # Graph-safe: device-indexed write + full-buffer read.
+                    # Future slots are masked by attention_bias — required
+                    # for CUDA-graph decode capture (fixed shapes, all ops
+                    # tensor-driven).
+                    preallocated_cache.append_t(layer_idx, k, v)
+                    k, v = preallocated_cache.kv_view(layer_idx)
+                else:
+                    preallocated_cache.append(layer_idx, k, v)
+                    k = preallocated_cache.k_caches[layer_idx][:, :, :past_len + T]
+                    v = preallocated_cache.v_caches[layer_idx][:, :, :past_len + T]
             else:
                 past_len = past_key_value[0].shape[-2] if past_key_value is not None else 0
                 q = self.rope(q, offset=past_len, position_ids=position_ids)
@@ -220,9 +247,14 @@ class GroupedLatentAttention(nn.Module):
         # Cache: store reconstructed K (nope+rope) and V for compatibility
         # In production, would cache only latent + k_rope (much smaller).
         if preallocated_cache is not None:
-            preallocated_cache.append(layer_idx, k_attn, v)
-            k_attn = preallocated_cache.k_caches[layer_idx][:, :, :past_len + T]
-            v = preallocated_cache.v_caches[layer_idx][:, :, :past_len + T]
+            if preallocated_cache.pos_t is not None and T == 1:
+                # Graph-safe write + full-buffer read (see identity path).
+                preallocated_cache.append_t(layer_idx, k_attn, v)
+                k_attn, v = preallocated_cache.kv_view(layer_idx)
+            else:
+                preallocated_cache.append(layer_idx, k_attn, v)
+                k_attn = preallocated_cache.k_caches[layer_idx][:, :, :past_len + T]
+                v = preallocated_cache.v_caches[layer_idx][:, :, :past_len + T]
         else:
             if past_key_value is not None:
                 k_attn = torch.cat([past_key_value[0], k_attn], dim=-2)

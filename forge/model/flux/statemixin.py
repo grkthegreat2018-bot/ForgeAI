@@ -1,28 +1,17 @@
 """Context/ring/episodic/knn state helpers for FluxLM."""
 from __future__ import annotations
 
-import json
 import math
-import time
 from collections import deque
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
 
-from .helpers import (_HASH_P, _MASK64, _MIX1, _MIX2,
-                      _group_totals, _load_teacher_embedding, _mix64,
-                      _s64, _scatter_sum)
-from .config import FluxConfig
-from .journal import FluxJournal
-from .tables import _GPUCellTables
+from .helpers import _MIX1, _group_totals, _mix64, _s64
 from .kernels import HAS_TRITON
 
 if HAS_TRITON:
-    from .kernels import (_flux_deep_votes_kernel,
-                          _flux_logit_tail_kernel)
+    pass
 
 
 class _StateMixin:
@@ -404,9 +393,8 @@ class _StateMixin:
             if c.thin_share > 0:
                 if top_sh < c.thin_share:
                     continue
-            elif c.evidence_share > 0:
-                if cell and (tot * top_sh ** c.evidence_share) <= tt:
-                    continue
+            elif c.evidence_share > 0 and cell and (tot * top_sh ** c.evidence_share) <= tt:
+                continue
             return 1
         return 0
 
@@ -771,7 +759,6 @@ class _StateMixin:
         journal=False is the bulk path: the "bc" block's gsyn
         pre-state snapshot covers undo, so the factor-ring copies
         (per-token D2H syncs) are skipped."""
-        c = self.config
         Rm = self._Reff if self._Reff is not None else self._R
         self._gsyn_write_vec(k, Rm[x].float(), s, journal=journal)
 
@@ -1075,7 +1062,6 @@ class _StateMixin:
         z, h, o = self._gsd_forward(q)
         lp = self._gsd_logits(q)
         topv, topi = lp.topk(min(top, lp.shape[0]))
-        ps = self._gsd_params()
         hd = int(c.gsyn_deep_hidden)
         gd = torch.Generator().manual_seed(c.seed ^ 0x6CE13)
         w0 = (torch.randn(hd, c.gsyn_dim, generator=gd)
@@ -1603,7 +1589,6 @@ class _StateMixin:
         its FluxBank and free their hot slots.  Cold rows keep voting
         through the order channel (see _cold_cell) - this shrinks hot
         footprint without forgetting."""
-        c = self.config
         bank = self._banks.get(k)
         if bank is None or n_spill <= 0:
             return 0
@@ -1804,39 +1789,46 @@ class _StateMixin:
         se_l = se.tolist()
         ER = self._epi_pos.shape[1]
         LC = len(c.cert_orders)
-        for kk_, s, f in zip(kk_list, se_l, fe_l):
-            if not f:
-                continue
-            dq = self._epi.get(kk_)
+        # host-build all payload rows, then ONE batched H2D per tensor:
+        # the old per-key path did ER device-scalar writes + a row copy
+        # per dirty key — thousands of micro-ops per ingest seal.
+        pos_h = np.full((len(kk_list), ER), -1, dtype=np.int32)
+        succ_h = np.full((len(kk_list), ER), -1, dtype=np.int32)
+        cert_h = np.zeros((len(kk_list), ER, LC),
+                          dtype=np.int64) if LC else None
+        cnt_h = np.zeros(len(kk_list), dtype=np.int64)
+        live_i = [i for i, f in enumerate(fe_l) if f]
+        dead_i = []
+        for i in live_i:
+            dq = self._epi.get(kk_list[i])
             if not dq:
-                gt.tkeys[oi, s] = 0
-                gt.traw[oi, s] = 0
-                gt.tocc[oi, s] = 0.0
-                self._epi_pos[s].fill_(-1)
-                self._epi_succ[s].fill_(-1)
-                if LC:
-                    self._epi_cert[s].zero_()
-                self._epi_cnt[s] = 0
-                gt.used[oi] -= 1
+                dead_i.append(i)
                 continue
-            pos = torch.full((ER,), -1, dtype=torch.int32,
-                             device=self._dev)
-            succ = torch.full((ER,), -1, dtype=torch.int32,
-                              device=self._dev)
-            cert = torch.zeros((ER, LC), dtype=torch.int64,
-                               device=self._dev) if LC else None
             for j, ent in enumerate(list(dq)[-ER:]):
-                pos[j] = int(ent[0])
-                succ[j] = int(ent[1])
+                pos_h[i, j] = int(ent[0])
+                succ_h[i, j] = int(ent[1])
                 if LC:
                     for l, cv in enumerate(ent[2] or ()):
-                        cert[j, l] = _s64(cv)
-            self._epi_pos[s] = pos
-            self._epi_succ[s] = succ
-            if LC:
-                self._epi_cert[s] = cert
-            self._epi_cnt[s] = min(len(dq), ER)
-            gt.tocc[oi, s] = float(self._epi_cnt[s])
+                        cert_h[i, j, l] = _s64(cv)
+            cnt_h[i] = min(len(dq), ER)
+        dev = self._dev
+        se_t = torch.tensor([se_l[i] for i in live_i],
+                            dtype=torch.int64, device=dev)
+        idx_i = np.asarray(live_i, dtype=np.int64)
+        self._epi_pos[se_t] = torch.from_numpy(pos_h[idx_i]).to(dev)
+        self._epi_succ[se_t] = torch.from_numpy(succ_h[idx_i]).to(dev)
+        if LC:
+            self._epi_cert[se_t] = torch.from_numpy(
+                cert_h[idx_i]).to(dev)
+        self._epi_cnt[se_t] = torch.from_numpy(cnt_h[idx_i]).to(dev)
+        gt.tocc[oi, se_t] = torch.from_numpy(
+            cnt_h[idx_i].astype(np.float32)).to(dev)
+        if dead_i:
+            dead_t = torch.tensor([se_l[i] for i in dead_i],
+                                  dtype=torch.int64, device=dev)
+            gt.tkeys[oi, dead_t] = 0
+            gt.traw[oi, dead_t] = 0
+            gt.used[oi] -= len(dead_i)
 
     def _epi_sync_row(self, key: int) -> None:
         """GPU mirror upkeep: rewrite the episodic row for ``key`` from
@@ -1901,9 +1893,15 @@ class _StateMixin:
             take = min(len(self._epi_fifo),
                        max(c.epi_evict_scan, over))
             batch = [self._epi_fifo.popleft() for _ in range(take)]
-            live = [kp for kp in batch
-                    if any(e[0] == kp[1]
-                           for e in self._epi.get(kp[0], ()))]
+            pos_sets: dict[int, set] = {}
+            live = []
+            for kp in batch:
+                s = pos_sets.get(kp[0])
+                if s is None:
+                    s = pos_sets[kp[0]] = {
+                        e[0] for e in self._epi.get(kp[0], ())}
+                if kp[1] in s:
+                    live.append(kp)
             if len(live) <= over:                # mostly tombstones
                 for key, pos in live:
                     self._epi_drop(key, pos)

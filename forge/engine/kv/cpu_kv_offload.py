@@ -392,8 +392,10 @@ class DiskKVCache(KVCacheStrategy):
         # Reload existing spool if present and persistent.
         if self._persist and os.path.exists(self._disk_k_path):
             try:
-                self.disk_k = torch.load(self._disk_k_path, map_location="cpu")
-                self.disk_v = torch.load(self._disk_v_path, map_location="cpu")
+                self.disk_k = torch.load(self._disk_k_path, map_location="cpu",
+                                         weights_only=True)
+                self.disk_v = torch.load(self._disk_v_path, map_location="cpu",
+                                         weights_only=True)
             except Exception:
                 logger.debug("Corrupt disk KV spool, starting fresh", exc_info=True)
 

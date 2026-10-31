@@ -1,7 +1,7 @@
 """STRATA configuration - block-store hyperparameters (M0 substrate)."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass

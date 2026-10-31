@@ -213,7 +213,7 @@ class _Int8TrainableFn(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_y):
-        x, w_int8, scale, w_master, y = ctx.saved_tensors
+        x, w_int8, scale, _w_master, y = ctx.saved_tensors
         gdt = grad_y.dtype
         # grad_x = grad_y @ w_dequantized (on GPU, using int8 weight)
         w_dq = (w_int8.to(gdt) * scale.to(gdt))
@@ -365,11 +365,10 @@ class BitNetLinear(nn.Module):
             state_dict, prefix, local_metadata, strict,
             missing_keys, unexpected_keys, error_msgs)
 
-        if had_weight and self.qscale is not None:
-            if not self.weight.is_meta:
-                with torch.no_grad():
-                    self.qscale.copy_(
-                        self.weight.abs().mean().clamp(min=_TERNARY_EPS) / 0.7)
+        if had_weight and self.qscale is not None and not self.weight.is_meta:
+            with torch.no_grad():
+                self.qscale.copy_(
+                    self.weight.abs().mean().clamp(min=_TERNARY_EPS) / 0.7)
             # else: weight is on meta, skip qscale update (will be set after assign)
 
     def load_prequantized(self, weight_int8: torch.Tensor, qscale: float | torch.Tensor):

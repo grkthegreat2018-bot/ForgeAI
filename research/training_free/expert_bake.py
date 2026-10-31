@@ -89,8 +89,8 @@ def decompress_expert(state: dict[str, torch.Tensor],
             out[part] = (U * S.unsqueeze(0)) @ Vh
 
     if not out and any(k.startswith(("up.", "down.")) for k in state):
-        print(f"  [ExpertBake] Skipping LatentMoE-format expert "
-              f"(latent-space, not foldable into dense SwiGLU FFN)")
+        print("  [ExpertBake] Skipping LatentMoE-format expert "
+              "(latent-space, not foldable into dense SwiGLU FFN)")
     return out
 
 

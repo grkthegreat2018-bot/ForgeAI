@@ -216,7 +216,7 @@ class SequenceAwareSplitWrapper:
         def split_forward(self, x, past_key_value=None, use_cache=False,
                           preallocated_cache=None, layer_idx=0,
                           attention_bias=None, position_ids=None):
-            B, T, C = x.shape
+            B, T, _C = x.shape
             hd = self.head_dim
 
             # Only use split attention for decode (T=1) with long context
@@ -262,6 +262,11 @@ class SequenceAwareSplitWrapper:
                 n_splits=0,  # auto-compute
                 n_sms=self._split_n_sms,
             )
+            # _finish_attn applies the LFM3 per-head sigmoid output gate
+            # (gate_proj) — out_proj alone would drop it. GTA/GLA have
+            # no gate — keep the raw out_proj path for them.
+            if getattr(self, '_finish_attn', None) is not None:
+                return self._finish_attn(x, out), new_kv
             out = out.transpose(1, 2).reshape(B, T, -1)
             return self.out_proj(out), new_kv
 

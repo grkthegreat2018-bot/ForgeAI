@@ -1,7 +1,8 @@
 """FluxLM configuration - the complete hyperparameter surface."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
 
 @dataclass
 class FluxConfig:

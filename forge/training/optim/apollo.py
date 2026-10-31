@@ -74,9 +74,9 @@ class APOLLO(Optimizer):
             raise ValueError(f"Invalid beta2: {betas[1]}")
         if rank < 1:
             raise ValueError(f"Invalid rank: {rank}")
-        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay,
-                        rank=rank, scale=scale, scale_weight=scale_weight,
-                        proj_freq=proj_freq)
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
+                        "rank": rank, "scale": scale, "scale_weight": scale_weight,
+                        "proj_freq": proj_freq}
         super().__init__(params, defaults)
 
     @torch.no_grad()

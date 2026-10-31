@@ -3,18 +3,17 @@
 Layer map: session_cache.py = per-session KV reuse implementation;
 session_manager.py = server-side history + batching (different layer).
 This mixin is the engine-facing surface (begin/continue/end_session)."""
-from .engine_common import *  # noqa: F403
-from forge.model_loader import unpack_output_with_kv  # noqa: F401
-from .prefix_cache import (
-    apply_recurrent_state_prefix as _apply_recurrent_state_prefix,
-    capture_recurrent_state as _capture_recurrent_state,
-)
+import torch
+
+from forge.model_loader import unpack_output_with_kv
+
 from .engine_common import (  # noqa: F401
     _CKPT_CACHE_MAX,
     _DEFAULT_CPU_MEMORY_BYTES,
     _DEFAULT_EOS_TOKEN_IDS,
     _QWEN_TOKENIZER_PATH,
     _QWEN_VOCAB,
+    SamplingParams,
     _checkpoint_metadata_cache,
     _checkpoint_size_cache,
     _ckpt_cache_lock,
@@ -24,6 +23,12 @@ from .engine_common import (  # noqa: F401
     _tokenizer_for_vocab,
     _truncate_at_stop,
     logger,
+)
+from .prefix_cache import (
+    apply_recurrent_state_prefix as _apply_recurrent_state_prefix,
+)
+from .prefix_cache import (
+    capture_recurrent_state as _capture_recurrent_state,
 )
 
 

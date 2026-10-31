@@ -101,7 +101,7 @@ class MTPHead(nn.Module):
 
         tokens = []
         logits_list = []
-        for k, logits in enumerate(all_logits):
+        for _k, logits in enumerate(all_logits):
             l = logits[:, -1, :]  # (B, vocab)
             if temperature == 0:
                 tok = l.argmax(dim=-1, keepdim=True)
@@ -179,7 +179,7 @@ class MTPTrainer:
         self.current_step += 1
         self.current_n = self._get_current_n()
 
-        B, T = input_ids.shape
+        _B, T = input_ids.shape
 
         # Forward pass through main model.
         model_out = self.model(input_ids)
@@ -324,13 +324,19 @@ class MTPModule(nn.Module):
     """
 
     def __init__(self, d_model: int, vocab_size: int, n_heads: int = 2,
-                 loss_weight: float = 0.3, identity_init: bool = True):
+                 loss_weight: float = 0.3, identity_init: bool = True,
+                 adapter_heads: bool = False):
         super().__init__()
         self.d_model = d_model
         self.vocab_size = vocab_size
         self.n_heads = n_heads
         self.loss_weight = loss_weight
         self.identity_init = identity_init
+        # V14: DeepSeek-MTP style — each head is a small d→d projection and
+        # ALL heads share the tied main vocab head. ~n×d² params instead of
+        # n×d×V (671M → 26M at d=2560,V=65536,n=4) and the vocab weight is
+        # read once per draft step regardless of head count.
+        self.adapter_heads = adapter_heads
 
         # Shared trunk: project hidden state → prediction representation.
         # Identity-ish init: Linear is near-zero (so trunk_out ≈ hidden),
@@ -345,10 +351,12 @@ class MTPModule(nn.Module):
             self.trunk[2].weight.fill_(1.0)
             self.trunk[2].bias.zero_()
 
-        # N independent output heads. Zero-init so they predict uniform
-        # distribution initially (zero MTP loss contribution).
+        # N output heads. Zero-init so they predict uniform distribution
+        # initially (zero MTP loss contribution). Adapter mode: d→d
+        # projections, output always goes through the tied vocab head.
+        head_out = d_model if adapter_heads else vocab_size
         self.heads = nn.ModuleList([
-            nn.Linear(d_model, vocab_size, bias=False)
+            nn.Linear(d_model, head_out, bias=False)
             for _ in range(n_heads)
         ])
         for head in self.heads:
@@ -374,11 +382,26 @@ class MTPModule(nn.Module):
         """
         self._tied_source = (parent, attr)
         self._tied_head_weight = getattr(getattr(parent, attr), "weight", None)
-        self.heads[0] = None  # type: ignore[assignment]
+        if not self.adapter_heads:
+            self.heads[0] = None  # type: ignore[assignment]
 
-    def forward(self, hidden: torch.Tensor, token_embeds: torch.Tensor,
-                targets: torch.Tensor) -> tuple[torch.Tensor | None, list]:
-        """Compute MTP auxiliary loss.
+    def _resolve_tied_weight(self, device: torch.device):
+        w = self._tied_head_weight
+        if self._tied_source is not None:
+            parent, attr = self._tied_source
+            w = getattr(getattr(parent, attr), "weight", None) or w
+        if w is not None and w.device != device:
+            w = nn.Parameter(w.to(device), requires_grad=w.requires_grad)
+        return w
+
+    def forward(self, hidden: torch.Tensor,
+                token_embeds: torch.Tensor | None = None,
+                targets: torch.Tensor | None = None,
+                ) -> tuple[torch.Tensor | None, list] | list:
+        """Compute MTP auxiliary loss — or draft logits when targets is None.
+
+        Draft mode (called by mtp_selfspec decoding as mtp(hidden)): returns
+        the per-head logits list directly, no loss.
 
         Args:
             hidden: (B, T, d_model) final hidden states from the model.
@@ -391,7 +414,8 @@ class MTPModule(nn.Module):
             sequence too short), logits_list is the list of per-head logits.
         """
         T = hidden.size(1)
-        if self.n_heads + 1 >= T:
+        draft_mode = targets is None
+        if not draft_mode and self.n_heads + 1 >= T:
             return None, []
 
         trunk_out = self.trunk(hidden)  # (B, T, d_model)
@@ -400,35 +424,39 @@ class MTPModule(nn.Module):
 
         mtp_loss = torch.tensor(0.0, device=hidden.device, dtype=hidden.dtype)
         logits_list = []
+        tied_w = self._resolve_tied_weight(hidden.device)
 
         for k in range(self.n_heads):
             # Head k predicts token at position t + k + 1
             offset = k + 1
-            if offset + 1 >= T:
-                break
 
-            # Use trunk_out at position t to predict target at t + offset
-            pred_input = trunk_out[:, :-offset, :]  # (B, T-offset, d_model)
-            target_k = targets[:, offset:]  # (B, T-offset)
+            if draft_mode:
+                # Drafting: every head reads the LAST position's features.
+                pred_input = trunk_out[:, -1:, :]  # (B, 1, d_model)
+            else:
+                if offset + 1 >= T:
+                    break
+                # Use trunk_out at position t to predict target at t + offset
+                pred_input = trunk_out[:, :-offset, :]  # (B, T-offset, d_model)
+                target_k = targets[:, offset:]  # (B, T-offset)
 
-            if self._tied_head_weight is not None and k == 0:
-                # Resolve tied weight: prefer live source (survives .to()),
-                # fall back to stored reference with device fix.
-                if self._tied_source is not None:
-                    parent, attr = self._tied_source
-                    w = getattr(getattr(parent, attr), "weight", None)
-                    if w is None:
-                        w = self._tied_head_weight
-                else:
-                    w = self._tied_head_weight
-                if w.device != pred_input.device:
-                    w = nn.Parameter(w.to(pred_input.device), requires_grad=w.requires_grad)
-                logits_k = F.linear(pred_input, w)
+            if self.adapter_heads:
+                # d→d adapter + shared tied vocab head (all heads).
+                if tied_w is None:
+                    raise RuntimeError(
+                        "MTPModule(adapter_heads=True) requires a tied "
+                        "vocab head — call tie_head_to_model/"
+                        "tie_head_from_module first.")
+                logits_k = F.linear(self.heads[k](pred_input), tied_w)
+            elif tied_w is not None and k == 0:
+                logits_k = F.linear(pred_input, tied_w)
             else:
                 logits_k = self.heads[k](pred_input)
 
             logits_list.append(logits_k)
 
+            if draft_mode:
+                continue
             # CE loss for this head
             loss_k = F.cross_entropy(
                 logits_k.reshape(-1, logits_k.size(-1)),
@@ -436,6 +464,9 @@ class MTPModule(nn.Module):
                 ignore_index=-100,
             )
             mtp_loss = mtp_loss + loss_k
+
+        if draft_mode:
+            return logits_list
 
         if self.n_heads > 0:
             mtp_loss = mtp_loss * self.loss_weight / self.n_heads

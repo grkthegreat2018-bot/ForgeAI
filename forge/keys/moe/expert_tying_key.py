@@ -127,8 +127,8 @@ class ExpertTyingKey(Key):
             if odd_idx not in moe_layers or even_idx not in moe_layers:
                 continue
 
-            even_name, even_moe = moe_layers[even_idx]
-            odd_name, odd_moe = moe_layers[odd_idx]
+            _even_name, even_moe = moe_layers[even_idx]
+            _odd_name, odd_moe = moe_layers[odd_idx]
 
             # Measure similarity between expert weights
             if similarity_threshold > 0:

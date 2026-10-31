@@ -80,7 +80,7 @@ def fused_qk_norm_rope_cache(
     Returns:
         (q_out, k_out, v_out) — normalized + RoPE'd Q/K, and V (unchanged)
     """
-    B, n_heads, T, hd = q.shape
+    _B, _n_heads, T, _hd = q.shape
     k.shape[1]
 
     # Slice the RoPE caches to this chunk's absolute positions. The fused
@@ -105,8 +105,8 @@ def fused_qk_norm_rope_cache(
     if kv_cache_k is not None and kv_cache_v is not None:
         if kv_quant_bits is not None:
             # Quantize K/V before writing to cache
-            k_quant, k_scales = _quantize_kv(k_out, bits=kv_quant_bits)
-            v_quant, v_scales = _quantize_kv(v, bits=kv_quant_bits)
+            k_quant, _k_scales = _quantize_kv(k_out, bits=kv_quant_bits)
+            v_quant, _v_scales = _quantize_kv(v, bits=kv_quant_bits)
             kv_cache_k[:, :, cache_position:cache_position + T] = k_quant
             kv_cache_v[:, :, cache_position:cache_position + T] = v_quant
         else:
@@ -214,7 +214,19 @@ class FusedQKNormRopeCacheWrapper:
                     preallocated_cache=preallocated_cache, layer_idx=layer_idx,
                     attention_bias=attention_bias, position_ids=position_ids,
                     cu_seqlens=cu_seqlens)
-            B, T, C = x.shape
+            if (preallocated_cache is not None
+                    and getattr(preallocated_cache, "pos_t", None)
+                    is not None):
+                # Static-KV graph decode: this fused path keys everything
+                # off a python-int position (frozen at capture) and slices
+                # KV to it, which both breaks the full-buffer contract and
+                # shape-crashes against the bucket-wide attention_bias.
+                # The original forward honors pos_t (append_t + kv_view).
+                return original_forward(
+                    x, past_key_value=past_key_value, use_cache=use_cache,
+                    preallocated_cache=preallocated_cache, layer_idx=layer_idx,
+                    attention_bias=attention_bias, position_ids=position_ids)
+            B, T, _C = x.shape
             hd = self.head_dim
 
             # Q/K/V projection
@@ -303,6 +315,12 @@ class FusedQKNormRopeCacheWrapper:
                     q, k_full, v_full, attn_mask=mask)
             else:
                 out = F.scaled_dot_product_attention(q, k_full, v_full, is_causal=T > 1)
+            # Route through _finish_attn so the LFM3 per-head sigmoid
+            # output gate (gate_proj) is applied — skipping it silently
+            # changes model semantics vs the unfused forward. GTA/GLA
+            # have no gate — keep the raw out_proj path for them.
+            if getattr(self, '_finish_attn', None) is not None:
+                return self._finish_attn(x, out), new_kv
             out = out.transpose(1, 2).reshape(B, T, -1)
             return self.out_proj(out), new_kv
 

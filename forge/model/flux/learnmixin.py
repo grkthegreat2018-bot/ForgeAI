@@ -1,35 +1,36 @@
 """Write paths for FluxLM (ingest/teach/fused steps)."""
 from __future__ import annotations
 
-import json
 import math
+import os
 import time
 from collections import deque
-from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
-
-import os
 
 _FLUX_DEBUG_NAN = bool(os.environ.get("FLUX_DEBUG_NAN"))
 
-from .helpers import (_HASH_P, _MASK64, _MIX1, _MIX2,
-                      _MIX1U, _MIX2U,
-                      _group_add, _group_apply, _group_prefix,
-                      _group_sort, _group_totals,
-                      _load_teacher_embedding, _mix64, _mix64_np,
-                      _mix64_py, _s64, _scatter_sum)
-from .config import FluxConfig
-from .journal import FluxJournal
-from .tables import _GPUCellTables
+from .helpers import (
+    _MIX1,
+    _MIX1U,
+    _MIX2,
+    _MIX2U,
+    _group_add,
+    _group_apply,
+    _group_prefix,
+    _group_sort,
+    _load_teacher_embedding,
+    _mix64,
+    _mix64_np,
+    _mix64_py,
+    _s64,
+)
 from .kernels import HAS_TRITON
 
 if HAS_TRITON:
-    from .kernels import (_flux_deep_votes_kernel,
-                          _flux_logit_tail_kernel)
+    pass
 
 
 class _LearnMixin:
@@ -302,7 +303,7 @@ class _LearnMixin:
         # context ending at ``end`` - the entry (ctx_end, succ, certs)
         # rides the phase-1 probe slot, so it votes even after the ring
         # wraps.  Predict reads still come from the phase-2 probe.
-        slot2, found2, evict2, _live2, cok2, dok2, dk2, pk2 = \
+        slot2, found2, _evict2, _live2, cok2, dok2, dk2, _pk2 = \
             self._probes_fast(pos)
         dok1 = (end - c.deep_order + 1 >= self._ep_g) \
             & (end >= c.deep_order - 1) & (end >= 0) & epi_gate
@@ -310,7 +311,6 @@ class _LearnMixin:
         fe = found1[gt.row_epi].reshape(1)
         ee = (evict1[gt.row_epi] & dok1).reshape(1)
         e_new = (~fe) & dok1
-        ER = self._epi_pos.shape[1]
         LC = len(c.cert_orders)
         certs_e = self._w_epi_dev(se, ee, e_new, dok1, pk1, dk_e,
                                   end, x)
@@ -1114,7 +1114,7 @@ class _LearnMixin:
         """
         c = self.config
         dev = self._dev
-        if c.auto_episode and 0 <= c.eos_token_id \
+        if c.auto_episode and c.eos_token_id >= 0 \
                 and c.eos_token_id in row:
             # episode boundary mid-row: one fused pass per segment,
             # host-side soft_reset between (outside the device pipeline)
@@ -1903,7 +1903,7 @@ class _LearnMixin:
         n = len(ids)
         if n == 0:
             return 0
-        if (c.auto_episode and 0 <= c.eos_token_id
+        if (c.auto_episode and c.eos_token_id >= 0
                 and c.eos_token_id in ids
                 and not getattr(self, "_bulk_split", False)):
             eos = c.eos_token_id
@@ -2034,8 +2034,8 @@ class _LearnMixin:
         # taking them host anyway - 700MB+ of device RAM freed);
         # probe-state rows are retained only when a downstream
         # consumer actually reads them.
-        pin = dict(device="cpu", pin_memory=True) \
-            if dev.type == "cuda" else dict(device="cpu")
+        pin = {"device": "cpu", "pin_memory": True} \
+            if dev.type == "cuda" else {"device": "cpu"}
         kk_all = torch.zeros(O, n, dtype=torch.int64, **pin)
         write_o = torch.zeros(O, n, dtype=torch.bool, **pin)
         rw_o = torch.zeros(O, n, dtype=torch.float64, **pin)
@@ -3025,7 +3025,6 @@ class _LearnMixin:
         # the live-path prob; cold positions keep the uni/pmix fallback
         real_r: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         if c.bulk_channel_rewards:
-            p_o2 = p_o.reshape(O, n)
             tots2 = tots_f.reshape(O, n)
             cnt2 = cnt_x.reshape(O, n)
             found2 = found_f.reshape(O, n)
@@ -3571,7 +3570,6 @@ class _LearnMixin:
         position, same feature layout as _gcell_feats (fp64 matmul =
         exact integer accumulation, bit-identical to the single-row
         path)."""
-        c = self.config
         X = self._gcell_feats_bulk(cprev, c2prev, xchunk, c0, base,
                                    ids_t, end_off)
         return self._gcell_codes_from_feats(X)

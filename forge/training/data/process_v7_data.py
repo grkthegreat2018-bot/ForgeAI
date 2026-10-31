@@ -185,7 +185,7 @@ def load_parquet(path: str, max_n: int) -> list[dict]:
         return []
     examples = []
     for row in rows[:max_n]:
-        if "messages" in row and row["messages"]:
+        if row.get("messages"):
             msgs = row["messages"]
             if isinstance(msgs, str):
                 msgs = json.loads(msgs)
@@ -283,7 +283,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*70}")
-    print(f"  V7 DATA PROCESSING")
+    print("  V7 DATA PROCESSING")
     print(f"{'='*70}")
     print(f"Max per source: {args.max_per_source}")
     print(f"Seq len: {args.seq_len}")
@@ -378,7 +378,7 @@ def main():
     # Shuffle on GPU (torch.randperm on CUDA = fast)
     perm = torch.randperm(n_seqs, device=device)
     packed = packed[perm]
-    print(f"  Shuffled on GPU")
+    print("  Shuffled on GPU")
 
     # Train/val split on GPU
     n_val = max(1, int(n_seqs * args.val_ratio))
@@ -424,12 +424,12 @@ def main():
 
     train_mb = train_path.stat().st_size / 1e6
     val_mb = val_path.stat().st_size / 1e6
-    print(f"\nSaved:")
+    print("\nSaved:")
     print(f"  {train_path} ({train_mb:.1f} MB)")
     print(f"  {val_path} ({val_mb:.1f} MB)")
     print(f"  {manifest_path}")
     print(f"\n{'='*70}")
-    print(f"  DATA PROCESSING COMPLETE")
+    print("  DATA PROCESSING COMPLETE")
     print(f"{'='*70}")
 
 

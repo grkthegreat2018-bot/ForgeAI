@@ -457,7 +457,7 @@ class Quamba2Block(nn.Module):
 
     def forward(self, x, past_key_value=None, use_cache=False, **kwargs):
         """Forward pass mirroring MambaLayer.forward but with quantized projections."""
-        B, T, D = x.shape
+        B, T, _D = x.shape
         # The SSM core (A_log, D, jamba norms) is stored in FP16 — mixed with
         # bf16 activations it promotes to fp32 mid-scan. Record the incoming
         # dtype so the block output is cast back before the residual stream

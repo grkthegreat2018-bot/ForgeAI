@@ -32,6 +32,7 @@ import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,11 @@ class CrashRecoveryManager:
         self._last_partial_output: str | None = None
         self._last_prompt: str | None = None
         self._snapshot_counter = 0
-        self._lock = threading.Lock()
+        # RLock, not Lock: _cleanup() runs inside signal handlers on the
+        # main thread — if that thread already holds the lock (e.g. mid
+        # checkpoint_generation/snapshot_kv_cache), a plain Lock would
+        # deadlock the handler and hang the process on SIGINT/SIGTERM.
+        self._lock = threading.RLock()
 
         if enabled:
             self._install()
@@ -158,10 +163,8 @@ class CrashRecoveryManager:
         self.enabled = False
         if self._installed:
             import atexit
-            try:
+            with contextlib.suppress(Exception):
                 atexit.unregister(self._atexit_fn)
-            except Exception:
-                pass
             self._installed = False
 
     def _log(self, message: str, **data):
@@ -257,28 +260,22 @@ class CrashRecoveryManager:
                     "final": True,
                 }
                 blob = _compress(json.dumps(data, ensure_ascii=False).encode())
-                try:
+                with contextlib.suppress(OSError):
                     (self.recovery_dir / "generation_final.zst").write_bytes(blob)
-                except OSError:
-                    pass
 
             # Flush event log
             if hasattr(self.engine, 'events'):
                 events = self.engine.events.to_list()
                 blob = _compress(json.dumps(events).encode())
-                try:
+                with contextlib.suppress(OSError):
                     (self.recovery_dir / "event_log.zst").write_bytes(blob)
-                except OSError:
-                    pass
 
             # Flush output history
             if hasattr(self.engine, 'outputs'):
                 outputs = self.engine.outputs.read_output(n=0)
                 blob = _compress(json.dumps(outputs).encode())
-                try:
+                with contextlib.suppress(OSError):
                     (self.recovery_dir / "output_history.zst").write_bytes(blob)
-                except OSError:
-                    pass
 
     def recover(self) -> dict[str, Any] | None:
         """Recover state from disk after a crash.
@@ -332,7 +329,11 @@ class CrashRecoveryManager:
                     # fall back to weights_only=False for older snapshots
                     try:
                         snapshot = torch.load(io.BytesIO(blob), weights_only=True)
-                    except Exception:
+                    except Exception as e:
+                        logger.warning(
+                            "KV snapshot %s failed weights_only=True load (%s); "
+                            "falling back to weights_only=False — only trust "
+                            "recovery files this process wrote", path, e)
                         snapshot = torch.load(io.BytesIO(blob), weights_only=False)
                     if snapshot["token_count"] > best_token_count:
                         best_snapshot = snapshot
@@ -348,7 +349,5 @@ class CrashRecoveryManager:
         """Remove all recovery files."""
         if self.recovery_dir.exists():
             for f in self.recovery_dir.glob("*.zst"):
-                try:
+                with contextlib.suppress(OSError):
                     f.unlink()
-                except OSError:
-                    pass

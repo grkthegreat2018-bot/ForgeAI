@@ -93,7 +93,7 @@ class TriRouteController(nn.Module):
         Returns:
             policy: dict with 'attention_mode', 'expert_indices', 'kv_bits'
         """
-        B, T, D = x.shape
+        _B, _T, _D = x.shape
 
         # Attention mode: (B, T, 3)
         attn_logits = self.attn_router(x) / self.temperature
@@ -253,7 +253,7 @@ class TriRouteWrapper:
         def triroute_forward(self, x, past_key_value=None, use_cache=False,
                              preallocated_cache=None, layer_idx=0,
                              attention_bias=None, position_ids=None):
-            B, T, C = x.shape
+            B, T, _C = x.shape
             hd = self.head_dim
 
             # Use TriRoute only for long sequences
@@ -298,6 +298,8 @@ class TriRouteWrapper:
                 self.n_heads, hd, self.n_kv_heads,
                 local_window=self._triroute_window)
             out = triroute_attn(q, k_cache, v_cache, attn_mode_idx)
+            if getattr(self, '_finish_attn', None) is not None:
+                return self._finish_attn(x, out), new_kv
             out = out.transpose(1, 2).reshape(B, T, -1)
             return self.out_proj(out), new_kv
 

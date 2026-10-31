@@ -136,9 +136,7 @@ class ShortcutDecoder:
         # Also terminate if answer trigger token is detected.
         if entropy_converged and probe_converged:
             return True
-        if trigger_detected:
-            return True
-        return False
+        return bool(trigger_detected)
 
     def reset(self):
         """Reset internal state for a new reasoning session."""

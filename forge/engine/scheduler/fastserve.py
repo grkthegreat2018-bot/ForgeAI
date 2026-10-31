@@ -65,8 +65,8 @@ class SkipJoinMLFQ:
     """
 
     def __init__(self, n_levels: int = 4,
-                 time_quanta: list[float] = None,
-                 length_thresholds: list[int] = None):
+                 time_quanta: list[float] | None = None,
+                 length_thresholds: list[int] | None = None):
         """
         Args:
             n_levels: number of priority levels

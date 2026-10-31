@@ -11,18 +11,49 @@ logger = logging.getLogger(__name__)
 from .layers import GroupedQueryAttention, RotaryEmbedding, SwiGLUFFN
 
 
-def build_attention(config: ModelConfig) -> nn.Module:
-    kwargs = dict(d_model=config.d_model, n_heads=config.n_heads, max_seq_len=config.max_seq_len, base=config.rope_base, rope_scaling=config.rope_scaling,
-                  use_qk_norm=getattr(config, 'use_qk_norm', False), attn_scale=getattr(config, 'attn_scale', None),
-                  qk_norm_eps=getattr(config, 'norm_eps', 1e-6),
-                  use_rope=getattr(config, 'use_rope', True))
+def build_attention(config: ModelConfig, layer_idx: int = 0) -> nn.Module:
+    # LFM3 per-layer-type wiring: layer_types[layer_idx] tells us whether
+    # this attention layer is sliding-window ("attention_swa",
+    # "sliding_attention", "swa") and rope_layer_params supplies the
+    # per-type theta/partial_rotary_factor (HF rope_parameters).
+    ltype = "attention"
+    layer_types = getattr(config, 'layer_types', None)
+    if layer_types is not None and layer_idx < len(layer_types):
+        ltype = layer_types[layer_idx]
+    is_swa = ltype in ("attention_swa", "sliding_attention", "swa", "attn_swa")
+
+    rope_base = config.rope_base
+    rope_partial = 1.0
+    rope_layer_params = getattr(config, 'rope_layer_params', None)
+    if rope_layer_params:
+        lrp = rope_layer_params.get(ltype)
+        if lrp is None and is_swa:
+            # fall back to any *swa*-keyed entry, then the "attention" entry
+            lrp = next((v for k, v in rope_layer_params.items()
+                        if 'swa' in k or 'sliding' in k), None)
+        if lrp is None:
+            lrp = rope_layer_params.get("attention")
+        if lrp:
+            rope_base = lrp.get("rope_theta", lrp.get("rope_base", rope_base))
+            rope_partial = lrp.get("partial_rotary_factor", 1.0)
+
+    sliding_window = getattr(config, 'sliding_window', None) if is_swa else None
+    use_out_gate = getattr(config, 'use_attn_out_gate', False)
+
+    kwargs = {"d_model": config.d_model, "n_heads": config.n_heads, "max_seq_len": config.max_seq_len, "base": rope_base, "rope_scaling": config.rope_scaling,
+                  "use_qk_norm": getattr(config, 'use_qk_norm', False), "attn_scale": getattr(config, 'attn_scale', None),
+                  "qk_norm_eps": getattr(config, 'norm_eps', 1e-6),
+                  "use_rope": getattr(config, 'use_rope', True)}
     # LeRoPE/AdaRoPE: learnable RoPE frequencies (identity init = lossless).
     # Applied post-construction by replacing the RotaryEmbedding module.
     getattr(config, 'rope_variant', 'standard')
     if config.attn_type == "gqa":
         attn = GroupedQueryAttention(**kwargs, n_kv_heads=getattr(config, 'n_kv_heads', None),
                                      attn_bias=getattr(config, 'attn_bias', False),
-                                     head_dim=getattr(config, 'head_dim', None))
+                                     head_dim=getattr(config, 'head_dim', None),
+                                     sliding_window=sliding_window,
+                                     use_out_gate=use_out_gate,
+                                     rope_partial_factor=rope_partial)
         attn = _maybe_bitnet_attention(config, attn)
         attn = _maybe_apply_lerope(config, attn)
         attn = _maybe_apply_learned_sink(config, attn)

@@ -257,7 +257,7 @@ class HashedNLRQ(nn.Module):
 
     def nlrq_compression_ratio(self) -> float:
         """Compression vs NLRQ (not vs dense)."""
-        h, d = self.param_count()
+        h, _d = self.param_count()
         nlrq = self.rank * (self.out_features + self.in_features)
         return nlrq / max(h, 1)
 

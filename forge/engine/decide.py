@@ -43,12 +43,10 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import torch
-import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +137,7 @@ def _parse_question(key: str, spec) -> _Question:
             raise QuestionValidationError(
                 f"question '{key}': choice needs {MIN_CHOICE_OPTIONS}-"
                 f"{MAX_CHOICE_OPTIONS} options, got {len(criteria)}")
-        labels = [str(l) for l in criteria.keys()]
+        labels = [str(l) for l in criteria]
         descs = {l: _jsonable(v) for l, v in zip(labels, criteria.values())}
         return _Question(key=key, qtype="choice", instructions=instructions,
                          labels=labels,
@@ -267,7 +265,7 @@ class SystemOneEvaluator:
         else:  # score
             hi = len(q.labels) - 1
             lines = [f"{q.instructions}\nScale:"]
-            for i, label in enumerate(q.labels):
+            for _i, label in enumerate(q.labels):
                 lines.append(f"{label}: {q.legend.get(label, '')}")
             lines.append(f"Answer with only the level number (0-{hi}).")
             body = "\n".join(lines)

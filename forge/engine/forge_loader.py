@@ -110,7 +110,7 @@ def _read_string(data: bytes, offset: int) -> tuple[str, int]:
 
 def _read_metadata_value(data: bytes, offset: int, value_type: int) -> tuple[object, int]:
     """Read a GGUF metadata value. Returns (value, new_offset)."""
-    type_name, elem_size = GGUF_TYPES.get(value_type, ("unknown", 0))
+    _type_name, elem_size = GGUF_TYPES.get(value_type, ("unknown", 0))
 
     if value_type == 8:  # string
         return _read_string(data, offset)
@@ -625,7 +625,7 @@ class ForgeLoader:
         raise ValueError(f"No loadable source found in {path}")
 
     @staticmethod
-    def _download_hf_file(model_id: str, dest: Path, filename: str = None):
+    def _download_hf_file(model_id: str, dest: Path, filename: str | None = None):
         """Download a single file from HuggingFace Hub."""
         import ipaddress
         import socket
@@ -649,7 +649,7 @@ class ForgeLoader:
             raise ValueError(f"URL hostname '{hostname}' is blocked (SSRF protection)")
         try:
             addr = socket.getaddrinfo(hostname, None)
-            for family, _, _, _, sockaddr in addr:
+            for _family, _, _, _, sockaddr in addr:
                 ip = ipaddress.ip_address(sockaddr[0])
                 if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
                     raise ValueError(f"URL hostname '{hostname}' resolves to private/reserved IP {ip} (SSRF protection)")

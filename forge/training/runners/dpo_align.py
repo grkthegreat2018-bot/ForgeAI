@@ -595,7 +595,7 @@ def main():
     kl_ref_point = KLReferencePoint(ema_beta=args.kto_kl_ema) if effective_loss == "kto" else None
     with task_scope("dpo") as log:
         step = start_step
-        for epoch in range(100):
+        for _epoch in range(100):
             for s in samples:
                 if step >= args.max_steps:
                     break

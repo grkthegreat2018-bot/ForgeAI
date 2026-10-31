@@ -228,6 +228,8 @@ class Library:
             category = "custom"
 
         entry_id = entry_id or str(uuid.uuid4())[:12]
+        if not self._entry_id_safe(entry_id):
+            raise ValueError(f"invalid library entry_id: {entry_id!r}")
         tags = tags or []
         triggers = triggers or []
 
@@ -682,8 +684,17 @@ class Library:
             tokens_path = entry_dir / f"{entry.id}.tokens"
             np.save(tokens_path, np.array(entry.token_ids, dtype=np.int32))
 
+    @staticmethod
+    def _entry_id_safe(entry_id: str) -> bool:
+        """entry_id reaches the filesystem — reject anything that could
+        traverse out of the entries dir (HTTP-supplied IDs included)."""
+        import re
+        return bool(re.fullmatch(r'[A-Za-z0-9_-]{1,128}', entry_id))
+
     def _load_entry(self, entry_id: str) -> LibraryEntry | None:
         """Load a single entry from disk."""
+        if not self._entry_id_safe(entry_id):
+            return None
         json_path = self.path / "entries" / f"{entry_id}.json"
         if not json_path.exists():
             return None
@@ -706,6 +717,8 @@ class Library:
 
     def _delete_entry_files(self, entry_id: str):
         """Delete entry files from disk."""
+        if not self._entry_id_safe(entry_id):
+            return
         for suffix in [".json", ".tokens"]:
             p = self.path / "entries" / f"{entry_id}{suffix}"
             if p.exists():

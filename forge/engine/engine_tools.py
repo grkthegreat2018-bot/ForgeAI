@@ -1370,57 +1370,101 @@ class EngineToolRegistry:
         return None
 
     def _web_search(self, args: dict) -> dict:
-        """Tavily web search."""
+        """Web search: Tavily -> keyless free_search (ddgs/arxiv/S2) ->
+        Exa. Paid paths first — they're richer; keyless keeps the tool
+        alive when keys are missing or dead."""
         import urllib.parse
         import urllib.request
-        api_key = self._get_api_key("TAVILY_API_KEY")
-        if not api_key:
-            return {"error": "TAVILY_API_KEY not set"}
         query = args["query"]
         max_results = min(args.get("max_results", 5), 10)
-        search_depth = args.get("search_depth", "basic")
-        include_answer = args.get("include_answer", True)
-        payload = json.dumps({
-            "query": query,
-            "max_results": max_results,
-            "search_depth": search_depth,
-            "include_answer": include_answer,
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            "https://api.tavily.com/search",
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-        )
+        api_key = self._get_api_key("TAVILY_API_KEY")
+        tavily_err = ("TAVILY_API_KEY not set" if not api_key else None)
+        if api_key:
+            search_depth = args.get("search_depth", "basic")
+            include_answer = args.get("include_answer", True)
+            payload = json.dumps({
+                "query": query,
+                "max_results": max_results,
+                "search_depth": search_depth,
+                "include_answer": include_answer,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "https://api.tavily.com/search",
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except Exception as e:
+                data = None
+                tavily_err = f"Tavily search failed: {e}"
+            if data is not None:
+                results = []
+                filtered = 0
+                for r in data.get("results", []):
+                    url = r.get("url", "")
+                    # Filter by website blacklist
+                    if url:
+                        decision = self.security.check_website(url)
+                        if not decision.allowed:
+                            filtered += 1
+                            continue
+                    results.append({
+                        "title": r.get("title", ""),
+                        "url": url,
+                        "content": r.get("content", "")[:2000],
+                    })
+                return {
+                    "query": query,
+                    "answer": data.get("answer", ""),
+                    "results": results,
+                    "count": len(results),
+                    "filtered_by_blacklist": filtered,
+                    "engine": "tavily",
+                }
+        # Keyless fallback: forge.evolution.research.free_search
+        # (ddgs multi-engine + arXiv/S2 for paper-ish queries).
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except Exception as e:
-            return {"error": f"Tavily search failed: {e}"}
+            from forge.evolution.research import free_search
+            hits = free_search(query, max_results)
+        except Exception:
+            hits = []
         results = []
         filtered = 0
-        for r in data.get("results", []):
-            url = r.get("url", "")
-            # Filter by website blacklist
-            if url:
-                decision = self.security.check_website(url)
-                if not decision.allowed:
-                    filtered += 1
-                    continue
+        for h in hits:
+            url = h.get("url", "")
+            if not url:
+                continue
+            decision = self.security.check_website(url)
+            if not decision.allowed:
+                filtered += 1
+                continue
             results.append({
-                "title": r.get("title", ""),
+                "title": h.get("title", ""),
                 "url": url,
-                "content": r.get("content", "")[:2000],
+                "content": (h.get("snippet") or "")[:2000],
             })
-        return {
-            "query": query,
-            "answer": data.get("answer", ""),
-            "results": results,
-            "count": len(results),
-            "filtered_by_blacklist": filtered,
-        }
+        if results:
+            return {
+                "query": query,
+                "answer": "",
+                "results": results,
+                "count": len(results),
+                "filtered_by_blacklist": filtered,
+                "engine": "free",
+            }
+        # Last resort: paid Exa semantic search.
+        exa = self._web_search_semantic(
+            {"query": query, "num_results": max_results})
+        if "error" not in exa:
+            exa["engine"] = "exa"
+            return exa
+        return {"error": f"{tavily_err}; free_search empty; "
+                         f"{exa.get('error', 'exa failed')}"}
 
     def _web_search_semantic(self, args: dict) -> dict:
         """Exa semantic search."""
@@ -1476,48 +1520,79 @@ class EngineToolRegistry:
         }
 
     def _web_scrape(self, args: dict) -> dict:
-        """Firecrawl page scrape."""
+        """Page scrape: Firecrawl -> keyless Jina reader (r.jina.ai,
+        ~20 RPM) -> trafilatura on requests.get when installed. Paid
+        path first — richer; keyless keeps the tool alive on
+        missing/dead keys."""
         import urllib.request
-        api_key = self._get_api_key("FIRECRAWL_API_KEY")
-        if not api_key:
-            return {"error": "FIRECRAWL_API_KEY not set"}
         url = args["url"]
         max_chars = args.get("max_chars", 10000)
         fmt = args.get("format", "markdown")
-        payload = json.dumps({
-            "url": url,
-            "formats": [fmt],
-            "onlyMainContent": True,
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            "https://api.firecrawl.dev/v1/scrape",
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except Exception as e:
-            return {"error": f"Firecrawl scrape failed: {e}"}
-        # Extract content from response
+        api_key = self._get_api_key("FIRECRAWL_API_KEY")
+        fc_err = ("FIRECRAWL_API_KEY not set" if not api_key else None)
         content = ""
-        if data.get("success") and data.get("data"):
-            d = data["data"]
-            if fmt == "markdown":
-                content = d.get("markdown", "")
-            elif fmt == "html":
-                content = d.get("html", "")
-            else:
-                content = d.get("text", d.get("markdown", ""))
-        return {
-            "url": url,
-            "content": content[:max_chars],
-            "truncated": len(content) > max_chars,
-            "title": data.get("data", {}).get("metadata", {}).get("title", ""),
-        }
+        title = ""
+        if api_key:
+            payload = json.dumps({
+                "url": url,
+                "formats": [fmt],
+                "onlyMainContent": True,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "https://api.firecrawl.dev/v1/scrape",
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except Exception as e:
+                data = None
+                fc_err = f"Firecrawl scrape failed: {e}"
+            if data is not None:
+                # Extract content from response
+                if data.get("success") and data.get("data"):
+                    d = data["data"]
+                    if fmt == "markdown":
+                        content = d.get("markdown", "")
+                    elif fmt == "html":
+                        content = d.get("html", "")
+                    else:
+                        content = d.get("text", d.get("markdown", ""))
+                    title = (d.get("metadata", {}) or {}).get("title", "")
+                if content:
+                    return {
+                        "url": url,
+                        "content": content[:max_chars],
+                        "truncated": len(content) > max_chars,
+                        "title": title,
+                        "engine": "firecrawl",
+                    }
+        # Keyless fallbacks (shared with the evolve research helper).
+        try:
+            from forge.evolution.research import (
+                jina_fetch, trafilatura_fetch)
+            content = jina_fetch(url)
+            engine = "jina"
+            if not content:
+                content = trafilatura_fetch(url)
+                engine = "trafilatura"
+        except Exception as e:
+            content = ""
+            engine = "none"
+            fc_err = f"{fc_err}; fallback scrape failed: {e}"
+        if content:
+            return {
+                "url": url,
+                "content": content[:max_chars],
+                "truncated": len(content) > max_chars,
+                "title": "",
+                "engine": engine,
+            }
+        return {"error": f"{fc_err}; jina/trafilatura returned nothing"}
 
     # ── File operation handlers ───────────────────────────────────────
 

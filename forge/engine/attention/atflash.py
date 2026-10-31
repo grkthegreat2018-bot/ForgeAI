@@ -117,7 +117,7 @@ def wavelength_pruned_attention(
     Returns:
         out: (B, n_heads, T, head_dim)
     """
-    B, n_heads, T, hd = q.shape
+    _B, _n_heads, T, hd = q.shape
     S = k.shape[2]
 
     # Compute effective sliding window from the median wavelength
@@ -189,7 +189,7 @@ class WavelengthPrunedAttention:
         def patched_forward(self, x, past_key_value=None, use_cache=False,
                             preallocated_cache=None, layer_idx=0,
                             attention_bias=None, position_ids=None):
-            B, T, C = x.shape
+            B, T, _C = x.shape
             hd = self.head_dim
 
             # Standard Q/K/V projection + RoPE + cache (same as original)
@@ -240,6 +240,8 @@ class WavelengthPrunedAttention:
                 rope_base=self.rope.base if hasattr(self.rope, 'base') else 1_000_000.0,
                 prune_factor=1.0,
             )
+            if getattr(self, '_finish_attn', None) is not None:
+                return self._finish_attn(x, out), new_kv
             out = out.transpose(1, 2).reshape(B, T, -1)
             return self.out_proj(out), new_kv
 

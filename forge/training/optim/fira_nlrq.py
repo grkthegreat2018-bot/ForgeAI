@@ -80,7 +80,7 @@ class FiraNLRQ(Optimizer):
             {"params": nlrq_params, "use_fira": True},
             {"params": other_params, "use_fira": False},
         ]
-        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay}
         super().__init__(param_groups, defaults)
 
         if verbose:

@@ -28,8 +28,8 @@ from __future__ import annotations
 
 import copy
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -49,8 +49,8 @@ class ModelSnapshot:
     param_shapes: dict[int, tuple] = field(default_factory=dict)
     param_dtypes: dict[int, torch.dtype] = field(default_factory=dict)
     n_params: int = 0
-    forward_output: Optional[torch.Tensor] = None
-    forward_checksum: Optional[float] = None
+    forward_output: torch.Tensor | None = None
+    forward_checksum: float | None = None
 
 
 def _param_id(p: torch.Tensor) -> int:
@@ -64,7 +64,7 @@ def _checksum(t: torch.Tensor) -> float:
 
 
 def take_snapshot(model: nn.Module,
-                  test_input: Optional[torch.Tensor] = None) -> ModelSnapshot:
+                  test_input: torch.Tensor | None = None) -> ModelSnapshot:
     """Take a safety snapshot of the model.
 
     Args:
@@ -100,7 +100,7 @@ def take_snapshot(model: nn.Module,
 
 
 def validate_snapshot(model: nn.Module, snapshot: ModelSnapshot,
-                      test_input: Optional[torch.Tensor] = None,
+                      test_input: torch.Tensor | None = None,
                       identity_init: bool = False,
                       atol: float = 1e-5,
                       rtol: float = 1e-4) -> tuple[bool, list[str]]:
@@ -130,7 +130,6 @@ def validate_snapshot(model: nn.Module, snapshot: ModelSnapshot,
             errors.append(f"Parameter '{name}' has unexpected dtype: {p.dtype}")
 
     # Check 2: no parameters were unexpectedly deleted.
-    current_ids = {_param_id(p) for p in model.parameters()}
     # New parameters are OK (keys may add them), but existing ones should
     # still be present unless explicitly replaced.
     # We check that the total param count didn't decrease unexpectedly.
@@ -173,7 +172,7 @@ def validate_snapshot(model: nn.Module, snapshot: ModelSnapshot,
 def safe_apply(model: nn.Module,
                apply_fn: Callable[[nn.Module], nn.Module],
                identity_init: bool = False,
-               test_input: Optional[torch.Tensor] = None,
+               test_input: torch.Tensor | None = None,
                atol: float = 1e-5,
                rtol: float = 1e-4,
                rollback_on_failure: bool = True) -> nn.Module:
@@ -249,7 +248,7 @@ def safe_apply(model: nn.Module,
 def safe_apply_key_to_expert(expert: nn.Module,
                              apply_fn: Callable,
                              identity_init: bool = False,
-                             test_input: Optional[torch.Tensor] = None,
+                             test_input: torch.Tensor | None = None,
                              **kwargs) -> nn.Module:
     """Safely apply a key to a single MoE expert.
 
@@ -272,7 +271,7 @@ def safe_apply_key_to_expert(expert: nn.Module,
 
 
 def verify_model_integrity(model: nn.Module,
-                           test_input: Optional[torch.Tensor] = None) -> tuple[bool, list[str]]:
+                           test_input: torch.Tensor | None = None) -> tuple[bool, list[str]]:
     """Standalone integrity check for a model.
 
     Useful for post-training or post-merge validation.

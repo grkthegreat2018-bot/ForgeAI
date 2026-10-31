@@ -156,7 +156,7 @@ class CudaGraphGenerator:
 
     @torch.no_grad()
     def generate(self, input_ids: torch.Tensor, max_new_tokens: int = 100,
-                 temperature: float = 0.0, eos_token_id: int = None) -> torch.Tensor:
+                 temperature: float = 0.0, eos_token_id: int | None = None) -> torch.Tensor:
         """Generate tokens with CUDA graph acceleration.
 
         Args:
@@ -169,7 +169,7 @@ class CudaGraphGenerator:
             (1, T + generated) token ids
         """
         input_ids = input_ids.to(self.device)
-        B, T = input_ids.shape
+        B, _T = input_ids.shape
 
         # Prefill (not graphed — variable length).
         out = self.model(input_ids, use_cache=True)

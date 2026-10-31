@@ -25,7 +25,7 @@ Usage::
 from __future__ import annotations
 
 import importlib
-from typing import Any
+import os
 
 import numpy as np
 import torch
@@ -63,6 +63,17 @@ def _import_target(dotted):
     mod_name, _, attr = dotted.partition(":")
     if not attr:
         mod_name, _, attr = dotted.rpartition(".")
+    # A manifest-controlled import path can instantiate ANY importable
+    # class (subprocess/os = RCE). Confine to project packages + extra
+    # roots from FORGE_AUX_MODULE_ROOTS (os.pathsep-separated).
+    roots = ("forge", "research", "forge_gui", "oposition")
+    extra = tuple(r for r in os.environ.get(
+        "FORGE_AUX_MODULE_ROOTS", "").split(os.pathsep) if r)
+    top = mod_name.split(".")[0]
+    if top not in roots and not mod_name.startswith(extra or ("\x00",)):
+        raise ValueError(
+            f"aux module target {mod_name!r} outside allowed roots "
+            "(forge/research/forge_gui/oposition + FORGE_AUX_MODULE_ROOTS)")
     return getattr(importlib.import_module(mod_name), attr)
 
 

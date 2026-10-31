@@ -32,10 +32,12 @@ import bisect
 import json
 import os
 import random
-from typing import Any, Callable, Iterator
+from collections.abc import Callable, Iterator
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import contextlib
 
 # ---------------------------------------------------------------------------
 # Conversion
@@ -220,9 +222,8 @@ def convert_jsonl_to_parquet_tokenized(
         Number of tokenised rows written.
     """
     from forge.training.runners.sft_train import (
-        _tokenize_cached,
-        tokenize_example,
         load_examples,
+        tokenize_example,
     )
 
     examples = load_examples([jsonl_path])
@@ -410,10 +411,8 @@ class ParquetDataset:
                     self._json_columns = self._detect_json_columns(row)
                 for col in self._json_columns:
                     if col in row and isinstance(row[col], str):
-                        try:
+                        with contextlib.suppress(json.JSONDecodeError, ValueError):
                             row[col] = _json_loads_from_parquet(row[col])
-                        except (json.JSONDecodeError, ValueError):
-                            pass
                 rows.append(row)
             yield rows
 
@@ -441,7 +440,7 @@ class _ParquetWorkerDataset:
     on Windows (``AttributeError: Can't pickle local object``).
     """
 
-    def __init__(self, dataset: "ParquetDataset", indices: list[int],
+    def __init__(self, dataset: ParquetDataset, indices: list[int],
                  transform_fn: Callable[[dict], dict] | None):
         self._dataset = dataset
         self._indices = indices

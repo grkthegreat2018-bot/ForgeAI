@@ -76,7 +76,7 @@ class _CausalDWConv(nn.Module):
         ``prefix`` is a stored left-pad ((B, C, k-1)) for suffix prefills on
         a prefix-cache hit; consumed by the caller (one-shot).
         """
-        B, T, C = x.shape
+        _B, _T, _C = x.shape
         xt = x.transpose(1, 2)  # (B, C, T)
         # Input length is always T + kernel - 1 (left context), so the
         # unpadded conv emits exactly T causal outputs in every branch.

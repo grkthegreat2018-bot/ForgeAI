@@ -86,7 +86,7 @@ class GroupedTiedAttention(nn.Module):
                 attention_bias: torch.Tensor | None = None,
                 position_ids: torch.Tensor | None = None,
                 cu_seqlens: torch.Tensor | None = None):
-        B, T, C = x.shape
+        B, T, _C = x.shape
         hd = self.head_dim
 
         q = self.q_proj(x).view(B, T, self.n_heads, hd).transpose(1, 2)

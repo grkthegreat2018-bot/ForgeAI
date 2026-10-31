@@ -44,6 +44,7 @@ import logging
 import math
 import os
 import random
+import signal
 import sys
 from collections import OrderedDict, defaultdict
 from pathlib import Path
@@ -58,6 +59,7 @@ import torch.nn.functional as F
 from forge.checkpoint_io import (
     cleanup_step_checkpoints,
     emergency_save,
+    load_training_state,
     save_training_checkpoint,
     step_checkpoint_path,
 )
@@ -855,6 +857,11 @@ def main():
                    help="Model config name (default: forgelm_v2)")
     p.add_argument("--checkpoint", default="research/checkpoints/ForgeLM_V2.safetensors",
                    help="Base checkpoint to fine-tune from")
+    p.add_argument("--resume", default=None,
+                   help="Resume weights + training state from this checkpoint "
+                        "(consumes the .train.pt sidecar written by "
+                        "save_training_checkpoint: optimizer, RNG, step). "
+                        "Overrides --checkpoint.")
     p.add_argument("--config-overrides", default=None,
                    help="JSON dict of architecture overrides applied before "
                         "model construction (e.g. '{\"use_forge_hybrid\":true,"
@@ -865,6 +872,11 @@ def main():
                         "Use with --nanoquant-qat or --no-bitnet-everywhere for QAT "
                         "on non-ForgeAI models. The tokenizer is auto-loaded from "
                         "the same HF repo.")
+    p.add_argument("--tokenizer", default=None,
+                   help="Tokenizer dir for the --checkpoint/ForgeEngine path "
+                        "(default: canonical ForgeLM tokenizer). Required when "
+                        "training a non-ForgeLM checkpoint, e.g. a ported Qwen "
+                        "dir — pass the checkpoint dir itself.")
     p.add_argument("--save", default="research/checkpoints/ForgeLM_V2.sft.safetensors",
                    help="Output checkpoint path")
     p.add_argument("--max-steps", type=int, default=500)
@@ -998,9 +1010,18 @@ def main():
                         "rank=128 → ~0.22 bits/w, rank=512 → ~0.81 bits/w.")
     p.add_argument("--nanoquant-quick-init", type=int, default=1,
                    help="1=SVD fast init (default, instant), 0=ADMM init (slow)")
+    p.add_argument("--lora-init", default=None,
+                   help="Continue-train from an existing .lora.safetensors "
+                        "adapter (warm-start lora_* params). Manual-LoRA path.")
     p.add_argument("--manual-lora", action="store_true",
                    help="Use manual LoRA adapters (BitNet-compatible, unlike PEFT). "
                         "Works with BitNetLinear. Auto-enabled with --bitnet-everywhere.")
+    p.add_argument("--lora-targets", default=None,
+                   help="Comma-separated module-name substrings to attach LoRA "
+                        "to (overrides the built-in list). Needed for non-GQA "
+                        "archs, e.g. MLA+MoE ports: "
+                        "'q_proj,out_proj,kv_down_proj,k_up_proj,v_up_proj,"
+                        "k_rope_proj,w1,w2,w3'.")
     p.add_argument("--qlora-nf4", action="store_true",
                    help="R32-1: NF4 QLoRA — quantize base weights to NF4 (4-bit normal float) "
                         "and train LoRA adapters on top. Works on standard nn.Linear models "
@@ -1204,7 +1225,8 @@ def main():
         print(f"SYNPRO: generated {len(synthetic)} synthetic variants from {len(texts)} source texts")
 
     # ── Tokenize (or use pre-tokenized parquet data directly) ──
-    tokenizer = get_tokenizer()
+    tokenizer = (get_tokenizer(args.tokenizer)
+                 if getattr(args, "tokenizer", None) else get_tokenizer())
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
     # ── Disk tokenization cache info ──
@@ -1317,6 +1339,10 @@ def main():
         cfg.mtp_n_heads = args.mtp_n_heads
         print(f"MTP n_heads overridden to {args.mtp_n_heads} (must match checkpoint)")
 
+    # --resume supersedes --checkpoint: the resume file IS the weights
+    # source; its .train.pt sidecar restores optimizer/RNG/step below.
+    if args.resume:
+        args.checkpoint = args.resume
     print(f"Building model ({args.config}) from {args.checkpoint}...")
     _from_scratch = args.checkpoint in ("scratch", "none", "") or args.from_scratch
     # ── From-scratch training: "scratch"/"none" = random init, no checkpoint ──
@@ -1463,8 +1489,13 @@ def main():
 
     if use_manual_lora:
         from forge.training.bitnet_lora import add_lora_adapters
-        target_mods = ["q_proj", "k_proj", "v_proj", "out_proj",
-                       "w_gate", "w_up", "w_down"] if not args.bitnet_everywhere else None
+        if args.lora_targets:
+            target_mods = [t.strip() for t in args.lora_targets.split(",")
+                           if t.strip()]
+        else:
+            target_mods = ["q_proj", "k_proj", "v_proj", "out_proj",
+                           "w_gate", "w_up", "w_down"] \
+                if not args.bitnet_everywhere else None
         n_adapters, lora_params = add_lora_adapters(
             model, rank=args.lora_r, alpha=args.lora_alpha,
             target_modules=target_mods,
@@ -1483,6 +1514,18 @@ def main():
         n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"  Frozen {n_frozen} non-LoRA params | "
               f"{n_trainable/1e6:.2f}M trainable total")
+        if getattr(args, 'lora_init', None):
+            # Continue-train an existing adapter (manager "update" action):
+            # warm-start the lora_* params from a saved .lora.safetensors.
+            from safetensors.torch import load_file as _load_lora_init
+            _init_state = _load_lora_init(args.lora_init)
+            _n_init = 0
+            for _n, _p in model.named_parameters():
+                if "lora_" in _n and _n in _init_state:
+                    _p.data.copy_(_init_state[_n].to(_p.dtype))
+                    _n_init += 1
+            print(f"LoRA init: loaded {_n_init}/{len(_init_state)} adapter "
+                  f"tensors from {args.lora_init}")
     elif args.lora:
         from peft import LoraConfig, get_peft_model
         lora_cfg = LoraConfig(
@@ -1492,8 +1535,11 @@ def main():
             # ffn uses w_gate/w_up/w_down (not gate_proj/up_proj/down_proj).
             # No task_type — ConfigurableResearchLLM is not an HF model;
             # we only train + merge, no generation through PEFT wrapper.
-            target_modules=["q_proj", "k_proj", "v_proj", "out_proj",
-                            "w_gate", "w_up", "w_down"],
+            target_modules=(
+                [t.strip() for t in args.lora_targets.split(",")
+                 if t.strip()] if args.lora_targets else
+                ["q_proj", "k_proj", "v_proj", "out_proj",
+                 "w_gate", "w_up", "w_down"]),
             lora_dropout=0.0,
             bias="none",
         )
@@ -1715,9 +1761,8 @@ def main():
 
     # ── FORGE optimizer: register gradient hooks (must run AFTER optimizer
     # creation — the optimizer object didn't exist at the previous site) ──
-    if args.optimizer == "forge":
-        if hasattr(optimizer, 'register_hooks'):
-            optimizer.register_hooks(model)
+    if args.optimizer == "forge" and hasattr(optimizer, 'register_hooks'):
+        optimizer.register_hooks(model)
 
     # ── L2-SP Anchor Regularization (NeurIPS 2024) ──
     # Load anchor checkpoint and build a name→tensor map for L2-SP loss.
@@ -1752,6 +1797,29 @@ def main():
     if args.ema:
         ema_state = init_ema(model)
         print(f"EMA enabled (decay={args.ema_decay})")
+
+    # Resume training state (optimizer + RNG + step) if requested —
+    # same contract as dpo_align: the .train.pt sidecar must exist.
+    start_step = 0
+    if args.resume:
+        ts = load_training_state(args.resume, optimizer=optimizer)
+        if args.ema and ts.get("ema") is not None:
+            ema_state = ts["ema"]
+        if ts["step"] is not None:
+            start_step = ts["step"] + 1
+            print(f"Resuming from {args.resume} at step {start_step}")
+
+    # Ctrl-C -> emergency checkpoint before dying (dpo_align pattern).
+    current = {"step": start_step}
+    _old_sigint = signal.getsignal(signal.SIGINT)
+
+    def _sigint_handler(sig, frame):
+        emergency_save(model, args.save, "interrupt", current["step"],
+                       optimizer=optimizer)
+        signal.signal(signal.SIGINT, _old_sigint)
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _sigint_handler)
 
     # ── Grad accumulation ──
     grad_accum = max(1, args.grad_accum)
@@ -1798,7 +1866,7 @@ def main():
 
     aborted = False
     with task_scope("sft") as log:
-        step = 0
+        step = start_step
         accum_count = 0
         indices = list(range(len(dataset)))
         last_loss = 0.0  # initialized; updated at log intervals (R&D round 25)
@@ -2197,6 +2265,7 @@ def main():
                         early_stopped = True
                         break
                 step += 1
+                current["step"] = step   # SIGINT emergency-save step
             if aborted or early_stopped or step >= args.max_steps:
                 break
 
@@ -2219,7 +2288,9 @@ def main():
                               if "lora_" in n}
                 if lora_state:
                     lora_path = str(Path(args.save).with_suffix(".lora.safetensors"))
-                    _save_lora_file(lora_state, lora_path)
+                    _tmp = lora_path + ".tmp"      # atomic: a killed run
+                    _save_lora_file(lora_state, _tmp)   # can't corrupt it
+                    os.replace(_tmp, lora_path)
                     print(f"Saved LoRA adapter ({len(lora_state)} tensors) "
                           f"to {lora_path}")
                 else:

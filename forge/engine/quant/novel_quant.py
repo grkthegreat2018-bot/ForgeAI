@@ -266,7 +266,7 @@ def _quantize_to_fp4_residual(
     k = max(1, int(in_f * residual_ratio))
     abs_error = error.abs()
     # Find top-k indices per row
-    topk_vals, topk_indices = abs_error.topk(k, dim=1)  # (out, k)
+    _topk_vals, topk_indices = abs_error.topk(k, dim=1)  # (out, k)
 
     # Quantize residual to INT8 with per-row scale
     residual_raw = error.gather(1, topk_indices)  # (out, k)
@@ -679,7 +679,7 @@ def quantize_oc_hybrid(w: torch.Tensor, block_size: int = 32,
     Returns:
         (w_dequant, row_is_fp8) — dequantized weights + per-row flag
     """
-    out_f, in_f = w.shape
+    _out_f, _in_f = w.shape
     # Per-row kurtosis
     mu = w.mean(dim=-1, keepdim=True)
     sigma = w.std(dim=-1, keepdim=True).clamp(min=1e-8)
@@ -764,7 +764,7 @@ def quantize_hpr_fp4(w: torch.Tensor, block_size: int = 32,
     rotation_size: size of the Hadamard (must be pow2, >= in_features rounded up).
         Default: next power of 2 >= in_features.
     """
-    out_f, in_f = w.shape
+    _out_f, in_f = w.shape
     if rotation_size is None:
         rotation_size = 1 << (in_f - 1).bit_length()
     pad = rotation_size - in_f
@@ -876,7 +876,7 @@ def quantize_awr_fp4(w: torch.Tensor, hessian_diag: torch.Tensor | None,
 
     Returns dequantized weights (with residual applied).
     """
-    out_f, in_f = w.shape
+    _out_f, in_f = w.shape
     # Base quantization with Hessian-weighted scale
     w_dq = quantize_hw_fp4(w, hessian_diag, block_size)
     error = w - w_dq  # (out, in)
@@ -887,7 +887,7 @@ def quantize_awr_fp4(w: torch.Tensor, hessian_diag: torch.Tensor | None,
         importance = torch.ones_like(error)
     weighted_err = error.abs() * importance.clamp(min=1e-12)
     k = max(1, int(in_f * residual_ratio))
-    topk_vals, topk_idx = weighted_err.topk(k, dim=1)
+    _topk_vals, topk_idx = weighted_err.topk(k, dim=1)
     # Quantize residual to INT8 per-row
     res_raw = error.gather(1, topk_idx)
     res_scale = res_raw.abs().amax(dim=1, keepdim=True).clamp(min=1e-8) / 127.0
@@ -954,7 +954,7 @@ def quantize_pcba(w: torch.Tensor, block_size: int = 32,
 
     Returns (w_dequant, row_is_8bit).
     """
-    out_f, in_f = w.shape
+    _out_f, _in_f = w.shape
     row_max = w.abs().amax(dim=-1)
     row_std = w.std(dim=-1).clamp(min=1e-8)
     dyn_ratio = row_max / row_std
@@ -1170,7 +1170,7 @@ class IRIFP4Linear(QuantizedLinearMixin):
 def _pack_fp4_round(wb: torch.Tensor, scale: torch.Tensor,
                     block_size: int) -> tuple:
     """Pack a single FP4 round (block view) into packed + FP8 scales + global scale."""
-    out_f, n_blocks, _ = wb.shape
+    out_f, _n_blocks, _ = wb.shape
     s = scale.clamp(min=1e-12)
     w_norm = wb / s
     abs_norm = w_norm.abs()
@@ -1744,7 +1744,7 @@ def quantize_hpr_iri_fp4(w: torch.Tensor, block_size: int = 32,
     Returns:
         (out, in) dequantized weights (inverse-rotated)
     """
-    out_f, in_f = w.shape
+    _out_f, in_f = w.shape
     if rotation_size is None:
         rotation_size = 1 << (in_f - 1).bit_length()
     pad = rotation_size - in_f
@@ -1978,7 +1978,7 @@ def analyze_weight_distribution(w: torch.Tensor) -> dict:
       - asymmetry: |mean|/std (asymmetric block indicator)
       - recommendation: algorithm name string
     """
-    out_f, in_f = w.shape
+    _out_f, _in_f = w.shape
     mu = w.mean(dim=-1)
     sigma = w.std(dim=-1).clamp(min=1e-8)
     # Per-row kurtosis
@@ -2270,7 +2270,7 @@ def quantize_adaptive_iri_fp4(w: torch.Tensor, block_size: int = 32,
     # Track which blocks still need refinement
     active = torch.ones(out_f, n_blocks, dtype=torch.bool, device=w.device)
 
-    for r in range(max_rounds):
+    for _r in range(max_rounds):
         wb_all = residual.view(out_f, n_blocks, block_size)
 
         # Only process active blocks
@@ -2778,7 +2778,7 @@ def quantize_ternlc(w: torch.Tensor, rank: int = 16,
     Returns:
         (dequantized_weight, metadata dict with A, B, scales, ternary)
     """
-    out_f, in_f = w.shape
+    _out_f, _in_f = w.shape
     if per_channel:
         scales = w.abs().mean(dim=1, keepdim=True).clamp(min=1e-8) / 0.7
     else:

@@ -87,6 +87,7 @@ _RE_CONTROL_TOKEN = re.compile(r'^<(?!0x[0-9A-Fa-f]{2}>)[^>\n]+>$')
 _CONTROL_TOKEN_KEEP = frozenset({2, 519, 542})
 
 from forge.evaluation.goal_tasks import GoalTask
+import contextlib
 
 # ─── Persistent sandbox worker pool ──────────────────────────────────
 # Module-level ThreadPool reused across sandbox executions to avoid the
@@ -497,7 +498,7 @@ class InfiniteCurriculum:
                  temperature: float = 0.8,
                  top_k: int = 50,
                  top_p: float = 0.95,
-                 task_queue_dir: str = None,
+                 task_queue_dir: str | None = None,
                  live_status=None,
                  engine=None):
         self.model = model
@@ -612,7 +613,7 @@ class InfiniteCurriculum:
             self._batch_used_hints = set()  # reset per-batch hint dedup
             for _ in range(current_batch):
                 sig_hint = self._random_signature(domain)
-                t_args, t_expected = self._example_test_cases(domain, sig_hint)
+                _t_args, _t_expected = self._example_test_cases(domain, sig_hint)
                 desc_hints = {
                     "algorithms": [
                         "Find the k-th smallest element using partitioning (not sorted())",
@@ -702,10 +703,8 @@ class InfiniteCurriculum:
                 if task is None:
                     parse_failed += 1
                     consecutive_fails += 1
-                    try:
+                    with contextlib.suppress(OSError):
                         print(f"  [Curriculum] Task {proposed}/{n}: PARSE FAILED")
-                    except OSError:
-                        pass
                     if consecutive_fails >= MAX_CONSECUTIVE_FAILS:
                         print(f"  [Curriculum] {consecutive_fails} consecutive parse failures — "
                               f"stopping early (got {len(valid_tasks)} valid)")
@@ -718,11 +717,9 @@ class InfiniteCurriculum:
                 consecutive_fails = 0  # reset on a successful parse
                 self.stats.total_proposed += 1
                 safe_desc = task.description[:40].encode('ascii', 'replace').decode('ascii')
-                try:
+                with contextlib.suppress(OSError):
                     print(f"  [Curriculum] Task {proposed}/{n}: sig={task.signature}, "
                           f"tests={len(task.test_cases)}, desc={safe_desc}")
-                except OSError:
-                    pass
 
                 # Clone guard: reject tasks with descriptions we've already seen
                 if self._is_seen_description(task.description):
@@ -782,8 +779,7 @@ class InfiniteCurriculum:
         appends the prefill text — the model continues it as code, which
         sidesteps the 3B's meta-musing failure on task-creation prompts.
         """
-        from forge.self_play.discovery.qwen_adapter import (
-            render_messages_for_config)
+        from forge.self_play.discovery.qwen_adapter import render_messages_for_config
         rendered = render_messages_for_config(
             [{"role": "user", "content": instruction}],
             thinking=(prefill is None))
@@ -995,7 +991,7 @@ class InfiniteCurriculum:
 
         # Generate concrete test case examples for the prompt template
         # These are EXAMPLES — the model will replace them with its own
-        t_args, t_expected = self._example_test_cases(domain, sig_hint)
+        _t_args, _t_expected = self._example_test_cases(domain, sig_hint)
 
         # Description hint — challenging, non-trivial tasks that push the model
         desc_hints = {
@@ -1292,8 +1288,7 @@ class InfiniteCurriculum:
         ``tool_calls_allowed=False`` the ban set is exactly the self-play
         structural set {518, 531, 532, 539, 540, 541}.
         """
-        from forge_gui_server.services.chat_loop import (
-            _think_cap_processor, _THINK_END_ID)
+        from forge_gui_server.services.chat_loop import _THINK_END_ID, _think_cap_processor
         ids = self._think_suffix_ids.get(close_suffix)
         if ids is None:
             ids = self.tokenizer.encode(
@@ -1859,36 +1854,57 @@ class InfiniteCurriculum:
         return ""
 
     def _execute_sandbox(self, code: str, timeout_s: float = 3.0) -> dict:
-        """Execute Python code in a subprocess sandbox."""
+        """Execute Python code in a sandboxed one-shot worker (audit hook +
+        jail dir + env scrub — model-generated code never runs unrestricted).
+        """
         temp_path = None
+        once_path = None
+        result_path = None
         try:
+            from research.persistent_executor import (
+                assign_to_job, build_once_script, close_job, scrub_environ)
+            scratch = tempfile.gettempdir()
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py',
-                                              delete=False, encoding='utf-8') as f:
+                                              delete=False, encoding='utf-8',
+                                              dir=scratch) as f:
                 f.write(code)
                 temp_path = f.name
+            once_path = temp_path + '_once.py'
+            result_path = temp_path + '_result.json'
+            with open(once_path, 'w', encoding='utf-8') as f:
+                f.write(build_once_script())
 
             proc = subprocess.Popen(
-                [sys.executable, temp_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True,
-                cwd=tempfile.gettempdir(),
-            )
+                [sys.executable, once_path, scratch, scratch,
+                 '--once', temp_path, result_path],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=scratch, env=scrub_environ())
+            job = None
+            handle = getattr(proc, '_handle', None)
+            if handle is not None:
+                job = assign_to_job(handle, allow_children=True)
             try:
-                stdout, stderr = proc.communicate(timeout=timeout_s)
-                return {
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "returncode": proc.returncode,
-                }
+                rc = proc.wait(timeout=timeout_s)
+                if os.path.exists(result_path):
+                    import json as _json
+                    with open(result_path, encoding='utf-8') as f:
+                        return _json.load(f)
+                return {"stdout": "", "stderr": "sandbox produced no result",
+                        "returncode": rc if rc is not None else -1}
             except subprocess.TimeoutExpired:
                 proc.kill()
                 return {"stdout": "", "stderr": "TIMEOUT", "returncode": -1}
+            finally:
+                close_job(job)
+        except Exception as e:
+            return {"stdout": "", "stderr": f"sandbox error: {e}",
+                    "returncode": -1}
         finally:
-            if temp_path is not None:
-                try:
-                    os.unlink(temp_path)
-                except OSError:
-                    pass
+            for p in (temp_path, once_path, result_path):
+                if p is not None:
+                    with contextlib.suppress(OSError):
+                        os.unlink(p)
 
     def _execute_sandbox_batch(self, codes: list[str],
                                timeout_s: float = 3.0) -> list[dict]:
@@ -2115,7 +2131,7 @@ class InfiniteCurriculum:
                 zip(tasks, goal_tasks, completions)):
             t0 = time.time()
             attempts = []
-            best_solution, best_success = None, False
+            best_success = False
             for sample_i, completion in enumerate(task_comps):
                 full_solution = self._assemble_solution(
                     goal_task, prompts[i], completion)
@@ -2128,7 +2144,7 @@ class InfiniteCurriculum:
                     "temperature": self.retry_policy.temperature_for_attempt(0),
                 })
                 if success and not best_success:
-                    best_solution, best_success = full_solution, True
+                    best_success = True
 
             # Retries stay serial — temperature bump per the retry policy.
             for attempt in range(1, self.retry_policy.max_retries + 1):
@@ -2153,7 +2169,7 @@ class InfiniteCurriculum:
                         attempt),
                 })
                 if success:
-                    best_solution, best_success = full_solution, True
+                    best_success = True
 
             elapsed_ms = batch_ms / len(tasks) + (time.time() - t0) * 1000.0
             results.append((task, {
@@ -2614,8 +2630,7 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
         return d
 
     _DESC_STOPWORDS = frozenset(
-        "a an the of in on to for and or is are it its with without by from "
-        "return returns returned given write create one all any each".split())
+        ["a", "an", "the", "of", "in", "on", "to", "for", "and", "or", "is", "are", "it", "its", "with", "without", "by", "from", "return", "returns", "returned", "given", "write", "create", "one", "all", "any", "each"])
 
     @classmethod
     def _desc_tokens(cls, desc: str) -> set[str]:

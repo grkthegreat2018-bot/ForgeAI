@@ -24,8 +24,6 @@ unchanged for machines without a GPU.
 """
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -117,7 +115,7 @@ def train_mlp(X, Y, *, layers=None, activation: str = "relu",
     loss_fn = _LOSSES[loss]
 
     hist = {"train": [], "val": []}
-    for ep in range(epochs):
+    for _ep in range(epochs):
         net.train()
         ep_loss, nb = 0.0, 0
         p = torch.randperm(len(ti), generator=g, device="cpu").to(dev)
@@ -174,5 +172,9 @@ def train_and_export(X, Y, path: str, *, layers=None, **train_kw) -> dict:
     return metrics
 
 
-__all__ = ["train_mlp", "export_aux_checkpoint", "train_and_export",
-           "fold_input_norm"]
+__all__ = [
+    "export_aux_checkpoint",
+    "fold_input_norm",
+    "train_and_export",
+    "train_mlp",
+]

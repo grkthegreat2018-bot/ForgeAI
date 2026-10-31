@@ -455,9 +455,8 @@ def make_grammar_logits_processor(grammar_matcher, bitmask, tokenizer):
                     pass  # grammar mismatch — let it slide
 
         # Check if we just entered a tool call (last token was start marker)
-        if generated_ids and not state["constrained"]:
-            if generated_ids[-1] == TOOL_CALL_START_FIRST_ID:
-                state["constrained"] = True
+        if generated_ids and not state["constrained"] and generated_ids[-1] == TOOL_CALL_START_FIRST_ID:
+            state["constrained"] = True
 
         if not state["constrained"]:
             return next_logits

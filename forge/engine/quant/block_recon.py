@@ -305,7 +305,10 @@ def _apply_optimized_params(block: nn.Module, params: dict[str, torch.Tensor]):
         elif hasattr(module, '_cached_weight') and hasattr(module, 'weight_packed'):
             if f"{name}.scales" in params and hasattr(module, 'weight_scales'):
                 module.weight_scales = params[f"{name}.scales"].to(torch.float16)
-                module._invalidate_cache()
+                if hasattr(module, '_invalidate_cache'):
+                    module._invalidate_cache()
+                else:
+                    module._cached_weight = None
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -469,7 +472,7 @@ def _update_soft_forward(patches: dict, opt_params: dict[str, torch.Tensor]):
 
 def _uninstall_soft_forward(patches: dict):
     """Remove soft-forward patches and restore original forward methods."""
-    for pid, info in patches.items():
+    for _pid, info in patches.items():
         info['module'].forward = info['orig_forward']
 
 

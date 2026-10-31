@@ -1,28 +1,23 @@
 """Snapshot / load / device / diagnostics for FluxLM."""
 from __future__ import annotations
 
-import json
-import math
-import time
 from collections import deque
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
-import torch.nn as nn
 
-from .helpers import (_HASH_P, _MASK64, _MIX1, _MIX2,
-                      _load_teacher_embedding, _mix64, _s64,
-                      _scatter_sum)
 from .config import FluxConfig
-from .journal import FluxJournal
-from .tables import _GPUCellTables
+from .helpers import _s64
 from .kernels import HAS_TRITON
 
+if TYPE_CHECKING:
+    from .model import FluxLM
+
 if HAS_TRITON:
-    from .kernels import (_flux_deep_votes_kernel,
-                          _flux_logit_tail_kernel)
+    pass
 
 
 class _IOMixin:
@@ -200,7 +195,7 @@ class _IOMixin:
                           zip(lt.tolist(), lp.tolist())}
         return s
 
-    def clone(self) -> "FluxLM":
+    def clone(self) -> FluxLM:
         """In-memory deep copy of the full learned state - tables, rings,
         episodic index, knn bank, journal, hedge weights, graft.  The
         clone shares no state with the source: use it for parallel
@@ -362,7 +357,7 @@ class _IOMixin:
 
     @classmethod
     def load(cls, path: str | Path, device: str | None = None,
-             cuda_primary: bool | None = None) -> "FluxLM":
+             cuda_primary: bool | None = None) -> FluxLM:
         # TRUST BOUNDARY: .flux snapshots are pickle payloads - load only
         # files you produced or trust.  weights_only=True cannot apply:
         # the format stores dict-of-dict cells, deques, and tuples, none

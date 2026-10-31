@@ -143,7 +143,6 @@ class FluxBank:
         keep[idx] = False
         shard = FluxBank(self.order, self.M)
         shard._grow(n)
-        sl = slice(0, n)
         for dst, src in ((shard.keys, self.keys),
                          (shard.raws, self.raws),
                          (shard.toks, self.toks),
@@ -167,7 +166,7 @@ class FluxBank:
         self.drop_rows(idx)
         return n
 
-    def _load_shard(self, sid: int) -> "FluxBank":
+    def _load_shard(self, sid: int) -> FluxBank:
         sb = self._shard_cache.get(sid)
         if sb is not None:
             return sb
@@ -252,45 +251,57 @@ class FluxBank:
         pos = np.asarray(pos, dtype=np.int64).reshape(-1)
         n0 = self._n
         self._grow(B)
-        added = 0
-        for b in range(B):
-            k = int(keys[b])
-            i = self._ix.get(k, -1)
-            if i < 0:
-                i = n0 + added
-                self._ix[k] = i
-                self.keys[i] = k
-                self.raws[i] = raws[b]
-                self.toks[i] = toks[b]
-                self.cnt[i] = cnt[b]
-                self.tot[i] = tot[b]
-                self.occ[i] = occ[b]
-                added += 1
-            else:
-                # merge follower columns by token id
-                for j in range(self.M):
-                    t = int(toks[b, j])
-                    if t < 0:
-                        continue
-                    hit = np.nonzero(self.toks[i] == t)[0]
-                    if hit.size:
-                        self.cnt[i, hit[0]] += cnt[b, j]
+        # Vectorized insert: brand-new keys take bulk field writes;
+        # only pre-existing keys and in-batch duplicates take the
+        # per-column merge loop.  The old per-row path was ~10 numpy
+        # scalar writes/row — the dominant spill cost at 15M scale.
+        _, first_i = np.unique(keys, return_index=True)
+        is_first = np.zeros(B, dtype=bool)
+        is_first[first_i] = True
+        ix_all = np.fromiter(
+            (self._ix.get(int(k), -1) for k in keys),
+            dtype=np.int64, count=B)
+        fresh = is_first & (ix_all < 0)
+        n_new = int(fresh.sum())
+        slots = np.arange(n0, n0 + n_new, dtype=np.int64)
+        if n_new:
+            for k, s in zip(keys[fresh].tolist(), slots.tolist()):
+                self._ix[k] = s
+            self.keys[slots] = keys[fresh]
+            self.raws[slots] = raws[fresh]
+            self.toks[slots] = toks[fresh]
+            self.cnt[slots] = cnt[fresh]
+            self.tot[slots] = tot[fresh]
+            self.occ[slots] = occ[fresh]
+            self.pos[slots] = pos[fresh]
+        for b in np.nonzero(~fresh)[0]:
+            # _ix now holds first-occurrence batch slots too, so in-
+            # batch duplicate keys merge into their twin's new row
+            i = self._ix[int(keys[b])]
+            # merge follower columns by token id
+            for j in range(self.M):
+                t = int(toks[b, j])
+                if t < 0:
+                    continue
+                hit = np.nonzero(self.toks[i] == t)[0]
+                if hit.size:
+                    self.cnt[i, hit[0]] += cnt[b, j]
+                else:
+                    free = np.nonzero(self.toks[i] < 0)[0]
+                    if free.size:
+                        self.toks[i, free[0]] = t
+                        self.cnt[i, free[0]] = cnt[b, j]
                     else:
-                        free = np.nonzero(self.toks[i] < 0)[0]
-                        if free.size:
-                            self.toks[i, free[0]] = t
-                            self.cnt[i, free[0]] = cnt[b, j]
-                        else:
-                            # row full: weakest column loses the merge
-                            w = int(np.argmin(self.cnt[i]))
-                            if cnt[b, j] > self.cnt[i, w]:
-                                self.toks[i, w] = t
-                                self.cnt[i, w] = cnt[b, j]
-                self.tot[i] += tot[b]
-                self.occ[i] = max(self.occ[i], float(occ[b]))
+                        # row full: weakest column loses the merge
+                        w = int(np.argmin(self.cnt[i]))
+                        if cnt[b, j] > self.cnt[i, w]:
+                            self.toks[i, w] = t
+                            self.cnt[i, w] = cnt[b, j]
+            self.tot[i] += tot[b]
+            self.occ[i] = max(self.occ[i], float(occ[b]))
             self.pos[i] = pos[b]
-        self._n = n0 + added
-        return added
+        self._n = n0 + n_new
+        return n_new
 
     def drop_rows(self, idx: np.ndarray) -> None:
         """Physically remove rows (controller shrink / coldest purge)."""
@@ -343,10 +354,10 @@ class FluxBank:
                 pos=self.pos[:self._n])
         meta = path.with_suffix(".meta.json")
         meta.write_text(json.dumps(
-            {"order": self.order, "M": self.M, "rows": int(len(self))}))
+            {"order": self.order, "M": self.M, "rows": len(self)}))
 
     @classmethod
-    def load(cls, path) -> "FluxBank":
+    def load(cls, path) -> FluxBank:
         z = np.load(Path(path))
         b = cls(int(z["order"]), int(z["M"]))
         b.keys = z["keys"].astype(np.int64)

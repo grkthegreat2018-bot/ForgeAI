@@ -36,7 +36,6 @@ import json
 import os
 import random
 import re
-import time
 from collections import deque
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -264,7 +263,7 @@ class FluxTools:
     def _kaikki_lookup(self, word: str) -> dict | None:
         """Stream-scan a local kaikki.org Wiktionary jsonl for ``word``."""
         try:
-            with open(self.dict_file, "r", encoding="utf-8",
+            with open(self.dict_file, encoding="utf-8",
                       errors="replace") as f:
                 for line in f:
                     if f'"word":"{word}"' not in line and \
@@ -640,7 +639,7 @@ class FluxKB:
         self._keys: set[tuple[str, str]] = set()
         if path and os.path.exists(path):
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
                         if not line:

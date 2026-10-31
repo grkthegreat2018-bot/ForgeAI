@@ -121,7 +121,7 @@ def mu_scale_init(model: nn.Module, verbose: bool = False):
         verbose: print statistics about the initialization
     """
     n_layers = 0
-    for name, module in model.named_modules():
+    for _name, module in model.named_modules():
         if isinstance(module, nn.Linear):
             d_in = module.in_features
 
@@ -188,7 +188,7 @@ def enable_fp8_training(dtype: torch.dtype = torch.float8_e4m3fn,
         yield
         return
 
-    major, minor = torch.cuda.get_device_capability()
+    major, _minor = torch.cuda.get_device_capability()
     if major < 9:  # SM90 = Hopper, SM120 = Blackwell
         # Pre-Hopper: no FP8 support, fall back to BF16 autocast
         with torch.autocast("cuda", dtype=torch.bfloat16):

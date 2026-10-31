@@ -247,8 +247,8 @@ class CPUAdamW(Optimizer):
     ):
         if lr <= 0:
             raise ValueError(f"Invalid learning rate: {lr}")
-        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay,
-                        amsgrad=amsgrad)
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
+                        "amsgrad": amsgrad}
         super().__init__(params, defaults)
         self.pin_memory = pin_memory
         self.overlap = overlap

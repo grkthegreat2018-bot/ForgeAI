@@ -331,10 +331,7 @@ def _nvidia_filter(model: DistillModel) -> bool:
         return True
     if model.license not in NVIDIA_ALLOWED_LICENSES:
         return False
-    for prefix in NVIDIA_BANNED_MODEL_PREFIXES:
-        if model.model_id.lower().startswith(prefix):
-            return False
-    return True
+    return all(not model.model_id.lower().startswith(prefix) for prefix in NVIDIA_BANNED_MODEL_PREFIXES)
 
 
 # Pre-filtered pool: NVIDIA-own models removed, all distill_allowed=True verified

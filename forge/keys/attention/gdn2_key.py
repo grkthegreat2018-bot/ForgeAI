@@ -44,8 +44,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from forge.keys.misc.base import Key, KeyClass, KeyResult
 from forge.keys.attention.kda_key import _CausalDWConv, _inv_softplus
+from forge.keys.misc.base import Key, KeyClass, KeyResult
 
 
 def _tile_rows(w: torch.Tensor, repeats: int) -> torch.Tensor:

@@ -1362,7 +1362,7 @@ def estimate_r46_memory(model: nn.Module) -> dict:
     total_bytes = 0
     total_params = 0
 
-    for name, module in model.named_modules():
+    for _name, module in model.named_modules():
         cls_name = type(module).__name__
         if cls_name in ('HadamardRotatedFP4Linear', 'GPTQFP4Linear', 'AWQFP4Linear',
                         'OptimalGridFP4Linear', 'HadamardGPTQFP4Linear',

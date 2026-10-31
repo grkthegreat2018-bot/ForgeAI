@@ -78,7 +78,7 @@ class MoSAAttention(nn.Module):
         Returns:
             out: (B, n_heads, T, head_dim)
         """
-        B, n_h, T, hd = q.shape
+        _B, n_h, T, hd = q.shape
         k_tokens = max(1, int(T * self.k_ratio))
 
         # Router scores: (B, T, n_heads)
@@ -176,7 +176,7 @@ class MoSAWrapper:
         def mosa_forward(self, x, past_key_value=None, use_cache=False,
                          preallocated_cache=None, layer_idx=0,
                          attention_bias=None, position_ids=None):
-            B, T, C = x.shape
+            B, T, _C = x.shape
             hd = self.head_dim
 
             # Use MoSA only for long sequences
@@ -213,6 +213,8 @@ class MoSAWrapper:
 
             # MoSA sparse attention
             out = self._mosa_module(q, k_cache, v_cache)
+            if getattr(self, '_finish_attn', None) is not None:
+                return self._finish_attn(x, out), new_kv
             out = out.transpose(1, 2).reshape(B, T, -1)
             return self.out_proj(out), new_kv
 

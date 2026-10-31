@@ -154,8 +154,8 @@ class S4RKVCache(KVCacheStrategy):
         bases_v = []
         for h in range(self.n_kv):
             # SVD: K = U S V^T, take top-rank rows of V^T as basis
-            U_k, S_k, Vh_k = torch.linalg.svd(k_flat[h].float(), full_matrices=False)
-            U_v, S_v, Vh_v = torch.linalg.svd(v_flat[h].float(), full_matrices=False)
+            _U_k, _S_k, Vh_k = torch.linalg.svd(k_flat[h].float(), full_matrices=False)
+            _U_v, _S_v, Vh_v = torch.linalg.svd(v_flat[h].float(), full_matrices=False)
 
             # Top-rank basis vectors
             basis_k_h = Vh_k[:self.rank].to(self.dtype)  # (rank, hd)

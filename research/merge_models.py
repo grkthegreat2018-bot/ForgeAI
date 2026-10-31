@@ -39,7 +39,6 @@ import torch
 
 from forge.checkpoint_io import load_checkpoint, save_checkpoint
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -127,7 +126,7 @@ def merge_slerp(a: dict[str, torch.Tensor],
     (dot > 0.9995), matching the standard SLERP convention.
     """
     out = {}
-    for k in a.keys():
+    for k in a:
         if k not in b or a[k].shape != b[k].shape:
             out[k] = a[k].clone()
             continue
@@ -1437,7 +1436,7 @@ def main():
         print(f"{args.method}: base={args.base} + {len(ft_models)} task vectors")
 
         if args.method == "linear":
-            merged = merge_linear([base] + ft_models, args.weights)
+            merged = merge_linear([base, *ft_models], args.weights)
         elif args.method == "task_arith":
             merged = merge_task_arith(base, task_vectors, args.weights)
         elif args.method == "ties":

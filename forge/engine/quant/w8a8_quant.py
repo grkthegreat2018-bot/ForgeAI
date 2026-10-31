@@ -24,6 +24,59 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from forge.quant.protocol import QuantizedLinearMixin
+from forge.evolution.auto_targets import self_improve
+
+
+def _evolve_inputs_w8a8_quant_act():
+    """Representative cases for w8a8_quantize_activation: fp16/bf16
+    activations at decode-time shapes (few rows, wide in_features) plus
+    the SmoothQuant-scaled path — the per-forward dynamic quant cost."""
+    import torch
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    g = torch.Generator().manual_seed(0)
+    cases = []
+    for shape in ((1, 1, 2048), (1, 8, 4096), (4, 16, 2048),
+                  (1, 1, 8192)):
+        for dt in (torch.float16, torch.bfloat16):
+            x = (torch.randn(*shape, generator=g).to(dev) * 6).to(dt)
+            cases.append((x, shape[-1], None))
+            sc = torch.rand(shape[-1], generator=g).to(dev) * 0.5 + 0.5
+            cases.append((x, shape[-1], sc))
+    # heavy-tailed activations — absmax clamp path matters here
+    x = torch.randn(2, 4, 1024, generator=g).to(dev).to(torch.float16)
+    x[..., ::97] *= 60
+    cases.append((x, 1024, None))
+    return cases
+
+
+@self_improve(gen_input=_evolve_inputs_w8a8_quant_act, evals=80,
+              tags=("quant", "w8a8", "int8", "kernel", "hot-path"),
+              prompt=("Faster w8a8_quantize_activation(x, in_features, "
+                      "act_scale): optional per-channel SmoothQuant "
+                      "scale, then per-row absmax symmetric int8 quant "
+                      "-> (x_int8, scale). Seed: reshape + abs + amax + "
+                      "div + round + clamp + cast, one kernel each. "
+                      "Ideas: fuse scale into one pass, integer absmax "
+                      "tricks, skip reshape, combine clamp/round/cast. "
+                      "Same outputs."))
+def w8a8_quantize_activation(
+        x: torch.Tensor, in_features: int,
+        act_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dynamic per-token absmax symmetric INT8 quantization of activations.
+
+    Applies SmoothQuant per-channel scaling first (if ``act_scale`` is
+    given), then per-token absmax quantization.
+
+    x: (..., in_features) -> x_int8 (..., in_features), scale (..., 1)
+    """
+    if act_scale is not None:
+        x = x / act_scale.to(x.dtype)
+    x_flat = x.reshape(-1, in_features)
+    absmax = x_flat.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
+    scale = absmax / 127.0
+    x_int8 = (x_flat / scale).round().clamp(-128, 127).to(torch.int8)
+    return x_int8.reshape(x.shape), scale.reshape(x.shape[:-1] + (1,))
 
 
 class W8A8Linear(QuantizedLinearMixin):
@@ -133,13 +186,9 @@ class W8A8Linear(QuantizedLinearMixin):
         x: (..., in_features) -> x_int8 (..., in_features), scale (..., 1)
         """
         # SmoothQuant: divide activations by per-channel scale (shifts outliers to weights)
-        if self.smoothquant_alpha > 0:
-            x = x / self.act_scale.to(x.dtype)
-        x_flat = x.reshape(-1, self.in_features)
-        absmax = x_flat.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
-        scale = absmax / 127.0
-        x_int8 = (x_flat / scale).round().clamp(-128, 127).to(torch.int8)
-        return x_int8.reshape(x.shape), scale.reshape(x.shape[:-1] + (1,))
+        return w8a8_quantize_activation(
+            x, self.in_features,
+            self.act_scale if self.smoothquant_alpha > 0 else None)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not x.is_cuda or self.mode != "int8":

@@ -84,7 +84,7 @@ class PEAGLEDraftHead(nn.Module):
         Returns:
             draft_logits: (B, K, vocab_size) logits for K draft tokens
         """
-        B, T, D = hidden_states.shape
+        B, _T, _D = hidden_states.shape
 
         # Use the LAST hidden state as the seed for drafting
         seed = hidden_states[:, -1:, :]  # (B, 1, d_model)
@@ -218,7 +218,7 @@ class PEAGLEDraftHeadTied(nn.Module):
         Returns:
             draft_logits: (B, K, vocab_size) logits for K draft tokens
         """
-        B, T, D = hidden_states.shape
+        B, _T, _D = hidden_states.shape
 
         # Use the LAST hidden state as the seed for drafting
         seed = hidden_states[:, -1:, :]  # (B, 1, d_model)
@@ -351,7 +351,7 @@ class PEAGLESpeculator:
         4. Accept longest matching prefix, resample at rejection point
         5. Repeat
         """
-        B, T = input_ids.shape
+        _B, T = input_ids.shape
         generated = input_ids.clone()
 
         while generated.shape[1] - T < max_new_tokens:
@@ -444,7 +444,7 @@ def train_peagle_head(draft_head: PEAGLEDraftHead, model: nn.Module,
         draft_logits = draft_head(hidden[:, :-1])  # (B, K, vocab)
 
         # Targets: the next K tokens after each position
-        B, T = input_ids.shape
+        _B, T = input_ids.shape
         K = draft_head.n_draft
         input_ids[:, 1:]  # (B, T-1)
 

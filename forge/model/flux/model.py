@@ -1,38 +1,31 @@
 """FluxLM - sparse online associative-memory LM."""
 from __future__ import annotations
 
-import json
 import math
 import os
 import tempfile
-import time
 from collections import deque
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from .helpers import (_HASH_P, _MASK64, _MIX1, _MIX2,
-                      _byte_class, _load_teacher_embedding, _mix64,
-                      _s64, _scatter_sum)
-from .config import FluxConfig
-from .journal import FluxJournal
-from .tables import _GPUCellTables
 from .bank import FluxBank
+from .config import FluxConfig
+from .helpers import _byte_class
+from .journal import FluxJournal
 from .kernels import HAS_TRITON
+from .tables import _GPUCellTables
 
 if HAS_TRITON:
-    from .kernels import (_flux_deep_votes_kernel,
-                          _flux_logit_tail_kernel)
+    pass
 
 
-from .statemixin import _StateMixin
-from .predictmixin import _PredictMixin
-from .learnmixin import _LearnMixin
-from .revertmixin import _RevertMixin
 from .iomixin import _IOMixin
+from .learnmixin import _LearnMixin
+from .predictmixin import _PredictMixin
+from .revertmixin import _RevertMixin
+from .statemixin import _StateMixin
 
 
 class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
@@ -129,7 +122,7 @@ class FluxLM(_StateMixin, _PredictMixin, _LearnMixin, _RevertMixin,
         # tables live here (host, .fluxbank-persistable); reads merge
         # through the same order-channel prob (see _cold_cell).
         _bw = c.bank_row_width or c.gpu_row_width
-        self._banks: dict[int, "FluxBank"] = (
+        self._banks: dict[int, FluxBank] = (
             {k: FluxBank(k, _bw, disk_dir=c.bank_dir)
              for k in c.orders}
             if c.bank_enable else {})

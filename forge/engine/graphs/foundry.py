@@ -202,8 +202,6 @@ class FoundryRunner:
         # Allocate static buffers from template shapes
         buffers = {}
         for name, shape in template.buffer_shapes.items():
-            dtype_str = template.buffer_dtypes.get(name, "torch.int64")
-            eval(dtype_str) if "torch" in dtype_str else torch.int64
             if "input" in name or "position" in name:
                 buffers[name] = torch.zeros(shape, dtype=torch.long, device=self.device)
             else:
@@ -245,11 +243,10 @@ class FoundryRunner:
     def run(self, template_name: str, input_ids: torch.Tensor,
             position_ids: torch.Tensor | None = None) -> torch.Tensor:
         """Run inference using a materialized graph."""
-        if template_name not in self._graphs:
-            if not self.materialize(template_name):
-                # Fallback to eager
-                with torch.inference_mode():
-                    return self.model(input_ids, position_ids=position_ids)
+        if template_name not in self._graphs and not self.materialize(template_name):
+            # Fallback to eager
+            with torch.inference_mode():
+                return self.model(input_ids, position_ids=position_ids)
 
         graph = self._graphs[template_name]
         buffers = self._buffers[template_name]

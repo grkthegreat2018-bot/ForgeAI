@@ -124,8 +124,8 @@ class SFNorMuon(Optimizer):
 
     def __init__(self, params: Iterable, lr=0.02, momentum=0.95,
                  beta=0.999, weight_decay=0.01, ns_steps=5):
-        defaults = dict(lr=lr, momentum=momentum, beta=beta,
-                        weight_decay=weight_decay, ns_steps=ns_steps)
+        defaults = {'lr': lr, 'momentum': momentum, 'beta': beta,
+                        'weight_decay': weight_decay, 'ns_steps': ns_steps}
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -225,9 +225,9 @@ class AMUSE(Optimizer):
 
     def __init__(self, params: Iterable, lr=0.02, momentum=0.95,
                  beta=0.999, interpolation_schedule='sqrt', ns_steps=5):
-        defaults = dict(lr=lr, momentum=momentum, beta=beta,
-                        interpolation_schedule=interpolation_schedule,
-                        ns_steps=ns_steps)
+        defaults = {'lr': lr, 'momentum': momentum, 'beta': beta,
+                        'interpolation_schedule': interpolation_schedule,
+                        'ns_steps': ns_steps}
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -315,8 +315,8 @@ class MONA(Optimizer):
 
     def __init__(self, params: Iterable, lr=0.02, momentum=0.95,
                  accel_decay=0.9, accel_weight=0.1, ns_steps=5):
-        defaults = dict(lr=lr, momentum=momentum, accel_decay=accel_decay,
-                        accel_weight=accel_weight, ns_steps=ns_steps)
+        defaults = {'lr': lr, 'momentum': momentum, 'accel_decay': accel_decay,
+                        'accel_weight': accel_weight, 'ns_steps': ns_steps}
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -408,9 +408,9 @@ class SAMuonLite(Optimizer):
     def __init__(self, params: Iterable, lr=0.02, momentum=0.95,
                  bulk_gain=1.5, power_iters=3, weight_decay=0.0,
                  ns_steps=5):
-        defaults = dict(lr=lr, momentum=momentum, bulk_gain=bulk_gain,
-                        power_iters=power_iters, weight_decay=weight_decay,
-                        ns_steps=ns_steps)
+        defaults = {'lr': lr, 'momentum': momentum, 'bulk_gain': bulk_gain,
+                        'power_iters': power_iters, 'weight_decay': weight_decay,
+                        'ns_steps': ns_steps}
         super().__init__(params, defaults)
 
     @torch.no_grad()

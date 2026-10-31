@@ -63,16 +63,26 @@ import torch
 logger = logging.getLogger(__name__)
 
 # Helpers moved to engine_common.py (re-exported for backward compatibility).
+from .activation import ActivationConfig
+
+# Heavy runtime dependencies used by ForgeEngine.__init__ and class methods.
+from .crash_recovery import CrashRecoveryManager
+from .decoding import DecodingStrategy, StandardDecoding
+from .diagnostics import (
+    BandwidthProfiler,
+    EngineProfiler,
+    EventLog,
+    OutputHistory,
+)
 from .engine_activation import _ActivationMixin
 from .engine_checkpoints import _CheckpointLoadingMixin
-from .activation import ActivationConfig  # noqa: F401
-from .feature_registry import _FEATURE_REGISTRY  # noqa: F401
 from .engine_common import (  # noqa: F401
     _CKPT_CACHE_MAX,
     _DEFAULT_CPU_MEMORY_BYTES,
     _DEFAULT_EOS_TOKEN_IDS,
     _QWEN_TOKENIZER_PATH,
     _QWEN_VOCAB,
+    SamplingParams,
     _checkpoint_metadata_cache,
     _checkpoint_size_cache,
     _ckpt_cache_lock,
@@ -80,7 +90,6 @@ from .engine_common import (  # noqa: F401
     _min_k_filter,
     _ScalingModelAdapter,
     _tokenizer_for_vocab,
-    SamplingParams,
 )
 from .engine_diagnostics import _DiagnosticsMixin
 from .engine_generation import _GenerationMixin
@@ -88,30 +97,21 @@ from .engine_lifecycle import _LifecycleMixin
 from .engine_lora import _LoRAMixin
 from .engine_merging import _MergingMixin
 from .engine_sessions import _SessionMixin
-
-# Heavy runtime dependencies used by ForgeEngine.__init__ and class methods.
-from .crash_recovery import CrashRecoveryManager  # noqa: F401
-from .decoding import DecodingStrategy, StandardDecoding  # noqa: F401
-from .diagnostics import (  # noqa: F401
-    BandwidthProfiler,
-    EngineProfiler,
-    EventLog,
-    OutputHistory,
-)
-from .engine_tools import EngineToolRegistry  # noqa: F401
-from .errors import ForgeEngineError  # noqa: F401
-from .hotswap import HotSwapManager  # noqa: F401
-from .innovations import (  # noqa: F401
+from .engine_tools import EngineToolRegistry
+from .errors import ForgeEngineError
+from .feature_registry import _FEATURE_REGISTRY  # noqa: F401
+from .hotswap import HotSwapManager
+from .innovations import (
     MRLAdaptiveContext,
     ProgressiveKV,
     QuaRotKV,
     V0WarmStart,
 )
-from .kv.cacheblend import CacheBlend  # noqa: F401
-from .kv_backend import KVCacheStrategy  # noqa: F401
-from .library import Library  # noqa: F401
-from .prefix_cache import SemanticKVAnchors  # noqa: F401
-from .session_cache import SessionCacheManager  # noqa: F401
+from .kv.cacheblend import CacheBlend
+from .kv_backend import KVCacheStrategy
+from .library import Library
+from .prefix_cache import SemanticKVAnchors
+from .session_cache import SessionCacheManager
 
 
 class ForgeEngine(_CheckpointLoadingMixin, _ActivationMixin,

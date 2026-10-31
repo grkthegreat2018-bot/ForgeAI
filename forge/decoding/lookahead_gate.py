@@ -67,7 +67,7 @@ class LookaheadQualityGate:
         Returns:
             score: quality score (0-1, higher = better)
         """
-        B, T, D = hidden_states.shape
+        _B, T, _D = hidden_states.shape
         draft_tokens.shape[1]
 
         # Geometry-based score: measure how "in-distribution" the draft is

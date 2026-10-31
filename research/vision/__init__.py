@@ -24,8 +24,6 @@ token-aligned embeddings that the LM processes like text tokens.
 from __future__ import annotations
 
 import logging
-import math
-from typing import Optional
 
 import torch
 import torch.nn as nn

@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 import time
 
 import torch
@@ -244,9 +243,8 @@ def convert_v3_to_v4_state(
 
         # Determine if V is already tied to K
         v_tied_to_k = False
-        if kk in state and vk in state:
-            if state[kk].shape == state[vk].shape:
-                v_tied_to_k = (state[kk] - state[vk]).abs().max().item() < 1e-6
+        if kk in state and vk in state and state[kk].shape == state[vk].shape:
+            v_tied_to_k = (state[kk] - state[vk]).abs().max().item() < 1e-6
 
         if v_tied_to_k:
             # V=K already: use gate=0 (V=K, halves KV cache BW)
@@ -298,7 +296,7 @@ def convert_v3_to_v4(
     print(f"  [V3→V4] Done! Total: {time.time()-t0:.1f}s")
 
     # Verify key shapes
-    print(f"\n  [V3→V4] Verification (layer {list(_find_attn_layers(state))[0]}):")
+    print(f"\n  [V3→V4] Verification (layer {next(iter(_find_attn_layers(state)))}):")
     first_layer = _find_attn_layers(state)[0]
     for k in sorted(state.keys()):
         if f"blocks.{first_layer}.attn" in k:

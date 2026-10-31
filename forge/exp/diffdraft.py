@@ -43,7 +43,7 @@ class DiffusionDraftHead(nn.Module):
         """h: (B, D) context; z: (B, K, D) noisy embeds;
         t: float or (B,) tensor in [0,1].  Computes in the module's
         param dtype (fp32) regardless of input dtype."""
-        B, K, D = z.shape
+        B, K, _D = z.shape
         pdtype = self.t_embed.weight.dtype
         z = z.to(pdtype)
         h = h.to(pdtype)
@@ -159,7 +159,7 @@ def collect_hidden_targets(model, embed_w, ids, k: int):
     hidden = out[-1] if isinstance(out, tuple) else out
     if hidden.dim() == 2:
         hidden = hidden.unsqueeze(1)
-    B, T = ids.shape
+    _B, T = ids.shape
     h = hidden[:, :T - k].contiguous()                    # h_t predicts t+1..t+k
     tgt_ids = torch.stack([ids[:, j:j + T - k]
                            for j in range(1, k + 1)], dim=2)   # (B,T-k,K)

@@ -362,7 +362,7 @@ class SchurABFP4Linear(QuantizedLinearMixin):
         w_fp4, idx_best = _quantize_with_scale(best_scale)
         best_mse = ((w_fp4 * best_scale.unsqueeze(-1) - W_blocks) ** 2).mean().item()
 
-        for it in range(schur_iters):
+        for _it in range(schur_iters):
             # Try small scale perturbations per-block-channel
             improved = False
             for factor in [0.98, 1.02, 0.95, 1.05]:
@@ -639,7 +639,7 @@ def requant_refine_layer(module: nn.Module, original_weight: torch.Tensor,
     # Try scale adjustments
     if hasattr(module, 'scales') and hasattr(module, 'q_weight'):
         scales = module.scales.data.clone()
-        for sweep in range(max_sweeps):
+        for _sweep in range(max_sweeps):
             improved = False
             for factor in [0.95, 0.97, 0.99, 1.01, 1.03, 1.05]:
                 module.scales.data = scales * factor
@@ -750,14 +750,14 @@ class LloydMaxRotatedKVQuantizer:
 
         # Reshape to 2D if needed
         if kv.dim() == 4:
-            b, h, s, d = kv.shape
+            _b, _h, _s, d = kv.shape
             kv_flat = kv.reshape(-1, d)  # (b*h*s, d)
         elif kv.dim() == 2:
             kv_flat = kv
         else:
             kv_flat = kv.reshape(-1, original_shape[-1])
 
-        n_vec, d = kv_flat.shape
+        _n_vec, d = kv_flat.shape
         assert d <= self.hadamard_size, f"head_dim {d} > hadamard_size {self.hadamard_size}"
 
         # Pad if needed
@@ -892,7 +892,7 @@ class LloydMaxRotatedKVQuantizer:
 
         # Reshape back
         if len(original_shape) == 4:
-            b, h, s, d_orig = original_shape
+            _b, _h, _s, _d_orig = original_shape
             return kv_flat.reshape(original_shape)
         elif len(original_shape) == 2:
             return kv_flat
@@ -977,7 +977,7 @@ def estimate_r45_memory(model: nn.Module) -> dict:
     total_bytes = 0
     total_params = 0
 
-    for name, module in model.named_modules():
+    for _name, module in model.named_modules():
         if isinstance(module, WaveletLiftLinear):
             # 1 bit per binary element + scale overhead
             u_bytes = module.u_binary.numel() // 8  # 1 bit each (theoretical)

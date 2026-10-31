@@ -42,9 +42,10 @@ from forge.training.training_utils import oom_guard
 
 logger = logging.getLogger(__name__)
 
-from forge.self_play.infinite_curriculum import GenTracer, InfiniteCurriculum
 from forge.self_play.flux_goals import TOOL_HEADER as _FLUX_TOOL_HEADER
 from forge.self_play.flux_goals import parse_tool_call as _parse_tool_call
+from forge.self_play.infinite_curriculum import GenTracer, InfiniteCurriculum
+import contextlib
 
 
 @dataclass
@@ -726,8 +727,8 @@ class InfiniteSelfPlayLoop:
                 self._engine.model.__class__.__name__ == "FluxLM":
             return self._engine
         self._free_engine()
-        from forge.model.flux import FluxConfig
         from forge.engine.forge_engine import ForgeEngine
+        from forge.model.flux import FluxConfig
         cfg = self.config
         fc = FluxConfig(vocab_size=65536, device=cfg.device,
                         cuda_primary=cfg.device == "cuda")
@@ -903,9 +904,7 @@ class InfiniteSelfPlayLoop:
 
     # ── self-posed goals (knowledge hunting) ──
     _SELF_STOP = frozenset(
-        "about which where there their would could should these those "
-        "between after before because through during under over into "
-        "from with have been other more than some such only also very".split())
+        ["about", "which", "where", "there", "their", "would", "could", "should", "these", "those", "between", "after", "before", "because", "through", "during", "under", "over", "into", "from", "with", "have", "been", "other", "more", "than", "some", "such", "only", "also", "very"])
 
     def _flux_self_proposals(self, engine, n: int) -> list[str]:
         """Ask the model to pose questions it wants answered."""
@@ -1171,9 +1170,6 @@ class InfiniteSelfPlayLoop:
                         call = (pairs[i].get("tool") or "wiki",
                                 pairs[i].get("query")
                                 or pairs[i]["prompt"])
-                        obs_ok = False
-                    else:
-                        obs_ok = True
                     o = tools.call(call[0], call[1])
                     obs.append(o)
                     pb_prompts.append(
@@ -1525,10 +1521,8 @@ class InfiniteSelfPlayLoop:
         from research.paths import CURRICULUM_DIR
         seen_path = CURRICULUM_DIR / "seen_descriptions.json"
         if seen_path.exists():
-            try:
+            with contextlib.suppress(OSError):
                 seen_path.unlink()
-            except OSError:
-                pass
 
         # ── Propose + validate tasks ──
         n_target = self.config.tasks_per_epoch
@@ -1769,10 +1763,8 @@ class InfiniteSelfPlayLoop:
             snap = getattr(engine, "_stored_checkpoint", None)
             if snap and os.path.basename(str(snap)).startswith(
                     "flux_sleep_"):
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(snap)
-                except OSError:
-                    pass
         except Exception:
             logger.debug("Error sleeping engine during cleanup", exc_info=True)
         del engine
@@ -2218,7 +2210,7 @@ class InfiniteSelfPlayLoop:
             by_domain = defaultdict(list)
             for t in verified:
                 by_domain[t.get("domain", "default")].append(t)
-            for domain, tasks in by_domain.items():
+            for _domain, tasks in by_domain.items():
                 for i in range(0, len(tasks) - 1, 2):
                     t1, t2 = tasks[i], tasks[i + 1]
                     prompts.append(t1["task_description"])

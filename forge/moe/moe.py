@@ -283,6 +283,16 @@ class MoELayer(nn.Module):
 
         self.router = Router(d_model, n_experts, top_k, noisy_gating,
                              mode=router_mode, gating=gating)
+        # Cached stacked expert weights for the graph-safe gather path
+        # (built lazily on first eval-mode routed forward).
+        self._w1s = None
+        self._w2s = None
+        self._w3s = None
+        # Lazy: True when all expert weights are bit-identical — lets the
+        # dense_bypass path run ONE expert instead of N (mean of identical
+        # outputs == that output).  Checked on first eval forward; works on
+        # quantized modules by comparing state_dict tensors, not .weight.
+        self._experts_identical: bool | None = None
         self.experts = nn.ModuleList([
             Expert(d_model, d_ff, use_clamp=use_clamp,
                    clamp_alpha=clamp_alpha, clamp_limit=clamp_limit,
@@ -293,6 +303,13 @@ class MoELayer(nn.Module):
             self.shared = Expert(d_model, d_ff, use_clamp=use_clamp,
                                  clamp_alpha=clamp_alpha, clamp_limit=clamp_limit,
                                  intra_sparsity=intra_sparsity)
+
+    def train(self, mode: bool = True):
+        # Weight stacks go stale whenever params may update — invalidate.
+        if mode:
+            self._w1s = self._w2s = self._w3s = None
+            self._experts_identical = None
+        return super().train(mode)
 
     def forward(self, x):
         """Forward pass.
@@ -311,13 +328,62 @@ class MoELayer(nn.Module):
         # Dense bypass: skip router, run all experts with equal weight.
         # This reproduces the original dense FFN when the router is untrained.
         if self.dense_bypass:
-            # Check if experts use BitNet int8 storage (can't stack int8 buffers)
+            # Bit-exact fast path: experts port in as N identical copies of
+            # the dense FFN, so mean over them equals a single expert's
+            # output.  Divergence (LoRA/training) flips the flag off once
+            # and this branch disappears — checked lazily on first forward.
+            if self._experts_identical is None:
+                # state_dict() detach() fails on torchao packed
+                # "inference tensors" — compare parameter tensors
+                # directly and treat incomparable (quantized) experts
+                # as not-identical: the quantized path below is the
+                # correct fallback anyway.
+                try:
+                    ref = dict(self.experts[0].named_parameters())
+                    ref.update(self.experts[0].named_buffers())
+                    identical = True
+                    for e in self.experts[1:]:
+                        sd = dict(e.named_parameters())
+                        sd.update(e.named_buffers())
+                        if sd.keys() != ref.keys():
+                            identical = False
+                            break
+                        if not all(torch.equal(ref[k], sd[k]) for k in ref):
+                            identical = False
+                            break
+                    self._experts_identical = identical
+                except Exception:
+                    self._experts_identical = False
+            if self._experts_identical:
+                output = self.experts[0](x_flat)
+                if self.has_shared:
+                    output = output + self.shared(x_flat)
+                aux_loss = x.new_zeros(())
+                self._last_aux_loss = aux_loss
+                return output.view(B, T, D), aux_loss
+            # Check if experts expose stackable dense weights. Quantized
+            # modules (BitNetLinear, QuantizedLinear, NanoQuantLinear, ...)
+            # store packed buffers instead of .weight/.base_weight — they
+            # must run through their own forward (dequant on the fly).
             first_w1 = self.experts[0].w1
             is_bitnet_int8 = (type(first_w1).__name__ == "BitNetLinear"
                               and getattr(first_w1, '_prequantized', False))
-            if is_bitnet_int8:
-                # BitNet int8 path: call each expert's forward individually
-                # (ternary GEMM kernel handles int8 weights natively)
+
+            def _get_weight(mod):
+                # Only plain torch Tensors are stackable — quantized
+                # packs (torchao Int4TilePackedTo4dTensor etc.) are
+                # Tensor subclasses whose ops are dispatched/limited;
+                # treat them as unstackable so the per-expert forward
+                # path handles them.
+                w = getattr(mod, 'base_weight',
+                            getattr(mod, 'weight', None))
+                if w is not None and type(w) not in (torch.Tensor,
+                                                     torch.nn.Parameter):
+                    return None
+                return w
+
+            if is_bitnet_int8 or _get_weight(first_w1) is None:
+                # Quantized path: call each expert's forward individually
                 expert_outs = []
                 for expert in self.experts:
                     h1 = expert.w1(x_flat)
@@ -329,8 +395,6 @@ class MoELayer(nn.Module):
                 output = expert_out.mean(dim=0)
             else:
                 # Standard path: batched matmul with stacked weights
-                def _get_weight(mod):
-                    return getattr(mod, 'base_weight', getattr(mod, 'weight', None))
                 w1 = torch.stack([_get_weight(e.w1) for e in self.experts])
                 w3 = torch.stack([_get_weight(e.w3) for e in self.experts])
                 w2 = torch.stack([_get_weight(e.w2) for e in self.experts])
@@ -349,12 +413,52 @@ class MoELayer(nn.Module):
                 output = expert_out.mean(dim=0)
             if self.has_shared:
                 output = output + self.shared(x_flat)
-            aux_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+            # new_zeros: direct device alloc — torch.tensor(0.0, device=cuda)
+            # is a pageable H2D copy that breaks CUDA-graph capture (and
+            # costs a sync per layer per token).
+            aux_loss = x.new_zeros(())
             self._last_aux_loss = aux_loss
             return output.view(B, T, D), aux_loss
 
         # Normal routed MoE path.
         dispatch_mask, gating_weights, aux_loss = self.router(x_flat)
+
+        # Graph-safe fast path (inference, small N — decode + spec verify):
+        # the per-expert nonzero()/scatter loop below is NOT CUDA-graph
+        # capturable (data-dependent shapes + host syncs). Here we gather
+        # top-k expert WEIGHTS per token — static shapes, dynamic values —
+        # so only the selected experts' weights are read (bandwidth win
+        # preserved) while every op stays tensor-driven and replayable.
+        if (not self.training and getattr(self, '_graph_moe_max_tokens', 64) >= N
+                and all(type(getattr(e.w1, 'weight', None))
+                        in (torch.Tensor, torch.nn.Parameter)
+                        for e in self.experts)):
+            # gating_weights is sparse (only top-k entries nonzero) — topk
+            # recovers static-shape (N, k) indices + scores.
+            scores, idx = gating_weights.topk(self.top_k, dim=-1)  # (N,k)
+            if (self._w1s is None or self._w1s.device != x.device
+                    or self._w1s.dtype != x.dtype):
+                self._w1s = torch.stack([e.w1.weight for e in self.experts])
+                self._w2s = torch.stack([e.w2.weight for e in self.experts])
+                self._w3s = torch.stack([e.w3.weight for e in self.experts])
+            # Gather selected expert weights: (N, k, out, in)
+            W1 = self._w1s[idx]  # (N,k,d_ff,D)
+            W3 = self._w3s[idx]
+            W2 = self._w2s[idx]  # (N,k,D,d_ff)
+            h1 = torch.einsum('nd,nkfd->nkf', x_flat, W1)
+            h3 = torch.einsum('nd,nkfd->nkf', x_flat, W3)
+            if self.use_clamp:
+                h1 = h1.clamp(min=None, max=self.clamp_limit)
+                h3 = h3.clamp(min=-self.clamp_limit, max=self.clamp_limit)
+                glu = h1 * torch.sigmoid(self.clamp_alpha * h1)
+                out_e = torch.einsum('nkf,nkdf->nkd', (h3 + 1) * glu, W2)
+            else:
+                out_e = torch.einsum('nkf,nkdf->nkd', F.silu(h1) * h3, W2)
+            output = (out_e * scores.unsqueeze(-1)).sum(1)  # (N, D)
+            if self.has_shared:
+                output = output + self.shared(x_flat)
+            self._last_aux_loss = aux_loss
+            return output.view(B, T, D), aux_loss
 
         # Compute expert outputs.
         # For efficiency, process each expert's assigned tokens.
@@ -469,10 +573,9 @@ def disable_dense_bypass(model):
     """
     n_disabled = 0
     for block in model.blocks:
-        if hasattr(block, 'ffn') and isinstance(block.ffn, MoELayer):
-            if block.ffn.dense_bypass:
-                block.ffn.dense_bypass = False
-                n_disabled += 1
+        if hasattr(block, 'ffn') and isinstance(block.ffn, MoELayer) and block.ffn.dense_bypass:
+            block.ffn.dense_bypass = False
+            n_disabled += 1
     if n_disabled:
         print(f"  [MoE] Disabled dense_bypass on {n_disabled} layers — router active")
     return n_disabled

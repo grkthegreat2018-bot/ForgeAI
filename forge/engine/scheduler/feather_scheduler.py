@@ -88,7 +88,7 @@ class ChunkedHashTree:
         best_request = None
         best_length = 0
 
-        for i, h in enumerate(chain):
+        for _i, h in enumerate(chain):
             if h in self._prefix_map:
                 for req_id, length in self._prefix_map[h]:
                     if length > best_length:

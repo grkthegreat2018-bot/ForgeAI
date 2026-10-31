@@ -378,7 +378,14 @@ class METRORouter:
     def load(cls, path: str, model, tokenizer, device: str = "cuda") -> SemanticRouter:
         try:
             data = torch.load(path, map_location=device, weights_only=True)
-        except Exception:
+        except Exception as e:
+            import warnings
+            warnings.warn(
+                f"Could not load router state {path} with weights_only=True "
+                f"({e}). Falling back to weights_only=False (UNSAFE — "
+                f"enables arbitrary code execution from the file). Only "
+                f"proceed if you trust this checkpoint's source.",
+                RuntimeWarning, stacklevel=2)
             data = torch.load(path, map_location=device, weights_only=False)
         inst = cls(model, tokenizer, {}, device=device)
         for t, e in data["topic_embeddings"].items():

@@ -23,7 +23,6 @@ import torch
 from forge.checkpoint_io import load_checkpoint, save_checkpoint
 from research.merge_models import _load_state_dict, _task_vectors, merge_task_arith
 
-
 # ---------------------------------------------------------------------------
 # 1. Task arithmetic baking
 # ---------------------------------------------------------------------------

@@ -209,9 +209,8 @@ class AdaptiveSpeculativeDecoder:
         if drafter == "ngram":
             if n_accepted > 0:
                 self._ngram_hits += 1
-        elif drafter == "eagle":
-            if n_accepted > 0:
-                self._eagle_accepts += 1
+        elif drafter == "eagle" and n_accepted > 0:
+            self._eagle_accepts += 1
 
     def _update_preference(self):
         """Update drafter preference based on observed stats."""

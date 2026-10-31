@@ -27,6 +27,7 @@ every _predict path routes through remix() including engine.generate.
 from __future__ import annotations
 
 import math
+
 import numpy as np
 import torch
 
@@ -208,7 +209,7 @@ class KnobHead:
                 "vpos": self.vpos, "gof": self.gof}
 
     @classmethod
-    def load_state_dict(cls, st: dict) -> "KnobHead":
+    def load_state_dict(cls, st: dict) -> KnobHead:
         h = cls(channels=st["channels"], min_n=st.get("min_n", 30),
                 k_cand=st.get("k_cand", 16))
         h.mixes = st["mixes"]
@@ -280,7 +281,7 @@ class KnobHead:
         c = flux.config
         lw = (flux._wR[warm] if getattr(c, "cond_hedge", 0)
               else flux._w)
-        dev = lg_dev = getattr(flux, "_dev", torch.device("cpu"))
+        dev = getattr(flux, "_dev", torch.device("cpu"))
         V = flux.vocab_size
         p = torch.zeros(V, device=dev)
         lg_geo = torch.zeros(V, device=dev) if b is not None else None
@@ -348,7 +349,6 @@ class KnobHead:
         [lam·p_cand + (1-lam)·arm], where the head arm blends the
         additive mix with the geometric (PoE) arm by gof[key].
         Returns log-probabilities."""
-        dev = lg.device
         lp = torch.log_softmax(lg.float(), -1)
         conf = float(lp.max().exp())
         key = self.key(self._dom_ch(self._chan_stats(cap)), conf)
@@ -377,7 +377,7 @@ class KnobHead:
 
     # ---------------- fitting (counting + EM, no gradient) ------------
     def fit(self, feats: dict, tgt_ids: np.ndarray,
-            rounds: int = 8) -> "KnobHead":
+            rounds: int = 8) -> KnobHead:
         """Batch-EM fit over collected per-position channel evidence.
 
         feats: {scal [N,C*3], ltgt [N,C], csup [N,K,C], cid [N,K],

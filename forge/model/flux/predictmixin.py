@@ -1,31 +1,19 @@
 """Prediction paths for FluxLM (CPU + CUDA-primary)."""
 from __future__ import annotations
 
-import json
 import math
-import os
 import re
-import time
-from collections import deque
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
 
-from .helpers import (_HASH_P, _MASK64, _MIX1, _MIX2,
-                      _load_teacher_embedding, _mix64, _s64,
-                      _scatter_sum)
-from .config import FluxConfig
-from .journal import FluxJournal
-from .tables import _GPUCellTables
+from .helpers import _MIX1, _mix64, _scatter_sum
 from .kernels import HAS_TRITON
 
 if HAS_TRITON:
     import triton
-    from .kernels import (_flux_deep_votes_kernel,
-                          _flux_logit_tail_kernel)
+
+    from .kernels import _flux_deep_votes_kernel, _flux_logit_tail_kernel
 
 
 class _PredictMixin:
@@ -389,7 +377,7 @@ class _PredictMixin:
                 w = float(c.deep_order)
                 certs = ent[2] if len(ent) > 2 else ()
                 for L, cv in zip(c.cert_orders, certs):
-                    if cv and cur_certs.get(L) == cv and L > w:
+                    if cv and cur_certs.get(L) == cv and w < L:
                         w = float(L)
             if succ < 0:              # legacy entry - read ring
                 if pos + 1 >= self._count or pos + 1 < floor:
@@ -2150,7 +2138,7 @@ class _PredictMixin:
         keys, live_k = self._keys_dev(end_t)        # [O] raw keys
         pk_e = _mix64(keys * _MIX1
                       + self._gt._salt[:keys.numel()])
-        sl_e, fd_e = self._gt.probe_fixed(pk_e)
+        _sl_e, fd_e = self._gt.probe_fixed(pk_e)
         miss_l = (live_k & ~fd_e).tolist()          # sync 1
         if not any(miss_l):
             return
@@ -3066,7 +3054,6 @@ class _PredictMixin:
             thin = pp[tots < c.gap_min_total]
             self._gaps.extend(thin.cpu().tolist())
             return len(self._gaps)
-        tab = self._tables.get(k, {})
         tots = self._totals.get(k, {})
         for pos in range(start + 1, self._count):
             key = self._raw_hash(k, pos - 1)
@@ -3110,7 +3097,6 @@ class _PredictMixin:
     def _explain_gpu(self, top_k: int) -> dict:
         c = self.config
         V = self.vocab_size
-        gt = self._gt
         hits0 = self._knn_hits.clone()      # vote scan counts hits
         end = torch.tensor(self._count - 1, dtype=torch.int64,
                            device=self._dev)

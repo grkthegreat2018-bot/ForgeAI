@@ -1,12 +1,16 @@
 """Checkpoint loading and auto-detection mixin for ForgeEngine."""
 import json
 import os
+import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+import torch
 import torch.nn.functional as F
 
-from .engine_common import *  # noqa: F403
-from .errors import CheckpointError  # noqa: F401
+if TYPE_CHECKING:
+    from forge.engine.forge_engine import ForgeEngine
+
 from .engine_common import (  # noqa: F401
     _CKPT_CACHE_MAX,
     _DEFAULT_CPU_MEMORY_BYTES,
@@ -23,6 +27,7 @@ from .engine_common import (  # noqa: F401
     _tokenizer_for_vocab,
     logger,
 )
+from .errors import CheckpointError
 
 
 class _CheckpointLoadingMixin:
@@ -58,11 +63,12 @@ class _CheckpointLoadingMixin:
                 strategy, the model never touches VRAM at bf16 size, so
                 checkpoints larger than free VRAM still load GPU-resident.
         """
-        from forge.config import get_config
-        from research.tokenizer_cache import get_tokenizer
-        from forge.runtime.configure import configure
-        from forge.engine.activation import ActivationConfig
         from dataclasses import fields as _dc_fields
+
+        from forge.config import get_config
+        from forge.engine.activation import ActivationConfig
+        from forge.runtime.configure import configure
+        from research.tokenizer_cache import get_tokenizer
 
         # Split kwargs: ActivationConfig field names are activation
         # overrides (kv_cache_tokens, use_*, quantize, ...) merged into
@@ -107,6 +113,14 @@ class _CheckpointLoadingMixin:
         # on the config's vocab so HF-style checkpoints get a matching
         # tokenizer (explicit tokenizer_path always wins).
         tok_path = tokenizer_path or _tokenizer_for_vocab(cfg.vocab_size)
+        # HF-format checkpoint dirs ship their own tokenizer (LFM3-1.7B:
+        # vocab 128000, tokenizer.json alongside the weights). When the
+        # caller didn't pin a tokenizer and the dir carries one, prefer it
+        # over the vocab-size dispatch.
+        if tokenizer_path is None and Path(checkpoint).is_dir():
+            ckpt_dir_tok = Path(checkpoint)
+            if (ckpt_dir_tok / "tokenizer.json").exists():
+                tok_path = str(ckpt_dir_tok)
 
         # GGUF-embedded tokenizer: "gguf:<path>" asks for the tekken/BPE
         # tables embedded in a GGUF file (llama_cpp vocab-only wrapper).
@@ -386,6 +400,11 @@ class _CheckpointLoadingMixin:
         elif "bitnet_prequant" in self.keystack_features:
             # Weights are already ternary int8 — no quantize needed
             overrides["quantize"] = None
+        elif getattr(self.model, '_forgequant_prequant', False):
+            # Checkpoint already stores ForgeQuant packed weights —
+            # a second pass would corrupt them. BCG/compile stay
+            # available: packed params are plain tensors on GPU.
+            overrides["quantize"] = None
         elif is_mamba_hybrid:
             # Quamba2 already quantizes SSM blocks in the mamba profile;
             # an extra whole-model quant pass is unvalidated there.
@@ -586,6 +605,10 @@ class _CheckpointLoadingMixin:
         try:
             with open(checkpoint, "rb") as f:
                 (n,) = struct.unpack("<Q", f.read(8))
+                # Bound the header read — safetensors caps it at 100MB;
+                # a corrupt u64 must not drive a giant f.read.
+                if n > 100 * 1024**2:
+                    return None
                 return json.loads(f.read(n))
         except (OSError, ValueError, struct.error):
             return None

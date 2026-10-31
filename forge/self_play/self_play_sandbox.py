@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 from forge.engine.scheduler.async_d2h import AsyncTokenReader, StreamedGenerator
 from forge.self_play.io_match import io_match, io_similarity
 from research.json_compat import dumps
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,8 @@ class SandboxExecutor:
                 from research.persistent_executor import PersistentCodeExecutor
                 n = max(1, int(workers))
                 self._pool = [PersistentCodeExecutor(
-                    timeout_s=timeout_s, memory_limit_mb=memory_limit_mb)
+                    timeout_s=timeout_s, memory_limit_mb=memory_limit_mb,
+                    fs_root=self.temp_dir)
                     for _ in range(n)]
                 self._persistent = self._pool[0]
             except Exception as e:
@@ -171,9 +173,13 @@ class SandboxExecutor:
                 result["output_matches_expected"] = result["io_score"] >= 0.99
             return result
 
-        # Fallback: subprocess per execution (slow path, ~200ms startup).
-        # Write code to temp file — include thread ID + UUID to avoid collisions
-        # when multiple threads run sandbox executions concurrently.
+        # Fallback: one-shot sandboxed worker (~200ms startup per execution).
+        # The once-script enforces the SAME containment as the persistent
+        # worker (audit hook, jail dir, env scrub, no pipe fds) — the old
+        # two-stage wrapper applied its import hook to the wrong process,
+        # leaving the executed code fully unrestricted.
+        from research.persistent_executor import (
+            assign_to_job, build_once_script, close_job, scrub_environ)
         import threading
         import uuid
         unique_suffix = f'_{threading.get_ident()}_{uuid.uuid4().hex[:8]}.py'
@@ -184,53 +190,10 @@ class SandboxExecutor:
             temp_path = f.name
 
         file_size = os.path.getsize(temp_path)
-
-        # Prepare resource-limited execution wrapper
-        if HAS_RESOURCE:
-            mem_limit_code = f"resource.setrlimit(resource.RLIMIT_AS, ({self.memory_limit_mb * 1024 * 1024}, {self.memory_limit_mb * 1024 * 1024}))"
-        else:
-            mem_limit_code = "# resource module not available on Windows"
-
-        wrapper = f'''
-import sys, os, time
-import subprocess
-{"import resource" if HAS_RESOURCE else ""}
-
-# Set memory limit (Unix only)
-{mem_limit_code}
-
-# Disable network (best effort)
-import builtins
-_orig_import = builtins.__import__
-def _restricted_import(name, *args, **kwargs):
-    blocked = ['socket', 'urllib', 'requests', 'http', 'subprocess',
-                              'ctypes', 'multiprocessing']
-    top = name.split('.')[0]
-    if top in blocked:
-        raise ImportError(f"Module '{{name}}' is blocked in sandbox")
-    return _orig_import(name, *args, **kwargs)
-builtins.__import__ = _restricted_import
-
-# Execute user code
-try:
-    _proc = subprocess.run(
-        [sys.executable, r"{temp_path}"],
-        capture_output=True, text=True,
-        timeout={self.timeout_s},
-        cwd=self.temp_dir,
-        encoding='utf-8', errors='replace',
-    )
-    sys.stdout.write(_proc.stdout)
-    sys.stderr.write(_proc.stderr)
-    sys.exit(_proc.returncode)
-except subprocess.TimeoutExpired:
-    sys.stderr.write(f"Execution timed out after {self.timeout_s}s")
-    sys.exit(124)
-'''
-
-        wrapper_path = temp_path + '_wrapper.py'
-        with open(wrapper_path, 'w', encoding='utf-8') as f:
-            f.write(wrapper)
+        once_path = temp_path + '_once.py'
+        result_path = temp_path + '_result.json'
+        with open(once_path, 'w', encoding='utf-8') as f:
+            f.write(build_once_script())
 
         t0 = time.time()
         result = {
@@ -240,20 +203,32 @@ except subprocess.TimeoutExpired:
             "output_matches_expected": False, "io_score": 0.0,
         }
 
+        proc = None
+        job = None
         try:
-            # subprocess.run kills the child automatically on timeout (on
-            # Windows it terminates the process tree entry it spawned).
-            proc = subprocess.run(
-                [sys.executable, wrapper_path],
-                capture_output=True, text=True,
-                timeout=self.timeout_s,
-                cwd=self.temp_dir,
-                encoding='utf-8', errors='replace',
-            )
-            result["stdout"] = proc.stdout
-            result["stderr"] = proc.stderr
-            result["returncode"] = proc.returncode
+            proc = subprocess.Popen(
+                [sys.executable, once_path, self.temp_dir, self.temp_dir,
+                 '--once', temp_path, result_path],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=self.temp_dir, env=scrub_environ())
+            handle = getattr(proc, '_handle', None)
+            if handle is not None:
+                job = assign_to_job(
+                    handle, mem_bytes=self.memory_limit_mb * 1024 * 1024,
+                    allow_children=True)
+            rc = proc.wait(timeout=self.timeout_s)
             result["exec_time_ms"] = (time.time() - t0) * 1000
+            if os.path.exists(result_path):
+                import json as _json
+                with open(result_path, encoding='utf-8') as f:
+                    worker_result = _json.load(f)
+                result["stdout"] = worker_result.get("stdout", "")
+                result["stderr"] = worker_result.get("stderr", "")
+                result["returncode"] = worker_result.get("returncode", rc)
+            else:
+                result["returncode"] = rc if rc is not None else -1
+                result["stderr"] = "Sandbox worker produced no result"
 
             if expected_output is not None:
                 # Semantic I/O match: tolerant to float formatting, ordering
@@ -266,15 +241,24 @@ except subprocess.TimeoutExpired:
             result["timed_out"] = True
             result["stderr"] = f"Execution timed out after {self.timeout_s}s"
             result["exec_time_ms"] = self.timeout_s * 1000
+            if proc is not None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                except Exception:
+                    pass
         except Exception as e:
             logger.warning("Sandbox execution error: %s", e)
             result["stderr"] = f"Sandbox error: {e}"
             result["exec_time_ms"] = (time.time() - t0) * 1000
         finally:
+            close_job(job)
             # Cleanup
             try:
                 os.unlink(temp_path)
-                os.unlink(wrapper_path)
+                os.unlink(once_path)
+                if os.path.exists(result_path):
+                    os.unlink(result_path)
             except OSError as e:
                 import warnings
                 warnings.warn(f"temp file cleanup: {e}", RuntimeWarning, stacklevel=2)
@@ -324,7 +308,7 @@ class SelfPlaySandbox:
         ],
     }
 
-    def __init__(self, model, tokenizer, log_dir: str = None,
+    def __init__(self, model, tokenizer, log_dir: str | None = None,
                  device: str = "cuda", max_gen_tokens: int = 200,
                  temperature: float = 0.0, top_k: int = 0, top_p: float = 0.0,
                  temp_dir: str | None = None, verify_workers: int = 1,
@@ -375,7 +359,7 @@ class SelfPlaySandbox:
             "total_exec_time_ms": 0, "total_tokens_generated": 0,
         }
 
-    def calibrate_conformal(self, calibration_prompts: list[str] = None,
+    def calibrate_conformal(self, calibration_prompts: list[str] | None = None,
                             alpha: float = 0.1) -> None:
         """Calibrate conformal sampler on held-out prompts.
 
@@ -437,7 +421,7 @@ class SelfPlaySandbox:
         # Conformal temperature: confident → low T (exploit), uncertain → high T (explore)
         return self.conformal_sampler.get_temperature(query_score)
 
-    def _sample_next_token(self, logits: torch.Tensor, temperature: float = None) -> torch.Tensor:
+    def _sample_next_token(self, logits: torch.Tensor, temperature: float | None = None) -> torch.Tensor:
         """Sample next token with temperature/top-k/top-p, or greedy if temp=0.
 
         Args:
@@ -575,10 +559,8 @@ class SelfPlaySandbox:
             # Free KV cache + logits aggressively (prevents VRAM accumulation
             # across repeated generate_code calls in the same process).
             del cache, logits, next_logits, next_token, cur_token
-            try:
+            with contextlib.suppress(NameError):
                 del reader
-            except NameError:
-                pass
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
@@ -885,7 +867,7 @@ class SelfPlaySandbox:
                 # without OOM. The finished sequence's output is already captured
                 # in all_generated[], so its KV is no longer needed.
                 if any(finished) and past_kvs is not None:
-                    for layer_idx, layer_kvs in enumerate(past_kvs):
+                    for _layer_idx, layer_kvs in enumerate(past_kvs):
                         if layer_kvs is None:
                             continue
                         k, v = layer_kvs
@@ -901,10 +883,8 @@ class SelfPlaySandbox:
             # GPU memory for the next sub-batch or verification step.
             del past_kvs, next_logits, next_tokens, logits, cur
             del mask_buf
-            try:
+            with contextlib.suppress(NameError):
                 del reader
-            except NameError:
-                pass
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
@@ -1109,14 +1089,17 @@ class SelfPlaySandbox:
         # Extract assert statements
         test_lines = [l.strip() for l in test_text.split("\n") if l.strip().startswith("assert")]
 
-        # Run the tests
+        # Run the tests — through the sandboxed executor, never in-process:
+        # `code` and `test_lines` are both raw model output (EC-sec).
         test_results = []
         all_code = code + "\n" + "\n".join(test_lines)
-        try:
-            exec(all_code, {})
+        res = self.executor.execute(all_code)
+        if res.get("returncode", -1) == 0:
             test_results.append({"passed": True, "tests": len(test_lines)})
-        except Exception as e:
-            test_results.append({"passed": False, "error": str(e), "tests": len(test_lines)})
+        else:
+            test_results.append({"passed": False,
+                                 "error": res.get("stderr", "execution failed"),
+                                 "tests": len(test_lines)})
 
         return code, test_results
 
@@ -1391,7 +1374,7 @@ class SelfPlaySandbox:
 
         return packets
 
-    def save_packets(self, filename: str = None, max_logs: int = 10) -> str:
+    def save_packets(self, filename: str | None = None, max_logs: int = 10) -> str:
         """Save all data packets to a JSONL file for later knowledge injection.
 
         Implements log rotation: keeps only the `max_logs` most recent JSONL

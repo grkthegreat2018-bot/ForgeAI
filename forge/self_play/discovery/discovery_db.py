@@ -23,7 +23,7 @@ import json
 import sqlite3
 import time
 from collections.abc import Iterable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -449,15 +449,11 @@ class DiscoveryDB:
             for t, max_id in marks.items():
                 if max_id <= 0:
                     # Table was empty at checkpoint — wipe any new rows.
-                    try:
+                    with suppress(sqlite3.Error):
                         c.execute(f"DELETE FROM {t} WHERE id > 0")
-                    except sqlite3.Error:
-                        pass
                 else:
-                    try:
+                    with suppress(sqlite3.Error):
                         c.execute(f"DELETE FROM {t} WHERE id > ?", (max_id,))
-                    except sqlite3.Error:
-                        pass
         del self._savepoints[name]
 
     def release(self, name: str) -> None:

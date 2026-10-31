@@ -33,8 +33,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 __all__ = [
-    "HeadGate", "HeadGateController", "EarlyExitController",
-    "OutGain", "DiagTempScaler", "find_linear", "confidence",
+    "DiagTempScaler",
+    "EarlyExitController",
+    "HeadGate",
+    "HeadGateController",
+    "OutGain",
+    "confidence",
+    "find_linear",
 ]
 
 

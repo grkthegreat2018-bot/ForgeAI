@@ -105,13 +105,13 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import socket
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator, Optional
+from typing import Any
 
 try:
     from loguru import logger
@@ -119,8 +119,9 @@ except Exception:  # pragma: no cover - loguru is a project dep but stay safe
     import logging
     logger = logging.getLogger("vast_connector")
 
-from research.paths import PROJECT_ROOT
+import contextlib
 
+from research.paths import PROJECT_ROOT
 
 # ─── Remote workspace layout on the rented instance ────────────────────────
 REMOTE_ROOT = "/workspace/forgeai"
@@ -328,7 +329,7 @@ class RemoteTrainingSpec:
     # Train from scratch (random init, no checkpoint).
     from_scratch: bool = False
     # Log filtering: grep pattern for live log stream (None = all lines).
-    log_filter: Optional[str] = None
+    log_filter: str | None = None
 
 
 # ─── File manifest for incremental sync ────────────────────────────────────
@@ -343,7 +344,7 @@ class FileEntry:
         return {"size": self.size, "mtime": self.mtime, "sha256": self.sha256}
 
     @staticmethod
-    def from_dict(d: dict) -> "FileEntry":
+    def from_dict(d: dict) -> FileEntry:
         return FileEntry(
             size=int(d.get("size", 0)),
             mtime=float(d.get("mtime", 0)),
@@ -364,7 +365,7 @@ def _compute_file_hash(path: Path) -> str:
 
 
 def _compute_local_manifest(local_dir: str,
-                             exclude: Optional[list[str]] = None) -> dict[str, dict]:
+                             exclude: list[str] | None = None) -> dict[str, dict]:
     """Walk a local directory and return {relative_path: FileEntry.to_dict()}."""
     exclude = exclude or []
     manifest: dict[str, dict] = {}
@@ -398,15 +399,15 @@ class VastConnector:
     with keepalive + reconnect-on-drop.
     """
 
-    def __init__(self, api_key: Optional[str] = None, ssh_key: str = ""):
+    def __init__(self, api_key: str | None = None, ssh_key: str = ""):
         self.api_key = api_key or os.environ.get("VAST_API_KEY", "")
         self.ssh_key = ssh_key or os.environ.get(
             "VAST_SSH_KEY",
             str(Path.home() / ".ssh" / "id_ed25519"),
         )
         self._ssh = None  # lazy paramiko client
-        self._ssh_host: Optional[str] = None
-        self._ssh_port: Optional[int] = None
+        self._ssh_host: str | None = None
+        self._ssh_port: int | None = None
         # Lazily-created SDK client.
         self._vast: Any = None
 
@@ -508,7 +509,7 @@ class VastConnector:
             max_steps = 500
         return max_steps * spec.est_sec_per_step / 3600.0
 
-    def select_best_offer(self, spec: RemoteTrainingSpec) -> Optional[VastOffer]:
+    def select_best_offer(self, spec: RemoteTrainingSpec) -> VastOffer | None:
         """Auto-select the best GPU by performance-per-dollar within budget."""
         est_hours = self.estimate_training_hours(spec)
         max_dph = spec.budget / max(est_hours, 0.01) if spec.budget > 0 else 0.0
@@ -548,7 +549,7 @@ class VastConnector:
     def create_instance(self, offer_id: int, image: str = DEFAULT_IMAGE,
                         disk_gb: int = 100, on_demand: bool = True,
                         ssh_pubkey: str = "", label: str = "",
-                        volume_id: Optional[int] = None) -> int:
+                        volume_id: int | None = None) -> int:
         """Rent an offer. Returns the new instance (contract) id.
 
         Uses the SDK's ``create_instance()`` with ``runtype="ssh_direct"``
@@ -590,7 +591,7 @@ class VastConnector:
         rows = self.vast.show_instances()
         return rows if isinstance(rows, list) else []
 
-    def get_instance(self, instance_id: int) -> Optional[dict]:
+    def get_instance(self, instance_id: int) -> dict | None:
         """Get a single instance by ID via SDK."""
         try:
             inst = self.vast.show_instance(id=instance_id)
@@ -619,7 +620,7 @@ class VastConnector:
         """Tag an instance with a label for reuse discovery."""
         self.vast.label_instance(id=instance_id, label=label)
 
-    def find_instance_by_label(self, label: str) -> Optional[dict]:
+    def find_instance_by_label(self, label: str) -> dict | None:
         """Find an instance (any state) by its label.
 
         Returns the instance dict if found, None otherwise.
@@ -671,7 +672,7 @@ class VastConnector:
         )
 
     def get_logs(self, instance_id: int, tail: int = 1000,
-                 filter_str: Optional[str] = None) -> str:
+                 filter_str: str | None = None) -> str:
         """Retrieve historical container logs via SDK.
 
         Uses ``vast.logs()`` which requests logs from S3 and polls until
@@ -734,7 +735,7 @@ class VastConnector:
                 f"cap. Destroying extras, keeping the first viable one."
             )
             # Keep the first non-trapped instance; destroy the rest.
-            keep_id: Optional[int] = None
+            keep_id: int | None = None
             for inst in all_insts:
                 status = str(inst.get("actual_status", "")).lower()
                 if status not in POLL_TRAP_STATES:
@@ -948,13 +949,13 @@ class VastConnector:
             self._ssh_port = None
 
     def exec_remote(self, host: str, port: int, cmd: str,
-                    timeout: Optional[float] = None) -> tuple[int, str, str]:
+                    timeout: float | None = None) -> tuple[int, str, str]:
         """Run a command on the remote box, return (rc, stdout, stderr).
 
         Reconnects automatically if the SSH connection has dropped.
         """
         client = self._ssh_connect(host, port)
-        stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
+        _stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
         rc = stdout.channel.recv_exit_status()
         return rc, stdout.read().decode("utf-8", "replace"), \
             stderr.read().decode("utf-8", "replace")
@@ -1018,7 +1019,7 @@ class VastConnector:
 
     def upload_rsync(self, host: str, port: int,
                      local_path: str, remote_path: str,
-                     ssh_key: Optional[str] = None) -> int:
+                     ssh_key: str | None = None) -> int:
         """Upload a file via rsync or scp over SSH (much faster than SFTP).
 
         rsync uses a streaming protocol that saturates the network link,
@@ -1030,11 +1031,11 @@ class VastConnector:
 
         Returns: bytes transferred, or -1 if fell back to SFTP.
         """
-        import subprocess
         import shutil
+        import subprocess
         key = ssh_key or self.ssh_key
         key_arg = f"-i {key}"
-        ssh_opts = f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        ssh_opts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
         # ── Try rsync first (fastest) ──
         if shutil.which("rsync"):
@@ -1099,8 +1100,8 @@ class VastConnector:
         Returns:
             Size of the uploaded zip in bytes.
         """
-        import zipfile
         import tempfile
+        import zipfile
 
         # 1. Create zip locally
         tmp_zip = Path(tempfile.gettempdir()) / zip_name
@@ -1161,14 +1162,12 @@ class VastConnector:
                 )
         logger.info("Unzip complete.")
         # Cleanup local temp zip
-        try:
+        with contextlib.suppress(OSError):
             tmp_zip.unlink()
-        except OSError:
-            pass
         return zip_size
 
     def upload_dir(self, host: str, port: int, local_dir: str,
-                   remote_dir: str, exclude: Optional[list[str]] = None) -> None:
+                   remote_dir: str, exclude: list[str] | None = None) -> None:
         """Recursively upload a directory over SFTP (full, non-incremental).
 
         For incremental sync (only changed files), use :meth:`sync_dir`.
@@ -1250,7 +1249,7 @@ class VastConnector:
         mkdir_cmd = "mkdir -p " + " ".join(
             f'"{d}"' for d in sorted(remote_dirs)
         )
-        rc, out, err = self.exec_remote(host, port, mkdir_cmd, timeout=30.0)
+        rc, _out, err = self.exec_remote(host, port, mkdir_cmd, timeout=30.0)
         logger.info(f"mkdir -p {len(remote_dirs)} dirs: rc={rc}")
         if rc != 0:
             logger.warning(f"mkdir -p failed (rc={rc}): {err}")
@@ -1270,7 +1269,7 @@ class VastConnector:
                 logger.info(f"  Uploading {rel_path}")
                 try:
                     sftp.put(local_path, remote_path)
-                except IOError as e:
+                except OSError as e:
                     logger.error(f"  Failed: {rel_path}: {e}")
                     raise
         finally:
@@ -1282,7 +1281,7 @@ class VastConnector:
 
     def sync_dir(self, host: str, port: int, local_dir: str,
                  remote_dir: str,
-                 exclude: Optional[list[str]] = None) -> tuple[int, int]:
+                 exclude: list[str] | None = None) -> tuple[int, int]:
         """Incrementally sync a directory: only upload changed files.
 
         Computes a local manifest (path → size + mtime + sha256), compares
@@ -1328,7 +1327,7 @@ class VastConnector:
                 self._ensure_remote_dir(sftp, str(PurePosixPath(remote_path).parent))
                 try:
                     sftp.put(local_path, remote_path)
-                except IOError as e:
+                except OSError as e:
                     logger.error(f"  Failed to upload {rel}: {e} "
                                  f"(local={local_path} remote={remote_path})")
                     raise
@@ -1338,7 +1337,7 @@ class VastConnector:
                 try:
                     sftp.remove(remote_path)
                     logger.debug(f"  Deleted {rel_path}")
-                except IOError:
+                except OSError:
                     pass  # already gone
         finally:
             sftp.close()
@@ -1366,7 +1365,7 @@ class VastConnector:
                 return json.loads(data) if data else {}
             finally:
                 sftp.close()
-        except (IOError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError):
             return {}  # no manifest yet — first sync
 
     def _put_remote_manifest(self, host: str, port: int,
@@ -1427,13 +1426,13 @@ class VastConnector:
             cur = f"{cur}/{p}"
             try:
                 sftp.stat(cur)
-            except IOError:
+            except OSError:
                 # Dir doesn't exist — try to create it.
                 # If mkdir fails (parent missing), recurse to create parent
                 # first, then retry.
                 try:
                     sftp.mkdir(cur)
-                except IOError:
+                except OSError:
                     parent = "/".join(cur.split("/")[:-1])
                     if parent:
                         VastConnector._ensure_remote_dir(sftp, parent)
@@ -1447,7 +1446,7 @@ class VastConnector:
             try:
                 sftp.listdir(rpath)
                 self._download_dir_recursive(sftp, rpath, lpath)
-            except IOError:
+            except OSError:
                 sftp.get(rpath, lpath)
 
     # ── Log parsing + formatting ──────────────────────────────────────────
@@ -1511,7 +1510,7 @@ class VastConnector:
 
     @staticmethod
     def _should_show_line(parsed: dict,
-                          filter_str: Optional[str]) -> bool:
+                          filter_str: str | None) -> bool:
         """Apply log filter (grep-like)."""
         if not filter_str:
             return True
@@ -1561,7 +1560,7 @@ class VastConnector:
                 return remote_hash == expected
             finally:
                 sftp.close()
-        except (IOError, OSError):
+        except OSError:
             return False  # no hash file — need to provision
 
     def _write_provision_hash(self, host: str, port: int) -> None:
@@ -1612,7 +1611,7 @@ class VastConnector:
             logger.info(f"  Auto: batch_size={ta['--batch-size']} for {gpu_vram_gb:.0f}GB")
         if gpu_vram_gb >= 40:
             ta["--compile"] = True
-            logger.info(f"  Auto: enabled torch.compile (1.3-2x kernel fusion)")
+            logger.info("  Auto: enabled torch.compile (1.3-2x kernel fusion)")
         if spec.from_scratch:
             ta["--checkpoint"] = "scratch"
             ta["--use-forge-engine"] = False
@@ -1732,7 +1731,7 @@ class VastConnector:
             # Fallback: probe exit code file if no marker was seen.
             if exit_code < 0:
                 try:
-                    rc2, out2, _ = self.exec_remote(
+                    _rc2, out2, _ = self.exec_remote(
                         host, port, f"cat {REMOTE_EXIT_CODE} 2>/dev/null || echo -1")
                     exit_code = int(out2.strip())
                 except ValueError:
@@ -1774,7 +1773,7 @@ class VastConnector:
                 return stat.st_size == expected_size
             finally:
                 sftp.close()
-        except IOError:
+        except OSError:
             return False
 
     def wipe_remote_data(self, instance_id: int) -> None:

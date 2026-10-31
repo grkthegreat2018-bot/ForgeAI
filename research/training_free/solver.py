@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import torch
 
-from research.training_free import generate_with_cache, ReflexionBuffer, build_prompt
+from research.training_free import ReflexionBuffer, build_prompt, generate_with_cache
 from research.training_free.steering import ActivationSteerer
 
 

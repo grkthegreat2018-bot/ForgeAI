@@ -398,7 +398,7 @@ class Eagle3Trainer:
             loss: scalar tensor
             metrics: dict with loss components
         """
-        B, T = input_ids.shape
+        _B, _T = input_ids.shape
         device = input_ids.device
 
         # Step 1: Extract target hidden states and target logits

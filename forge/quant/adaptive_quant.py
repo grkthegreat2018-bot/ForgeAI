@@ -197,7 +197,7 @@ class SharQQuantizer:
             dense_residual_q: (B, T, d) quantized dense residual (FP4)
             mask: (B, T, d) N:M sparsity mask
         """
-        B, T, d = x.shape
+        _B, _T, _d = x.shape
 
         # 1. Generate N:M sparsity mask (select top-N in each M-group)
         mask = self._nm_mask(x)
@@ -242,7 +242,7 @@ class SharQQuantizer:
         sparse_q @ W^T + dense_residual_q @ W^T
         (Both paths share the same weight payload)
         """
-        sparse_q, dense_q, mask = self.quantize_activation(x)
+        sparse_q, dense_q, _mask = self.quantize_activation(x)
         # Two GEMM passes (in practice, fused into one kernel)
         out_sparse = F.linear(sparse_q, W)
         out_dense = F.linear(dense_q, W)

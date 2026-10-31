@@ -21,12 +21,12 @@ Paths per prompt:
 """
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 
 import torch
 
 from forge.model.kv_cache import unpack_output_with_kv
+import contextlib
 
 GATE_PROBES_VERSION = 1
 
@@ -120,10 +120,8 @@ class GatedDecoder:
     def _eos_ids(self):
         ids = set()
         for t in ('<|im_end|>', '<|endoftext|>'):
-            try:
+            with contextlib.suppress(Exception):
                 ids.update(self._enc(t, special=False))
-            except Exception:
-                pass
         return ids
 
     def _prompt(self, q, tail):

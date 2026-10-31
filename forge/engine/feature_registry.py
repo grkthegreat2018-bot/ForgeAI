@@ -182,9 +182,161 @@ def _h_triroute(eng, _flags):
 # ── Graph / kernel features ──────────────────────────────────────────────────
 
 def _h_breakable_cuda_graph(eng, _flags):
+    """Static-KV decode-step graph capture.
+
+    Builds a PreAllocatedKVCache (pos_t tensor mode) + a persistent
+    attention-mask buffer so the decode step is fully tensor-driven and
+    CUDA-graph capturable. The closure is reused at decode time —
+    see StandardDecoding._generate_static.
+    """
+    import torch as _t
+
     from forge.engine.graphs.breakable_cuda_graph import BreakableCudaGraph
+    from forge.model.kv_cache import create_kv_cache
+
     eng._bcg = BreakableCudaGraph(eng.model, device=str(eng.device))
-    eng._bcg.capture_decode(batch_sizes=[1, 2, 4, 8])
+    cfg = getattr(eng.model, 'config', None)
+    max_len = min(getattr(cfg, 'max_seq_len', 4096) or 4096, 8192)
+    try:
+        cache = create_kv_cache(eng.model, max_total=max_len, batch=1,
+                                device=eng.device)
+        cache.enable_tensor_pos()
+        mask_buf = _t.zeros(1, cache.max_seq_len, dtype=_t.long,
+                            device=eng.device)
+
+        raw_model = getattr(eng.model, '_orig_mod', eng.model)
+
+        # KV-length buckets: each capture reads a [:b] VIEW of the same
+        # cache storage (see PreAllocatedKVCache.view_len) — a full-buffer
+        # read costs ~30x wasted attention at short contexts.  Switching
+        # buckets at decode time is free: the views share storage.
+        buckets = [b for b in (512, 1024, 2048, 4096, 8192)
+                   if b <= cache.max_seq_len]
+        if cache.max_seq_len not in buckets:
+            buckets.append(cache.max_seq_len)
+
+        def _step(m, mask_view, c):
+            def decode_step(ids_t1):
+                return m(ids_t1, attention_mask=mask_view,
+                         preallocated_cache=c, use_cache=True,
+                         logits_last_only=True)
+            return decode_step
+
+        def _capture_buckets(c, m_buf, B, want, prefix):
+            """Capture one graph per KV bucket in ``want`` for batch size B.
+            Compiled step tried twice per bucket, eager fallback once.
+            Returns the number of buckets captured on the COMPILED model."""
+            n_compiled = 0
+            for b in want:
+                c.view_len = b
+                mask_view = m_buf[:, :b]
+                tag = f"{prefix}kv{b}"
+                if tag in eng._bcg._decode_graphs:
+                    n_compiled += 1
+                    continue
+                for _ in range(2):
+                    eng._bcg.capture_decode(
+                        batch_sizes=[B],
+                        decode_step=_step(eng.model, mask_view, c),
+                        tag=tag)
+                    if tag in eng._bcg._decode_graphs:
+                        break
+                if tag in eng._bcg._decode_graphs:
+                    n_compiled += 1
+                else:
+                    eng._bcg.capture_decode(
+                        batch_sizes=[B],
+                        decode_step=_step(raw_model, mask_view, c),
+                        tag=tag)
+            c.view_len = None
+            return n_compiled
+
+        eng._decode_state = {'cache': cache, 'mask': mask_buf,
+                             'buckets': buckets, 'batch': {}}
+        # Decoding strategies see the model, not the engine — attach.
+        eng.model._bcg = eng._bcg
+        eng.model._decode_state = eng._decode_state
+
+        def _ensure_static_batch(B, plen, need_len):
+            """Lazy per-batch-size static decode state for BatchedDecoding.
+
+            Allocates a batch-B preallocated cache + mask and captures the
+            KV buckets covering positions (plen .. need_len].  Returns
+            {'cache','mask','prefix','buckets'} or None (functional
+            fallback).  B=1 uses the eagerly-captured state instead.
+            """
+            if (eng._decode_state is None or B <= 1 or B > 32
+                    or not buckets):
+                return None
+            hi = next((b for b in buckets if b >= need_len), None)
+            if hi is None:
+                return None  # request outgrows every bucket
+            want = [b for b in buckets if b >= plen and b <= need_len]
+            if hi not in want:
+                want.append(hi)
+            bs_map = eng._decode_state['batch']
+            bs = bs_map.get(B)
+            if bs is not None and not bs:
+                return None  # allocation failed before — don't retry
+            if bs is not None and bs['cache'].max_seq_len < hi:
+                # A previous, shorter request sized this batch's cache;
+                # the new horizon needs a bigger allocation. The old
+                # b{B}_ graphs replay on the OLD cache/mask storage —
+                # evict them before recapture or decode reads freed
+                # buffers.
+                try:
+                    for _tag in [t for t in eng._bcg._decode_graphs
+                                 if t.startswith(f"b{B}_")]:
+                        eng._bcg._decode_graphs.pop(_tag, None)
+                        eng._bcg._static_buffers.pop(_tag, None)
+                    c = create_kv_cache(eng.model, max_total=hi,
+                                        batch=B, device=eng.device)
+                    c.enable_tensor_pos()
+                    m_buf = _t.zeros(B, c.max_seq_len, dtype=_t.long,
+                                     device=eng.device)
+                    bs = {'cache': c, 'mask': m_buf, 'prefix': f"b{B}_"}
+                    bs_map[B] = bs
+                except Exception:
+                    return None
+            if bs is None:
+                try:
+                    # Size the cache to the request horizon (hi), not the
+                    # global max — B=16+ at full max_len wastes GBs of KV
+                    # that the bucket views never touch.
+                    c = create_kv_cache(eng.model, max_total=hi,
+                                        batch=B, device=eng.device)
+                    c.enable_tensor_pos()
+                    m_buf = _t.zeros(B, c.max_seq_len, dtype=_t.long,
+                                     device=eng.device)
+                    bs = {'cache': c, 'mask': m_buf, 'prefix': f"b{B}_"}
+                    bs_map[B] = bs
+                except Exception:
+                    bs_map[B] = {}
+                    return None
+            missing = [b for b in want
+                       if f"{bs['prefix']}kv{b}"
+                       not in eng._bcg._decode_graphs]
+            _capture_buckets(bs['cache'], bs['mask'], B, missing,
+                             bs['prefix'])
+            have = [b for b in want
+                    if f"{bs['prefix']}kv{b}" in eng._bcg._decode_graphs]
+            if sorted(have) != sorted(want):
+                return None  # partial coverage — decode would stall
+            bs['buckets'] = want
+            return bs
+
+        eng.model._ensure_static_batch = _ensure_static_batch
+
+        # Prefer capturing the COMPILED decode step — fused inductor
+        # kernels + a single graph launch beats unfused eager replay.
+        # Long fused-kernel names need the short TRITON_CACHE_DIR set in
+        # configure.py; on compile failure fall back to eager capture
+        # (still collapses ~200 per-token launches into one replay).
+        compiled_graphs = _capture_buckets(cache, mask_buf, 1, buckets, "")
+        eng._decode_state['compiled_step'] = compiled_graphs == len(buckets)
+    except Exception as e:
+        eng._decode_state = None
+        return f"Breakable CUDA Graph: failed ({e})"
     return f"Breakable CUDA Graph: {eng._bcg.stats()}"
 
 
@@ -227,21 +379,21 @@ def _h_kara_kv(eng, _flags):
 
 def _h_moment_kv(eng, _flags):
     from forge.engine.kv.moment_kv import MomentKVCache
-    n_kv, head_dim = _kv_dims(eng)
+    n_kv, _head_dim = _kv_dims(eng)
     eng._moment_kv = MomentKVCache(n_kv, max_budget=2048)
     return "MomentKV: moment-statistics eviction (geometric regularity)"
 
 
 def _h_kvpop(eng, _flags):
     from forge.engine.kv.kvpop import KVpopCache
-    n_kv, head_dim = _kv_dims(eng)
+    n_kv, _head_dim = _kv_dims(eng)
     eng._kvpop = KVpopCache(n_kv, long_range_budget=1024)
     return "KVpop: predictive online pruning (future-attention supervised)"
 
 
 def _h_conf_kv(eng, _flags):
     from forge.engine.kv.conf_kv import ConfKVCache
-    n_kv, head_dim = _kv_dims(eng)
+    n_kv, _head_dim = _kv_dims(eng)
     eng._conf_kv = ConfKVCache(
         n_kv, min_budget=256, max_budget=4096)
     return "CONF-KV: confidence-aware budget + mixed FP16/INT8 storage"
@@ -249,7 +401,7 @@ def _h_conf_kv(eng, _flags):
 
 def _h_matryoshka_kv(eng, _flags):
     from forge.engine.kv.matryoshka_kv import MatryoshkaKVCache
-    n_kv, head_dim = _kv_dims(eng)
+    _n_kv, _head_dim = _kv_dims(eng)
     eng._matryoshka_kv = MatryoshkaKVCache(
         n_levels=3, importance_metric="norm")
     return "MatryoshkaKV: nested-granularity KV compression (fp16→bf16→fp8)"

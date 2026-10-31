@@ -25,6 +25,7 @@ from collections import deque
 from pathlib import Path
 
 from research.json_compat import dumps
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -275,7 +276,5 @@ class LiveStatusWriter:
             self._write_heartbeat()
         self._stop.set()
         self._hb_thread.join(timeout=2.0)
-        try:
+        with contextlib.suppress(Exception):
             self._events_file.close()
-        except Exception:
-            pass

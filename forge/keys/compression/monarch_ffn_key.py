@@ -200,7 +200,7 @@ class MonarchLinear(nn.Module):
             R0 = torch.randn(in1, in0, out0) * 0.01
             R1 = torch.randn(out0, in1, out1) * 0.01
 
-            for iteration in range(15):
+            for _iteration in range(15):
                 # Fit R1 given R0:
                 # W[o0, o1, i0, i1] = R0[i1, i0, o0] * R1[o0, i1, o1]
                 # For fixed (o0, i1): W_sub[i0, o1] = R0[i1, i0, o0] * R1[o0, i1, o1]
@@ -251,7 +251,7 @@ class MonarchLinear(nn.Module):
         6. Flatten to out_pad, truncate to out_features
         """
         in0, in1 = self.in_dims
-        out0, out1 = self.out_dims
+        _out0, _out1 = self.out_dims
         in_pad = self.in_pad
         out_pad = self.out_pad
 

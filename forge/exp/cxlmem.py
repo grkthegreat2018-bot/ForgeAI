@@ -159,9 +159,20 @@ class _TierState:
         token range [c0:c0+n) is ONE contiguous DMA block.
     """
 
-    __slots__ = ("hot_k", "hot_v", "hot_len", "cold_k", "cold_v",
-                 "cold_len", "n_kv", "head_dim", "stage_k", "stage_v",
-                 "stage_ev", "staged")
+    __slots__ = (
+        "cold_k",
+        "cold_len",
+        "cold_v",
+        "head_dim",
+        "hot_k",
+        "hot_len",
+        "hot_v",
+        "n_kv",
+        "stage_ev",
+        "stage_k",
+        "stage_v",
+        "staged",
+    )
 
     def __init__(self):
         self.hot_k = self.hot_v = None

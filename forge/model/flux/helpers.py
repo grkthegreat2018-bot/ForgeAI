@@ -92,7 +92,7 @@ def emb_class_table(emb: torch.Tensor, n_cls: int = 256,
     classes (ids 0..n_cls-1); special/control tokens pinned to the
     last class.  members sorted by centrality -> ``gen_cls_cap``
     first-N probes the most prototypical variants."""
-    V, D = emb.shape
+    V, _D = emb.shape
     dev = emb.device
     g = torch.Generator(device=dev).manual_seed(seed)
     X = emb.float()

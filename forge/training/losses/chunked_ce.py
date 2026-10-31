@@ -34,7 +34,7 @@ class ChunkedLinearCrossEntropy(Function):
 
     @staticmethod
     def forward(ctx, x, weight, target, chunk_size=512):
-        N, H = x.shape
+        N, _H = x.shape
         weight.shape[0]
         device = x.device
         ignore_index = -100
@@ -127,7 +127,7 @@ class ChunkedEntropyWeightedCE(Function):
 
     @staticmethod
     def forward(ctx, x, weight, target, chunk_size=512, entropy_alpha=0.5):
-        N, H = x.shape
+        N, _H = x.shape
         V = weight.shape[0]
         device = x.device
         ignore_index = -100

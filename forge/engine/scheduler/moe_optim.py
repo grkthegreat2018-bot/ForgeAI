@@ -102,7 +102,7 @@ class ElbowRouter:
             expert_indices: (B, T, max_k) selected expert indices (-1 for padding)
             expert_weights: (B, T, max_k) routing weights (0 for padding)
         """
-        B, T, n_experts = router_logits.shape
+        B, T, _n_experts = router_logits.shape
         probs = F.softmax(router_logits, dim=-1)
 
         expert_indices = torch.full((B, T, self.max_experts), -1,

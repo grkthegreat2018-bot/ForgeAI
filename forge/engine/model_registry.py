@@ -29,8 +29,9 @@ from pathlib import Path
 
 import torch
 
-from forge.engine.forge_engine import ForgeEngine, _checkpoint_size_cache
 from forge.engine.engine_common import _DEFAULT_TOKENIZER_PATH
+from forge.engine.forge_engine import ForgeEngine, _checkpoint_size_cache
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -154,10 +155,8 @@ class ModelRegistry:
             if existing is not None:
                 # Lost a concurrent register() race — discard the duplicate
                 # load and hand back the winner.
-                try:
+                with contextlib.suppress(Exception):
                     engine.sleep(level=2)
-                except Exception:
-                    pass
                 return existing.engine
             entry = EngineEntry(
                 model_id=model_id,

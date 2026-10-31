@@ -156,7 +156,7 @@ class CompressedKVCache:
 
         new_k, new_v: (B, n_heads, T_new, head_dim) float
         """
-        B, H, T_new, D = new_k.shape
+        _B, H, T_new, D = new_k.shape
         assert self.n_heads == H and self.head_dim == D
 
         # Quantize new tokens.

@@ -67,10 +67,7 @@ def _ref_factorial(n: int) -> int:
 def _ref_is_prime(n: int) -> bool:
     if n < 2:
         return False
-    for i in range(2, int(n**0.5) + 1):
-        if n % i == 0:
-            return False
-    return True
+    return all(n % i != 0 for i in range(2, int(n ** 0.5) + 1))
 
 def _ref_gcd(a: int, b: int) -> int:
     return math.gcd(a, b)

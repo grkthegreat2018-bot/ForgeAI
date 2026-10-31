@@ -94,7 +94,7 @@ class ExpertRouter(KeywordRouter):
         return self.topics.keys()
 
     def register_topic(self, topic: str, keywords: list[str],
-                        label: str = "", subtopics: list[str] = None):
+                        label: str = "", subtopics: list[str] | None = None):
         """Register a new expert topic at runtime.
 
         This allows adding new experts to the library without restarting.
@@ -429,7 +429,7 @@ class InfiniteAirMoE:
         """Estimate current cache VRAM usage."""
         total_params = 0
         for topic_experts in self.cache.values():
-            for layer, expert in topic_experts.items():
+            for _layer, expert in topic_experts.items():
                 for w in expert.values():
                     total_params += w.numel()
         return total_params * 2 / 1e9  # bf16

@@ -50,8 +50,8 @@ class VRAMManager:
     def __init__(
         self,
         total_vram_gb: float = 12.0,
-        safety_margin_gb: float = 1.0,
-        compile_cache_dir: str = None,
+        safety_margin_gb: float = 3.0,
+        compile_cache_dir: str | None = None,
     ):
         if compile_cache_dir is None: from research.paths import TORCH_CACHE_DIR, as_str; compile_cache_dir = as_str(TORCH_CACHE_DIR)
         self.total_vram_mb = total_vram_gb * 1024
@@ -187,7 +187,7 @@ class VRAMManager:
         with torch.inference_mode():
             past_kv = None
             cur_ids = input_ids
-            for step in range(max_warmup_tokens):
+            for _step in range(max_warmup_tokens):
                 if past_kv is not None:
                     logits, _, past_kv = model(
                         cur_ids[:, -1:], past_key_values=past_kv, use_cache=True)

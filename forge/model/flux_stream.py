@@ -249,7 +249,7 @@ class FluxStreamPool:
 
     def _keys_b(self, end: torch.Tensor):
         """Order keys [N,O] + validity [N,O] at context ``end`` [N]."""
-        m, c = self.model, self.model.config
+        m = self.model
         ks = m._orders_g                                        # [O]
         he = self._h_at(end)                                    # [N]
         keys = he[:, None] - self._h_at(end[:, None]
@@ -966,7 +966,7 @@ class FluxStreamPool:
             rw = None
             if prompt_rewards:
                 end = self.spos - 1
-                slot, found, live_k, cok, dok, dk = \
+                slot, found, live_k, cok, _dok, dk = \
                     self._probe_b(end)
                 floor = torch.clamp(
                     end + 1 - self.model.config.ring_capacity,
@@ -1097,7 +1097,6 @@ class FluxStreamPool:
                       top_ks, rep_pens, gens, stops, processors,
                       tokenizer, eos_ids, cf_topk: int = 0):
         from forge.model.flux import FluxLM
-        m = self.model
         n = len(prompt_ids)
         outs: list[list[int]] = [[] for _ in range(n)]
         alts_out: list[list] = [[] for _ in range(n)]

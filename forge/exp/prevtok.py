@@ -326,7 +326,10 @@ def load_head(path: str, device: str = "cuda",
     """Reload a saved head.  For tied heads (tied=True in the payload —
     the embedding rows are NOT stored) pass
     ``out_weight=model.embed.weight``."""
-    payload = torch.load(path, map_location="cpu", weights_only=False)
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
     tied = payload.get("tied", False)
     if tied and out_weight is None:
         raise ValueError(

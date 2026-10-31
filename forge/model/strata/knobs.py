@@ -64,7 +64,7 @@ class KnobSet:
                 "overlays": [[n, v] for n, v in self.overlays]}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "KnobSet":
+    def from_dict(cls, d: dict) -> KnobSet:
         k = cls(d["base"])
         k.overlays = [(n, v) for n, v in d.get("overlays", [])]
         return k
@@ -75,7 +75,7 @@ class KnobSet:
         return p.stat().st_size
 
     @classmethod
-    def load(cls, path) -> "KnobSet":
+    def load(cls, path) -> KnobSet:
         return cls.from_dict(json.loads(Path(path).read_text()))
 
 

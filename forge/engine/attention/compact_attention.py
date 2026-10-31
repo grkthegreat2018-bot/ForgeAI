@@ -215,7 +215,7 @@ class CompactAttentionWrapper:
         def compact_forward(self, x, past_key_value=None, use_cache=False,
                             preallocated_cache=None, layer_idx=0,
                             attention_bias=None, position_ids=None):
-            B, T, C = x.shape
+            B, T, _C = x.shape
             hd = self.head_dim
 
             # Only use CompactAttention for prefill (T > 1) with long KV
@@ -261,6 +261,8 @@ class CompactAttentionWrapper:
                 block_size=16,
                 budget_ratio=self._compact_budget,
             )
+            if getattr(self, '_finish_attn', None) is not None:
+                return self._finish_attn(x, out), new_kv
             out = out.transpose(1, 2).reshape(B, T, -1)
             return self.out_proj(out), new_kv
 

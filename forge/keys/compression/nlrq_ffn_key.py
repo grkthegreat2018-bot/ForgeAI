@@ -450,7 +450,7 @@ class NLRQLinear(nn.Module):
         max_r = max_rank if max_rank is not None else min(out_features, in_features)
         with torch.no_grad():
             W_f32 = weight.float()
-            U, S, Vh = torch.linalg.svd(W_f32, full_matrices=False)
+            _U, S, _Vh = torch.linalg.svd(W_f32, full_matrices=False)
             # Cumulative singular value energy (squared singular values)
             s2 = (S ** 2)
             energy = s2.cumsum(0) / s2.sum().clamp(min=1e-12)
@@ -608,7 +608,7 @@ class NLRQLinear(nn.Module):
 
     @staticmethod
     def _ste_quantize(w: torch.Tensor, scale_dim: int, max_val: float,
-                      min_val: float = None) -> torch.Tensor:
+                      min_val: float | None = None) -> torch.Tensor:
         """Quantize-dequantize with straight-through gradient.
 
         scale_dim=1 → per-row scales (U, shape (out, rank));

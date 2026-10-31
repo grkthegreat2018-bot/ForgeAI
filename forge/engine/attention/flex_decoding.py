@@ -113,7 +113,7 @@ class FlexDecodingWrapper:
         def flex_forward(self, x, past_key_value=None, use_cache=False,
                          preallocated_cache=None, layer_idx=0,
                          attention_bias=None, position_ids=None):
-            B, T, C = x.shape
+            _B, T, _C = x.shape
             # Only use FlexDecoding for single-token decode (T=1)
             if T == 1 and preallocated_cache is not None and attention_bias is None:
                 return self._flex_decode_forward(
@@ -131,7 +131,7 @@ class FlexDecodingWrapper:
     def _make_flex_decode_forward(self, attn_module):
         """Create a flex_decode forward method for a specific attention module."""
         def _flex_decode_forward(x, preallocated_cache, layer_idx, position_ids, use_cache):
-            B, T, C = x.shape
+            B, T, _C = x.shape
             hd = attn_module.head_dim
 
             # Project Q/K/V (same as original)
@@ -163,6 +163,8 @@ class FlexDecodingWrapper:
 
             # FlexDecoding: use flex_attention for the decode step
             out = flex_decode(q, k_cache, v_cache)
+            if getattr(attn_module, '_finish_attn', None) is not None:
+                return attn_module._finish_attn(x, out), new_kv
             out = out.transpose(1, 2).reshape(B, T, -1)
             return attn_module.out_proj(out), new_kv
 

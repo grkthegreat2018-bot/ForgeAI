@@ -137,7 +137,7 @@ class ResidualStreamCache(KVCacheStrategy):
         """
         if residuals.dim() == 2:
             residuals = residuals.unsqueeze(0)
-        B, T, D = residuals.shape
+        B, T, _D = residuals.shape
         self._ensure_allocated(B)
         end_pos = min(start_pos + T, self.max_seq_len)
         actual_T = end_pos - start_pos

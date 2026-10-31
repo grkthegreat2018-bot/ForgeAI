@@ -1,5 +1,4 @@
 """LoRA adapter management mixin for ForgeEngine."""
-from .engine_common import *  # noqa: F403
 from .engine_common import (  # noqa: F401
     _CKPT_CACHE_MAX,
     _DEFAULT_CPU_MEMORY_BYTES,
@@ -62,8 +61,6 @@ class _LoRAMixin:
 
         from forge.training.bitnet_lora import add_lora_adapters
 
-        if alpha is None:
-            alpha = rank * 2
         if target_modules is None:
             target_modules = ["w_gate", "w_up", "w_down", "q_proj", "v_proj",
                               "out_proj", "in_proj"]
@@ -75,12 +72,24 @@ class _LoRAMixin:
         # Remove any existing LoRA adapters first
         self.unload_lora()
 
+        # Rank from the FILE, not the manifest/caller — lora_A is (r, in)
+        # so safetensors shapes are ground truth; a stale manifest or a
+        # default-32 caller crashed on param.data.copy_ (16-vs-32).
+        state = _load(str(lora_file))
+        a_key = next((k for k in state if k.endswith("lora_A")), None)
+        if a_key is not None and int(state[a_key].shape[0]) != rank:
+            file_rank = int(state[a_key].shape[0])
+            self._log(f"LoRA rank mismatch: requested {rank}, file has "
+                      f"{file_rank} — using file rank", level="warn")
+            rank = file_rank
+        if alpha is None:
+            alpha = rank * 2
+
         self._log(f"Loading LoRA adapter: {lora_file.name} (rank={rank})")
         n_adapters, _ = add_lora_adapters(
             self.model, rank=rank, alpha=alpha,
             target_modules=target_modules)
 
-        state = _load(str(lora_file))
         loaded = 0
         for name, param in self.model.named_parameters():
             if "lora_" in name and name in state:
@@ -119,23 +128,30 @@ class _LoRAMixin:
 
     def _unload_lora_impl(self) -> bool:
         removed = 0
-        for name, module in self.model.named_modules():
-            # IRIFP4Linear: lora_adapter is a submodule attribute
+        for _name, module in self.model.named_modules():
+            # Quantized linears keep lora_adapter as an attribute their
+            # forward checks (`is not None`) — deleting it outright leaves
+            # subsequent forwards raising AttributeError. Set None.
             if hasattr(module, 'lora_adapter') and module.lora_adapter is not None:
-                del module.lora_adapter
+                module.lora_adapter = None
                 removed += 1
             # nn.Linear with monkey-patched forward: restore original
             if hasattr(module, '_lora_orig_forward'):
                 module.forward = module._lora_orig_forward
                 del module._lora_orig_forward
-                # Also remove the LoRA adapter module if present
                 if hasattr(module, 'lora_adapter'):
-                    del module.lora_adapter
+                    module.lora_adapter = None
                 removed += 1
 
         if removed > 0:
             self._log(f"LoRA unloaded: {removed} adapters removed")
             self._lora_config = None
+            # code_evolve._ensure_lora skips re-attach when its tag marker
+            # still matches the last adapter — clear both markers so an
+            # external unload doesn't leave the engine silently unadapted.
+            for marker in ("_evolve_lora_tag", "_evolve_lora_badbase"):
+                if hasattr(self, marker):
+                    delattr(self, marker)
         return removed > 0
 
     def has_lora(self) -> bool:

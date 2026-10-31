@@ -145,7 +145,7 @@ class HotPrefixManager:
         )
 
         # Top-k → GPU (promote)
-        for i, node in enumerate(sorted_nodes[:self.gpu_capacity]):
+        for _i, node in enumerate(sorted_nodes[:self.gpu_capacity]):
             if node.kv_cache is None and node.cpu_kv_cache is not None:
                 # Promote: CPU → GPU
                 node.kv_cache = node.cpu_kv_cache.to("cuda", non_blocking=True)

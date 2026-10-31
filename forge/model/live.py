@@ -22,7 +22,7 @@ chunks — and across calls — as the model's long-term live state.
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F

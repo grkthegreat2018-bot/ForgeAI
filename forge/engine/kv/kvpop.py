@@ -233,7 +233,7 @@ def train_kvpop_scorer(model, scorer, training_data, n_steps=1000):
         # (attention received from FUTURE tokens)
         for layer_attn in attn_weights:
             # layer_attn: (B, n_heads, T, T)
-            B, H, T, _ = layer_attn.shape
+            B, _H, T, _ = layer_attn.shape
 
             # Future attention: sum of attention from tokens AFTER position i
             # to token i (transposed attention)

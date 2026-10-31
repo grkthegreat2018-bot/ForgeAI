@@ -46,7 +46,7 @@ def get_gpu_arch() -> tuple[int, int]:
 
 def is_blackwell() -> bool:
     """Check if GPU is Blackwell (sm_100+)."""
-    major, minor = get_gpu_arch()
+    major, _minor = get_gpu_arch()
     return major >= 10
 
 

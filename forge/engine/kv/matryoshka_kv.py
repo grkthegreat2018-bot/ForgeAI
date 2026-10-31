@@ -182,7 +182,7 @@ class MatryoshkaKVCache(KVCacheStrategy):
         # Base unit: head_dim // 2^(n_levels-1)
         base = max(1, head_dim // (2 ** (self.n_levels - 1)))
         dims = []
-        for i in range(self.n_levels - 1):
+        for _i in range(self.n_levels - 1):
             dims.append(base)
         dims.append(head_dim - sum(dims))
         return dims

@@ -177,7 +177,7 @@ def replace_rmsnorm_with_seednorm(model: nn.Module) -> int:
     new norm_weight and norm_bias initialize to produce identity-like behavior).
     """
     count = 0
-    for name, module in model.named_modules():
+    for _name, module in model.named_modules():
         for child_name, child in module.named_children():
             if 'RMSNorm' in type(child).__name__ or 'rms_norm' in child_name.lower():
                 d_model = getattr(child, 'weight', torch.ones(1)).shape[0]
@@ -200,7 +200,7 @@ def replace_rmsnorm_with_dyt(model: nn.Module) -> int:
     optimizer coupling penalty).
     """
     count = 0
-    for name, module in model.named_modules():
+    for _name, module in model.named_modules():
         for child_name, child in module.named_children():
             if 'RMSNorm' in type(child).__name__ or 'rms_norm' in child_name.lower():
                 d_model = getattr(child, 'weight', torch.ones(1)).shape[0]

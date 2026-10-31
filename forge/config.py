@@ -77,6 +77,28 @@ class ModelConfig:
     # CSA (Compressed Sparse Attention, DeepSeek-V4): top-k position selection.
     attention_pattern: str = "standard"  # "standard", "csa", "csa_hca_hybrid"
     csa_top_k: int = 256
+
+    # === LFM3 port keys ===
+    # Per-head sigmoid output gate on attention (LFM2/3 "gated attention"):
+    #   out = out_proj(attn_out * sigmoid(gate_proj(x))) with one scalar
+    #   gate per query head. Requires the ported gate_proj weights.
+    use_attn_out_gate: bool = False
+    # Sliding-window attention layers (layer_types entry "attention_swa" /
+    # "sliding_attention" / "swa"): each token attends to itself + the
+    # previous sliding_window-1 keys (HF LFM3/Gemma3 semantics).
+    sliding_window: int | None = None
+    # Per-layer-type RoPE overrides, keyed by normalized layer type
+    # ("attention", "attention_swa"): {"rope_theta": float,
+    # "partial_rotary_factor": float}. Mirrors HF rope_parameters.
+    # partial_rotary_factor < 1 uses the LFM3 zero-tail layout: the first
+    # factor*head_dim//2 frequencies keep the FULL-head-dim progression and
+    # the tail gets freq 0 (unrotated) — NOT a shrunk rotary dimension.
+    rope_layer_params: dict | None = None
+    # SandwichNorm placement: "post_residual" (existing — post_*_norm applied
+    # to the stream AFTER the residual add) vs "pre_residual" (LFM2/3 —
+    # post_*_norm applied to the operator/FFN OUTPUT before the add:
+    #   x = x0 + post_op_norm(op(x0));  x = x + post_ffn_norm(ffn(x))).
+    sandwich_norm_mode: str = "post_residual"
     # MTP (Multi-Token Prediction): shared-weight heads for speculative decode.
     use_mtp: bool = False
     mtp_n_heads: int = 4  # evolution: 4 heads (was 2), score 27.69 vs 23.6
@@ -86,6 +108,10 @@ class ModelConfig:
     # mtp_weight=0.0 disables the MTP loss contribution (params become dead,
     # frozen by freeze_dead_params_ before BAdam partitioning).
     mtp_weight: float | None = None
+    # V14: DeepSeek-MTP style adapter heads — each head is a small d→d
+    # projection sharing the tied vocab head (~n×d² vs n×d×V params; the
+    # vocab weight is read once per draft step). Requires head tying.
+    mtp_adapter_heads: bool = False
     # BitNet b1.58: ternary QAT on all linear layers ({-1,0,1} weights, STE).
     # Training = ternary forward (STE, master weights fp); eval = full
     # precision unless bitnet_force_quant (deploy after QAT converges).
@@ -501,6 +527,22 @@ class ModelConfig:
     gdn2_n_heads: int = 0           # 0 = inherit n_heads
     gdn2_head_dim: int = 0          # 0 = inherit d_model // n_heads
     gdn2_decay_floor: float = 0.0   # optional lower bound on per-key-dim decay
+    # V14: restrict side-paths to a layer subset (None = all blocks — legacy
+    # behaviour). GDN2/Titan are param-heavy; a strided subset keeps the
+    # LiveT surface at a fraction of the param cost on tight budgets.
+    gdn2_layers: list[int] | None = None     # None = all blocks
+    titan_layers: list[int] | None = None    # None = all blocks
+
+    # === V14: RSI work-acceleration heads (read-only taps on hidden) ===
+    # CopySpan edit head: LM emits <copy> op, pointer head emits (start,end)
+    # over cached source hiddens; driver splices verbatim + chunked commit.
+    use_edit_head: bool = False
+    edit_head_dim: int = 0          # 0 = d_model (pointer q/k width)
+    copy_op_token_id: int = -1      # vocab id of the <copy> op token (-1=unset)
+    # Verifier head: scalar P(candidate passes tests) on ln_f(hidden);
+    # BT-trained on evolve pairs → best-of-n rerank + early-stop gate.
+    use_verifier_head: bool = False
+    verifier_head_dim: int = 256
 
     # === Preset lineage (critique F2 — machine-enforced lineage) ===
     # parent: name of the parent preset this one is derived from (or None for
@@ -761,6 +803,91 @@ MODEL_CONFIGS["forgelm_v13_gdn2"] = ModelConfig(
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
+# ForgeLM V14-RSI: purpose-built ~2.5B RSI-loop coder (docs/V14_RSI_DESIGN.md).
+#
+# Derived from forgelm_v13_gdn2 (carries forward V12+V13 keys). NEW topology —
+# intentionally NON-lossless vs V13 (24 layers, hybrid conv/mamba3/GLA mix,
+# MoE FFN); every divergence is documented in dropped_keys below.
+#
+# Design targets (RTX 5070, ~672 GB/s): <3GB at max load (int4 ≈1.3GB weights),
+# ~1k tok/s decode via ~1.3B active params/step + MTP self-spec + CopySpan,
+# minutes-scale hone (tagged LoRA), instant ingest (GDN2/Titan/NGram live).
+#
+# Divergences vs V13 (all documented):
+#   n_layers 28→24, layer_types: explicit conv/mamba3/GLA mix (was 26 mamba
+#   +2 attn), attn_type gqa→gla (latent KV, d_c=256), use_forge_hybrid OFF
+#   (explicit mamba3 layers replace per-block SSM routing), gdn2_n_heads 0→4
+#   (9.2M/layer vs 39M — LiveT surface on all blocks within budget),
+#   use_outro OFF (untested on GLA; latent attention supersedes it),
+#   use_titan_memory ON but titan_layers subset (4 blocks ≈105M params),
+#   use_moe ON (8 experts top-2 + shared, dense_bypass warm start),
+#   use_mtp ON (4 heads, evolution-tuned weight), NEW use_edit_head +
+#   use_verifier_head (RSI work-acceleration heads), zero_init_residual ON
+#   (clean distill init), use_qk_norm + use_embed_norm ON (GLA/LFM2-style).
+# ──────────────────────────────────────────────────────────────────────────────
+MODEL_CONFIGS["forgelm_v14_rsi"] = ModelConfig(
+    **{
+        **MODEL_CONFIGS["forgelm_v13_gdn2"].__dict__,
+        "parent": "forgelm_v13_gdn2",
+        "dropped_keys": (
+            "n_layers",            # 28 → 24 (new topology)
+            "layer_types",         # conv/mamba3/GLA hybrid mix
+            "attn_type",           # gqa → gla (latent-compressed KV)
+            "gla_latent_dim",      # 0 → 256
+            "max_seq_len",         # 262144 → 16384 (RSI prompts <8k; RoPE
+                                   # cache buffers scale ~16× down)
+            "use_forge_hybrid",    # OFF: explicit mamba3 layers replace routing
+            "gdn2_n_heads",        # 0(inherit 20) → 4 (param budget)
+            "gdn2_head_dim",       # 0(inherit 128) → 128 explicit (heads
+                                   # otherwise derive 640-wide, ~46M/layer)
+            "use_outro",           # OFF: untested on GLA; latent attn supersedes
+            "use_titan_memory",    # ON: LiveT persistent store
+            "titan_layers",        # subset [5,11,17,23] vs all-block default
+            "titan_memory_rank",   # 0(full d×d) → 128 factorized live surface
+            "use_moe",             # ON: 8 experts top-2 + shared
+            "moe_d_ff",            # None → 768 (expert dim)
+            "use_mtp",             # ON: 4-head self-spec draft
+            "mtp_adapter_heads",   # ON: DeepSeek-style shared-head adapters
+            "use_edit_head",       # NEW: CopySpan edit head
+            "copy_op_token_id",    # -1 placeholder → resolved at driver
+            "use_verifier_head",   # NEW: P(pass) rerank/early-stop head
+            "zero_init_residual",  # ON: clean distillation init
+            "use_qk_norm",         # ON: GLA stability
+            "use_embed_norm",      # ON: LFM2-style embed norm
+        ),
+        # ── V14 topology ──
+        "n_layers": 24,
+        "layer_types": (
+            ["conv", "conv", "mamba", "conv", "conv", "attention"] * 4
+        ),  # 16 conv + 4 mamba3 + 4 GLA attention
+        "attn_type": "gla",
+        "gla_latent_dim": 256,
+        "n_kv_heads": 1,           # MQA at GLA layer (latent dominates anyway)
+        "max_seq_len": 16384,
+        # ── Carried keys with budget adjustments ──
+        "use_forge_hybrid": False,
+        "gdn2_n_heads": 4,
+        "gdn2_head_dim": 128,
+        "use_outro": False,
+        "use_titan_memory": True,
+        "titan_layers": [5, 11, 17, 23],
+        "titan_memory_rank": 128,
+        # ── MoE FFN: capacity without bandwidth cost ──
+        "use_moe": True,
+        "moe_d_ff": 768,
+        # ── Acceleration heads ──
+        "use_mtp": True,
+        "mtp_adapter_heads": True,
+        "use_edit_head": True,
+        "use_verifier_head": True,
+        # ── Init norms ──
+        "zero_init_residual": True,
+        "use_qk_norm": True,
+        "use_embed_norm": True,
+    }
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Qwen2.5-0.5B (HF compat, R49) — native shapes for HF-style checkpoints.
 #
 # Matches Qwen/Qwen2.5-0.5B exactly: GQA 14Q/2KV (head_dim 64), QKV bias,
@@ -783,6 +910,66 @@ MODEL_CONFIGS["qwen25_05b"] = ModelConfig(
     max_seq_len=32768,
     use_qk_norm=False,             # Qwen2.5 has no q_norm/k_norm (Qwen3 only)
     tie_word_embeddings=True,      # 0.5B ties embed/head (no lm_head.weight in ckpt)
+)
+
+# Qwen2.5-0.5B → MLA+MoE port (ForgeLM-v1 recipe, updated): GQA→latent-KV
+# via SVD (d_c=256 = full joint-KV rank → bit-exact), dense SwiGLU→4 routed
+# experts (dense_bypass → exact at init, router learns during SFT/evolve).
+# Produced by scripts/port_qwen_mla_moe.py; ckpt carries forge_convert.json.
+MODEL_CONFIGS["qwen25_05b_mla_moe"] = ModelConfig(
+    vocab_size=151936,
+    d_model=896,
+    n_layers=24,
+    n_heads=14,
+    n_kv_heads=2,
+    intermediate_size=4864,
+    attn_type="gla",
+    gla_latent_dim=256,
+    attn_bias=True,                # q_proj bias; kv_down bias emitted as zeros
+    ffn_type="swiglu",
+    use_moe=True,
+    moe_n_experts=4,
+    moe_top_k=4,                   # dense_bypass ignores routing anyway
+    moe_d_ff=1216,                 # 4864/4 — experts partition the dense FFN
+    moe_shared_expert=False,
+    moe_dense_bypass=True,         # lossless init: all experts equal weight
+    moe_noisy_gating=False,
+    norm_type="rmsnorm",
+    norm_eps=1e-6,
+    rope_base=1_000_000.0,
+    max_seq_len=32768,
+    tie_word_embeddings=True,
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Qwen2.5-Coder-3B MLA+MoE port target (V14-RSI P1 teacher / proposer upgrade).
+# Same recipe as qwen25_05b_mla_moe at 3B scale: GQA → GLA latent-KV via
+# joint SVD (d_c=512 = 2*kv_dim, kv_dim=2*128=256 → full-rank → lossless),
+# dense SwiGLU 11008 → 8 routed experts d_ff=1376 (dense_bypass = exact).
+# ──────────────────────────────────────────────────────────────────────────────
+MODEL_CONFIGS["qwen25_coder_3b_mla_moe"] = ModelConfig(
+    vocab_size=151936,
+    d_model=2048,
+    n_layers=36,
+    n_heads=16,
+    n_kv_heads=2,
+    intermediate_size=11008,
+    attn_type="gla",
+    gla_latent_dim=512,
+    attn_bias=True,
+    ffn_type="swiglu",
+    use_moe=True,
+    moe_n_experts=8,
+    moe_top_k=8,                   # dense_bypass ignores routing anyway
+    moe_d_ff=1376,                 # 11008/8 — experts partition the dense FFN
+    moe_shared_expert=False,
+    moe_dense_bypass=True,         # lossless init: all experts equal weight
+    moe_noisy_gating=False,
+    norm_type="rmsnorm",
+    norm_eps=1e-6,
+    rope_base=1_000_000.0,
+    max_seq_len=32768,
+    tie_word_embeddings=True,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -925,6 +1112,75 @@ MODEL_CONFIGS["rocinante_12b"] = ModelConfig(
     use_qk_norm=False,
     use_final_norm=True,
     tie_word_embeddings=False,     # untied lm_head (output.weight in GGUF)
+)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LFM3-1.7B port (2026-10-29) — LiquidAI tri-hybrid conv+attention.
+#
+# 24 layers: 13 gated short convs (L=7), 5 sliding-window attention (W=256,
+# theta=10K, full RoPE), 6 full attention (theta=1M, partial RoPE 0.5
+# zero-tail). GQA 16Q/4KV heads, head_dim=128, QK-norm, per-head sigmoid
+# output gate. Pre-residual sandwich norms (post-op + post-FFN applied to
+# the branch output before the residual add). Embed norm, NO final norm,
+# tied embeddings, vocab 128K. No biases anywhere.
+#
+# Checkpoint: research/checkpoints/lfm3_1p7b_cc (mondk Claude-Code
+# fine-tune — stock LFM3 arch, R1 tools + R2 bench + R3 self-RL on top of
+# LiquidAI/LFM3-1.7B). HF keys remap via ModelLoader._remap_hf_keys.
+# forge_convert.json in the dir names this preset; non-lossless delta vs
+# the HF reference is bounded by kernel-level fp error only (verified by
+# tests/unit/test_lfm3_port.py logit comparison).
+# ──────────────────────────────────────────────────────────────────────────────
+MODEL_CONFIGS["lfm3_1p7b"] = ModelConfig(
+    vocab_size=128_000,
+    d_model=2048,
+    n_layers=24,
+    n_heads=16,
+    n_kv_heads=4,
+    head_dim=128,                  # explicit (2048/16 happens to match)
+    intermediate_size=7680,
+    attn_type="gqa",
+    attn_bias=False,
+    ffn_type="swiglu",
+    norm_type="rmsnorm",
+    norm_eps=1e-5,                 # HF norm_eps
+    use_embed_norm=False,
+    use_final_norm=True,           # model.embedding_norm IS the final norm
+                                   # (applied after the last layer, misnamed)
+    use_rope=True,
+    rope_base=1_000_000.0,         # default for full-attention layers
+    # HF max_position_embeddings=262144, but RotaryEmbedding precomputes
+    # cos/sin tables per attention layer (~500MB/layer at 262K → OOM on
+    # 12GB). The evolve loop generates ≤~4K tokens; 16384 is lossless for
+    # that workload. Raise only with a lazy/shared RoPE table.
+    max_seq_len=16_384,
+    conv_kernel_size=7,            # conv_L_cache
+    use_qk_norm=True,
+    tie_word_embeddings=True,
+    layer_types=[
+        "conv", "conv", "attention", "conv", "attention_swa", "conv",
+        "attention", "conv", "attention_swa", "conv", "attention", "conv",
+        "attention_swa", "conv", "attention", "conv", "attention_swa",
+        "conv", "attention", "conv", "attention_swa", "conv", "attention",
+        "conv",
+    ],
+    sliding_window=256,
+    use_attn_out_gate=True,        # sigmoid per-head gate on attn output
+    use_sandwich_norm=True,
+    sandwich_norm_mode="pre_residual",
+    rope_layer_params={
+        "attention":       {"rope_theta": 1_000_000.0,
+                            "partial_rotary_factor": 0.5},
+        "attention_swa":   {"rope_theta": 10_000.0,
+                            "partial_rotary_factor": 1.0},
+    },
+    batch_size=4,                  # batch-gen sweet spot for the evolve loop
+    seq_len=2048,
+    max_steps=500,
+    warmup_steps=50,
+    max_lr=2e-4,
+    min_lr=2e-5,
 )
 
 

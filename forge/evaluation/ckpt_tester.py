@@ -120,9 +120,7 @@ def evaluate_answer(question: dict[str, Any], answer: str) -> bool | None:
         expected_num = numbers[-1]  # last number is the answer
         # Word-boundary match so "4" doesn't match inside "12345"
         pattern = r"(?<!\d)" + re.escape(expected_num) + r"(?!\d)"
-        if re.search(pattern, answer_str):
-            return True
-        return False
+        return bool(re.search(pattern, answer_str))
 
     # ── Format: validate JSON / markdown / tool-use structure ──
     if cat == "format":
@@ -131,16 +129,12 @@ def evaluate_answer(question: dict[str, Any], answer: str) -> bool | None:
             # Strict JSON validation
             try:
                 parsed = json.loads(answer_str)
-                if isinstance(parsed, (dict, list)):
-                    return True
-                return False
+                return bool(isinstance(parsed, (dict, list)))
             except (json.JSONDecodeError, ValueError):
                 return False
         if "markdown" in prompt_lower or "``" in prompt_lower:
             # Markdown: expect a code block fence or heading
-            if "```" in answer_str or answer_str.startswith("#"):
-                return True
-            return False
+            return bool("```" in answer_str or answer_str.startswith("#"))
         if "tool" in prompt_lower:
             # Tool-use: expect JSON-like structure with tool key
             if "{" in answer_str and "}" in answer_str:
@@ -153,22 +147,16 @@ def evaluate_answer(question: dict[str, Any], answer: str) -> bool | None:
                 return False
             return False
         # Generic format fallback
-        if expected_str and expected_str.lower() in answer_str.lower():
-            return True
-        return False
+        return bool(expected_str and expected_str.lower() in answer_str.lower())
 
     # ── Logic / Code / Recall: keyword or substring match ──
     if expected_str:
         # For numeric answers, use word-boundary matching
         if expected_str.lstrip("-").isdigit():
             pattern = r"(?<!\d)" + re.escape(expected_str) + r"(?!\d)"
-            if re.search(pattern, answer_str):
-                return True
-            return False
+            return bool(re.search(pattern, answer_str))
         # Case-insensitive substring match
-        if expected_str.lower() in answer_str.lower():
-            return True
-        return False
+        return expected_str.lower() in answer_str.lower()
 
     return None
 

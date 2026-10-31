@@ -410,9 +410,8 @@ class HotSwapManager:
 
         # Clear old KV cache if strategy changed
         kv_changed = settings.kv_cache != self._current.kv_cache
-        if old_kv is not None and kv_changed:
-            if hasattr(old_kv, 'clear'):
-                old_kv.clear()
+        if old_kv is not None and kv_changed and hasattr(old_kv, 'clear'):
+            old_kv.clear()
 
         # Re-activate
         try:

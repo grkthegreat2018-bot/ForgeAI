@@ -144,7 +144,7 @@ def fused_gated_conv_forward(
     Returns:
         out: (B, T, D) = C_gate * causal_conv(Bx)
     """
-    B, T, D = Bx.shape
+    _B, T, D = Bx.shape
     K = conv_weight.shape[-1]
 
     if T == 1 and conv_state is not None:
@@ -184,7 +184,7 @@ def patch_conv_layers(model: nn.Module):
     from forge.model_loader import DoubleGatedConvLayer
 
     n_patched = 0
-    for name, module in model.named_modules():
+    for _name, module in model.named_modules():
         if isinstance(module, DoubleGatedConvLayer):
             # Store original forward as fallback
             module._original_forward = module.forward
@@ -197,7 +197,8 @@ def patch_conv_layers(model: nn.Module):
                     B_gate, C_gate, x_proj = BCx.chunk(3, dim=-1)
                     Bx = B_gate * x_proj
 
-                    if T == 1 and conv_layer._conv_state is not None:
+                    if (T == 1 and conv_layer._conv_state is not None
+                            and conv_layer._conv_state.shape[0] == B):
                         conv_out = fused_gated_conv_forward(
                             Bx, C_gate, conv_layer.conv.weight, conv_layer._conv_state,
                         )
@@ -208,11 +209,17 @@ def patch_conv_layers(model: nn.Module):
                         if use_cache:
                             conv_layer._init_conv_state(B, x.device, x.dtype)
                             if conv_layer.kernel_size - 1 <= T:
-                                conv_layer._conv_state = Bx[:, -(conv_layer.kernel_size - 1):, :].transpose(1, 2).clone()
+                                new_state = Bx[:, -(conv_layer.kernel_size - 1):, :].transpose(1, 2)
                             else:
                                 pad_len = conv_layer.kernel_size - 1 - T
                                 pad = torch.zeros(B, pad_len, D, device=x.device, dtype=x.dtype)
-                                conv_layer._conv_state = torch.cat([pad, Bx], dim=1).transpose(1, 2).clone()
+                                new_state = torch.cat([pad, Bx], dim=1).transpose(1, 2)
+                            # In-place update keeps the buffer's storage
+                            # stable across CUDA-graph capture/replay.
+                            if conv_layer._conv_state.shape == new_state.shape:
+                                conv_layer._conv_state.copy_(new_state)
+                            else:
+                                conv_layer._conv_state = new_state.clone()
 
                     out = conv_layer.out_proj(conv_out)
                     return out, None

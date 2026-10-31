@@ -18,14 +18,13 @@ Modules:
 """
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
 
 from research.training_free.expert_bake import bake_expert, decompress_expert
 from research.training_free.steering import ActivationSteerer
-
 
 # ── URIAL ──────────────────────────────────────────────────────────────
 
@@ -330,19 +329,19 @@ class RAINGenerator:
 
 
 __all__ = [
+    "STYLE_EXAMPLES",
+    "SYSTEM_PROMPT",
+    "ActivationSteerer",
     "RAINGenerator",
     "ReflexionBuffer",
     "TrainingFreeSolver",
-    "ActivationSteerer",
     "bake_expert",
-    "decompress_expert",
     "build_prompt",
+    "decompress_expert",
     "generate_with_cache",
     "make_template_reflection",
-    "SYSTEM_PROMPT",
-    "STYLE_EXAMPLES",
 ]
 
 # Import solver at the END to avoid circular import
 # (solver.py imports generate_with_cache, ReflexionBuffer, build_prompt from here)
-from research.training_free.solver import TrainingFreeSolver  # noqa: E402
+from research.training_free.solver import TrainingFreeSolver

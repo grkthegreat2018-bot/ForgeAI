@@ -196,10 +196,10 @@ def eval_head(head: DecisionHead, feats: torch.Tensor,
     conf = torch.zeros(N_ACTIONS, N_ACTIONS, dtype=torch.long)
     for t in range(N_ACTIONS):
         for p in range(N_ACTIONS):
-            conf[t, p] = int(((Y == t) & (pred == p)).sum())
+            conf[t, p] = int(((t == Y) & (pred == p)).sum())
     per_class = {}
     for a, name in enumerate(ACTIONS):
-        m = Y == a
+        m = a == Y
         per_class[name] = round(float(correct[m].float().mean()), 4) \
             if int(m.sum()) else None
     return {"acc": round(float(correct.float().mean()), 4),

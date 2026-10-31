@@ -156,10 +156,16 @@ class ModelLoader:
         # Fallback: safetensors safe_open with direct device loading.
         # SAFETENSORS_FAST_CUDA=1 (set at module import) enables pinned async.
         from safetensors import safe_open
+
+        from forge.checkpoint_io import _MAX_ST_TENSORS
         load_device = str(device) if device.type != "cpu" else "cpu"
         state = {}
         with safe_open(path, framework="pt", device=load_device) as f:
-            for key in f.keys():
+            keys = list(f.keys())
+            if len(keys) > _MAX_ST_TENSORS:  # cap enumeration — see checkpoint_io
+                raise ValueError(
+                    f"{path} declares {len(keys)} tensors (cap {_MAX_ST_TENSORS})")
+            for key in keys:
                 state[key] = f.get_tensor(key)
         return state
 
@@ -211,11 +217,17 @@ class ModelLoader:
 
         # Fallback: safetensors safe_open with direct device loading
         from safetensors import safe_open
+
+        from forge.checkpoint_io import _MAX_ST_TENSORS
         load_device = str(device) if device.type != "cpu" else "cpu"
         state = {}
         for sf_path in sf_paths:
             with safe_open(str(sf_path), framework="pt", device=load_device) as f:
-                for key in f.keys():
+                keys = list(f.keys())
+                if len(keys) > _MAX_ST_TENSORS:  # cap enumeration — see checkpoint_io
+                    raise ValueError(
+                        f"{sf_path} declares {len(keys)} tensors (cap {_MAX_ST_TENSORS})")
+                for key in keys:
                     state[key] = f.get_tensor(key)
         return state
 
@@ -253,7 +265,7 @@ class ModelLoader:
                     b = getattr(config, 'kron_b', 32)
                     c = getattr(config, 'kron_c', 32)
                     d = getattr(config, 'kron_d', 256)
-                    out_features, in_features = weight.shape
+                    _out_features, _in_features = weight.shape
                     # Adjust factorization to match actual dimensions
                     # For w_gate/w_up: out=intermediate, in=d_model
                     # For w_down: out=d_model, in=intermediate
@@ -344,7 +356,7 @@ class ModelLoader:
 
     @staticmethod
     def _remap_hf_keys(state: dict, config) -> dict:
-        """Remap HuggingFace Qwen/Llama-style keys to ForgeAI internal names."""
+        """Remap HuggingFace Qwen/Llama/LFM3-style keys to ForgeAI internal names."""
         import re
         new_state = {}
         for key, tensor in state.items():
@@ -352,16 +364,36 @@ class ModelLoader:
             if key == "model.embed_tokens.weight":
                 new_state["embed.weight"] = tensor
             # model.norm.weight → ln_f.weight
-            elif key == "model.norm.weight":
+            elif key == "model.norm.weight" or key == "model.embedding_norm.weight":
                 new_state["ln_f.weight"] = tensor
             # lm_head.weight → head.weight
             elif key == "lm_head.weight":
                 new_state["head.weight"] = tensor
+            # LFM3 conv blocks: model.layers.{i}.conv.{conv,in_proj,out_proj}
+            # → blocks.{i}.attn.{same} (DoubleGatedConvLayer lives on .attn)
+            elif m := re.match(r"model\.layers\.(\d+)\.conv\.(.+)", key):
+                new_state[f"blocks.{m.group(1)}.attn.{m.group(2)}"] = tensor
+            # LFM3 MLP: feed_forward.w1/w3/w2 → ffn.w_gate/w_up/w_down
+            elif m := re.match(r"model\.layers\.(\d+)\.feed_forward\.w([123])\.(.+)", key):
+                name = {"1": "w_gate", "3": "w_up", "2": "w_down"}[m.group(2)]
+                new_state[f"blocks.{m.group(1)}.ffn.{name}.{m.group(3)}"] = tensor
+            # LFM3 block norms: operator_norm → ln1 (pre-op),
+            # ffn_norm → ln2 (pre-FFN),
+            # post_operator_norm/post_ffn_norm → post_attn_norm/post_ffn_norm
+            # (pre-residual sandwich norms)
+            elif m := re.match(r"model\.layers\.(\d+)\.operator_norm\.(.+)", key):
+                new_state[f"blocks.{m.group(1)}.ln1.{m.group(2)}"] = tensor
+            elif m := re.match(r"model\.layers\.(\d+)\.ffn_norm\.(.+)", key):
+                new_state[f"blocks.{m.group(1)}.ln2.{m.group(2)}"] = tensor
+            elif m := re.match(r"model\.layers\.(\d+)\.post_operator_norm\.(.+)", key):
+                new_state[f"blocks.{m.group(1)}.post_attn_norm.{m.group(2)}"] = tensor
+            elif m := re.match(r"model\.layers\.(\d+)\.post_ffn_norm\.(.+)", key):
+                new_state[f"blocks.{m.group(1)}.post_ffn_norm.{m.group(2)}"] = tensor
             # model.layers.{i}.self_attn.{proj}.{weight|bias} → blocks.{i}.attn.{proj}.{weight|bias}
             elif m := re.match(r"model\.layers\.(\d+)\.self_attn\.(.+)", key):
                 layer = m.group(1)
                 rest = m.group(2)
-                # q_proj/k_proj/v_proj → same name
+                # q_proj/k_proj/v_proj/gate_proj/q_norm/k_norm → same name
                 # o_proj → out_proj
                 rest = rest.replace("o_proj", "out_proj")
                 new_state[f"blocks.{layer}.attn.{rest}"] = tensor
@@ -399,9 +431,13 @@ class ModelLoader:
                 max_seq_len = getattr(module, 'max_seq_len',
                                       module.cos_cached.shape[0])
                 rope_scaling = getattr(module, 'rope_scaling', None)
+                partial = getattr(module, 'partial_rotary_factor', 1.0)
                 inv_freq = 1.0 / (base ** (
                     torch.arange(0, module.dim, 2, device=target_device,
                                  dtype=torch.float32) / module.dim))
+                # LFM3 zero-tail partial rotation (see RotaryEmbedding).
+                if partial < 1.0:
+                    inv_freq[int(partial * module.dim) // 2:] = 0.0
                 if rope_scaling:
                     rope_type = (rope_scaling.get("type")
                                  or rope_scaling.get("rope_type"))
@@ -747,11 +783,103 @@ class ModelLoader:
                 raise state_result["error"]
             state = state_result.get("state", {})
 
+            # Pre-packed ForgeQuant: <mod>.dense_packed keys mean the
+            # checkpoint stores packed INT4 dense + INT8 sparse params.
+            # Swap the corresponding nn.Linear modules for empty
+            # ForgeQuantLinear shells — assign=True then writes the packed
+            # tensors directly (no bf16 intermediate on GPU, plain-tensor
+            # dequant stays CUDA-graph capturable).
+            if any(k.endswith(".dense_packed") for k in state):
+                from forge.engine.quant.forge_quant import ForgeQuantLinear
+                # forge_convert.json {"fq_rotation": true} marks ckpts
+                # packed with --rotate (Hadamard-rotated dense basis) —
+                # the shells must rotate activations at forward to match.
+                _fq_rot = False
+                try:
+                    _cdir = Path(checkpoint_path)
+                    if not _cdir.is_dir():
+                        _cdir = _cdir.parent
+                    _convp = _cdir / "forge_convert.json"
+                    if _convp.exists():
+                        import json as _json
+                        _fq_rot = bool(_json.loads(
+                            _convp.read_text()).get("fq_rotation"))
+                except Exception:
+                    pass
+                for name, mod in list(model.named_modules()):
+                    dk = f"{name}.dense_packed"
+                    if dk not in state:
+                        continue
+                    w = state.get(f"{name}.weight")
+                    # dense_packed is (out, pad(in)//2) — group padding
+                    # inflates in//2, so recover true in_features from
+                    # sparse_packed (n_sparse, in) which stays unpadded.
+                    out_f = state[dk].shape[0]
+                    sp = state.get(f"{name}.sparse_packed")
+                    in_f = (sp.shape[1] if sp is not None
+                            else (w.shape[1] if w is not None
+                                  else state[dk].shape[1] * 2))
+                    has_bias = f"{name}.bias" in state
+                    fq = ForgeQuantLinear(
+                        in_f, out_f, bias=has_bias,
+                        group_size=getattr(config, 'forge_quant_group_size', 128),
+                        sparse_ratio=getattr(config, 'forge_quant_sparse_ratio', 0.10),
+                        use_rotation=_fq_rot)
+                    # Prequant = memory-bounded path: keep weights packed and
+                    # dequant per forward (plain ops → still graph-capturable).
+                    fq._cache_w = False
+                    # Replace on parent module
+                    parent_name, _, attr = name.rpartition('.')
+                    parent = (model.get_submodule(parent_name)
+                              if parent_name else model)
+                    setattr(parent, attr, fq)
+                model._forgequant_prequant = True
+
+            # NF4 QLoRA checkpoints (sft_train --qlora-nf4 saves): every
+            # trained nn.Linear is stored as *.weight_packed (uint8,
+            # 2 nibbles/byte, group-padded) + *.weight_scales (fp16).
+            # Materialize NF4QuantLinear shells so the packed tensors load
+            # directly — no bf16 detour and no double-quantization.
+            if any(k.endswith(".weight_packed") and
+                   f"{k[:-len('weight_packed')]}weight_scales" in state
+                   for k in state):
+                from forge.engine.quant.forge_quant import NF4QuantLinear
+                for name, mod in list(model.named_modules()):
+                    pk, sk = (f"{name}.weight_packed",
+                              f"{name}.weight_scales")
+                    if pk not in state or sk not in state:
+                        continue
+                    out_f = state[pk].shape[0]
+                    in_f = (mod.in_features
+                            if isinstance(mod, torch.nn.Linear)
+                            else state[sk].shape[1] *
+                            getattr(config, 'nf4_group_size', 64))
+                    has_bias = f"{name}.bias" in state
+                    nf = NF4QuantLinear(
+                        in_f, out_f, bias=has_bias,
+                        group_size=getattr(config, 'nf4_group_size', 64))
+                    nf._cache_w = False
+                    parent_name, _, attr = name.rpartition('.')
+                    parent = (model.get_submodule(parent_name)
+                              if parent_name else model)
+                    setattr(parent, attr, nf)
+                model._nf4_prequant = True
+                # Treat like ForgeQuant for downstream activation
+                # (skip post-load quantize; dequant ops are plain tensors
+                # so CUDA-graph capture stays available).
+                model._forgequant_prequant = True
+
             # Pre-quantized BitNet: int8 weights are loaded directly into
             # int8 storage via load_prequantized() — NO bf16/fp32 intermediate.
             # This keeps peak CPU RAM at ~checkpoint size (e.g. 4.7 GB for 4B
             # model) instead of 3x (int8 + bf16 cast + model copy).
-            _has_int8 = any(t.dtype == torch.int8 for t in state.values())
+            # int8 *.weight* tensors = BitNet prequant signature. ForgeQuant
+            # int8 lives in *.sparse_packed — do NOT trip BitNet handling on it
+            # (it would skip the embed/head re-tie below, leaving head.weight
+            # as an fp32 meta remnant → bf16×fp32 matmul crash).
+            _has_int8 = any(
+                t.dtype == torch.int8 and k.endswith(".weight")
+                for k, t in state.items())
             if _has_int8:
                 from forge.keys.quantization.bitnet_b158_key import (
                     BitNetConv1d,
@@ -1086,7 +1214,7 @@ class ModelLoader:
         if checkpoint_path and os.path.exists(checkpoint_path):
             _has_iri_trad = any(
                 k.endswith(".iri_packed")
-                for k in (state if 'state' in locals() else {}).keys()
+                for k in (state if 'state' in locals() else {})
             )
         model = ModelLoader._post_quant_iri_fp4(
             model, config, has_packed=_has_iri_trad)

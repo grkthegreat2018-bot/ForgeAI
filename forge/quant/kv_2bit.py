@@ -161,7 +161,7 @@ class KV2BitCache:
             k: (B, n_kv_heads, T, head_dim) — will be quantized
             v: (B, n_kv_heads, T, head_dim) — will be quantized
         """
-        B, H, T, D = k.shape
+        B, _H, T, _D = k.shape
         assert B == 1, "KV2BitCache only supports batch=1"
 
         pos = self.seq_len

@@ -191,7 +191,7 @@ class BeaconKVCache(KVCacheStrategy):
             beacons = self._update_beacons(layer_idx, pooled)
             self._beacons[layer_idx] = beacons
             T = k.shape[-2]
-            if T <= self.budget:
+            if self.budget >= T:
                 out.append(entry)
                 continue
             keep = self._keep_mask(T, self._scores(pooled, beacons), k.device)
@@ -241,7 +241,7 @@ class BeaconKVCache(KVCacheStrategy):
         beacons = self._beacons.get(layer_key)
         if beacons is None:
             T = pooled.shape[0]
-            if T >= self.n_beacons:
+            if self.n_beacons <= T:
                 idx = torch.linspace(0, T - 1, self.n_beacons,
                                      device=pooled.device).long()
             else:

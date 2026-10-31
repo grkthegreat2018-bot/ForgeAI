@@ -80,7 +80,7 @@ class PITEmbedding(nn.Module):
         if init == "orthonormal":
             # Thin polar decomposition: random matrix -> orthonormal via SVD.
             M = torch.randn(vocab_size, d_model)
-            U, S, Vh = torch.linalg.svd(M, full_matrices=False)
+            U, _S, Vh = torch.linalg.svd(M, full_matrices=False)
             M = U @ Vh  # orthonormal rows
         else:
             # Standard embedding init (normal, scaled by 1/sqrt(d_model)).

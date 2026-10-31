@@ -15,26 +15,57 @@ Three separated systems:
 M0 (this package): the storage substrate + artifact IO.  The model
 dynamics (channels, context sketch, fused decode) build on top.
 """
-from .config import StrataConfig
+from .blocks import BlockMeta, BlockStore, CellBlock
 from .cells import (
-    count_lut, quantize_counts, decode_counts, pack_follower,
-    foll_tok, foll_cntq, foll_aux, foll_valid, pack_meta, meta_nfoll,
-    meta_wtag, meta_flags, cell_bytes, EMPTY_FOLL,
+    EMPTY_FOLL,
+    cell_bytes,
+    count_lut,
+    decode_counts,
+    foll_aux,
+    foll_cntq,
+    foll_tok,
+    foll_valid,
+    meta_flags,
+    meta_nfoll,
+    meta_wtag,
+    pack_follower,
+    pack_meta,
+    quantize_counts,
 )
-from .blocks import CellBlock, BlockStore, BlockMeta
-from .io import (save_container, load_container, save_store,
-                 load_store, MAGIC)
-from .knobs import KnobSet, DEFAULT_KNOBS
-from .params import ParamSet, quantize_param, dequantize_param
+from .config import StrataConfig
+from .io import MAGIC, load_container, load_store, save_container, save_store
+from .knobs import DEFAULT_KNOBS, KnobSet
 from .model import StrataLM
+from .params import ParamSet, dequantize_param, quantize_param
 
 __all__ = [
-    "StrataConfig", "CellBlock", "BlockStore", "BlockMeta",
-    "KnobSet", "DEFAULT_KNOBS", "ParamSet", "StrataLM",
-    "quantize_param", "dequantize_param",
-    "save_container", "load_container", "save_store", "load_store",
-    "count_lut", "quantize_counts", "decode_counts", "pack_follower",
-    "foll_tok", "foll_cntq", "foll_aux", "foll_valid", "pack_meta",
-    "meta_nfoll", "meta_wtag", "meta_flags", "cell_bytes",
-    "EMPTY_FOLL", "MAGIC",
+    "DEFAULT_KNOBS",
+    "EMPTY_FOLL",
+    "MAGIC",
+    "BlockMeta",
+    "BlockStore",
+    "CellBlock",
+    "KnobSet",
+    "ParamSet",
+    "StrataConfig",
+    "StrataLM",
+    "cell_bytes",
+    "count_lut",
+    "decode_counts",
+    "dequantize_param",
+    "foll_aux",
+    "foll_cntq",
+    "foll_tok",
+    "foll_valid",
+    "load_container",
+    "load_store",
+    "meta_flags",
+    "meta_nfoll",
+    "meta_wtag",
+    "pack_follower",
+    "pack_meta",
+    "quantize_counts",
+    "quantize_param",
+    "save_container",
+    "save_store",
 ]

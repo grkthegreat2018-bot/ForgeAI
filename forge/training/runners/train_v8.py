@@ -46,6 +46,7 @@ from forge.training.runners.train_8b_all import (  # noqa: F401
     state_size_gb,
     unwrap_compiled,
 )
+import contextlib
 
 ROOT = Path(__file__).resolve().parents[2]
 CKPT_DIR = ROOT / "research" / "checkpoints"
@@ -143,10 +144,8 @@ class CheckpointWriter:
         # files are sorted by step ascending; drop the oldest beyond `keep`.
         to_delete = files[: len(files) - self.keep]
         for p in to_delete:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 p.unlink()
-            except FileNotFoundError:
-                pass
 
     def save(self, state: dict, step: int) -> Path:
         """Save a checkpoint and rotate. Returns the written path."""

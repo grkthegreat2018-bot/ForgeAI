@@ -201,9 +201,8 @@ class AutoContextManager:
             projected_len = context_length + int(predicted)
             projected_pressure = vram_pressure + self._growth_pressure_delta(
                 projected_len, context_length)
-            if projected_pressure >= self.growth_preempt_ratio:
-                if target not in ("cpu_offload", "s4r"):
-                    target = "s4r" if projected_pressure < self.vram_critical else "cpu_offload"
+            if projected_pressure >= self.growth_preempt_ratio and target not in ("cpu_offload", "s4r"):
+                target = "s4r" if projected_pressure < self.vram_critical else "cpu_offload"
         if target == current_strategy:
             return None
         return target

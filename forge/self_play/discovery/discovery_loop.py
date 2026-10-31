@@ -183,7 +183,7 @@ class DiscoveryLoop:
         eos_id = tok.eos_token_id  # 7 = <|im_end|>
 
         with torch.no_grad():
-            for step in range(self.max_gen_tokens):
+            for _step in range(self.max_gen_tokens):
                 out = self.model(ids)
                 logits = out[0] if isinstance(out, tuple) else out
                 next_logits = logits[:, -1, :] / max(self.temperature, 1e-5)

@@ -18,8 +18,6 @@ Usage:
 import json
 import os
 from functools import lru_cache
-from typing import Optional
-
 
 # The canonical tokenizer directory — the only one that exists on disk.
 # Old code may pass "research/checkpoints/forgelm_v2_tokenizer" (the pre-V10
@@ -27,6 +25,7 @@ from typing import Optional
 # Absolute: callers/GUI launch with an arbitrary cwd, and os.path.isdir
 # checks below must not depend on it (EC-129).
 from pathlib import Path as _Path
+
 CANONICAL_TOKENIZER_PATH = str(
     _Path(__file__).resolve().parent / "checkpoints" / "forgelm_v2_tokenizer")
 

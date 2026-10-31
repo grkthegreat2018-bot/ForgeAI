@@ -25,11 +25,18 @@ from dataclasses import dataclass, field
 
 import torch
 
-from forge.model.flux.helpers import (_MIX1, _MIX2, _s64, _mix64)
+from forge.model.flux.helpers import _MIX1, _MIX2, _mix64, _s64
+
 from .cells import (
-    EMPTY_FOLL, count_lut, decode_counts, quantize_counts, pack_meta,
-    meta_nfoll, meta_wtag, foll_tok, foll_cntq, foll_aux, foll_valid,
+    EMPTY_FOLL,
+    count_lut,
+    decode_counts,
+    foll_cntq,
+    foll_tok,
+    foll_valid,
     pack_follower,
+    pack_meta,
+    quantize_counts,
 )
 
 
@@ -507,10 +514,10 @@ class CellBlock:
             old = decode_counts(foll_cntq(row[c:c + 1]), self.lut)
             q = quantize_counts(old + d)
             self.foll[s, c] = int(
-                ((int(row[c]) & ~0xFF0000) | (int(q[0]) << 16)))
+                (int(row[c]) & ~0xFF0000) | (int(q[0]) << 16))
         else:
             v = foll_valid(row)
-            ar = torch.arange(self.M, device=dev)
+            ar = torch.arange(self.M, device=self.dev)
             if bool((~v).any()):
                 c = int(torch.where(~v, ar, self.M).amin())
             else:
@@ -610,7 +617,7 @@ class CellBlock:
 
     @classmethod
     def from_dict(cls, d: dict, tensors: dict, dev: torch.device,
-                  undo_cap: int = 200_000) -> "CellBlock":
+                  undo_cap: int = 200_000) -> CellBlock:
         b = cls(d["kind"], d["id"], d["slots"], d["M"], dev,
                 store_raw=d["has_raw"], undo_cap=undo_cap,
                 vocab=d.get("V", 65536))
@@ -703,7 +710,7 @@ class BlockStore:
             if not bool((~got).any()):
                 break
             kk = keys[~got]
-            toks, cnts, tot, fnd = b.read(kk.to(b.dev))
+            toks, cnts, _tot, fnd = b.read(kk.to(b.dev))
             idx = torch.nonzero(~got).squeeze(1)
             hit = idx[fnd.to(idx.device)]
             out_t[hit] = toks[fnd].to(self.dev)
@@ -749,7 +756,7 @@ class BlockStore:
         rep = {"undone": 0, "dropped": [], "tainted": []}
         if tid is None:
             return rep
-        for kind, bl in self.kinds.items():
+        for _kind, bl in self.kinds.items():
             for b in list(bl):
                 if not b._sealed:
                     rep["undone"] += b.revert_tag(tid)
@@ -800,7 +807,7 @@ class BlockStore:
 
     @classmethod
     def from_manifest(cls, m: dict, tensors: dict,
-                      dev: str = "cpu") -> "BlockStore":
+                      dev: str = "cpu") -> BlockStore:
         st = cls(slots=m["slots"], M=m["M"], dev=dev,
                  store_raw=m["store_raw"])
         st.seq = m["seq"]

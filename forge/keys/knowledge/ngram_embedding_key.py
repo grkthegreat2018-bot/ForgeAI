@@ -116,7 +116,7 @@ class NGramEmbeddingLayer(nn.Module):
         Returns:
             (B, T, d_model) — token_embeddings + ngram_embeddings
         """
-        B, T = input_ids.shape
+        _B, T = input_ids.shape
 
         if self.n_gram > T:
             # Not enough context for n-gram — return unchanged

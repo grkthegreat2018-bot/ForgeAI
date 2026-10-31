@@ -31,7 +31,6 @@ Usage:
 
 import torch
 
-
 # English function words, auxiliaries, conjunctions, prepositions,
 # pronouns, and punctuation that typically carry low retrieval signal.
 # Encoded per-tokenizer by ``filler_token_ids`` — multi-token encodings

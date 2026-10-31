@@ -63,6 +63,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from forge.evolution.auto_targets import self_improve
+
 
 def _to_complex(real: torch.Tensor, imag: torch.Tensor) -> torch.Tensor:
     """torch.complex wrapper that handles BFloat16 by upcasting to float32.
@@ -164,6 +166,37 @@ class Mamba3Cache:
 # Complex RMSNorm — operates on complex-valued inputs (stored as [..., 2])
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _evolve_inputs_complex_rmsnorm():
+    """Representative cases for complex_rmsnorm: complex64 activations
+    at mamba3 layer widths, real-pair gain tensors in fp32 and bf16."""
+    import torch
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    g = torch.Generator().manual_seed(0)
+    cases = []
+    for shape in ((1, 8, 32), (2, 16, 64), (1, 64, 128), (4, 32, 96)):
+        re = torch.randn(*shape, generator=g).to(dev)
+        im = torch.randn(*shape, generator=g).to(dev)
+        x = torch.complex(re, im)
+        w = torch.randn(*shape, 2, generator=g).to(dev)
+        cases.append((x, w, 1e-6))
+    # bf16 gain path exercises the _to_complex upcast
+    x = torch.complex(torch.randn(2, 8, 16, generator=g).to(dev),
+                      torch.randn(2, 8, 16, generator=g).to(dev))
+    w = torch.randn(2, 8, 16, 2, generator=g).to(dev).to(torch.bfloat16)
+    cases.append((x, w, 1e-6))
+    return cases
+
+
+@self_improve(gen_input=_evolve_inputs_complex_rmsnorm, evals=80,
+              deps=("_to_complex",),
+              tags=("mamba3", "ssm", "norm", "kernel", "hot-path"),
+              prompt=("Faster complex_rmsnorm(x, weight, eps): RMS-normal"
+                      "ize a complex tensor then apply complex gain. "
+                      "Seed materializes |x|^2, mean, rsqrt, complex mul "
+                      "as separate kernels. Ideas: view_as_real to work "
+                      "on (..., 2) floats end-to-end, fused complex mul "
+                      "via real arithmetic, fewer temporaries. Complex64 "
+                      "out, same values."))
 def complex_rmsnorm(x: torch.Tensor, weight: torch.Tensor,
                     eps: float = 1e-6) -> torch.Tensor:
     """RMSNorm for complex-valued tensors.
@@ -188,6 +221,45 @@ def complex_rmsnorm(x: torch.Tensor, weight: torch.Tensor,
 # Exponential-trapezoidal discretization
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _evolve_inputs_exp_discretize():
+    """Representative cases for exp_trapezoidal_discretize: complex A/B
+    at mamba3 dims (negative-real A), small positive deltas incl. the
+    near-zero region where the trapezoidal correction hits its limit."""
+    import torch
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    g = torch.Generator().manual_seed(0)
+    cases = []
+    for b, h, d_state, n_in in ((1, 4, 16, 8), (2, 8, 32, 16),
+                                (1, 16, 64, 32)):
+        A = torch.complex(
+            -torch.rand(b, h, d_state, generator=g).to(dev) - 0.05,
+            torch.randn(b, h, d_state, generator=g).to(dev))
+        Bc = torch.complex(
+            torch.randn(b, h, d_state, n_in, generator=g).to(dev),
+            torch.randn(b, h, d_state, n_in, generator=g).to(dev))
+        delta = (torch.rand(b, h, 1, generator=g).to(dev) * 0.1) + 1e-4
+        cases.append((A, Bc, delta, 1e-12))
+    # near-zero delta — correction factor must stay finite (L'Hopital)
+    A = torch.complex(-torch.rand(1, 2, 8, generator=g).to(dev),
+                      torch.randn(1, 2, 8, generator=g).to(dev))
+    Bc = torch.complex(torch.randn(1, 2, 8, 4, generator=g).to(dev),
+                       torch.randn(1, 2, 8, 4, generator=g).to(dev))
+    cases.append((A, Bc,
+                  torch.full((1, 2, 1), 1e-9, device=dev), 1e-12))
+    return cases
+
+
+@self_improve(gen_input=_evolve_inputs_exp_discretize, evals=80,
+              tags=("mamba3", "ssm", "discretize", "kernel", "hot-path"),
+              prompt=("Faster exp_trapezoidal_discretize(A, B, delta, "
+                      "eps): A_bar=exp(dA); B_bar=expm1(dA)/(dA+eps)*"
+                      "delta*B. Seed computes exp AND expm1 over complex "
+                      "tensors plus several broadcasts. Ideas: reuse "
+                      "exp(dA) to get expm1 (A_bar-1 — but watch the "
+                      "small-|dA| accuracy the gate checks), "
+                      "view_as_real arithmetic, precomputed broadcast "
+                      "shapes, fuse into fewer kernels. Outputs must "
+                      "match to 1e-5."))
 def exp_trapezoidal_discretize(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -634,7 +706,10 @@ class Mamba3Block(nn.Module):
             y = y * F.silu(z_gate.reshape(B, T, self.d_inner_out))
 
         # ── out_proj ──
-        out = self.out_proj(y)  # (B, T, d_model)
+        # The complex scan produces float32 (complex64 → real); cast back to
+        # the projection's dtype so bf16/fp16 models don't hit a dtype
+        # mismatch at out_proj.
+        out = self.out_proj(y.to(self.out_proj.weight.dtype))  # (B, T, d_model)
 
         # ── Build present state ──
         present = None

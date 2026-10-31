@@ -128,7 +128,7 @@ class BAdam(Optimizer):
         for block in self._blocks:
             all_params.extend(block["params"])
 
-        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay}
         super().__init__(all_params, defaults)
 
         # Freeze all blocks except the first
@@ -436,9 +436,9 @@ class BAdam(Optimizer):
         requantize_from_master() after the optimizer updates the CPU master.
         """
         self._param_to_module = {}
-        for name, module in self.model.named_modules():
+        for _name, module in self.model.named_modules():
             if hasattr(module, '_int8_trainable') and module._int8_trainable:
-                for pname, p in module.named_parameters(recurse=False):
+                for _pname, p in module.named_parameters(recurse=False):
                     self._param_to_module[id(p)] = module
 
     @torch.no_grad()
@@ -580,7 +580,7 @@ class BAdam(Optimizer):
         If layer_idx is after the active block, we detach its INPUT so backward
         doesn't flow through it. This skips ~50% of backward compute on average.
         """
-        start, end = self.get_active_layer_range()
+        _start, end = self.get_active_layer_range()
         return layer_idx >= end
 
     def state_dict(self):

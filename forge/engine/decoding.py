@@ -17,13 +17,16 @@ from abc import ABC, abstractmethod
 import torch
 import torch.nn.functional as F
 
-from forge.model_loader import unpack_output_with_kv
-from forge.engine.engine_common import (  # noqa: F401 — shared helpers
-    _apply_dry,
+from forge.engine.engine_common import (
     _DEFAULT_EOS_TOKEN_IDS,
+    _apply_dry,
     _dry_penalties,
+)
+from forge.engine.engine_common import (
     _min_k_filter as _min_k_filter_logits,
 )
+from forge.model_loader import unpack_output_with_kv
+from forge.evolution.auto_targets import self_improve
 
 
 def _sample_from_logits(
@@ -111,6 +114,142 @@ class DecodingStrategy(ABC):
         return self.__class__.__name__
 
 
+def _evolve_inputs_clone_state_tree():
+    """Representative cases for _clone_state_tree: nested past_kv trees
+    mixing (k,v) tuples, SSM/conv dicts, Nones and scalars — the shapes a
+    Jamba-style hybrid cache actually carries per decode step."""
+    import torch
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    g = torch.Generator().manual_seed(0)
+
+    def t(*shape):
+        return torch.randn(*shape, generator=g).to(dev)
+
+    cases = []
+    for layers in (8, 32):
+        tree = []
+        for _ in range(layers):
+            tree.append((t(1, 8, 64, 64), t(1, 8, 64, 64)))
+            tree.append({"conv_state": t(1, 256, 3), "ssm": t(1, 64)})
+        tree += [None, "meta", 42, [t(2, 4), {"k": t(8)}]]
+        cases.append((tree,))
+    return cases
+
+
+@self_improve(gen_input=_evolve_inputs_clone_state_tree, evals=80,
+              tags=("decoding", "spec-decode", "state", "hot-path"),
+              prompt=("Faster _clone_state_tree: deep-clone tensor leaves "
+                      "in a nested tuple/list/dict tree. Ideas: dispatch "
+                      "on exact type, avoid per-node isinstance chains, "
+                      "iterative traversal, torch._C fast paths. Output "
+                      "must equal the seed: same structure, every tensor "
+                      "an equal-valued clone."))
+def _clone_state_tree(obj):
+    """Deep-clone every tensor leaf of a nested cache structure.
+
+    torch.compile(mode='reduce-overhead') runs under cudagraph trees:
+    outputs of compiled run N live in a shared pool that run N+1
+    overwrites. The decode loop feeds past_kv back as inputs to the next
+    compiled call, which trips the 'overwritten by a subsequent run'
+    guard. Cloning in the same step — before the next compiled call —
+    produces stable tensors. KV is ~12-57KB/token here, negligible vs a
+    forward pass."""
+    if isinstance(obj, torch.Tensor):
+        return obj.clone()
+    if isinstance(obj, tuple):
+        return tuple(_clone_state_tree(o) for o in obj)
+    if isinstance(obj, list):
+        return [_clone_state_tree(o) for o in obj]
+    if isinstance(obj, dict):
+        return {k: _clone_state_tree(v) for k, v in obj.items()}
+    return obj
+
+
+def _model_is_compiled(model) -> bool:
+    """True when the model is a dynamo-compiled callable whose outputs may
+    live in cudagraph-managed memory."""
+    if hasattr(model, '_orig_mod'):  # torch.compile(model) -> OptimizedModule
+        return True
+    fwd = getattr(model, 'forward', None)
+    return fwd is not None and hasattr(fwd, '_torchdynamo_orig_callable')
+
+
+def _evolve_inputs_ngram_lookup():
+    """Representative cases for _ngram_lookup: token sequences with a
+    planted earlier copy of the tail n-gram ~60% of the time — the
+    lookup-hot distribution the spec-decode draft path sees."""
+    import random
+    rng = random.Random(0)
+    cases = []
+    for _ in range(240):
+        n = rng.randint(8, 512)
+        seq = [rng.randint(0, 5000) for _ in range(n)]
+        if rng.random() < 0.6 and n > 6:
+            k = rng.randint(2, 4)
+            src = rng.randint(0, n - k - 1)
+            seq[-k:] = seq[src:src + k]
+        cases.append((seq, rng.choice((2, 3, 4, 5)),
+                      rng.choice((4, 8, 16))))
+    cases += [([1, 2], 3, 4), ([], 3, 4), ([7, 7, 7, 7, 7], 2, 4)]
+    return cases
+
+
+@self_improve(gen_input=_evolve_inputs_ngram_lookup, evals=80,
+              tags=("decoding", "spec-decode", "ngram", "hot-path"),
+              prompt=("Faster _ngram_lookup(seq, ngram_size, "
+                      "draft_length): find the rightmost earlier copy of "
+                      "the tail n-gram and return up to draft_length "
+                      "tokens after it. Ideas: dict of ngram->last_pos, "
+                      "rolling hash, bytes/array compare, early exit. "
+                      "Same return value for every input."))
+def _ngram_lookup(seq: list[int], ngram_size: int,
+                  draft_length: int) -> list[int]:
+    """Find draft tokens by n-gram matching against the sequence."""
+    if len(seq) < ngram_size + 1:
+        return []
+    ngram = seq[-ngram_size:]
+    # Search for this ngram earlier in the sequence
+    for i in range(len(seq) - ngram_size - 1, ngram_size - 2, -1):
+        if seq[i:i + ngram_size] == ngram:
+            # Return up to draft_length tokens after the match
+            start = i + ngram_size
+            end = min(start + draft_length, len(seq))
+            return seq[start:end]
+    return []
+
+
+def _evolve_inputs_jsd():
+    """Representative cases for _jsd: softmax probability rows over
+    vocab-scale widths (DoLa contrasts final vs early-layer rows)."""
+    import torch
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    g = torch.Generator().manual_seed(0)
+    cases = []
+    for v in (1024, 65536, 128256):
+        p = torch.softmax(torch.randn(1, v, generator=g).to(dev) * 4, -1)
+        q = torch.softmax(torch.randn(1, v, generator=g).to(dev) * 4, -1)
+        cases.append((p, q))
+        cases.append((p, p))                    # identical rows
+    return cases
+
+
+@self_improve(gen_input=_evolve_inputs_jsd, evals=80,
+              tags=("decoding", "dola", "math", "hot-path"),
+              prompt=("Faster _jsd(p, q): Jensen-Shannon divergence "
+                      "between two probability rows -> float. Seed makes "
+                      "~6 full-vocab temporaries. Ideas: fuse via "
+                      "log-add operations, one pass, avoid intermediate "
+                      "m tensor, half the clamps. Must return the same "
+                      "float within 1e-5."))
+def _jsd(p: torch.Tensor, q: torch.Tensor) -> float:
+    """Jensen-Shannon divergence between two probability rows."""
+    m = 0.5 * (p + q)
+    log_m = m.clamp_min(1e-12).log()
+    kl_pm = (p * (p.clamp_min(1e-12).log() - log_m)).sum(-1)
+    kl_qm = (q * (q.clamp_min(1e-12).log() - log_m)).sum(-1)
+    return float((0.5 * (kl_pm + kl_qm)).mean().item())
+
+
 class StandardDecoding(DecodingStrategy):
     """Standard autoregressive decoding with KV cache."""
 
@@ -123,7 +262,6 @@ class StandardDecoding(DecodingStrategy):
                  stop=None, tokenizer=None,
                  kv_compact=None, suffix_mem=None, **_ignored):
         ids = input_ids.clone()
-        device = input_ids.device
         # EOS detection: check model attr, config, then known defaults
         eos = getattr(model, "eos_token_id", None)
         if eos is None:
@@ -162,9 +300,44 @@ class StandardDecoding(DecodingStrategy):
         # Prefill — model returns (logits, loss, presents) when use_cache=True.
         # logits_last_only: only the last position is ever read — materializing
         # [B,T,V] logits costs ~512MB transient at 4k tokens / V=128k.
+        # Static-KV decode graph path: prefill eager into the persistent
+        # preallocated cache, then replay the captured per-token graph.
+        # Only preferred over compiled functional decode when the model is
+        # NOT compiled — measured on RTX 5070 / proposer_mla_moe:
+        #   eager-KV  ~39 tok/s | static-graph ~76 | compiled ~107.
+        # A compiled decode-step capture would beat both, but the fused
+        # mask+cumsum+SDPA kernel fails Triton codegen on this box.
+        bcg = getattr(model, '_bcg', None)
+        state = getattr(model, '_decode_state', None)
+        if (bcg is not None and state is not None
+                and (state.get('compiled_step')
+                     or not _model_is_compiled(model))
+                and any(k in bcg._decode_graphs
+                        for k in (f"kv{b}" for b in state['buckets']))
+                and input_ids.shape[0] == 1
+                and input_ids.shape[1] + max_new_tokens
+                <= state['cache'].max_seq_len):
+            try:
+                return self._generate_static(
+                    model, input_ids, max_new_tokens, eos_set,
+                    temperature, top_p, top_k, repetition_penalty,
+                    min_p, min_k, dry_multiplier, dry_base,
+                    dry_allowed_length, dry_penalty_last_n, prompt_ids,
+                    suffix_mem, stop_matcher)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "static-KV graph decode failed — falling back to "
+                    "functional path", exc_info=True)
+                ids = input_ids.clone()  # _generate_static may have mutated
+
+        needs_kv_clone = _model_is_compiled(model)
         with torch.inference_mode():
             out = model(ids, use_cache=True, logits_last_only=True)
             logits, past_kv = unpack_output_with_kv(out)
+            if needs_kv_clone:
+                logits = logits.clone()
+                past_kv = _clone_state_tree(past_kv)
             # R65: a prompt that already overflows the KV budget is
             # compacted before decode (the strategy no-ops when T fits).
             if kv_compact is not None:
@@ -214,9 +387,8 @@ class StandardDecoding(DecodingStrategy):
 
             # Degeneration guard: detect repetitive garbage and stop early.
             # Critical for base models that haven't learned to emit EOS.
-            if len(generated_ids) >= MAX_REPEAT:
-                if all(g == tok_id for g in generated_ids[-MAX_REPEAT:]):
-                    break  # same token repeated 8x = degenerate
+            if len(generated_ids) >= MAX_REPEAT and all(g == tok_id for g in generated_ids[-MAX_REPEAT:]):
+                break  # same token repeated 8x = degenerate
             if len(generated_ids) >= 20:
                 recent = generated_ids[-20:]
                 if len(set(recent)) / len(recent) < 0.4:
@@ -234,6 +406,9 @@ class StandardDecoding(DecodingStrategy):
             with torch.inference_mode():
                 out = model(next_token, past_key_values=past_kv, use_cache=True)
                 logits, past_kv = unpack_output_with_kv(out)
+                if needs_kv_clone:
+                    logits = logits.clone()
+                    past_kv = _clone_state_tree(past_kv)
                 # R65: keep the KV window bounded (throttled inside the
                 # engine helper — ~zero cost under the watermark).
                 if kv_compact is not None:
@@ -245,6 +420,124 @@ class StandardDecoding(DecodingStrategy):
         model._forge_last_kv = past_kv
         model._forge_last_logits = logits
         # Single cat at the end instead of per-step (O(n) vs O(n²))
+        if _generated_tokens:
+            ids = torch.cat([ids] + _generated_tokens, dim=-1)
+        return ids
+
+    def _generate_static(self, model, input_ids, max_new_tokens, eos_set,
+                         temperature, top_p, top_k, repetition_penalty,
+                         min_p, min_k, dry_multiplier, dry_base,
+                         dry_allowed_length, dry_penalty_last_n, prompt_ids,
+                         suffix_mem, stop_matcher):
+        """Decode via a replayed CUDA graph over static KV.
+
+        Prefill runs eagerly into the persistent PreAllocatedKVCache
+        (pos_t tensor mode); each token then updates the three device
+        buffers the graph reads — mask_buf (attention_mask → positions
+        AND future-slot masking), pos_t (append index), input_ids — and
+        replays. Sampling/EOS/degen logic stays eager per token.
+        """
+        bcg = model._bcg
+        state = model._decode_state
+        cache, mask_buf = state['cache'], state['mask']
+        # Prefill on the UNWRAPPED model — the graph was captured on it, and
+        # routing a new (mask+preallocated) signature through torch.compile
+        # invites an inductor recompile (Triton cache race on this box).
+        fwd = getattr(model, '_orig_mod', model)
+        ids = input_ids.clone()
+        plen = ids.shape[1]
+        generated_ids: list[int] = []
+        _generated_tokens: list[torch.Tensor] = []
+        MAX_REPEAT = 8
+
+        cache.reset()
+        mask_buf.zero_()
+        with torch.inference_mode():
+            prompt_mask = torch.ones(1, plen, dtype=torch.long,
+                                     device=ids.device)
+            out = fwd(ids, attention_mask=prompt_mask,
+                      preallocated_cache=cache, use_cache=True,
+                      logits_last_only=True)
+            logits, _ = unpack_output_with_kv(out)
+        cache.position = plen
+        mask_buf[:, :plen] = 1
+        model._forge_prefill_kv = None
+
+        # Per-KV-length-bucket graphs: pick the smallest captured bucket
+        # covering pos+1 visible slots; each graph reads a fixed [:b]
+        # view of the SAME cache storage, so switching is free.
+        buckets = state.get('buckets') or [cache.max_seq_len]
+        graphs = bcg._decode_graphs
+        buffers = bcg._static_buffers
+
+        def _step_bufs(need):
+            for b in buckets:
+                if b >= need:
+                    tag = f"kv{b}"
+                    if tag in graphs:
+                        return graphs[tag], buffers[tag]
+            return None
+
+        for _ in range(max_new_tokens):
+            dry_pen = (
+                _dry_penalties(
+                    prompt_ids + generated_ids,
+                    dry_penalty_last_n,
+                    dry_allowed_length,
+                    dry_multiplier,
+                    dry_base,
+                )
+                if dry_multiplier > 0.0 else None
+            )
+            last_logits = logits[:, -1, :]
+            if suffix_mem is not None:
+                last_logits = last_logits + suffix_mem.lift_last(
+                    device=last_logits.device, dtype=last_logits.dtype)
+            next_token = _sample_from_logits(
+                last_logits,
+                temperature=temperature, top_p=top_p, top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                generated_ids=generated_ids,
+                min_p=min_p, min_k=min_k,
+                dry_penalties=dry_pen,
+                top_p_fn=self._top_p)
+
+            tok_id = next_token.item()
+            generated_ids.append(tok_id)
+            if suffix_mem is not None:
+                suffix_mem.feed_one(tok_id)
+            if tok_id in eos_set:
+                break
+            if len(generated_ids) >= MAX_REPEAT and all(g == tok_id for g in generated_ids[-MAX_REPEAT:]):
+                break
+            if len(generated_ids) >= 20:
+                recent = generated_ids[-20:]
+                if len(set(recent)) / len(recent) < 0.4:
+                    break
+            _generated_tokens.append(next_token)
+            if stop_matcher is not None and stop_matcher.push(tok_id):
+                break
+
+            # Drive static state and replay the captured step.
+            pos = cache.position
+            if pos >= cache.max_seq_len:
+                break
+            step = _step_bufs(pos + 1)
+            if step is None:
+                break
+            graph, bufs = step
+            mask_buf[:, pos] = 1
+            cache.pos_t.fill_(pos)
+            bufs['input_ids'].copy_(next_token)
+            with torch.inference_mode():
+                graph.replay()
+                logits, _ = unpack_output_with_kv(bufs['output'])
+            cache.position += 1
+
+        # _forge_last_logits is consumed by the _finish_to_stop fast path —
+        # clone: the raw tensor is a graph buffer overwritten on next replay.
+        model._forge_last_kv = None
+        model._forge_last_logits = logits.clone()
         if _generated_tokens:
             ids = torch.cat([ids] + _generated_tokens, dim=-1)
         return ids
@@ -389,17 +682,7 @@ class NGramSpeculativeDecoding(DecodingStrategy):
         # last_token may arrive as a 0-dim tensor — coerce to a real int
         # (a tensor in the list only compared equal by accident).
         seq = ids[0].tolist() + [int(last_token)]
-        if len(seq) < self.ngram_size + 1:
-            return []
-        ngram = seq[-self.ngram_size:]
-        # Search for this ngram earlier in the sequence
-        for i in range(len(seq) - self.ngram_size - 1, self.ngram_size - 2, -1):
-            if seq[i:i+self.ngram_size] == ngram:
-                # Return up to draft_length tokens after the match
-                start = i + self.ngram_size
-                end = min(start + self.draft_length, len(seq))
-                return seq[start:end]
-        return []
+        return _ngram_lookup(seq, self.ngram_size, self.draft_length)
 
 
 class ExternalDraftSpeculativeDecoding(DecodingStrategy):
@@ -680,6 +963,8 @@ class MTPSelfSpecDecoding(DecodingStrategy):
         mtp = self.mtp
         if mtp is None and hasattr(model, "mtp_head"):
             mtp = model.mtp_head
+        if mtp is None and getattr(model, "mtp_module", None) is not None:
+            mtp = model.mtp_module  # integrated MTPModule (V14+)
         if mtp is None:
             # No MTP heads — fall back to standard
             return StandardDecoding().generate(
@@ -903,7 +1188,6 @@ class SelfSpeculativeSparse(DecodingStrategy):
                  top_k=80, repetition_penalty=1.05,
                  **kwargs):
         ids = input_ids.clone()
-        device = input_ids.device
         eos = getattr(model, "eos_token_id", None)
         eos_set = set(_DEFAULT_EOS_TOKEN_IDS)
         if isinstance(eos, (list, tuple, set, frozenset)):
@@ -1134,11 +1418,7 @@ class DoLaDecoding(DecodingStrategy):
     @staticmethod
     def _jsd(p: torch.Tensor, q: torch.Tensor) -> float:
         """Jensen-Shannon divergence between two probability rows."""
-        m = 0.5 * (p + q)
-        log_m = m.clamp_min(1e-12).log()
-        kl_pm = (p * (p.clamp_min(1e-12).log() - log_m)).sum(-1)
-        kl_qm = (q * (q.clamp_min(1e-12).log() - log_m)).sum(-1)
-        return float((0.5 * (kl_pm + kl_qm)).mean().item())
+        return _jsd(p, q)
 
     @torch.no_grad()
     def _contrast_logits(self, model, final_logits, hidden_list,
@@ -1243,9 +1523,8 @@ class DoLaDecoding(DecodingStrategy):
             generated_ids.append(tok_id)
             if tok_id in eos_set:
                 break
-            if len(generated_ids) >= MAX_REPEAT:
-                if all(g == tok_id for g in generated_ids[-MAX_REPEAT:]):
-                    break
+            if len(generated_ids) >= MAX_REPEAT and all(g == tok_id for g in generated_ids[-MAX_REPEAT:]):
+                break
             if len(generated_ids) >= 20:
                 recent = generated_ids[-20:]
                 if len(set(recent)) / len(recent) < 0.4:
@@ -1367,6 +1646,38 @@ def _spec_past_len(past_kv) -> int:
     return 0
 
 
+def _evolve_inputs_spec_slice_kv():
+    """Representative cases for _spec_slice_kv: hybrid (k,v)-tuple +
+    conv-dict + None per-layer presents at verify-time rollback lens."""
+    import torch
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    g = torch.Generator().manual_seed(0)
+    cases = []
+    for n_layers, seq, keep in ((16, 256, 128), (32, 512, 200),
+                                (8, 64, 0)):
+        past = []
+        for i in range(n_layers):
+            if i % 3 == 0:
+                past.append(None)
+            elif i % 3 == 1:
+                past.append({"conv_state":
+                             torch.randn(1, 64, 4, generator=g).to(dev)})
+            else:
+                k = torch.randn(1, 8, seq, 64, generator=g).to(dev)
+                v = torch.randn(1, 8, seq, 64, generator=g).to(dev)
+                past.append((k, v))
+        cases.append((past, keep))
+    cases.append((None, 4))
+    return cases
+
+
+@self_improve(gen_input=_evolve_inputs_spec_slice_kv, evals=80,
+              tags=("decoding", "spec-decode", "kv-cache", "hot-path"),
+              prompt=("Faster _spec_slice_kv(past_kv, keep_len): new "
+                      "list with each (k,v) tuple sliced [:, :, :keep, :]"
+                      "; None/dict entries pass through unchanged, None "
+                      "input -> None. Ideas: list-comp prealloc, single "
+                      "type dispatch, skip re-slicing views."))
 def _spec_slice_kv(past_kv, keep_len: int):
     """Rollback KV presents to ``keep_len`` (None-safe; dict presents
     pass through — recurrent state is repaired by the replay below)."""
@@ -1784,11 +2095,10 @@ class SpecBoundDecoding(DecodingStrategy):
                 if tok in eos_set:
                     stop = True
                     break
-                if len(generated_ids) >= MAX_REPEAT:
-                    if all(g == tok
-                           for g in generated_ids[-MAX_REPEAT:]):
-                        stop = True
-                        break
+                if len(generated_ids) >= MAX_REPEAT and all(g == tok
+                       for g in generated_ids[-MAX_REPEAT:]):
+                    stop = True
+                    break
                 if len(generated_ids) >= 20:
                     recent = generated_ids[-20:]
                     if len(set(recent)) / len(recent) < 0.4:

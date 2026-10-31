@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from forge.evolution.auto_targets import self_improve
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CPU_MEMORY_BYTES = 32 * 1024**3
@@ -86,7 +88,7 @@ class SamplingParams:
     suffix_gate: float | None = None
 
     @classmethod
-    def from_kwargs(cls, **kw) -> "SamplingParams":
+    def from_kwargs(cls, **kw) -> SamplingParams:
         """Build from a kwargs dict, ignoring keys that aren't fields."""
         names = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in kw.items() if k in names})
@@ -127,6 +129,39 @@ class _StopMatcher:
         return any(s in text for s in self.stop)
 
 
+def _evolve_inputs_truncate_stop():
+    """Representative cases for the _truncate_at_stop evolution target
+    (auto_targets harvest). Real decode output: chat text up to ~1k
+    chars, 0-4 stop strings, a planted hit half the time."""
+    import random
+    rng = random.Random(0)
+    words = ("the quick brown fox jumps over lazy dog alpha beta gamma "
+             "delta epsilon lorem ipsum dolor sit amet consectetur "
+             "assistant user system answer question").split()
+    stops_pool = ["</s>", "DONE", "\n\n", "STOP", ".", "###", "end", ""]
+    cases = []
+    for _ in range(48):
+        n = rng.randint(20, 400)
+        text = " ".join(rng.choice(words) for _ in range(n))
+        stops = [rng.choice(stops_pool)
+                 for _ in range(rng.randint(0, 4))]
+        if rng.random() < 0.5:
+            pos = rng.randint(0, len(text))
+            s = rng.choice([s for s in stops if s] or ["</s>"])
+            text = text[:pos] + s + text[pos:]
+        cases.append((text, stops))
+    cases += [("plain answer", None), ("", ["</s>"]),
+              ("STOP early", ["STOP"])]
+    return cases
+
+
+@self_improve(gen_input=_evolve_inputs_truncate_stop, evals=80,
+              tags=("decoding", "string", "hot-path"),
+              prompt=("Faster _truncate_at_stop: find the earliest index "
+                      "across all stop strings. Ideas: single-pass scan, "
+                      "min() over finds, early-exit on empty/None, "
+                      "regex alternation. Semantics: skip empty stops; "
+                      "None/[] returns text unchanged."))
 def _truncate_at_stop(text: str, stop) -> str:
     """Cut ``text`` at the earliest occurrence across all stop strings
     (OpenAI semantics: the first stop hit ends output).  Empty strings
@@ -334,6 +369,7 @@ _QWEN_TOKENIZER_PATH = "Qwen/Qwen2.5-0.5B"
 # Resolve against the package location, not the cwd — a GUI/server
 # launched outside the repo root used to fail tokenizer lookup (EC-129).
 from pathlib import Path as _Path
+
 _REPO_ROOT = _Path(__file__).resolve().parents[2]
 _DEFAULT_TOKENIZER_PATH = str(
     _REPO_ROOT / "research" / "checkpoints" / "forgelm_v2_tokenizer")
@@ -408,7 +444,7 @@ class _ScalingModelAdapter:
       attempt seeding without crashing.
     """
 
-    def __init__(self, engine: "ForgeEngine", **default_kwargs):
+    def __init__(self, engine: ForgeEngine, **default_kwargs):
         self._engine = engine
         self._default_kwargs = default_kwargs
         # Expose tokenizer for BeamSearch._token_to_str.

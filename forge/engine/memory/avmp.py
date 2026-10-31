@@ -80,10 +80,9 @@ class AVMPManager:
         if ssm_spare > 0:
             needed = n_bytes - self.kv_pool.spare()
             migrate = min(ssm_spare, needed)
-            if self._migrate_capacity("ssm", "kv", migrate):
-                if self.kv_pool.allocate(key, n_bytes):
-                    self._kv_alloc_keys.add(key)
-                    return True
+            if self._migrate_capacity("ssm", "kv", migrate) and self.kv_pool.allocate(key, n_bytes):
+                self._kv_alloc_keys.add(key)
+                return True
         return False
 
     def request_ssm(self, n_bytes: int, key: str | None = None) -> bool:
@@ -96,10 +95,9 @@ class AVMPManager:
         if kv_spare > 0:
             needed = n_bytes - self.ssm_pool.spare()
             migrate = min(kv_spare, needed)
-            if self._migrate_capacity("kv", "ssm", migrate):
-                if self.ssm_pool.allocate(key, n_bytes):
-                    self._ssm_alloc_keys.add(key)
-                    return True
+            if self._migrate_capacity("kv", "ssm", migrate) and self.ssm_pool.allocate(key, n_bytes):
+                self._ssm_alloc_keys.add(key)
+                return True
         return False
 
     def _migrate_capacity(self, from_name: str, to_name: str,

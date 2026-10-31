@@ -274,29 +274,28 @@ def quantize_model_int4(model, target_modules=None, group_size=128, verbose=True
                 setattr(parent, child_name, quantized)
                 n_quantized += 1
         # Handle already-quantized layers (dequantize first, then requantize)
-        elif isinstance(module, (QuantizedLinear, FastINT8Linear)):
-            if any(t in name for t in target_modules):
-                parent_name = '.'.join(name.split('.')[:-1])
-                child_name = name.split('.')[-1]
-                parent = model.get_submodule(parent_name)
-                # Dequantize to a temporary nn.Linear
-                if hasattr(module, '_get_dequantized_weight'):
-                    w = module._get_dequantized_weight()
-                elif hasattr(module, '_cached_weight') and module._cached_weight is not None:
-                    w = module._cached_weight
-                elif hasattr(module, '_dequantize'):
-                    w = module._dequantize()
-                else:
-                    continue
-                tmp = nn.Linear(module.in_features, module.out_features, bias=module.bias is not None)
-                tmp.weight.data.copy_(w.to(tmp.weight.dtype))
-                if module.bias is not None:
-                    tmp.bias.data.copy_(module.bias_weight.to(tmp.bias.dtype))
-                tmp = tmp.to(w.device)
-                # Requantize to INT4
-                quantized = QuantizedLinear(tmp, bits=4, group_size=group_size)
-                setattr(parent, child_name, quantized)
-                n_quantized += 1
+        elif isinstance(module, (QuantizedLinear, FastINT8Linear)) and any(t in name for t in target_modules):
+            parent_name = '.'.join(name.split('.')[:-1])
+            child_name = name.split('.')[-1]
+            parent = model.get_submodule(parent_name)
+            # Dequantize to a temporary nn.Linear
+            if hasattr(module, '_get_dequantized_weight'):
+                w = module._get_dequantized_weight()
+            elif hasattr(module, '_cached_weight') and module._cached_weight is not None:
+                w = module._cached_weight
+            elif hasattr(module, '_dequantize'):
+                w = module._dequantize()
+            else:
+                continue
+            tmp = nn.Linear(module.in_features, module.out_features, bias=module.bias is not None)
+            tmp.weight.data.copy_(w.to(tmp.weight.dtype))
+            if module.bias is not None:
+                tmp.bias.data.copy_(module.bias_weight.to(tmp.bias.dtype))
+            tmp = tmp.to(w.device)
+            # Requantize to INT4
+            quantized = QuantizedLinear(tmp, bits=4, group_size=group_size)
+            setattr(parent, child_name, quantized)
+            n_quantized += 1
 
     if verbose:
         print(f"  [InferQuant] INT4 (group={group_size}): {n_quantized} layers quantized")
@@ -345,8 +344,7 @@ def quantize_model_w4(model, target_modules=None, group_size=128,
         number of layers quantized
     """
     from torchao.quantization import quantize_
-    from torchao.quantization.quant_api import (
-        Int4WeightOnlyConfig, Int4PackingFormat)
+    from torchao.quantization.quant_api import Int4PackingFormat, Int4WeightOnlyConfig
 
     targets = target_modules or _W4_TARGET_SUFFIXES
 
@@ -379,6 +377,20 @@ def quantize_model_w4(model, target_modules=None, group_size=128,
             torch.cuda.empty_cache()
     else:
         quantize_(model, cfg, filter_fn=_filter, device=device)
+
+    # torchao's _weight_int4pack_mm requires contiguous activations; fused
+    # callers (TritonConv patch, transposed gate outputs) can hand it
+    # non-contiguous views and it hard-errors. Wrap each quantized Linear
+    # once — .contiguous() is a no-op when already dense.
+    for m in matched:
+        _orig_fwd = m.forward
+
+        def _contig_fwd(x, _f=_orig_fwd):
+            if not x.is_contiguous():
+                x = x.contiguous()
+            return _f(x)
+
+        m.forward = _contig_fwd
 
     if verbose:
         packed = sum(
@@ -536,7 +548,7 @@ def load_gptq_linear(layer: torch.nn.Linear, qweight: torch.Tensor,
     inference with standard matmul. This is the simple path — for
     fast inference, a fused GPTQ kernel would be needed.
     """
-    out_features, in_features = layer.weight.shape
+    _out_features, _in_features = layer.weight.shape
     dequant = dequantize_gptq(
         layer.weight.data, qweight, qzeros, scales, bits, group_size)
     layer.weight.data.copy_(dequant.to(layer.weight.dtype))
@@ -547,7 +559,7 @@ def load_awq_linear(layer: torch.nn.Linear, qweight: torch.Tensor,
                     qzeros: torch.Tensor, scales: torch.Tensor,
                     bits: int = 4, group_size: int = 128) -> torch.nn.Linear:
     """Load AWQ-quantized weights into a standard nn.Linear layer."""
-    out_features, in_features = layer.weight.shape
+    _out_features, _in_features = layer.weight.shape
     dequant = dequantize_awq(
         layer.weight.data, qweight, qzeros, scales, bits, group_size)
     layer.weight.data.copy_(dequant.to(layer.weight.dtype))

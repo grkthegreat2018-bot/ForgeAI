@@ -108,7 +108,7 @@ class CSAAttention(nn.Module):
         Returns:
             (B, H, Sq, top_k) indices of the top-k positions.
         """
-        B, H, Sq, Sk = scores.shape
+        _B, _H, Sq, Sk = scores.shape
 
         if is_causal:
             # Mask future positions with -inf before top-k.

@@ -38,17 +38,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import struct
 import threading
-import time
 from collections import OrderedDict
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 import numpy as np
 import torch
-
+import contextlib
 
 # ─── Disk-backed tokenization cache ──────────────────────────────────────────
 
@@ -106,7 +104,7 @@ class DiskTokenCache:
     @staticmethod
     def _hash_key(text: str, tokenizer_hash: str) -> str:
         """Compute a stable hash for (text, tokenizer_hash)."""
-        h = hashlib.sha256(f"{tokenizer_hash}:{text}".encode("utf-8"))
+        h = hashlib.sha256(f"{tokenizer_hash}:{text}".encode())
         return h.hexdigest()[:16]  # 16 chars = 8 bytes, enough for 100K entries
 
     def _cache_path(self, key_hash: str) -> Path:
@@ -132,10 +130,8 @@ class DiskTokenCache:
                     except Exception:
                         # Corrupted entry — remove it
                         del self._index[key]
-                        try:
+                        with contextlib.suppress(Exception):
                             path.unlink()
-                        except Exception:
-                            pass
                         return None
                 else:
                     # Index says it exists but file is gone
@@ -166,7 +162,7 @@ class DiskTokenCache:
                self._total_bytes > self.max_disk_bytes):
             if not self._index:
                 break
-            key, path_str = self._index.popitem(last=False)  # LRU
+            _key, path_str = self._index.popitem(last=False)  # LRU
             try:
                 size = Path(path_str).stat().st_size
                 Path(path_str).unlink()
@@ -493,19 +489,18 @@ class PackedSequenceDataset:
                 current_ex_lens = []
 
         # Flush remaining
-        if current_ids:
-            if not self.drop_last_incomplete:
-                remaining = self.seq_len - len(current_ids)
-                current_ids.extend([self.pad_id] * remaining)
-                current_labels.extend([-100] * remaining)
-                entry = {
-                    "input_ids": current_ids[:self.seq_len],
-                    "labels": current_labels[:self.seq_len],
-                    "n_comp": sum(1 for l in current_labels if l != -100),
-                }
-                if self.emit_cu_seqlens:
-                    entry["cu_seqlens"] = list(current_ex_lens)
-                packed.append(entry)
+        if current_ids and not self.drop_last_incomplete:
+            remaining = self.seq_len - len(current_ids)
+            current_ids.extend([self.pad_id] * remaining)
+            current_labels.extend([-100] * remaining)
+            entry = {
+                "input_ids": current_ids[:self.seq_len],
+                "labels": current_labels[:self.seq_len],
+                "n_comp": sum(1 for l in current_labels if l != -100),
+            }
+            if self.emit_cu_seqlens:
+                entry["cu_seqlens"] = list(current_ex_lens)
+            packed.append(entry)
 
         return packed
 
@@ -605,10 +600,8 @@ class ModelDataCache:
 
             if key in self._cache:
                 old = self._cache.pop(key)
-                try:
+                with contextlib.suppress(Exception):
                     self._total_bytes -= len(repr(old).encode("utf-8"))
-                except Exception:
-                    pass
 
             self._cache[key] = value
             self._total_bytes += size
@@ -619,10 +612,8 @@ class ModelDataCache:
                 if not self._cache:
                     break
                 _, old = self._cache.popitem(last=False)
-                try:
+                with contextlib.suppress(Exception):
                     self._total_bytes -= len(repr(old).encode("utf-8"))
-                except Exception:
-                    pass
 
     def get_or_compute(self, key: str, compute_fn: Callable) -> Any:
         """Get from cache, or compute and cache."""

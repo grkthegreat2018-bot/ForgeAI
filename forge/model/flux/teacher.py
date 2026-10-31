@@ -17,7 +17,6 @@ Contract:
 """
 from __future__ import annotations
 
-import math
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -30,7 +29,7 @@ def _sdpa_pref():
     materializes [H, S, S] attention (~5.5GB at 8K+4K context); HF
     picks math whenever an explicit 4D mask is built."""
     try:
-        from torch.nn.attention import sdpa_kernel, SDPBackend
+        from torch.nn.attention import SDPBackend, sdpa_kernel
         with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION,
                           SDPBackend.FLASH_ATTENTION,
                           SDPBackend.MATH]):
@@ -112,7 +111,7 @@ class TeacherChannel:
         w = self.window - (self.sink if self._has_sink else 0)
         for layer in self.past.layers:
             L = layer.get_seq_length()
-            if L <= self.window:
+            if self.window >= L:
                 continue
             if self._has_sink:
                 keep = torch.cat((

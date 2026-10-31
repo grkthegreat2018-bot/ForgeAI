@@ -12,7 +12,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from pathlib import Path
@@ -53,7 +52,6 @@ def main():
     log(f"Loading tokenizer from {TOKENIZER_PATH}...")
     tok = AutoTokenizer.from_pretrained(str(TOKENIZER_PATH))
     log(f"Tokenizer: {type(tok).__name__}, vocab={tok.vocab_size}")
-    pad_id = tok.pad_token_id or 0
 
     # ── Dataset config ──
     dataset_configs = {

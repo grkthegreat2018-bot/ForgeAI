@@ -149,6 +149,7 @@ class ConfigurableResearchLLM(nn.Module):
                              if getattr(config, 'mtp_weight', None) is not None
                              else getattr(config, 'mtp_loss_weight', 0.3)),
                 identity_init=getattr(config, 'zero_init_residual', True),
+                adapter_heads=getattr(config, 'mtp_adapter_heads', False),
             )
             # Tie MTP head to model head (shared weight design)
             # Use tie_head_from_module so the tie survives model.to(device)
@@ -156,6 +157,22 @@ class ConfigurableResearchLLM(nn.Module):
                 self.mtp_module.tie_head_from_module(self, "head")
             else:
                 self.mtp_module.tie_head_to_model(self.head.weight)
+
+        # V14: RSI work-acceleration heads — read-only taps on ln_f(hidden).
+        # Lossless at init: untrained model never emits <copy>; verifier
+        # output is ignored unless the decoding driver reads it.
+        self.edit_head: nn.Module | None = None
+        if getattr(config, 'use_edit_head', False):
+            from forge.model.edit_head import CopySpanPointerHead
+            self.edit_head = CopySpanPointerHead(
+                config.d_model,
+                ptr_dim=getattr(config, 'edit_head_dim', 0) or None)
+        self.verifier_head: nn.Module | None = None
+        if getattr(config, 'use_verifier_head', False):
+            from forge.model.edit_head import VerifierHead
+            self.verifier_head = VerifierHead(
+                config.d_model,
+                hidden=getattr(config, 'verifier_head_dim', 256))
 
         # V5.2: LiSA — cross-layer Q/K sharing with alignment FFN.
         # Lossless at init: shared Q/K + alignment are zero-init (gate=0).
@@ -516,7 +533,8 @@ class ConfigurableResearchLLM(nn.Module):
         # correct place to reset — conv layers always get past_key_value=None
         # (they don't have KV cache entries), so they can't detect new vs.
         # continuation at the per-layer level.
-        if past_key_values is None:
+        if past_key_values is None and (
+                preallocated_cache is None or preallocated_cache.position == 0):
             for block in self.blocks:
                 if hasattr(block, 'attn') and hasattr(block.attn, '_conv_state'):
                     block.attn._conv_state_reset = True
@@ -561,6 +579,23 @@ class ConfigurableResearchLLM(nn.Module):
                 attn = block.attn
                 if hasattr(attn, '_v0_capture'):
                     attn._v0_capture = True  # signal to capture
+            # LFM3 padding semantics for conv layers: HF zeroes the gated
+            # conv input at padding positions (apply_mask_to_padding_states).
+            # Hand the current-token slice of the attention mask to the
+            # conv module; consumed inside DoubleGatedConvLayer.forward.
+            if getattr(block, '_is_conv', False) and attention_mask is not None:
+                if (preallocated_cache is not None
+                        and getattr(preallocated_cache, 'pos_t', None)
+                        is not None and idx.shape[1] == 1):
+                    # pos_t decode: mask_buf is a fixed bucket view, so
+                    # [:, -1] reads the bucket's LAST column (always 0) —
+                    # zeroing every conv's gated input on replay. The live
+                    # column is the write position — index it by the
+                    # device tensor so the op stays capturable.
+                    block._pad_mask = attention_mask.index_select(
+                        1, preallocated_cache.pos_t)
+                else:
+                    block._pad_mask = attention_mask[:, -idx.shape[1]:]
             past = past_key_values[i] if past_key_values is not None else None
             x, present = block(x, past_key_value=past, use_cache=use_cache,
                                preallocated_cache=preallocated_cache, layer_idx=i,
@@ -625,7 +660,9 @@ class ConfigurableResearchLLM(nn.Module):
         # (e.g. GRPO/RLVR policy-gradient forward) can still add it to their
         # loss — otherwise the MoE router gets no load-balancing signal during
         # RL and can collapse to a single expert.
-        moe_aux_loss = torch.tensor(0.0, device=idx.device, dtype=hidden.dtype)
+        # new_zeros: torch.tensor(0.0, device=cuda) is a pageable H2D copy —
+        # forbidden during CUDA-graph capture and a sync per forward anyway.
+        moe_aux_loss = hidden.new_zeros(())
         for block in self.blocks:
             if hasattr(block, '_last_aux_loss') and block._last_aux_loss is not None:
                 moe_aux_loss = moe_aux_loss + block._last_aux_loss
@@ -680,7 +717,7 @@ class ConfigurableResearchLLM(nn.Module):
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
 
         if self.draft_head is not None and targets is not None and targets.size(1) > 2:
-            draft_logits, draft_loss = self.draft_head(hidden[:, :-2], targets[:, 2:])
+            _draft_logits, draft_loss = self.draft_head(hidden[:, :-2], targets[:, 2:])
             if loss is not None and draft_loss is not None:
                 loss = loss + 0.1 * draft_loss
 

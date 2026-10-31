@@ -135,7 +135,7 @@ class HqeKVCache(KVCacheStrategy):
         scores = self.scores[:n]
 
         # Sort by importance (descending)
-        sorted_scores, sorted_idx = scores.sort(descending=True)
+        _sorted_scores, sorted_idx = scores.sort(descending=True)
 
         # Determine tier boundaries
         n_full = int(n * self.budget_full)
@@ -175,7 +175,7 @@ class HqeKVCache(KVCacheStrategy):
 
     def _quantize_int8(self, idx):
         """Quantize token at idx from full precision to INT8."""
-        for kv_idx, (full, q, scale) in enumerate([
+        for _kv_idx, (full, q, scale) in enumerate([
             (self.k_full, self.k_int8, self.k_int8_scales),
             (self.v_full, self.v_int8, self.v_int8_scales),
         ]):

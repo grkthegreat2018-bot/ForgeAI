@@ -162,7 +162,7 @@ class CompiledMegakernelDecode(MegakernelDecode):
 
         # Extra warmup for torch.compile (tracing + compilation + autotuning)
         with torch.inference_mode():
-            for i in range(5):
+            for _i in range(5):
                 _ = self.model(
                     self._static_input,
                     use_cache=False,

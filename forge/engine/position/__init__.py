@@ -58,7 +58,7 @@ class LeRoPE(nn.Module):
         Returns:
             rotated: (B, n_heads, T, head_dim)
         """
-        B, n_h, T, hd = x.shape
+        _B, _n_h, T, hd = x.shape
         device = x.device
         d = hd // 2
 
@@ -104,7 +104,7 @@ def integrate_lerope_into_model(model: nn.Module, base: float = 10000.0):
     with LeRoPE. Existing checkpoints load losslessly (scalars init to 1.0).
     """
     count = 0
-    for name, module in model.named_modules():
+    for _name, module in model.named_modules():
         if hasattr(module, 'rope') and module.rope is not None:
             # Get head_dim from the existing RoPE
             head_dim = getattr(module.rope, 'head_dim',
@@ -176,7 +176,7 @@ class RoPEID:
         Returns:
             rotated: (B, n_heads, T, head_dim)
         """
-        B, n_h, T, hd = x.shape
+        _B, _n_h, T, hd = x.shape
         device = x.device
         d = hd // 2
 

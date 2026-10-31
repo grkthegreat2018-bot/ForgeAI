@@ -29,11 +29,12 @@ This implementation provides:
 """
 from __future__ import annotations
 
-from collections.abc import Callable
 import logging
+from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -105,49 +106,70 @@ class BreakableCudaGraph:
         self._static_buffers: dict = {}
         self._captured = False
 
-    def capture_decode(self, batch_sizes: list[int] = [1, 2, 4, 8],
-                       seq_len: int = 1, dtype: torch.dtype = torch.bfloat16):
+    def capture_decode(self, batch_sizes: Iterable[int] = (1, 2, 4, 8),
+                       seq_len: int = 1, dtype: torch.dtype = torch.bfloat16,
+                       decode_step: Callable | None = None,
+                       tag: str | None = None):
         """Capture decode graphs for common batch sizes.
 
         Decode is fully static (T=1, fixed batch), so we capture complete
         graphs for each batch size. At runtime, we pad to the nearest
         captured batch size.
+
+        Requires ``decode_step`` — a callable(static_input_ids)->output that
+        runs ONE token through the model against a STATIC KV buffer
+        (e.g. PreAllocatedKVCache with device-tensor position). Without it,
+        the only thing capturable is a context-free forward, whose replay
+        would emit tokens with empty context — so we skip instead of
+        producing silently-wrong graphs.
         """
         if self.device.type != "cuda":
             return
-
-        config = getattr(self.model, 'config', None)
-        getattr(config, 'd_model', 2048) if config else 2048
+        if decode_step is None:
+            logger.warning(
+                "  [BCG] capture_decode skipped: no static-KV decode_step "
+                "provided. Functional past_kv grows per step and cannot be "
+                "captured — wire PreAllocatedKVCache + tensor position first.")
+            self._captured = True
+            return
 
         for bs in batch_sizes:
             static_input = torch.zeros(bs, seq_len, dtype=torch.long,
                                        device=self.device)
-            static_pos = torch.arange(seq_len, device=self.device).unsqueeze(0).expand(bs, -1)
 
-            self._static_buffers[bs] = {
-                'input_ids': static_input,
-                'position_ids': static_pos,
-            }
+            # ``tag`` namespaces buffers/graphs per capture (e.g. KV-length
+            # buckets "kv512"/"kv4096" over one shared cache); default = bs.
+            key = tag if tag is not None else bs
+            self._static_buffers[key] = {'input_ids': static_input}
 
-            # Warmup
-            with torch.inference_mode():
-                for _ in range(3):
-                    try:
-                        _ = self.model(static_input, position_ids=static_pos)
-                    except Exception:
-                        break
+            # Validate the call contract BEFORE entering the capture
+            # context — an exception inside torch.cuda.graph() corrupts
+            # the stream (cudaErrorStreamCaptureInvalidated) and poisons
+            # every subsequent CUDA op in the process.
+            try:
+                with torch.inference_mode():
+                    for _ in range(3):
+                        _ = decode_step(static_input)
                 torch.cuda.synchronize()
+            except Exception as e:
+                logger.warning(
+                    f"  [BCG] decode capture skipped bs={bs}: warmup call "
+                    f"failed ({type(e).__name__}: {e}).")
+                continue
 
             # Capture
-            graph = torch.cuda.CUDAGraph()
-            with torch.inference_mode(), torch.cuda.graph(graph):
-                try:
-                    output = self.model(static_input, position_ids=static_pos)
-                    self._static_buffers[bs]['output'] = output
-                except Exception:
-                    continue
+            try:
+                graph = torch.cuda.CUDAGraph()
+                with torch.inference_mode(), torch.cuda.graph(graph):
+                    output = decode_step(static_input)
+                    self._static_buffers[key]['output'] = output
+            except Exception as e:
+                logger.warning(f"  [BCG] decode capture failed {key=}: {e}")
+                with contextlib.suppress(Exception):
+                    torch.cuda.synchronize()
+                continue
 
-            self._decode_graphs[bs] = graph
+            self._decode_graphs[key] = graph
 
         self._captured = True
         logger.info(f"  [BCG] Captured {len(self._decode_graphs)} decode graphs "
@@ -163,10 +185,12 @@ class BreakableCudaGraph:
         if T != 1:
             # Not decode — run normally
             with torch.inference_mode():
-                return self.model(input_ids, position_ids=position_ids)
+                return self.model(input_ids)
 
-        # Find nearest captured batch size
-        captured_sizes = sorted(self._decode_graphs.keys())
+        # Find nearest captured batch size (int keys only — string keys
+        # belong to KV-bucket captures handled by the decode loop).
+        captured_sizes = sorted(k for k in self._decode_graphs
+                                if isinstance(k, int))
         target_bs = None
         for bs in captured_sizes:
             if bs >= B:
@@ -176,7 +200,7 @@ class BreakableCudaGraph:
         if target_bs is None:
             # B too large — run without graph
             with torch.inference_mode():
-                return self.model(input_ids, position_ids=position_ids)
+                return self.model(input_ids)
 
         # Pad input
         buffers = self._static_buffers[target_bs]
@@ -184,15 +208,8 @@ class BreakableCudaGraph:
             padded_input = torch.zeros(target_bs, T, dtype=input_ids.dtype,
                                        device=self.device)
             padded_input[:B] = input_ids
-            if position_ids is not None:
-                padded_pos = torch.zeros(target_bs, T, dtype=position_ids.dtype,
-                                         device=self.device)
-                padded_pos[:B] = position_ids
-                buffers['position_ids'][:target_bs] = padded_pos
         else:
             padded_input = input_ids
-            if position_ids is not None:
-                buffers['position_ids'][:] = position_ids
 
         buffers['input_ids'][:target_bs] = padded_input
 
@@ -232,6 +249,9 @@ class BreakableCudaGraph:
     def stats(self) -> dict:
         return {
             "decode_graphs": len(self._decode_graphs),
-            "batch_sizes": sorted(self._decode_graphs.keys()),
+            "batch_sizes": sorted(
+                k for k in self._decode_graphs if isinstance(k, int)),
+            "buckets": sorted(k for k in self._decode_graphs
+                              if isinstance(k, str)),
             "captured": self._captured,
         }

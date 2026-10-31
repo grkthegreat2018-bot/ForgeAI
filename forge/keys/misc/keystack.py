@@ -91,7 +91,7 @@ class KeyStack:
                 errors.append(f"{key.name}: {result.error}")
 
         return KeyResult(
-            success=True if all_data else False,
+            success=bool(all_data),
             data=all_data,
             metadata={'stack': self.name, 'components': all_metadata,
                      'errors': errors if errors else None}

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,17 @@ def configure() -> None:
     # short dirs keep paths well under the limit and persist kernels.
     try:
         from research.paths import TORCH_CACHE_DIR
-        os.environ.setdefault("TRITON_CACHE_DIR", str(TORCH_CACHE_DIR / "triton"))
+        # Inductor emits ~200-char fused-kernel source filenames (one per
+        # unique op fusion); with triton's ~85 chars of hash/tmp dirs any
+        # base over ~24 chars overflows MAX_PATH and dies deterministically
+        # as a "tmp.*" FileNotFoundError inside cache.put.  FluxLM hit the
+        # same wall (forge/model/flux/model.py) and pins a drive-root dir —
+        # share that convention.  A long inherited value cannot serve long
+        # names anyway, so override it.
+        _tt = os.environ.get("TRITON_CACHE_DIR")
+        if _tt is None or len(_tt) > 24:
+            _root = os.path.splitdrive(tempfile.gettempdir())[0] + os.sep
+            os.environ["TRITON_CACHE_DIR"] = _root + "tt"
         os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", str(TORCH_CACHE_DIR))
         os.environ.setdefault("TORCHINDUCTOR_PERSISTENT_AUTOTUNE_DIR", str(TORCH_CACHE_DIR))
     except ImportError:

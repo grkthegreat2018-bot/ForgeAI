@@ -120,7 +120,7 @@ class FlashAdamW(Optimizer):
 
     def __init__(self, params: Iterable, lr=1e-3, betas=(0.9, 0.999),
                  eps=1e-8, weight_decay=1e-2, block_size=128):
-        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        defaults = {'lr': lr, 'betas': betas, 'eps': eps, 'weight_decay': weight_decay}
         self.block_size = block_size
         super().__init__(params, defaults)
 
@@ -219,7 +219,7 @@ class FlashLion(Optimizer):
 
     def __init__(self, params: Iterable, lr=1e-4, betas=(0.9, 0.99),
                  weight_decay=0.0, block_size=128):
-        defaults = dict(lr=lr, betas=betas, weight_decay=weight_decay)
+        defaults = {'lr': lr, 'betas': betas, 'weight_decay': weight_decay}
         self.block_size = block_size
         super().__init__(params, defaults)
 

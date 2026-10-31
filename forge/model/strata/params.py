@@ -22,8 +22,7 @@ from collections import OrderedDict
 
 import torch
 
-from .io import save_container, load_container
-
+from .io import load_container, save_container
 
 # ---- sub-bit packing ------------------------------------------------------
 
@@ -113,7 +112,7 @@ def dequantize_param(words: torch.Tensor, scales: torch.Tensor,
 
 class ParamSet:
     def __init__(self):
-        self.tensors: "OrderedDict[str, torch.Tensor]" = OrderedDict()
+        self.tensors: OrderedDict[str, torch.Tensor] = OrderedDict()
         self.derived: dict = {}   # name -> {"seed":int,"shape":[],
                                   #         "dtype":str}
         self.packed: dict = {}    # name -> quantize_param meta; the
@@ -192,7 +191,7 @@ class ParamSet:
         return save_container(path, self.tensors, meta)
 
     @classmethod
-    def load(cls, path, device: str | None = None) -> "ParamSet":
+    def load(cls, path, device: str | None = None) -> ParamSet:
         meta, tensors = load_container(path, device=device)
         p = cls()
         p.version = meta.get("version", 1)

@@ -2,22 +2,12 @@
 import os
 from pathlib import Path
 
-from .engine_common import *  # noqa: F403
-import torch.nn as nn  # noqa: F401
-from .activation import ActivationConfig  # noqa: F401
-from .airllm_streamer import AirLLMStreamer  # noqa: F401
-from .errors import ActivationError, ConfigurationError  # noqa: F401
-from .feature_registry import _FEATURE_REGISTRY  # noqa: F401
-from .innovations import (  # noqa: F401
-    MRLAdaptiveContext,
-    ProgressiveKV,
-    QuaRotKV,
-    V0WarmStart,
-)
-from .kv.cacheblend import CacheBlend  # noqa: F401
-from .kv_backend import build_kv_cache  # noqa: F401
-from .decoding import build_decoding  # noqa: F401
-from .prefix_cache import ChunkedPrefixCache, LRUPrefixCache  # noqa: F401
+import torch
+import torch.nn as nn
+
+from .activation import ActivationConfig
+from .airllm_streamer import AirLLMStreamer
+from .decoding import build_decoding
 from .engine_common import (  # noqa: F401
     _CKPT_CACHE_MAX,
     _DEFAULT_CPU_MEMORY_BYTES,
@@ -34,6 +24,17 @@ from .engine_common import (  # noqa: F401
     _tokenizer_for_vocab,
     logger,
 )
+from .errors import ActivationError, ConfigurationError
+from .feature_registry import _FEATURE_REGISTRY
+from .innovations import (
+    MRLAdaptiveContext,
+    ProgressiveKV,
+    QuaRotKV,
+    V0WarmStart,
+)
+from .kv.cacheblend import CacheBlend
+from .kv_backend import build_kv_cache
+from .prefix_cache import ChunkedPrefixCache, LRUPrefixCache
 
 
 class _ActivationMixin:
@@ -529,9 +530,17 @@ class _ActivationMixin:
         # torch.compile
         if feature_flags["use_compile"] and self.device.type == "cuda":
             try:
+                # reduce-overhead MINUS cudagraph trees: the engine's decode
+                # loops feed functional past_kv (outputs of run N) back as
+                # inputs to run N+1, which cudagraph-trees' shared memory
+                # pool rejects ('overwritten by a subsequent run'). Kernel
+                # fusion — the bulk of the compile win — is unaffected; the
+                # breakable-CUDA-graph system provides graph capture where
+                # it can safely do so.
                 self.model = torch.compile(
-                    self.model, mode="reduce-overhead", dynamic=True)
-                self._log("torch.compile: active (reduce-overhead)")
+                    self.model, dynamic=True,
+                    options={"triton.cudagraphs": False})
+                self._log("torch.compile: active (reduce-overhead, no cudagraph trees)")
             except Exception as e:
                 self._log(f"torch.compile: failed ({e})", level="warn")
 
@@ -633,8 +642,7 @@ class _ActivationMixin:
             # garbage-token state — snapshot before and restore after so
             # live-state readers (gated probes, snapshots) never observe
             # the residue (EC-126).
-            from forge.engine.decoding import (
-                _spec_snapshot_recurrent, _spec_restore_recurrent)
+            from forge.engine.decoding import _spec_restore_recurrent, _spec_snapshot_recurrent
             snap = _spec_snapshot_recurrent(self.model)
             with torch.inference_mode():
                 self.model(dummy, use_cache=True)
@@ -866,6 +874,19 @@ class _ActivationMixin:
             gs = getattr(cfg, 'forge_quant_group_size', 128) if cfg else 128
             sr = getattr(cfg, 'forge_quant_sparse_ratio', 0.10) if cfg else 0.10
             n_q = quantize_model_forge_quant(self.model, group_size=gs, sparse_ratio=sr)
+            # Warm every layer's dequant cache NOW, before torch.compile /
+            # CUDA-graph capture. ForgeQuantLinear.forward lazily mutates
+            # _cached_weight (w[sparse_idx] += w_sparse); doing that inside a
+            # captured graph window corrupts the cudagraph tree manager and
+            # also forces dynamo recompiles (one per parameter shape).
+            from forge.engine.quant.forge_quant import ForgeQuantLinear
+            w_dtype = getattr(self.model, 'embed', None)
+            w_dtype = (w_dtype.weight.dtype if w_dtype is not None
+                       and hasattr(w_dtype, 'weight') else torch.bfloat16)
+            with torch.no_grad():
+                for mod in self.model.modules():
+                    if isinstance(mod, ForgeQuantLinear):
+                        mod._dequantize_weight(w_dtype, cache=True)
             self._log(f"ForgeQuant: {n_q} layers quantized (INT4 dense + 2-bit sparse, "
                       f"group={gs}, sparse_ratio={sr}). SM120-tuned.")
         elif mode == "grinqh":

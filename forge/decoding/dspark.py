@@ -494,7 +494,7 @@ class DSparkTrainer:
         Returns:
             (total_loss, stats_dict)
         """
-        B, T = input_ids.shape
+        _B, T = input_ids.shape
         gamma = self.dspark_head.n_predict
         device = input_ids.device
 
@@ -828,7 +828,7 @@ def dspark_generate(model: nn.Module, dspark_head: DSparkHead,
         # Check if any draft token is EOS — stop early
         if any(t in eos_ids for t in draft_tokens):
             # Find first EOS in draft, accept up to and including it
-            for i, t in enumerate(draft_tokens):
+            for _i, t in enumerate(draft_tokens):
                 if t in eos_ids:
                     eos_draft = torch.tensor([[t]], dtype=input_ids.dtype, device=dev)
                     input_ids = torch.cat([draft_input, eos_draft], dim=1)
@@ -967,8 +967,8 @@ def dspark_generate(model: nn.Module, dspark_head: DSparkHead,
     return input_ids
 
 
-def add_dspark_to_model(model: nn.Module, d_model: int = None,
-                        vocab_size: int = None, n_predict: int = 4,
+def add_dspark_to_model(model: nn.Module, d_model: int | None = None,
+                        vocab_size: int | None = None, n_predict: int = 4,
                         n_layers: int = 2) -> DSparkHead:
     """Create a DSparkHead and attach it to a model.
 

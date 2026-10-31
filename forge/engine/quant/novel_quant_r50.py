@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -296,7 +297,7 @@ def enc_ppc_w(w: torch.Tensor, r_bits: int = 4, t_bits: int = 4,
     r quantized in log domain over block range; theta uniform on [0, 2pi).
     Per-block fp16 scale normalizes radii (gain-shape split)."""
     x = _blocks(w.float(), bs)
-    B, W = x.shape
+    _B, _W = x.shape
     a = x[:, 0::2]; b = x[:, 1::2]
     r = torch.sqrt(a * a + b * b).clamp(min=1e-8)
     th = torch.atan2(b, a)  # [-pi, pi]
@@ -487,7 +488,7 @@ def dec_dpcm_w(p: dict, shape: tuple) -> torch.Tensor:
     rb = p["q"].float() * p["s"].float()
     res = _unblocks(rb, shape[0], shape[1], p["bs"])
     rho = p["rho"].float().unsqueeze(1)
-    R, C = res.shape
+    _R, C = res.shape
     w = torch.zeros_like(res)
     w[:, 0] = res[:, 0]
     for j in range(1, C):
@@ -509,7 +510,7 @@ def enc_det_q(w: torch.Tensor, bits: int = 4, bs: int = 32) -> dict:
     """Per block: w_j ~ a + b*t_j (t_j in [0,1]); residual int-b.
     Storage: a,b fp16 per block + b-bit residual codes."""
     x = _blocks(w.float(), bs)
-    B, W = x.shape
+    _B, W = x.shape
     t = torch.linspace(0, 1, W, device=x.device).unsqueeze(0)
     tm = t.mean(); tt = t - tm
     b = ((x - x.mean(-1, keepdim=True)) * tt).sum(-1) / (tt ** 2).sum()
@@ -579,7 +580,7 @@ def enc_dctq(w: torch.Tensor, bits_hi: int = 8, bits_lo: int = 2,
     """Row -> orthonormal DCT-II -> first `frac` coeffs at bits_hi (per-coeff
     group scale), rest at bits_lo. Requires spectral compaction to win."""
     x = w.float()
-    R, C = x.shape
+    _R, C = x.shape
     k = torch.arange(C, device=x.device, dtype=torch.float32)
     i = torch.arange(C, device=x.device, dtype=torch.float32).unsqueeze(1)
     Cm = torch.cos(math.pi / C * (k.unsqueeze(0) + 0.5) * i)
@@ -749,7 +750,7 @@ class XParamLinear(QuantizedLinearMixin):
         self.bias = nn.Parameter(torch.zeros(out_f)) if bias else None
 
     @classmethod
-    def from_linear(cls, lin: nn.Linear, codec: str, **kw) -> "XParamLinear":
+    def from_linear(cls, lin: nn.Linear, codec: str, **kw) -> XParamLinear:
         mod = cls(lin.in_features, lin.out_features, lin.bias is not None)
         w = lin.weight.detach().float()
         payload = encode(codec, w, **kw)

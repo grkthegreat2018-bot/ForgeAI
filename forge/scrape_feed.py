@@ -39,10 +39,12 @@ import hashlib
 import json
 import re
 import time
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator
+from typing import Any
 
 from forge import web_primitives as wp
+import contextlib
 
 Fetch = Callable[..., str]
 
@@ -114,11 +116,9 @@ class FeedState:
         self.data: dict[str, Any] = {"cursors": {}, "shard_idx": 0,
                                      "stats": {}}
         if self.path.exists():
-            try:
+            with contextlib.suppress(Exception):
                 self.data.update(json.loads(
                     self.path.read_text(encoding="utf-8")))
-            except Exception:
-                pass
 
     def cursor(self, source: str, default: str = "") -> str:
         return str(self.data["cursors"].get(source, default))
@@ -347,7 +347,7 @@ def iter_arxiv(query: str, n: int = 25, fetch: Fetch = wp.http_get
            "&sortBy=submittedDate&sortOrder=descending")
     xml = fetch(url, timeout=15)
     for entry in re.findall(r"<entry>(.*?)</entry>", xml, re.DOTALL):
-        def tag(t: str) -> str:
+        def tag(t: str, entry: str = entry) -> str:
             m = re.search(rf"<{t}>(.*?)</{t}>", entry, re.DOTALL)
             return m.group(1).strip() if m else ""
         title, summ, aid, pub = (tag("title"), tag("summary"),

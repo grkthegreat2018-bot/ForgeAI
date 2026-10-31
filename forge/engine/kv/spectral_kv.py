@@ -306,7 +306,7 @@ class SpectralPreAllocatedCache:
 
     def __init__(self, n_layers: int, batch: int, n_kv_heads: int,
                  max_seq_len: int, head_dim: int, dtype: torch.dtype,
-                 device: torch.device, n_kv_heads_per_layer: list = None,
+                 device: torch.device, n_kv_heads_per_layer: list | None = None,
                  max_freq: int = 64, sink_size: int = 4):
         self.max_seq_len = max_seq_len
         self.n_layers = n_layers

@@ -1,28 +1,17 @@
 """Journal undo / audit for FluxLM."""
 from __future__ import annotations
 
-import json
 import math
-import time
 from collections import deque
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
 
-from .helpers import (_HASH_P, _MASK64, _MIX1, _MIX2,
-                      _group_add, _load_teacher_embedding, _mix64, _s64,
-                      _scatter_sum)
-from .config import FluxConfig
-from .journal import FluxJournal
-from .tables import _GPUCellTables
+from .helpers import _group_add, _s64
 from .kernels import HAS_TRITON
 
 if HAS_TRITON:
-    from .kernels import (_flux_deep_votes_kernel,
-                          _flux_logit_tail_kernel)
+    pass
 
 
 class _RevertMixin:

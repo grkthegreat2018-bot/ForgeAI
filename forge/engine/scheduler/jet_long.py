@@ -84,7 +84,7 @@ class DynamicBifocalRoPE:
         Returns:
             q_rot, k_rot: rotated queries and keys
         """
-        B, n_h, T, hd = q.shape
+        _B, _n_h, T, _hd = q.shape
         device = q.device
 
         # Position indices

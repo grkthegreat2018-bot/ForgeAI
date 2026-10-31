@@ -56,13 +56,22 @@ class RotaryEmbedding(nn.Module):
     (controlled by beta_fast/beta_slow) blends the two zones.
     """
 
-    def __init__(self, dim: int, max_seq_len: int = 2048, base: float = 10000.0, rope_scaling=None):
+    def __init__(self, dim: int, max_seq_len: int = 2048, base: float = 10000.0, rope_scaling=None,
+                 partial_rotary_factor: float = 1.0):
         super().__init__()
         self.dim = dim
         self.base = base
         self.max_seq_len = max_seq_len
         self.rope_scaling = rope_scaling
+        # LFM3 zero-tail partial rotation: the first
+        # partial_rotary_factor*dim//2 frequency entries keep the full-dim
+        # progression and the tail is zeroed → cos=1/sin=0 there, leaving
+        # those head dims unrotated (NOT a shrunk rotary dimension).
+        self.partial_rotary_factor = partial_rotary_factor
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        if partial_rotary_factor < 1.0:
+            rope_angles = int(partial_rotary_factor * dim) // 2
+            inv_freq[rope_angles:] = 0.0
 
         if rope_scaling:
             rope_type = rope_scaling.get("type") or rope_scaling.get("rope_type")
@@ -177,7 +186,10 @@ class GroupedQueryAttention(nn.Module):
 
     def __init__(self, d_model=768, n_heads=12, n_kv_heads=None, max_seq_len=2048, base=10000.0, rope_scaling=None,
                  use_qk_norm=False, attn_scale=None, attn_bias=False, qk_norm_eps=1e-6,
-                 use_rope=True, head_dim: int | None = None):
+                 use_rope=True, head_dim: int | None = None,
+                 sliding_window: int | None = None,
+                 use_out_gate: bool = False,
+                 rope_partial_factor: float = 1.0):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
@@ -188,13 +200,20 @@ class GroupedQueryAttention(nn.Module):
         self.n_rep = n_heads // self.n_kv_heads
         self._qk_norm_eps = qk_norm_eps
         self.use_rope = use_rope
+        # LFM3: sliding-window attention (token sees itself + last W-1 keys)
+        self.sliding_window = sliding_window
         self.q_proj = nn.Linear(d_model, n_heads * self.head_dim, bias=attn_bias)
         self.k_proj = nn.Linear(d_model, self.n_kv_heads * self.head_dim, bias=attn_bias)
         self.v_proj = nn.Linear(d_model, self.n_kv_heads * self.head_dim, bias=attn_bias)
         # o_proj input is n_heads*head_dim (== d_model only when head_dim
         # divides evenly); never has bias (Qwen2 convention).
         self.out_proj = nn.Linear(n_heads * self.head_dim, d_model, bias=False)
-        self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len, base=base, rope_scaling=rope_scaling) if use_rope else None
+        # LFM3 gated attention: per-head sigmoid gate on the attention
+        # output before out_proj (gate_proj: d_model -> n_heads).
+        self.gate_proj = (nn.Linear(d_model, n_heads, bias=False)
+                          if use_out_gate else None)
+        self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len, base=base, rope_scaling=rope_scaling,
+                                    partial_rotary_factor=rope_partial_factor) if use_rope else None
 
         # QK-norm: RMSNorm on Q and K before RoPE (LFM2 / Gemma3 / Qwen3 style).
         # When weights are identity (all 1.0), skip — it's a no-op.
@@ -228,7 +247,7 @@ class GroupedQueryAttention(nn.Module):
                 attention_bias: torch.Tensor | None = None,
                 position_ids: torch.Tensor | None = None,
                 cu_seqlens: torch.Tensor | None = None):
-        B, T, C = x.shape
+        B, T, _C = x.shape
         q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
@@ -287,9 +306,16 @@ class GroupedQueryAttention(nn.Module):
 
         # Cache append + KV retrieval (same for both paths)
         if preallocated_cache is not None:
-            preallocated_cache.append(layer_idx, k, v)
-            k = preallocated_cache.k_caches[layer_idx][:, :, :past_len + T]
-            v = preallocated_cache.v_caches[layer_idx][:, :, :past_len + T]
+            if preallocated_cache.pos_t is not None and T == 1:
+                # Graph-safe: device-indexed write + full-buffer read.
+                # Future slots stay masked by attention_bias — required
+                # for CUDA-graph decode capture (see PreAllocatedKVCache).
+                preallocated_cache.append_t(layer_idx, k, v)
+                k, v = preallocated_cache.kv_view(layer_idx)
+            else:
+                preallocated_cache.append(layer_idx, k, v)
+                k = preallocated_cache.k_caches[layer_idx][:, :, :past_len + T]
+                v = preallocated_cache.v_caches[layer_idx][:, :, :past_len + T]
         elif past_key_value is not None and not _use_fused:
             k = torch.cat([past_key_value[0], k], dim=-2)
             v = torch.cat([past_key_value[1], v], dim=-2)
@@ -309,11 +335,41 @@ class GroupedQueryAttention(nn.Module):
         # contamination. Only during training (no KV cache, no attention_bias).
         if cu_seqlens is not None and not use_cache and attention_bias is None:
             out = varlen_attention(q, k, v, cu_seqlens)
-            out = out.transpose(1, 2).reshape(B, T, self.n_heads * self.head_dim)
-            return self.out_proj(out), new_kv
+            return self._finish_attn(x, out), new_kv
 
         # Single-token decode with cached KV: no causal mask needed (all keys are valid)
         total_len = k.shape[-2]
+        # Cache length before this forward's tokens (for SWA window mask).
+        if preallocated_cache is not None:
+            _past_len = preallocated_cache.position
+        elif past_key_value is not None:
+            _past_len = past_key_value[0].shape[-2]
+        else:
+            _past_len = total_len - T
+        # LFM3 sliding-window attention: key j is visible to query i iff
+        # j <= i and i - j < sliding_window (self + W-1 previous keys).
+        # Combines additively with any incoming attention_bias (pad masks
+        # and pos_t future-slot masks keep working).
+        if self.sliding_window is not None:
+            if (preallocated_cache is not None
+                    and preallocated_cache.pos_t is not None and T == 1):
+                # pos_t (CUDA-graph decode): position lives on-device —
+                # bake the mask from the live tensor so each replay sees
+                # the CURRENT position, not the capture-time int.
+                q_pos = preallocated_cache.pos_t.reshape(1)
+            else:
+                q_pos = _past_len + torch.arange(T, device=q.device)
+            k_pos = torch.arange(total_len, device=q.device)
+            allow = (k_pos[None, :] <= q_pos[:, None]) & \
+                    ((q_pos[:, None] - k_pos[None, :]) < self.sliding_window)
+            swa = torch.zeros(T, total_len, device=q.device, dtype=q.dtype)
+            swa = swa.masked_fill(~allow, float('-inf')).view(1, 1, T, total_len)
+            if attention_bias is not None:
+                swa = swa + attention_bias
+            if self.sinks is not None and self.sinks.abs().max().item() != 0.0:
+                swa = swa + self.sinks.view(1, self.n_heads, 1, 1).to(swa.dtype)
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=swa)
+            return self._finish_attn(x, out), new_kv
         # CSA (Compressed Sparse Attention): for long sequences, use top-k
         # position selection to reduce O(S^2) → O(S*k). Short sequences
         # use full attention (lossless when S <= top_k).
@@ -325,8 +381,7 @@ class GroupedQueryAttention(nn.Module):
                 self.n_heads, top_k=csa_top_k,
                 head_dim=self.head_dim)
             out = csa(q, k, v, is_causal=True)
-            out = out.transpose(1, 2).reshape(B, T, self.n_heads * self.head_dim)
-            return self.out_proj(out), new_kv
+            return self._finish_attn(x, out), new_kv
         # LearnedSink: add per-head sink bias to attention scores.
         # sink is (n_heads,) → broadcast to (1, n_heads, 1, total_len).
         # init=0 → no-op (lossless). Training learns positive sink values.
@@ -358,8 +413,21 @@ class GroupedQueryAttention(nn.Module):
             mask = _causal_mask(T, total_len, total_len - T,
                                 q.device, q.dtype)
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
-        out = out.transpose(1, 2).reshape(B, T, self.n_heads * self.head_dim)
-        return self.out_proj(out), new_kv
+        return self._finish_attn(x, out), new_kv
+
+    def _finish_attn(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+        """(B,H,T,Dh) attn output -> optional per-head sigmoid gate ->
+        (B,T,H*Dh) -> out_proj.
+
+        LFM3 gated attention: out = out_proj(attn * sigmoid(gate_proj(x)))
+        with one scalar gate per query head, gate read off the block input.
+        """
+        out = out.transpose(1, 2)                        # (B,T,H,Dh)
+        if self.gate_proj is not None:
+            gate = torch.sigmoid(self.gate_proj(x))      # (B,T,H)
+            out = out * gate.unsqueeze(-1)
+        out = out.reshape(out.shape[0], out.shape[1], -1)
+        return self.out_proj(out)
 
 
 class DoubleGatedConvLayer(nn.Module):
@@ -407,14 +475,41 @@ class DoubleGatedConvLayer(nn.Module):
             self.out_proj = nn.Linear(d_model, d_model, bias=bias)
         # Conv state buffer for incremental generation: (B, d_model, kernel_size-1)
         self._conv_state = None
+        # Owned backing buffer sized to the largest batch seen — conv
+        # state for batch B is the [:B] view. CUDA-graph decode captures
+        # read/write THIS storage: the model-level reset only re-points
+        # the alias, so replays never chase a reallocated tensor (the old
+        # single-buffer scheme freed and realloc'd on every position-0
+        # reset — stale reads → OOV garbage, worst at B>8). One shared
+        # buffer also keeps torch.compile guards happy — a per-B dict of
+        # the same tensor showed up as "duplicate tensor" guard churn.
+        self._conv_state_buf = None
+
+    # Max batch slice pre-allocated: covers the static-graph B<=32 cap.
+    _CONV_STATE_MAX_B = 32
 
     def _init_conv_state(self, batch: int, device: torch.device, dtype: torch.dtype):
-        """Initialize conv state buffer for incremental decoding."""
-        state = torch.zeros(
-            batch, self.d_model, self.kernel_size - 1,
-            device=device, dtype=dtype,
-        )
-        self._conv_state = state
+        """Initialize conv state buffer for incremental decoding.
+
+        Slice [:batch] of the owned backing buffer — CUDA-graph decode
+        captures read/write this storage, so re-allocating orphans the
+        captured graph's pointer (stale reads → logit drift / OOV tokens
+        at replay)."""
+        buf = self._conv_state_buf
+        if (buf is None or buf.shape[0] < batch
+                or buf.device != device or buf.dtype != dtype):
+            # Allocate OUTSIDE inference mode: a buffer created under
+            # inference_mode is an inference tensor and cannot be
+            # mutated by copy_() under plain no_grad (mixed-mode callers
+            # exist — engine prefill runs inference_mode, some callers
+            # decode under no_grad). Normal tensors mutate fine in both.
+            with torch.inference_mode(False):
+                self._conv_state_buf = torch.zeros(
+                    max(batch, self._CONV_STATE_MAX_B), self.d_model,
+                    self.kernel_size - 1, device=device, dtype=dtype)
+        else:
+            buf[:batch].zero_()
+        self._conv_state = self._conv_state_buf[:batch]
 
     def _causal_conv(self, x: torch.Tensor) -> torch.Tensor:
         """Causal depthwise conv via left-padding + Conv1d.
@@ -440,19 +535,22 @@ class DoubleGatedConvLayer(nn.Module):
         Returns:
             (B, 1, d_model)
         """
-        B, T, D = x.shape
+        B, T, _D = x.shape
         assert T == 1, f"incremental_conv expects T=1, got T={T}"
         x_t = x.transpose(1, 2)  # (B, d_model, 1)
 
-        if self._conv_state is None:
+        if (self._conv_state is None
+                or self._conv_state.shape[0] != B):
             self._init_conv_state(B, x.device, x.dtype)
 
         # Concatenate state + new token: (B, d_model, kernel_size)
         window = torch.cat([self._conv_state, x_t], dim=-1)
         # Apply conv (no padding needed — window is exactly kernel_size)
         out = self.conv(window)  # (B, d_model, 1)
-        # Update state: shift window, drop oldest
-        self._conv_state = window[:, :, 1:].clone()
+        # Update state in place: a fixed buffer survives CUDA-graph
+        # capture — reassigning the attr would freeze a stale storage
+        # pointer into the replay (and a B-mismatch cats [1,D,k]+[8,D,1]).
+        self._conv_state.copy_(window[:, :, 1:])
 
         return out.transpose(1, 2)  # (B, 1, d_model)
 
@@ -461,6 +559,7 @@ class DoubleGatedConvLayer(nn.Module):
         x: torch.Tensor,
         past_key_value: KVCache | None = None,
         use_cache: bool = False,
+        pad_mask: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, KVCache | None]:
         """LFM2-style forward: in_proj → gate → conv → gate → out_proj.
@@ -477,6 +576,17 @@ class DoubleGatedConvLayer(nn.Module):
         # Input gate: raw multiply (NO sigmoid — LFM2 uses multiplicative gates)
         Bx = B_gate * x_proj  # (B, T, D)
 
+        # LFM3 padding semantics: the HF model zeroes the gated conv input
+        # at padding positions (apply_mask_to_padding_states). The mask
+        # arrives as an explicit kwarg from ModularBlock (consumed at
+        # block level so gradient-checkpoint recomputation sees the same
+        # ops); the _pad_mask attr fallback covers direct callers.
+        if pad_mask is None:
+            pad_mask = getattr(self, '_pad_mask', None)
+            self._pad_mask = None
+        if pad_mask is not None:
+            Bx = Bx * pad_mask.unsqueeze(-1).to(Bx.dtype)
+
         # Conv state is reset at the MODEL level when starting a new sequence
         # (past_key_values is None at the model level). Per-layer reset based
         # on past_key_value is incorrect because conv layers ALWAYS get
@@ -492,11 +602,20 @@ class DoubleGatedConvLayer(nn.Module):
         # A stored prefix boundary (_conv_state_prefix, from a prefix/session
         # KV cache hit) restores the conv context.  For T==1 it becomes the
         # live state so incremental decode sees the right left context.
+        # Restores into the banked buffer (copy_, not reassignment) so any
+        # captured CUDA graph keeps reading the same storage.
         prefix_ctx = getattr(self, '_conv_state_prefix', None)
         self._conv_state_prefix = None
         if prefix_ctx is not None and T == 1:
-            self._conv_state = prefix_ctx.to(
-                device=Bx.device, dtype=Bx.dtype)
+            _buf = self._conv_state_buf
+            if (_buf is not None and _buf.shape[0] >= Bx.shape[0]
+                    and _buf[0].shape == prefix_ctx.shape[1:]
+                    and _buf.dtype == prefix_ctx.dtype):
+                _buf[:Bx.shape[0]].copy_(prefix_ctx.to(Bx.device))
+                self._conv_state = _buf[:Bx.shape[0]]
+            else:
+                self._conv_state = prefix_ctx.to(
+                    device=Bx.device, dtype=Bx.dtype)
 
         if T == 1 and self._conv_state is not None:
             conv_out = self._incremental_conv(Bx)
@@ -513,7 +632,11 @@ class DoubleGatedConvLayer(nn.Module):
             # prefill (the model-level reset flag cleared it), so this only
             # engages on genuine continuations.
             left_ctx = prefix_ctx
-            if left_ctx is None and self._conv_state is not None:
+            if (left_ctx is None and self._conv_state is not None
+                    and self._conv_state.shape[0] == B):
+                # Same-batch continuation only — a stale state from a
+                # different batch size (switched without model reset)
+                # would cat-mismatch; treat as a fresh left context.
                 left_ctx = self._conv_state
             if left_ctx is not None and T > 1:
                 Bx_t = Bx.transpose(1, 2)  # (B, D, T)
@@ -523,15 +646,21 @@ class DoubleGatedConvLayer(nn.Module):
                 conv_out = self.conv(full).transpose(1, 2)  # (B, T, D)
             else:
                 conv_out = self._causal_conv(Bx)
-            # Initialize state from last (kernel_size - 1) tokens of GATED input
+            # Initialize state from last (kernel_size - 1) tokens of GATED input.
+            # Write in place when a same-shaped buffer exists — reassignment
+            # breaks the static-buffer contract CUDA-graph decode replays on.
             if use_cache:
                 self._init_conv_state(B, x.device, x.dtype)
                 if self.kernel_size - 1 <= T:
-                    self._conv_state = Bx[:, -(self.kernel_size - 1):, :].transpose(1, 2).clone()
+                    new_state = Bx[:, -(self.kernel_size - 1):, :].transpose(1, 2)
                 else:
                     pad_len = self.kernel_size - 1 - T
                     pad = torch.zeros(B, pad_len, D, device=x.device, dtype=x.dtype)
-                    self._conv_state = torch.cat([pad, Bx], dim=1).transpose(1, 2).clone()
+                    new_state = torch.cat([pad, Bx], dim=1).transpose(1, 2)
+                if self._conv_state.shape == new_state.shape:
+                    self._conv_state.copy_(new_state)
+                else:
+                    self._conv_state = new_state.clone()
 
         # Output gate: raw multiply (NO sigmoid)
         gated = C_gate * conv_out  # (B, T, D)
@@ -657,7 +786,7 @@ class ModularBlock(nn.Module):
                 )
         else:
             from .builders import build_attention  # lazy: circular dep
-            self.attn = build_attention(config)
+            self.attn = build_attention(config, layer_idx=layer_idx)
         if self._use_adaln:
             from forge.training.losses.adaln_zero import AdaLNZero
             self.ln2 = AdaLNZero(config.d_model, _cond_dim,
@@ -676,6 +805,10 @@ class ModularBlock(nn.Module):
                 "GroupedTiedAttention",
                 "GroupedLatentAttention")
         self._is_conv = isinstance(self.attn, DoubleGatedConvLayer)
+        # LFM3 conv pad mask — set by the parent model per forward,
+        # consumed HERE (block level) so checkpoint recomputation
+        # replays identical ops (see llm.py _forward_impl).
+        self._pad_mask = None
         self._is_mamba = type(self.attn).__name__ in ("MambaLayer", "Mamba3Block")
         self._gradient_checkpointing = False
 
@@ -725,7 +858,9 @@ class ModularBlock(nn.Module):
         # KDA superset; gate=0 → lossless). Mutually exclusive with use_kda.
         self._gdn2 = None
         self._gdn2_gate_zero: bool | None = None  # cached eval gate state
-        if getattr(config, 'use_gdn2', False):
+        _gdn2_subset = getattr(config, 'gdn2_layers', None)
+        if getattr(config, 'use_gdn2', False) and (
+                _gdn2_subset is None or layer_idx in _gdn2_subset):
             from forge.keys.attention.gdn2_key import GDN2Layer
             gdn2_heads = getattr(config, 'gdn2_n_heads', 0) or config.n_heads
             self._gdn2 = GDN2Layer(
@@ -749,12 +884,23 @@ class ModularBlock(nn.Module):
         self._static_skip_layers: set[int] = set()  # populated when threshold > 0
 
         # SandwichNorm: post-sublayer RMSNorm (identity init = lossless).
-        # Applied after attention output and after FFN output, before the
-        # residual add. Stabilizes MoE training by bounding activations.
+        # "post_residual" (default): applied to the stream AFTER the add —
+        # stabilizes MoE training by bounding activations.
+        # "pre_residual" (LFM2/3): applied to the operator/FFN output BEFORE
+        # the add — the branch-norm topology HF Lfm2/Lfm3 uses.
         self._use_sandwich = getattr(config, 'use_sandwich_norm', False)
+        self._sandwich_pre = (
+            getattr(config, 'sandwich_norm_mode', 'post_residual')
+            == 'pre_residual')
         if self._use_sandwich:
-            self.post_attn_norm = norm(config.d_model)
-            self.post_ffn_norm = norm(config.d_model)
+            if norm is RMSNorm:
+                self.post_attn_norm = RMSNorm(config.d_model, eps=_norm_eps,
+                                              use_triton=_use_triton)
+                self.post_ffn_norm = RMSNorm(config.d_model, eps=_norm_eps,
+                                             use_triton=_use_triton)
+            else:
+                self.post_attn_norm = norm(config.d_model)
+                self.post_ffn_norm = norm(config.d_model)
 
         # TITAN neural memory + MoD token router (zero-init => lossless at
         # start; the ported checkpoint loads and behaves identically).
@@ -762,7 +908,9 @@ class ModularBlock(nn.Module):
         self._mod = None
         self._mhc = None
         self._mem_gate_zero: bool | None = None  # cached eval gate state
-        if getattr(config, 'use_titan_memory', False):
+        _titan_subset = getattr(config, 'titan_layers', None)
+        if getattr(config, 'use_titan_memory', False) and (
+                _titan_subset is None or layer_idx in _titan_subset):
             from forge.keys.architecture.titan_memory_key import TitanMemory
             self._memory = TitanMemory(
                 config.d_model,
@@ -801,6 +949,28 @@ class ModularBlock(nn.Module):
             return self.ln2(x, cond)
         return self.ln2(x)
 
+    def _add_attn(self, x: torch.Tensor, attn_out: torch.Tensor) -> torch.Tensor:
+        """Residual add for the operator branch, honoring sandwich_norm_mode.
+
+        pre_residual (LFM3): x + post_attn_norm(attn_out)
+        post_residual:       post_attn_norm(x + attn_out)   (no-op if off)
+        """
+        if self._use_sandwich and self._sandwich_pre:
+            return x + self.post_attn_norm(attn_out)
+        x = x + attn_out
+        if self._use_sandwich:
+            x = self.post_attn_norm(x)
+        return x
+
+    def _add_ffn(self, x: torch.Tensor, ffn_out: torch.Tensor) -> torch.Tensor:
+        """Residual add for the FFN branch (same mode rules as _add_attn)."""
+        if self._use_sandwich and self._sandwich_pre:
+            return x + self.post_ffn_norm(ffn_out)
+        x = x + ffn_out
+        if self._use_sandwich:
+            x = self.post_ffn_norm(x)
+        return x
+
     def forward(
         self,
         x: torch.Tensor,
@@ -819,6 +989,16 @@ class ModularBlock(nn.Module):
     ) -> tuple[torch.Tensor, KVCache | None]:
         x0 = x  # pre-update residual (for TITAN read + MoD gating)
 
+        # LFM3 conv pad mask: consumed at block level (NOT inside the
+        # checkpointed region) so torch.utils.checkpoint recompute
+        # replays identical ops — a consumed-attr inside the checkpoint
+        # changed the saved-tensor count and crashed training.
+        pad_mask = self._pad_mask
+        self._pad_mask = None
+        # Conv-only kwarg — attention modules don't accept pad_mask.
+        _pm_kw = {"pad_mask": pad_mask} if (
+            self._is_conv and pad_mask is not None) else {}
+
         # TRUE Mixture-of-Depths: in training (no KV cache, no attention
         # mask) router-skipped tokens genuinely BYPASS attention + FFN —
         # the block only computes the top-k kept tokens, so FLOPs scale
@@ -836,14 +1016,22 @@ class ModularBlock(nn.Module):
             strategy = self._gradient_checkpointing_strategy
             if strategy == "all":
                 def custom_forward(x_inner):
-                    attn_out, present = self.attn(self._norm1(x_inner, cond), past_key_value=past_key_value, use_cache=False, cu_seqlens=cu_seqlens)
-                    x_inner = x_inner + attn_out
+                    attn_out, present = self.attn(
+                        self._norm1(x_inner, cond),
+                        past_key_value=past_key_value, use_cache=False,
+                        preallocated_cache=(
+                            preallocated_cache
+                            if self._supports_prealloc_cache else None),
+                        layer_idx=layer_idx, attention_bias=attention_bias,
+                        position_ids=position_ids, cu_seqlens=cu_seqlens,
+                        **_pm_kw)
+                    x_inner = self._add_attn(x_inner, attn_out)
                     ffn_out = self.ffn(self._norm2(x_inner, cond))
                     aux = None
                     if isinstance(ffn_out, tuple):
                         aux = ffn_out[1]
                         ffn_out = ffn_out[0]
-                    x_inner = x_inner + ffn_out
+                    x_inner = self._add_ffn(x_inner, ffn_out)
                     return x_inner, present, aux
                 x, present, aux = torch.utils.checkpoint.checkpoint(custom_forward, x, use_reentrant=False)
                 self._last_aux_loss = aux
@@ -855,22 +1043,22 @@ class ModularBlock(nn.Module):
                         self._norm1(x, cond), past_key_value=past_key_value, use_cache=False,
                         preallocated_cache=preallocated_cache, layer_idx=layer_idx,
                         attention_bias=attention_bias, position_ids=position_ids,
-                        cu_seqlens=cu_seqlens,
+                        cu_seqlens=cu_seqlens, **_pm_kw,
                     )
                 else:
                     attn_out, present = self.attn(
                         self._norm1(x, cond), past_key_value=past_key_value, use_cache=False,
                         attention_bias=attention_bias, position_ids=position_ids,
-                        cu_seqlens=cu_seqlens,
+                        cu_seqlens=cu_seqlens, **_pm_kw,
                     )
-                x = x + attn_out
+                x = self._add_attn(x, attn_out)
                 ffn_out = torch.utils.checkpoint.checkpoint(
                     self.ffn, self._norm2(x, cond), use_reentrant=False)
                 self._last_aux_loss = None
                 if isinstance(ffn_out, tuple):
                     self._last_aux_loss = ffn_out[1]
                     ffn_out = ffn_out[0]
-                x = x + ffn_out
+                x = self._add_ffn(x, ffn_out)
             elif strategy == "attn":
                 # Recompute only attention; FFN activations stay materialized.
                 def _attn_forward(x_inner):
@@ -878,37 +1066,38 @@ class ModularBlock(nn.Module):
                         x_inner, past_key_value=past_key_value, use_cache=False,
                         preallocated_cache=preallocated_cache if self._supports_prealloc_cache else None,
                         layer_idx=layer_idx, attention_bias=attention_bias,
-                        position_ids=position_ids, cu_seqlens=cu_seqlens)
+                        position_ids=position_ids, cu_seqlens=cu_seqlens,
+                        **_pm_kw)
                 attn_out, present = torch.utils.checkpoint.checkpoint(
                     _attn_forward, self._norm1(x, cond), use_reentrant=False)
-                x = x + attn_out
+                x = self._add_attn(x, attn_out)
                 ffn_out = self.ffn(self._norm2(x, cond))
                 self._last_aux_loss = None
                 if isinstance(ffn_out, tuple):
                     self._last_aux_loss = ffn_out[1]
                     ffn_out = ffn_out[0]
-                x = x + ffn_out
+                x = self._add_ffn(x, ffn_out)
             else:  # "none" — no recomputation this block
                 if preallocated_cache is not None and self._supports_prealloc_cache:
                     attn_out, present = self.attn(
                         self._norm1(x, cond), past_key_value=past_key_value, use_cache=use_cache,
                         preallocated_cache=preallocated_cache, layer_idx=layer_idx,
                         attention_bias=attention_bias, position_ids=position_ids,
-                        cu_seqlens=cu_seqlens,
+                        cu_seqlens=cu_seqlens, **_pm_kw,
                     )
                 else:
                     attn_out, present = self.attn(
                         self._norm1(x, cond), past_key_value=past_key_value, use_cache=use_cache,
                         attention_bias=attention_bias, position_ids=position_ids,
-                        cu_seqlens=cu_seqlens,
+                        cu_seqlens=cu_seqlens, **_pm_kw,
                     )
-                x = x + attn_out
+                x = self._add_attn(x, attn_out)
                 ffn_out = self.ffn(self._norm2(x, cond))
                 self._last_aux_loss = None
                 if isinstance(ffn_out, tuple):
                     self._last_aux_loss = ffn_out[1]
                     ffn_out = ffn_out[0]
-                x = x + ffn_out
+                x = self._add_ffn(x, ffn_out)
         else:
             # DiffusionBlocks: extract AdaLN modulation (4 * d_model)
             # No gates — shift/scale only (zero-init = identity, gradients flow)
@@ -934,18 +1123,15 @@ class ModularBlock(nn.Module):
                     attn_in, past_key_value=past_key_value, use_cache=use_cache,
                     preallocated_cache=preallocated_cache, layer_idx=layer_idx,
                     attention_bias=attention_bias, position_ids=position_ids,
-                    **_cu_kw,
+                    **_cu_kw, **_pm_kw,
                 )
             else:
                 attn_out, present = self.attn(
                     attn_in, past_key_value=past_key_value, use_cache=use_cache,
                     attention_bias=attention_bias, position_ids=position_ids,
-                    **_cu_kw,
+                    **_cu_kw, **_pm_kw,
                 )
-            x = x + attn_out
-            # SandwichNorm: post-attention norm (identity init = no-op).
-            if self._use_sandwich:
-                x = self.post_attn_norm(x)
+            x = self._add_attn(x, attn_out)
             # FFN-SkipLLM: skip FFN on saturated layers during eval.
             # Uses a static skip set (calibrated via cosine similarity).
             # Safe with KV cache: FFN doesn't touch KV state, only attention.
@@ -964,10 +1150,7 @@ class ModularBlock(nn.Module):
                 if isinstance(ffn_out, tuple):
                     self._last_aux_loss = ffn_out[1]
                     ffn_out = ffn_out[0]
-            x = x + ffn_out
-            # SandwichNorm: post-FFN norm (identity init = no-op).
-            if self._use_sandwich:
-                x = self.post_ffn_norm(x)
+            x = self._add_ffn(x, ffn_out)
 
         # TITAN memory read + MoD token gating (zero-init => lossless).
         # Applied on the combined block update for every branch above.
@@ -1058,13 +1241,13 @@ class ModularBlock(nn.Module):
                 self._norm1(x_k, cond), past_key_value=None, use_cache=False,
                 preallocated_cache=None, layer_idx=layer_idx,
                 attention_bias=attention_bias, position_ids=position_ids)
-            h = x_k + attn_out
+            h = self._add_attn(x_k, attn_out)
             ffn_out = self.ffn(self._norm2(h, cond))
             self._last_aux_loss = None
             if isinstance(ffn_out, tuple):
                 self._last_aux_loss = ffn_out[1]
                 ffn_out = ffn_out[0]
-            h = h + ffn_out
+            h = self._add_ffn(h, ffn_out)
             if self._memory is not None:
                 h = h + self._memory(x_k)
             out[b][idx] = h[0]

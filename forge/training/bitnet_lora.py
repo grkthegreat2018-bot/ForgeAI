@@ -480,7 +480,7 @@ def build_muon_sf_lora_opt(
     class _MuonSFLoRA(SingleDeviceMuonWithAuxAdam):
         def __init__(self):
             self._sf = AdamWScheduleFree(adam_p, lr=lr_adam, betas=(0.9, 0.95), weight_decay=0.0) if adam_p else None
-            super().__init__([dict(params=muon_p, lr=lr_muon, momentum=0.95, weight_decay=0.0, use_muon=True)])
+            super().__init__([{'params': muon_p, 'lr': lr_muon, 'momentum': 0.95, 'weight_decay': 0.0, 'use_muon': True}])
             if self._sf:
                 self._sf.train()
 

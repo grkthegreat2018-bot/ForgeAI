@@ -8,6 +8,13 @@ logger = logging.getLogger(__name__)
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
+__all__ = [
+    "KVCache",
+    "PreAllocatedKVCache",
+    "create_kv_cache",
+    "unpack_output_with_kv",
+]
+
 
 
 class PreAllocatedKVCache:
@@ -31,7 +38,7 @@ class PreAllocatedKVCache:
 
     def __init__(self, n_layers: int, batch: int, n_kv_heads: int,
                  max_seq_len: int, head_dim: int, dtype: torch.dtype,
-                 device: torch.device, n_kv_heads_per_layer: list = None,
+                 device: torch.device, n_kv_heads_per_layer: list | None = None,
                  quantize: str = "none"):
         self.max_seq_len = max_seq_len
         self.n_layers = n_layers
@@ -130,6 +137,52 @@ class PreAllocatedKVCache:
     def reset(self):
         """Reset to empty (start of new sequence)."""
         self.position = 0
+        if self.pos_t is not None:
+            self.pos_t.zero_()
+
+    # ── Graph-safe tensor-position mode ──────────────────────────────────
+    # For CUDA-graph decode capture: python-int `position` and `[:pos]`
+    # slices bake into a graph at capture time, freezing the context
+    # length. With pos_t set (device scalar), append_t writes via
+    # index_copy_ and callers read the FULL buffer, masking future slots
+    # via attention_bias — every op stays tensor-driven and replayable.
+
+    pos_t: torch.Tensor | None = None
+
+    # Read horizon for the pos_t path: attention reads k_caches[:, :, :view_len].
+    # None = full buffer.  Set per CUDA-graph capture so each bucket's graph
+    # replays attention over a fixed-length VIEW of the same storage —
+    # switching buckets at decode time costs zero data movement.
+    view_len: int | None = None
+
+    def enable_tensor_pos(self):
+        """Switch to device-tensor position mode for graph capture."""
+        dev = next((k.device for k in self.k_caches if k is not None),
+                   torch.device('cuda'))
+        self.pos_t = torch.zeros(1, dtype=torch.long, device=dev)
+        self.pos_t.fill_(self.position)
+
+    def sync_tensor_pos(self):
+        """Copy python position into pos_t (call before each replay)."""
+        if self.pos_t is not None:
+            self.pos_t.fill_(self.position)
+
+    def append_t(self, layer_idx: int, k_new: torch.Tensor, v_new: torch.Tensor):
+        """Device-indexed write at pos_t — capturable inside a CUDA graph."""
+        if self.k_caches[layer_idx] is None or self.pos_t is None:
+            return
+        self.k_caches[layer_idx].index_copy_(2, self.pos_t, k_new)
+        self.v_caches[layer_idx].index_copy_(2, self.pos_t, v_new)
+
+    def kv_view(self, layer_idx: int):
+        """k/v read view honoring view_len (pos_t path only)."""
+        k = self.k_caches[layer_idx]
+        v = self.v_caches[layer_idx]
+        if k is None:
+            return None, None
+        if self.view_len is not None:
+            return k[:, :, :self.view_len], v[:, :, :self.view_len]
+        return k, v
 
     @property
     def filled(self) -> int:
@@ -171,7 +224,9 @@ def create_kv_cache(model: nn.Module, max_total: int, batch: int = 1,
     layer_types = getattr(cfg, "layer_types", None)
     if layer_types is not None:
         n_kv_heads_per_layer = [
-            n_kv_heads if (i < len(layer_types) and layer_types[i] in ("attention", "attn"))
+            n_kv_heads if (i < len(layer_types)
+                           and ("attention" in str(layer_types[i])
+                                or "attn" in str(layer_types[i])))
             else 0
             for i in range(cfg.n_layers)
         ]

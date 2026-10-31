@@ -36,10 +36,10 @@ import torch.nn as nn
 from forge.model.flux.helpers import _s64
 
 from .blocks import BlockStore
-from .cells import foll_tok, foll_cntq, foll_valid, meta_wtag
+from .cells import foll_cntq, foll_tok, foll_valid, meta_wtag
 from .config import StrataConfig
-from .io import save_container, load_container
-from .knobs import KnobSet, DEFAULT_KNOBS
+from .io import load_container, save_container
+from .knobs import DEFAULT_KNOBS, KnobSet
 from .params import ParamSet
 
 _FNV = 1099511628211
@@ -487,7 +487,6 @@ class StrataLM(nn.Module):
 
     def _learn_token(self, x: int) -> None:
         """All live updates for observing token ``x`` (journaled)."""
-        c = self.config
         kn = self.knobs
         end = self._count - 1            # context ends just before x
         keys = self._keys_at(end) if end >= self._ep_start else {}
@@ -906,7 +905,7 @@ class StrataLM(nn.Module):
         return p
 
     @classmethod
-    def load(cls, path, device: str | None = None) -> "StrataLM":
+    def load(cls, path, device: str | None = None) -> StrataLM:
         p = Path(path)
         meta, tensors = load_container(p, copy=True)
         cfg = StrataConfig(**meta["config"])

@@ -212,7 +212,7 @@ def finetune_from_db(db: DiscoveryDB, base_checkpoint: str | None = None,
 
     step = 0
     t0 = time.time()
-    for ep in range(cfg.epochs):
+    for _ep in range(cfg.epochs):
         order = list(range(len(dataset)))
         order.reverse()  # variety without importing random
         optimizer.zero_grad()
@@ -222,7 +222,7 @@ def finetune_from_db(db: DiscoveryDB, base_checkpoint: str | None = None,
             batch_indices = [order[(sp * cfg.batch_size + j) % len(order)]
                             for j in range(cfg.batch_size)]
             batch = [dataset[idx] for idx in batch_indices]
-            ids, tgt, mask = _collate(batch, pad_id, device)
+            ids, tgt, _mask = _collate(batch, pad_id, device)
 
             # Forward (targets passed for chunked CE)
             shift_tgt = tgt[:, 1:].contiguous()

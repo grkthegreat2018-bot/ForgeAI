@@ -41,21 +41,50 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from forge.evolution.auto_targets import self_improve
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "DecisionScorer",
     "ProcessRewardHead",
+    "expected_calibration_error",
     "fit_decision_scorer",
     "fit_prm",
     "score_steps",
-    "expected_calibration_error",
 ]
 
 SCORE_HEAD_VERSION = 1
 PRM_HEAD_VERSION = 1
 
 
+def _evolve_inputs_ece():
+    """Representative cases for expected_calibration_error: confidence
+    + correctness vectors at eval-set sizes, uniform and skewed."""
+    import torch
+    g = torch.Generator().manual_seed(0)
+    cases = []
+    for n in (100, 1000, 10000):
+        probs = torch.rand(n, generator=g)
+        labels = (torch.rand(n, generator=g) < probs).float()
+        cases.append((probs, labels, 10))
+        cases.append((probs, labels, 15))
+    # degenerate: all in one bin, all wrong, all right
+    cases.append((torch.ones(500) * 0.99, torch.ones(500), 10))
+    cases.append((torch.zeros(500), torch.zeros(500), 10))
+    cases.append((torch.linspace(0, 1, 64), torch.ones(64), 8))
+    return cases
+
+
+@self_improve(gen_input=_evolve_inputs_ece, evals=80,
+              tags=("eval", "calibration", "math"),
+              prompt=("Faster expected_calibration_error(probs, labels, "
+                      "bins): per-bin |acc-conf| gap weighted by bin "
+                      "mass. Seed loops over bins doing a mask + three "
+                      ".item() host syncs per bin. Ideas: single "
+                      "torch.bucketize/histc pass, segment means via "
+                      "index_add/scatter_add, ONE .item() (or none — "
+                      "sum on-device then scalar). Same float out."))
 def expected_calibration_error(probs: torch.Tensor,
                                labels: torch.Tensor,
                                bins: int = 10) -> float:
@@ -119,7 +148,7 @@ class DecisionScorer(nn.Module):
 
     @classmethod
     def load(cls, path: str, device: str | torch.device = "cpu"
-             ) -> "DecisionScorer":
+             ) -> DecisionScorer:
         blob = torch.load(path, map_location="cpu", weights_only=True)
         version = blob.get("version", 0)
         if version > SCORE_HEAD_VERSION:
@@ -174,8 +203,11 @@ def fit_decision_scorer(
     Brier plus harvest/train wall-clock times.
     """
     from forge.engine.decide import (  # local import: avoid cycles
-        DEFAULT_CONTEXT_LIMIT, SystemOneEvaluator, _jsonable,
-        _parse_question)
+        DEFAULT_CONTEXT_LIMIT,
+        SystemOneEvaluator,
+        _jsonable,
+        _parse_question,
+    )
 
     torch.manual_seed(seed)
     device = torch.device(device)
@@ -334,7 +366,7 @@ class ProcessRewardHead(nn.Module):
 
     @classmethod
     def load(cls, path: str, device: str | torch.device = "cpu"
-             ) -> "ProcessRewardHead":
+             ) -> ProcessRewardHead:
         blob = torch.load(path, map_location="cpu", weights_only=True)
         version = blob.get("version", 0)
         if version > PRM_HEAD_VERSION:

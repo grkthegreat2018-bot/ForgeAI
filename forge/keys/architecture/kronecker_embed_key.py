@@ -57,7 +57,8 @@ def _ids_to_bytes(token_ids: torch.Tensor, max_char_len: int) -> torch.Tensor:
         (V, max_char_len) long tensor where each row is the little-endian
         byte decomposition of the corresponding token id.
     """
-    bytes_tensor = torch.zeros(len(token_ids), max_char_len, dtype=torch.long)
+    bytes_tensor = torch.zeros(len(token_ids), max_char_len, dtype=torch.long,
+                               device=token_ids.device)
     for i in range(max_char_len):
         bytes_tensor[:, i] = (token_ids >> (8 * i)) & 0xFF
     return bytes_tensor
@@ -268,7 +269,7 @@ class KroneckerEmbedKey(Key):
 
         # SVD: W = U @ S @ Vt, take top-k components
         W_f = W.float()
-        U, S, Vt = torch.linalg.svd(W_f, full_matrices=False)
+        _U, S, Vt = torch.linalg.svd(W_f, full_matrices=False)
 
         # Initialize projection from SVD right singular vectors (scaled by S)
         projection = torch.zeros(kronecker_dim, d, dtype=W_f.dtype)

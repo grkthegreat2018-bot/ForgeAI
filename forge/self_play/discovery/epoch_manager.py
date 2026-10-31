@@ -205,7 +205,7 @@ class EpochManager:
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
         # Update the candidate epoch row with scores.
-        self.db.query  # noop to ensure connection works
+        self.db.query("SELECT 1")  # noop to ensure connection works
         # Record candidate scores (the add_epoch in finetune/distill already
         # inserted a candidate row; update it).
         epoch_num = self.db.last_epoch_num()

@@ -29,6 +29,7 @@ from collections import OrderedDict
 import torch
 
 from forge.model_loader import unpack_output_with_kv
+from forge.evolution.auto_targets import self_improve
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +314,40 @@ def _prefix_hash(prev: int, chunk_h: int) -> int:
     return int.from_bytes(h, "little")
 
 
+def _evolve_inputs_slice_past_kv():
+    """Representative cases for _slice_past_kv: hybrid (k,v)-tuple +
+    conv-dict + None per-layer presents at prefix-cache hit boundaries.
+    Slices are cloned in the seed, so the oracle also pins ownership."""
+    import torch
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    g = torch.Generator().manual_seed(0)
+    cases = []
+    for n_layers, seq, keep in ((16, 512, 256), (32, 1024, 256),
+                                (24, 300, 1)):
+        past = []
+        for i in range(n_layers):
+            if i % 4 == 0:
+                past.append(None)
+            elif i % 4 == 1:
+                past.append({"conv_state":
+                             torch.randn(1, 64, 3, generator=g).to(dev)})
+            else:
+                k = torch.randn(1, 8, seq, 64, generator=g).to(dev)
+                v = torch.randn(1, 8, seq, 64, generator=g).to(dev)
+                past.append((k, v))
+        cases.append((past, keep))
+    cases.append((None, 8))
+    return cases
+
+
+@self_improve(gen_input=_evolve_inputs_slice_past_kv, evals=80,
+              tags=("prefix-cache", "kv-cache", "hot-path"),
+              prompt=("Faster _slice_past_kv(past_kv, length): new list "
+                      "of per-layer entries — (k,v) tuples sliced "
+                      "[:, :, :length].clone(), dict entries shallow-"
+                      "copied with tensor values cloned, None passthrough"
+                      ", None input -> None. Ideas: fused "
+                      "contiguous-slice, single alloc, prealloc list."))
 def _slice_past_kv(past_kv, length: int):
     """Slice a per-layer KV cache list to ``length`` tokens.
 
@@ -483,9 +518,8 @@ class ChunkedPrefixCache:
             matched_len = min((i + 1) * self.chunk_size, len(token_ids))
             # Verify token equality on the matched prefix.
             stored_tokens = entry.get("token_ids")
-            if stored_tokens is not None:
-                if stored_tokens[:matched_len] != token_ids[:matched_len]:
-                    continue  # hash collision — skip
+            if stored_tokens is not None and stored_tokens[:matched_len] != token_ids[:matched_len]:
+                continue  # hash collision — skip
             # Move to MRU and return sliced KV.
             self._cache.move_to_end(h)
             if matched_len < entry["length"]:
@@ -730,7 +764,7 @@ class RadixPrefixCache:
         token_ids = ids[0].cpu().tolist()
         if len(token_ids) <= 16:
             return None
-        matched, node, _edge_pos, _parent = self._match(
+        matched, _node, _edge_pos, _parent = self._match(
             self.root, token_ids, 0)
         if matched <= 0:
             self._misses += 1
@@ -808,10 +842,9 @@ class RadixPrefixCache:
         parent_map = {id(self.root): None}
         while queue:
             node = queue.pop(0)
-            if node.kv_state is not None and node.ref_count == 0:
-                if node.last_used < best_time:
-                    best = node
-                    best_time = node.last_used
+            if node.kv_state is not None and node.ref_count == 0 and node.last_used < best_time:
+                best = node
+                best_time = node.last_used
             for child in node.children.values():
                 parent_map[id(child)] = node
                 queue.append(child)

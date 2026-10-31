@@ -75,7 +75,7 @@ class ForgeOptimizer(Optimizer):
 
     def __init__(self, params: Iterable, lr=1e-3, betas=(0.9, 0.999),
                  eps=1e-8, weight_decay=1e-2, block_size: int = 128):
-        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay}
         self.block_size = block_size
         self._hooks = []
         self._grad_norm_sq = 0.0

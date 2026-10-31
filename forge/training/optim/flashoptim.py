@@ -94,8 +94,8 @@ class FlashOptimAdamW(Optimizer):
             raise ValueError(f"Invalid learning rate: {lr}")
         if not eps >= 0.0:
             raise ValueError(f"Invalid epsilon: {eps}")
-        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay,
-                        bits=bits, companding=companding)
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
+                        "bits": bits, "companding": companding}
         super().__init__(params, defaults)
 
     @torch.no_grad()

@@ -100,9 +100,7 @@ class TaskBootConfig:
             return True
         if self.quantize != getattr(engine, "quantize", None):
             return True
-        if self.acceleration != getattr(engine, "acceleration", None):
-            return True
-        return False
+        return self.acceleration != getattr(engine, "acceleration", None)
 
     def apply_to(self, engine):
         """Apply this config to a ForgeEngine via activate().
@@ -349,7 +347,7 @@ class SessionManager:
     def _evict_if_needed(self):
         """Evict oldest sessions if over max_sessions."""
         while len(self._sessions) > self.max_sessions:
-            tid, session = self._sessions.popitem(last=False)
+            _tid, _session = self._sessions.popitem(last=False)
             # Could log eviction here
 
 
@@ -627,7 +625,8 @@ class BatchQueue:
                     if session and session.seed is not None:
                         effective_seed = session.seed
                 if req.stream:
-                    run = lambda: self._run_single_stream(req)
+                    def run():
+                        return self._run_single_stream(req)
                 else:
                     def run():
                         output = self.registry.generate(
@@ -738,7 +737,7 @@ class BatchQueue:
                 repetition_penalties=rep_penalties_list,
                 seeds=seeds_list, stops=stop_list,
                 skip_special_tokens=True)
-            for req, text in zip(requests, outs):
+            for req, text in zip(requests, outs, strict=True):
                 if req.task_id and self.session_manager:
                     self.session_manager.append_message(
                         req.task_id, "assistant", text)
@@ -822,7 +821,7 @@ class BatchQueue:
         generated = engine._generate_with_oom_recovery(_decode)
 
         # Decode and deliver results
-        for req, gen_ids in zip(requests, generated):
+        for req, gen_ids in zip(requests, generated, strict=True):
             gen_ids_1d = gen_ids[0] if gen_ids.dim() > 1 else gen_ids
             text = tokenizer.decode(gen_ids_1d, skip_special_tokens=True)
 

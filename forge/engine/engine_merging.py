@@ -1,8 +1,8 @@
 """Checkpoint merge and evolutionary-merge mixin for ForgeEngine."""
 from pathlib import Path
 
-from .engine_common import *  # noqa: F403
-from .errors import ConfigurationError  # noqa: F401
+import torch
+
 from .engine_common import (  # noqa: F401
     _CKPT_CACHE_MAX,
     _DEFAULT_CPU_MEMORY_BYTES,
@@ -18,6 +18,7 @@ from .engine_common import (  # noqa: F401
     _tokenizer_for_vocab,
     logger,
 )
+from .errors import ConfigurationError
 
 
 class _MergingMixin:
@@ -45,7 +46,7 @@ class _MergingMixin:
         with self._gen_lock:
             dev_state = {k: (v.to(self.device) if not v.is_meta else v)
                          for k, v in state.items()}
-            missing, unexpected = self.model.load_state_dict(
+            _missing, _unexpected = self.model.load_state_dict(
                 dev_state, strict=False, assign=True)
             if dev_state and self.device.type == "cuda":
                 torch.cuda.synchronize(self.device)

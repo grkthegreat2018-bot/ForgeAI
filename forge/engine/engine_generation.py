@@ -3,20 +3,30 @@ import dataclasses
 import json
 import time
 from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
+import torch
 import torch.nn.functional as F
 
-from .engine_common import *  # noqa: F403
+if TYPE_CHECKING:
+    from forge.engine.forge_engine import ForgeEngine
+
+from forge.model_loader import unpack_output_with_kv
+
+from .airllm_streamer import AirLLMStreamer
+from .cascade import ModelCascade
+from .crash_recovery import _CHECKPOINT_INTERVAL as _RECOVERY_CKPT_EVERY
 from .engine_common import (  # noqa: F401
     _CKPT_CACHE_MAX,
     _DEFAULT_CPU_MEMORY_BYTES,
     _DEFAULT_EOS_TOKEN_IDS,
     _QWEN_TOKENIZER_PATH,
     _QWEN_VOCAB,
+    SamplingParams,
+    _apply_dry,
     _checkpoint_metadata_cache,
     _checkpoint_size_cache,
     _ckpt_cache_lock,
-    _apply_dry,
     _dry_penalties,
     _is_memory_model,
     _map_gguf_to_forge,
@@ -26,24 +36,20 @@ from .engine_common import (  # noqa: F401
     _tokenizer_for_vocab,
     _truncate_at_stop,
     logger,
-    SamplingParams,
 )
-from .airllm_streamer import AirLLMStreamer  # noqa: F401
-from .cascade import ModelCascade  # noqa: F401
-from .crash_recovery import _CHECKPOINT_INTERVAL as _RECOVERY_CKPT_EVERY  # noqa: F401
-from .errors import ConfigurationError, GenerationOOMError  # noqa: F401
-from .kv.cacheblend import CacheBlend  # noqa: F401
-from .test_time_scaling import (  # noqa: F401
+from .errors import ConfigurationError, GenerationOOMError
+from .kv.cacheblend import CacheBlend
+from .prefix_cache import (
+    cache_prompt_prefix as _cache_prompt_prefix,
+)
+from .prefix_cache import (
+    generate_from_prefix_cache as _generate_from_prefix_cache,
+)
+from .test_time_scaling import (
     BeamSearch,
     FirstFinishSearch,
     MCTSDecoder,
 )
-from .prefix_cache import (  # noqa: F401
-    cache_prompt_prefix as _cache_prompt_prefix,
-    generate_from_prefix_cache as _generate_from_prefix_cache,
-)
-from forge.model_loader import unpack_output_with_kv  # noqa: F401
-
 
 # R60: decode-step throttle for the live KV-compaction bridge
 # (_maybe_compact_past_kv).  Strategies exposing compact_past_kv
@@ -687,8 +693,9 @@ class _GenerationMixin:
         for off in range(0, n, max_par):
             chunk = norm[off:off + max_par]
             idx = list(range(off, off + len(chunk)))
-            sub = lambda name_list: ([name_list[i] for i in idx]
-                                     if name_list else None)
+            def sub(name_list, idx=idx):
+                return ([name_list[i] for i in idx]
+                        if name_list else None)
             o, pk = pool.generate(
                 chunk,
                 max_new_tokens=max_new_tokens,
@@ -707,7 +714,7 @@ class _GenerationMixin:
                 logits_processors=sub(logits_processors),
                 tokenizer=self.tokenizer,
                 eos_ids=eos_ids,
-                tag_fn=lambda j: f"batch:{off + j}",
+                tag_fn=lambda j, off=off: f"batch:{off + j}",
                 prompt_rewards=prompt_rewards,
                 cf_topk=cf_topk,
             )
@@ -1639,7 +1646,7 @@ class _GenerationMixin:
             text = ""
 
             logits, past_kv = self._prefill(ids)
-            for next_token, _stop, _eos in self._decode_tokens(
+            for _next_token, _stop, _eos in self._decode_tokens(
                 logits, past_kv, params, eos_set, generated_ids,
                 logits_processor,
                 context_ids=ids[0].tolist(),

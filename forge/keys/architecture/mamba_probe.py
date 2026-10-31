@@ -208,7 +208,7 @@ class MambaLayer(nn.Module):
         Returns:
             (out, present) — out is (B, T, d_model), present is state dict or None
         """
-        B, T, D = x.shape
+        B, T, _D = x.shape
 
         # in_proj → split into x (ssm path) and z (gate)
         # HuggingFace Mamba: x, z = in_proj(x).chunk(2, dim=-1)
@@ -494,7 +494,7 @@ def test_jamba_weight_mapping():
     layer = MambaLayer(d_model=64, d_state=16, d_conv=4, expand=2)
 
     print("\nJamba Mamba layer → ForgeAI mapping:")
-    for name, param in layer.named_parameters():
+    for name, _param in layer.named_parameters():
         jamba_key = f"model.layers.0.mixer.{name}"
         forge_key = f"blocks.0.attn.{name}"
         print(f"  {jamba_key:50s} → {forge_key}")

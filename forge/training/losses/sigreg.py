@@ -82,7 +82,7 @@ class SIGRegLoss(nn.Module):
         if h.dim() > 2:
             h = h.reshape(h.shape[0] * h.shape[1], -1) if h.dim() == 3 else h.reshape(-1, h.shape[-1])
         h_f = h.float()
-        M, N = h_f.shape
+        _M, N = h_f.shape
         # Random init vector in the column space.
         v = torch.randn(N, device=h_f.device, dtype=h_f.dtype)
         v = v / v.norm().clamp(min=1e-8)

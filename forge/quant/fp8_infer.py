@@ -139,13 +139,12 @@ def quantize_model_fp8(model, target_modules=None, verbose=True):
 
     n_quantized = 0
     for name, module in list(model.named_modules()):
-        if isinstance(module, nn.Linear) and module.weight.ndim == 2:
-            if any(t in name for t in target_modules):
-                parent_name = ".".join(name.split(".")[:-1])
-                child_name = name.split(".")[-1]
-                parent = model.get_submodule(parent_name)
-                setattr(parent, child_name, FP8Linear(module))
-                n_quantized += 1
+        if isinstance(module, nn.Linear) and module.weight.ndim == 2 and any(t in name for t in target_modules):
+            parent_name = ".".join(name.split(".")[:-1])
+            child_name = name.split(".")[-1]
+            parent = model.get_submodule(parent_name)
+            setattr(parent, child_name, FP8Linear(module))
+            n_quantized += 1
 
     if verbose:
         bf16_bytes = 0

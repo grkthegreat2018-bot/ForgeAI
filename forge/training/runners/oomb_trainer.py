@@ -81,7 +81,7 @@ class PagedKVCacheForTraining:
             v: (B, n_kv, T, head_dim)
             offset: starting position in the cache
         """
-        B, _, T, _ = k.shape
+        _B, _, T, _ = k.shape
         for i in range(T):
             pos = offset + i
             block_idx = pos // self.block_size
@@ -218,7 +218,7 @@ class ChunkRecurrentTrainer:
         logits = self.model(input_ids, use_cache=False)
 
         # Compute cross-entropy loss
-        B, T, V = logits.shape
+        _B, T, V = logits.shape
         logits_flat = logits.view(-1, V)
         targets_flat = target_ids.view(-1)
 

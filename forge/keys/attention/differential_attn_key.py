@@ -129,7 +129,7 @@ class DifferentialAttention(nn.Module):
                 attention_bias: torch.Tensor | None = None,
                 position_ids: torch.Tensor | None = None,
                 cu_seqlens: torch.Tensor | None = None):
-        B, T, C = x.shape
+        B, T, _C = x.shape
         hd = self.head_dim
 
         if self._identity:
@@ -352,11 +352,10 @@ class DifferentialAttentionKey(Key):
                     del state[k]
                 elif ".attn.q_proj.weight" in k:
                     state[k] = _avg_rows(state[k], self.n_heads)
-                elif ".attn.k_proj.weight" in k:
-                    if q_rows:
-                        hd = q_rows // self.n_heads
-                        n_kv = state[k].shape[0] // (2 * hd)
-                        state[k] = _avg_rows(state[k], n_kv)
+                elif ".attn.k_proj.weight" in k and q_rows:
+                    hd = q_rows // self.n_heads
+                    n_kv = state[k].shape[0] // (2 * hd)
+                    state[k] = _avg_rows(state[k], n_kv)
             return KeyResult(success=True, weights=state)
         except Exception as e:
             return KeyResult(success=False, error=str(e))

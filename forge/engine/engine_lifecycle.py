@@ -1,9 +1,9 @@
 """Sleep/wake/VRAM lifecycle and crash-recovery mixin for ForgeEngine."""
 import os
 
-from .engine_common import *  # noqa: F403
-from .activation import ActivationConfig  # noqa: F401
-from .errors import CheckpointError, ConfigurationError  # noqa: F401
+import torch
+
+from .activation import ActivationConfig
 from .engine_common import (  # noqa: F401
     _CKPT_CACHE_MAX,
     _DEFAULT_CPU_MEMORY_BYTES,
@@ -20,6 +20,7 @@ from .engine_common import (  # noqa: F401
     _tokenizer_for_vocab,
     logger,
 )
+from .errors import CheckpointError, ConfigurationError
 
 
 class _LifecycleMixin:

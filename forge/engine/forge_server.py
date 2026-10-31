@@ -61,6 +61,7 @@ from forge.self_play.discovery.qwen_adapter import (
     render_messages_for_config,
 )
 from research.paths import FORGE_TOKENIZER_DIR, V2_CHECKPOINT
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,26 @@ _MAX_BATCH_PROMPTS = 64
 # Idle-timeout for task streams: no chunk AND no producer completion for
 # this long => the dispatcher died — error out instead of hanging (EC-073).
 _STREAM_IDLE_TIMEOUT_S = 300.0
+
+
+def _adapter_path_allowed(path: str) -> bool:
+    """Request-supplied adapter paths must resolve to an existing file
+    under an allowed root — the repo tree by default, plus optional extra
+    roots in FORGE_LORA_ROOTS (os.pathsep-separated). Blocks drive-by
+    file loads of arbitrary local paths (deserialization + read oracle).
+    """
+    try:
+        rp = os.path.realpath(path)
+    except (OSError, ValueError):
+        return False
+    if not os.path.isfile(rp):
+        return False
+    roots = [os.path.realpath(os.getcwd())]
+    extra = os.environ.get("FORGE_LORA_ROOTS", "")
+    roots += [os.path.realpath(r) for r in extra.split(os.pathsep) if r.strip()]
+    rp_l = rp.lower()
+    return any(rp_l == r.lower() or rp_l.startswith(r.lower() + os.sep)
+               for r in roots)
 
 
 def _parse_reasoning(text: str, model: str = "") -> tuple[str, str | None]:
@@ -597,7 +618,10 @@ class ForgeServer:
         self.app = FastAPI(title="ForgeAI Inference Server", version="3.0.0")
         self.app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
+            # Loopback origins only — a wildcard Origin + credentials lets
+            # any web page drive-by POST to the local server (tool exec,
+            # security-config mutation) through the victim's browser.
+            allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
@@ -704,10 +728,8 @@ class ForgeServer:
     def _cleanup_gpu_lock(self):
         """Remove the GPU lock file on shutdown."""
         if self._gpu_lock_file is not None:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(self._gpu_lock_file)
-            except OSError:
-                pass
             self._gpu_lock_file = None
 
     def register(self, model_id: str, checkpoint: str, config_name: str,
@@ -719,7 +741,7 @@ class ForgeServer:
             model_id, checkpoint, config_name,
             tokenizer_path=tok_path, vram_budget_gb=vram_budget_gb, **kwargs)
 
-    def serve(self, host: str = "0.0.0.0", port: int = 8000) -> None:
+    def serve(self, host: str = "127.0.0.1", port: int = 8000) -> None:
         """Start the HTTP server (blocking)."""
         self.batch_queue.start()
         if not self._api_key and host not in ("127.0.0.1", "::1",
@@ -870,10 +892,8 @@ class ForgeServer:
             _put(("error", e))
         finally:
             if gen is not None:
-                try:
+                with contextlib.suppress(Exception):
                     gen.close()
-                except Exception:
-                    pass
             _put(("done", None))  # no-op if the loop already closed
 
     async def _aiter_stream(self, gen_factory,
@@ -959,7 +979,6 @@ class ForgeServer:
             request.state.request_id = rid
             self._metrics["requests_total"] += 1
             if (self._api_key
-                    and request.method in _MUTATING_METHODS
                     and request.url.path.startswith("/v1")):
                 auth = request.headers.get("authorization", "")
                 if auth != f"Bearer {self._api_key}":
@@ -1127,7 +1146,8 @@ class ForgeServer:
             except QuestionValidationError as e:
                 raise HTTPException(
                     422, detail=[{"loc": ["body", "questions"],
-                                  "msg": str(e), "type": "value_error"}])
+                                  "msg": str(e), "type": "value_error"}]
+                ) from e
             result["model"] = model_id
             response.headers["x-typesafe-request-id"] = uuid.uuid4().hex
             return result
@@ -1148,6 +1168,10 @@ class ForgeServer:
             lora_swapped = False
             prev_lora = None
             if req.lora_adapter:
+                if not _adapter_path_allowed(req.lora_adapter):
+                    raise HTTPException(
+                        403, "lora_adapter path is outside allowed roots "
+                        "(repo tree + FORGE_LORA_ROOTS)")
                 engine = registry.get_engine(req.model)
                 if engine is not None:
                     prev_lora = engine.lora_info() if engine.has_lora() else None
@@ -1675,6 +1699,10 @@ class ForgeServer:
             engine = registry.get_engine(req.model)
             if engine is None:
                 raise HTTPException(404, f"Model '{req.model}' not found")
+            if not _adapter_path_allowed(req.adapter_path):
+                raise HTTPException(
+                    403, "adapter_path is outside allowed roots "
+                    "(repo tree + FORGE_LORA_ROOTS)")
             try:
                 n = engine.load_lora(req.adapter_path, rank=req.rank, alpha=req.alpha)
                 return {"status": "ok", "model": req.model, "n_adapters": n}
@@ -2399,7 +2427,7 @@ class ForgeServer:
                         try:
                             chunk = await asyncio.wait_for(
                                 get_next, timeout=1.0)
-                        except asyncio.TimeoutError:
+                        except TimeoutError:
                             chunk = None
                         if chunk is None:
                             break
@@ -2518,7 +2546,7 @@ def main():
     configure()
 
     parser = argparse.ArgumentParser(description="ForgeAI Inference Server v3.0")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind address")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind address")
     parser.add_argument("--port", type=int, default=8000, help="Bind port")
     parser.add_argument("--models", type=str, default="forgelm-v2-jamba",
                         help="Comma-separated model IDs to load")

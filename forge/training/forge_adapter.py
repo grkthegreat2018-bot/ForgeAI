@@ -107,7 +107,7 @@ class ForgeAdapter(nn.Module):
             return base_out + lora_out
 
         # Entropy-guided fusion
-        batch, seq_len, _ = x.shape
+        _batch, _seq_len, _ = x.shape
         # Compute each adapter's output
         adapter_outputs = []
         for i, (A, B) in enumerate(zip(self.adapters_A, self.adapters_B)):

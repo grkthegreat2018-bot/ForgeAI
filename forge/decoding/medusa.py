@@ -141,7 +141,7 @@ class MedusaTrainer:
         Returns:
             (total_loss, stats_dict)
         """
-        B, T = input_ids.shape
+        _B, T = input_ids.shape
 
         # Get hidden states from frozen main model.
         with torch.no_grad():
@@ -269,7 +269,7 @@ def medusa_generate(model, medusa, input_ids: torch.Tensor,
             # Each head produces (1, 1, V) logits from the last position.
             medusa_logits_list = medusa(medusa_input[:, -1:, :])  # list of (1, 1, V)
 
-            candidate_tokens, candidate_probs = medusa.predict_candidates(
+            candidate_tokens, _candidate_probs = medusa.predict_candidates(
                 medusa_input, top_k=top_k_candidates
             )  # (1, n_heads, top_k)
 

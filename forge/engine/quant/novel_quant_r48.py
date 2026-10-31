@@ -426,7 +426,7 @@ class NanoQuantLinear(QuantizedLinearMixin, _CachedDequantMixin):
             s2_f = s2.clone().requires_grad_(True)
             optimizer = torch.optim.Adam([U_f, V_f, s1_f, s2_f], lr=0.01)
 
-            for step in range(refine_steps):
+            for _step in range(refine_steps):
                 optimizer.zero_grad()
                 # STE: forward uses sign, backward uses gradient
                 U_q = U_f + (torch.sign(U_f) - U_f).detach()
@@ -889,7 +889,7 @@ def _binary_kmeans(W_bin: torch.Tensor, K: int, device: torch.device,
         codebook: (K, D) binary ±1 centroids
         indices: (N,) cluster assignments
     """
-    N, D = W_bin.shape
+    N, _D = W_bin.shape
 
     # Initialize: random selection of K rows as centroids
     perm = torch.randperm(N, device=device)[:K]
@@ -1186,7 +1186,7 @@ def estimate_r48_memory(model: nn.Module) -> dict:
     total_bytes = 0
     total_params = 0
 
-    for name, module in model.named_modules():
+    for _name, module in model.named_modules():
         cls_name = type(module).__name__
         if cls_name == 'NanoQuantLinear':
             # U packed: d_out * r bits, V packed: d_in * r bits, s1: d_out * 16, s2: d_in * 16

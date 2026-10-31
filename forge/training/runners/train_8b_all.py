@@ -52,6 +52,7 @@ if sys.platform == "win32":
 import numpy as np
 import torch
 import torch.nn.functional as F
+import contextlib
 
 ROOT = Path(__file__).resolve().parents[2]
 V7_DATA_DIR = ROOT / "research" / "data" / "v7_train"
@@ -628,10 +629,8 @@ def restore_rng(rng: dict) -> None:
     if rng.get("torch") is not None:
         torch.set_rng_state(rng["torch"].cpu())
     if rng.get("cuda") is not None and torch.cuda.is_available():
-        try:
+        with contextlib.suppress(RuntimeError):
             torch.cuda.set_rng_state_all([s.cpu() for s in rng["cuda"]])
-        except RuntimeError:
-            pass
     if rng.get("numpy") is not None:
         np.random.set_state(rng["numpy"])
     if rng.get("python") is not None:
@@ -672,7 +671,7 @@ def freeze_dead_params_(model, device: torch.device, use_flce: bool) -> int:
     model.train(was_training)
 
     n_dead = 0
-    for p, was in saved_flags:
+    for p, _was in saved_flags:
         if not had_grad[id(p)]:
             p.requires_grad_(False)
             p._forge_frozen = True  # BAdam excludes explicitly frozen params
@@ -1125,7 +1124,7 @@ def run(args: argparse.Namespace) -> None:
                     "badam": slim_badam_state(optimizer),
                     "rng": capture_rng(),
                     "best_val": best_val,
-                    "args": {k: v for k, v in vars(args).items()},
+                    "args": dict(vars(args).items()),
                 }, resume_pt)
             except Exception as exc:
                 log(f"Resume bundle save FAILED: {exc}")

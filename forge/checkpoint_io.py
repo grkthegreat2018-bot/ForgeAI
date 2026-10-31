@@ -11,6 +11,7 @@ safetensors only stores tensors.
 """
 import glob
 import json
+import math
 import os
 import random
 import re
@@ -19,6 +20,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import contextlib
 
 try:
     from safetensors.torch import load_file, save_file
@@ -31,6 +33,13 @@ try:
     _HAS_FAST_SAFETENSORS = True
 except ImportError:
     _HAS_FAST_SAFETENSORS = False
+
+
+# Hardening bounds for untrusted safetensors files — checked before any
+# allocation is sized from header contents.
+_MAX_ST_FILE_BYTES = 128 * 1024**3     # 128GB per-file sanity cap
+_MAX_ST_HEADER_BYTES = 100 * 1024**2   # safetensors spec caps headers at 100MB
+_MAX_ST_TENSORS = 100_000              # cap on header/keys enumeration
 
 
 def _is_safetensors_path(path: str) -> bool:
@@ -47,6 +56,13 @@ _ST_TORCH_DTYPES = {
     "F8_E4M3": "float8_e4m3fn", "F8_E5M2": "float8_e5m2",
 }
 
+# safetensors dtype name -> element size in bytes (for header validation).
+_ST_DT_SIZES = {
+    "BOOL": 1, "U8": 1, "I8": 1, "I16": 2, "U16": 2, "I32": 4, "U32": 4,
+    "I64": 8, "U64": 8, "F16": 2, "BF16": 2, "F32": 4, "F64": 8,
+    "F8_E4M3": 1, "F8_E5M2": 1,
+}
+
 
 def _read_safetensors_entries(path: str):
     """Parse a safetensors header without loading tensor data.
@@ -58,9 +74,28 @@ def _read_safetensors_entries(path: str):
     torch build cannot represent.
     """
     import struct
+    size = os.path.getsize(path)
+    if size > _MAX_ST_FILE_BYTES:
+        raise ValueError(
+            f"safetensors file too large: {size / 2**30:.1f} GiB in {path}")
+    if size < 8:
+        raise ValueError(f"file too small for safetensors header: {path}")
     with open(path, "rb") as f:
         (hdr_len,) = struct.unpack("<Q", f.read(8))
+        # Bound the header read — a corrupt u64 length must not drive a
+        # multi-GB f.read / json.loads.
+        if hdr_len > _MAX_ST_HEADER_BYTES or hdr_len > size - 8:
+            raise ValueError(
+                f"bad safetensors header length {hdr_len} in {path}")
         header = json.loads(f.read(hdr_len))
+    # Cap tensor enumeration — a hostile header could declare millions of
+    # entries and exhaust memory before any data is read.
+    n_tensors = len(header) - (1 if "__metadata__" in header else 0)
+    if n_tensors > _MAX_ST_TENSORS:
+        raise ValueError(
+            f"safetensors header declares {n_tensors} tensors "
+            f"(cap {_MAX_ST_TENSORS})")
+    blob_len = size - 8 - hdr_len
     entries = []
     for key, meta in header.items():
         if key == "__metadata__":
@@ -71,8 +106,14 @@ def _read_safetensors_entries(path: str):
             raise ValueError(
                 f"unsupported safetensors dtype {meta.get('dtype')!r}")
         s, e = meta["data_offsets"]
-        if e < s:
+        # Offsets must fit the real blob AND match shape*dtype — the
+        # pipelined loader allocates tensors from `shape`, so a lie here
+        # is a GPU/host OOM vector.
+        if e < s or e > blob_len:
             raise ValueError(f"bad data_offsets for {key!r}")
+        if math.prod(meta["shape"]) * _ST_DT_SIZES[meta["dtype"]] != e - s:
+            raise ValueError(
+                f"shape/dtype inconsistent with data_offsets for {key!r}")
         entries.append((key, dt, meta["shape"], s, e))
     entries.sort(key=lambda t: t[3])
     return entries, 8 + hdr_len
@@ -163,7 +204,7 @@ def load_safetensors_pipelined(path: str, device,
                     raise OSError(
                         f"short read in {path}: {got}/{n} bytes at {off}")
                 with torch.cuda.stream(stream):
-                    for k, dt, _shape, s, e in group:
+                    for k, _dt, _shape, s, e in group:
                         cs, ce = max(s, off), min(e, off + n)
                         if cs >= ce:
                             continue
@@ -186,7 +227,7 @@ def load_safetensors_pipelined(path: str, device,
     return state
 
 
-def cleanup_orphaned_tmp(checkpoint_dir: str = None) -> int:
+def cleanup_orphaned_tmp(checkpoint_dir: str | None = None) -> int:
     """Remove orphaned .tmp files left by crashed checkpoint saves.
 
     Call this at startup to clean up any .tmp files from previous runs
@@ -294,10 +335,8 @@ def save_checkpoint(state: dict[str, Any], path: str) -> str:
                         raise RuntimeError(
                             f"dtype mismatch for '{k}': {st_dtype} != {t.dtype}")
         except Exception as e:
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(tmp_path)
-            except OSError:
-                pass
             raise RuntimeError(f"checkpoint verification failed for {path}: {e}") from e
         os.replace(tmp_path, path)  # atomic on the same filesystem
         # Meta JSON sidecar (also atomic).
@@ -334,6 +373,13 @@ def load_checkpoint(path: str, map_location=None, allow_unsafe: bool = False) ->
         if not _HAS_SAFETENSORS:
             raise RuntimeError("safetensors not installed; cannot read .safetensors checkpoint.")
 
+        # Sanity cap before any header-driven allocation.
+        size = os.path.getsize(path)
+        if size > _MAX_ST_FILE_BYTES:
+            raise ValueError(
+                f"safetensors checkpoint too large: "
+                f"{size / 2**30:.1f} GiB in {path}")
+
         device_str = str(map_location) if map_location is not None else "cpu"
 
         # Try fastsafetensors first (4.8-7.5x faster, BOOT_TIME_AUDIT Stage 2)
@@ -341,7 +387,7 @@ def load_checkpoint(path: str, map_location=None, allow_unsafe: bool = False) ->
             try:
                 loader = SafeTensorsFileLoader(pg=None, device=device_str)
                 tensors = loader.load(path, map_location=device_str)
-                result: dict[str, Any] = {k: v for k, v in tensors.items()}
+                result: dict[str, Any] = dict(tensors.items())
                 meta_path = path + ".meta.json"
                 if os.path.exists(meta_path):
                     with open(meta_path, encoding="utf-8") as f:
@@ -359,7 +405,13 @@ def load_checkpoint(path: str, map_location=None, allow_unsafe: bool = False) ->
         if device_str in ("cpu", "meta"):
             from safetensors import safe_open
             with safe_open(path, framework="pt", device="cpu") as f:
-                result: dict[str, Any] = {k: f.get_tensor(k) for k in f.keys()}
+                keys = list(f.keys())
+                # Cap enumeration (see _MAX_ST_TENSORS) before materializing.
+                if len(keys) > _MAX_ST_TENSORS:
+                    raise ValueError(
+                        f"safetensors file declares {len(keys)} tensors "
+                        f"(cap {_MAX_ST_TENSORS})")
+                result: dict[str, Any] = {k: f.get_tensor(k) for k in keys}
         else:
             try:
                 tensors = load_safetensors_pipelined(path, device_str)
@@ -367,7 +419,7 @@ def load_checkpoint(path: str, map_location=None, allow_unsafe: bool = False) ->
                 print(f"  (pipelined load failed: {e}, "
                       f"falling back to safetensors)")
                 tensors = load_file(path, device=device_str)
-            result = {k: v for k, v in tensors.items()}
+            result = dict(tensors.items())
         n_tensors = len(result)
         meta_path = path + ".meta.json"
         if os.path.exists(meta_path):

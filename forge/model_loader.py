@@ -10,8 +10,6 @@ logger = logging.getLogger(__name__)
 # ``forge/runtime/configure.py``.
 import torch
 
-KVCache = tuple[torch.Tensor, torch.Tensor]
-
 
 
 # ── Split-module re-exports (backward compatibility) ─────────────────────────
@@ -23,7 +21,7 @@ from forge.model.attention_ops import (  # noqa: F401
     varlen_attention,
 )
 from forge.model.builders import build_attention, build_ffn  # noqa: F401
-from forge.model.kv_cache import *  # noqa: F403
+from forge.model.kv_cache import *
 from forge.model.kv_cache import KVCache, PreAllocatedKVCache, create_kv_cache, unpack_output_with_kv  # noqa: F401
 from forge.model.layers import (  # noqa: F401
     DoubleGatedConvLayer,

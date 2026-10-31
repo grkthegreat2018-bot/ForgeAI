@@ -277,10 +277,9 @@ class RotorQuantCache:
         """Effective V bit-width: boundary layers get boundary_v_bits."""
         base = bits if bits_v is None else bits_v
         if (boundary_v_bits is not None and layer_idx is not None
-                and n_layers is not None):
-            if (layer_idx < boundary_layers
-                    or layer_idx >= n_layers - boundary_layers):
-                return boundary_v_bits
+                and n_layers is not None) and (layer_idx < boundary_layers
+                or layer_idx >= n_layers - boundary_layers):
+            return boundary_v_bits
         return base
 
     # ── low-level quantize / dequantize for a single tensor ──
@@ -347,7 +346,7 @@ class RotorQuantCache:
         Decode tokens (T_new == 1) flush the prefill buffer to quantized form
         and are appended in quantized form.
         """
-        B, Hkv, T_new, D = k.shape
+        _B, Hkv, T_new, D = k.shape
         assert self.head_dim == D, f"head_dim mismatch: got {D}, expected {self.head_dim}"
         assert Hkv == self.n_kv_heads, f"n_kv_heads mismatch: got {Hkv}, expected {self.n_kv_heads}"
 

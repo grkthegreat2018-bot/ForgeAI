@@ -208,11 +208,15 @@ DANGEROUS_IMPORTS = {
 DEFAULT_SANDBOX_CONFIG = {
     "auto_mode": "ask",
     "access_rules": {
-        # Writable dirs (model can create/modify files here)
+        # Writable dirs (model can create/modify files here) — post
+        # research/->forge/ migration layout; research/* kept for the
+        # data/results dirs that still exist on disk.
         "research/data": ACCESS_READ_WRITE,
-        "research/output": ACCESS_READ_WRITE,
-        "research/sandbox": ACCESS_READ_WRITE,
         "research/results": ACCESS_READ_WRITE,
+        "forge/data": ACCESS_READ_WRITE,
+        "forge/results": ACCESS_READ_WRITE,
+        "forge/evolution": ACCESS_READ_WRITE,
+        "sandbox": ACCESS_READ_WRITE,
         ".devin": ACCESS_READ_WRITE,
         # Read-only dirs (model can read but not modify)
         "forge/engine": ACCESS_READ_ONLY,
@@ -220,13 +224,15 @@ DEFAULT_SANDBOX_CONFIG = {
         "forge/self_play": ACCESS_READ_ONLY,
         "forge/distillation": ACCESS_READ_ONLY,
         "forge/evaluation": ACCESS_READ_ONLY,
-        "research/checkpoints": ACCESS_READ_ONLY,
-        "research/architecture": ACCESS_READ_ONLY,
         "forge/decoding": ACCESS_READ_ONLY,
         "forge/quant": ACCESS_READ_ONLY,
         "forge/keys": ACCESS_READ_ONLY,
         "forge/moe": ACCESS_READ_ONLY,
+        "forge/model": ACCESS_READ_ONLY,
         "forge/runtime": ACCESS_READ_ONLY,
+        "forge/exp": ACCESS_READ_ONLY,
+        "research/checkpoints": ACCESS_READ_ONLY,
+        "research/architecture": ACCESS_READ_ONLY,
         "AGENTS.md": ACCESS_READ_ONLY,
         "docs": ACCESS_READ_ONLY,
         # Denied (no access at all)
@@ -489,7 +495,7 @@ class ToolSecurityManager:
             )
 
         # Credential/secret blacklist applies to reads too (EC-027).
-        for pattern in self.file_blacklist:
+        for pattern in self._effective_blacklist():
             if self._match_glob(rel_path, pattern) or self._match_glob(str(p), pattern):
                 return SecurityDecision(
                     allowed=False,
@@ -552,7 +558,7 @@ class ToolSecurityManager:
             )
 
         # 3. Check file blacklist patterns (always blocked for writes)
-        for pattern in self.file_blacklist:
+        for pattern in self._effective_blacklist():
             if self._match_glob(rel_path, pattern) or self._match_glob(str(p), pattern):
                 return SecurityDecision(
                     allowed=False,
@@ -675,7 +681,7 @@ class ToolSecurityManager:
             )
 
         # Check file blacklist
-        for pattern in self.file_blacklist:
+        for pattern in self._effective_blacklist():
             if self._match_glob(rel_path, pattern) or self._match_glob(str(p), pattern):
                 return SecurityDecision(
                     allowed=False,
@@ -724,7 +730,7 @@ class ToolSecurityManager:
 
         # Source must not be a protected engine file or blacklisted
         rel_src = self._rel_path(source)
-        for pattern in self.file_blacklist:
+        for pattern in self._effective_blacklist():
             if self._match_glob(rel_src, pattern):
                 return SecurityDecision(
                     allowed=False,
@@ -807,15 +813,14 @@ class ToolSecurityManager:
                             "reason": DANGEROUS_IMPORTS[module],
                             "line": getattr(node, "lineno", 0),
                         })
-            elif isinstance(node, ast.ImportFrom):
-                if node.module:
-                    module = node.module.split(".")[0]
-                    if module in DANGEROUS_IMPORTS:
-                        findings.append({
-                            "module": module,
-                            "reason": DANGEROUS_IMPORTS[module],
-                            "line": getattr(node, "lineno", 0),
-                        })
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                module = node.module.split(".")[0]
+                if module in DANGEROUS_IMPORTS:
+                    findings.append({
+                        "module": module,
+                        "reason": DANGEROUS_IMPORTS[module],
+                        "line": getattr(node, "lineno", 0),
+                    })
 
         # Also check for string-based dynamic imports
         dynamic_patterns = [
@@ -1005,13 +1010,31 @@ class ToolSecurityManager:
         rel_path = self._rel_path(path)
         return self._get_access_level(rel_path)
 
+    def _effective_blacklist(self) -> list[str]:
+        """Blacklist actually enforced: hard-coded secret defaults are a
+        non-removable floor — remote/local config mutation can only ADD
+        patterns, never drop the credential/.git/sandbox.json protections.
+        """
+        merged = list(dict.fromkeys(
+            list(DEFAULT_FILE_BLACKLIST_PATTERNS) + list(self.file_blacklist)))
+        return merged
+
     def add_to_file_blacklist(self, pattern: str):
         """Add a file pattern to the blacklist."""
         if pattern not in self.file_blacklist:
             self.file_blacklist.append(pattern)
 
     def remove_from_file_blacklist(self, pattern: str):
-        """Remove a file pattern from the blacklist."""
+        """Remove a file pattern from the blacklist.
+
+        Refuses to drop DEFAULT_FILE_BLACKLIST_PATTERNS entries — they are
+        the hard deny floor (EC-027): /v1/security/config PATCH could
+        otherwise un-blacklist .env/.ssh/sandbox.json remotely.
+        """
+        if pattern in DEFAULT_FILE_BLACKLIST_PATTERNS:
+            raise ValueError(
+                f"'{pattern}' is a default protected pattern and cannot "
+                "be removed")
         self.file_blacklist = [p for p in self.file_blacklist if p != pattern]
 
     def add_to_website_whitelist(self, domain: str):

@@ -132,7 +132,7 @@ def generate_candidates(
         ))
 
         # Temperature-sampled candidates (reuse prefilled prompt KV cache)
-        for i in range(n_temp_samples):
+        for _i in range(n_temp_samples):
             temp = temperature + random.uniform(-0.1, 0.1)  # slight variation
             temp = max(0.3, min(1.2, temp))  # clamp
             sampled_ids = model.generate(
@@ -496,7 +496,7 @@ def main():
             # Score candidates with LLM judge
             if judge_client:
                 for c in candidates:
-                    score, reason = score_candidate_with_judge(
+                    score, _reason = score_candidate_with_judge(
                         judge_client, prompt, c.text, args.judge_model
                     )
                     c.judge_score = score

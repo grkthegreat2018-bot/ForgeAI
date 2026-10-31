@@ -159,9 +159,7 @@ def _is_filler_task(task: str) -> bool:
         if pat in t:
             return True
     has_keyword = any(kw in t for kw in _TOOL_KEYWORDS)
-    if not has_keyword:
-        return True
-    return False
+    return bool(not has_keyword)
 
 
 # System prompt for task generation

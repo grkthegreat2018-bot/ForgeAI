@@ -234,7 +234,7 @@ class UnifiedRadixCache:
                       kv_cache: torch.Tensor | None = None,
                       state_cache: torch.Tensor | None = None):
         """Insert a prefix into the tree with its cache data."""
-        node, matched, total = self.match_prefix(token_ids)
+        node, matched, _total = self.match_prefix(token_ids)
 
         tokens = tuple(token_ids)
         offset = matched
@@ -315,7 +315,7 @@ class UnifiedRadixCache:
             "gpu_tokens": self._gpu_tokens,
             "host_tokens": self._host_tokens,
             "max_gpu_tokens": self.max_gpu_tokens,
-            "total_nodes": len([n for n in self._collect_all()]),
+            "total_nodes": len(list(self._collect_all())),
         }
 
     def _collect_all(self) -> list:

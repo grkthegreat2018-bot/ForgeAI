@@ -133,7 +133,7 @@ class AdamW4Bit(Optimizer):
         ef_feedback: bool = True,
         verbose: bool = True,
     ):
-        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay}
         super().__init__(params, defaults)
         self.block_size = block_size
         self.ef_feedback = ef_feedback
@@ -286,7 +286,7 @@ class NVMeStreamedBAdam(Optimizer):
         switch_every: int = 10,
         verbose: bool = True,
     ):
-        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay}
         all_params = [p for p in model.parameters() if p.requires_grad]
         super().__init__(all_params, defaults)
 
@@ -493,8 +493,8 @@ class MuonBitNet4Bit(Optimizer):
         block_size: int = 128,
         verbose: bool = True,
     ):
-        defaults = dict(lr=lr, momentum=momentum, n_steps=n_steps,
-                        weight_decay=weight_decay)
+        defaults = {"lr": lr, "momentum": momentum, "n_steps": n_steps,
+                        "weight_decay": weight_decay}
         super().__init__(params, defaults)
         self.block_size = block_size
         self._verbose = verbose
@@ -625,8 +625,8 @@ class NvmeMuon4Bit(Optimizer):
         switch_every: int = 5,
         verbose: bool = False,
     ):
-        defaults = dict(lr=lr, momentum=momentum, n_steps=n_steps,
-                        weight_decay=weight_decay)
+        defaults = {"lr": lr, "momentum": momentum, "n_steps": n_steps,
+                        "weight_decay": weight_decay}
         all_params = [p for p in model.parameters() if p.requires_grad]
         super().__init__(all_params, defaults)
 
@@ -718,10 +718,11 @@ class NvmeMuon4Bit(Optimizer):
             if os.path.exists(packed_path) and os.path.exists(scales_path):
                 try:
                     m_packed = torch.load(
-                        packed_path, map_location="cpu", weights_only=False)
+                        packed_path, map_location="cpu", weights_only=True)
                     m_scales = torch.load(
-                        scales_path, map_location="cpu", weights_only=False)
+                        scales_path, map_location="cpu", weights_only=True)
                 except TypeError:
+                    # old torch without weights_only
                     m_packed = torch.load(packed_path, map_location="cpu")
                     m_scales = torch.load(scales_path, map_location="cpu")
             else:
@@ -905,7 +906,7 @@ class TernaryOptimizer(Optimizer):
         ternary_threshold: float = 1.0,
         verbose: bool = True,
     ):
-        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay}
         super().__init__(params, defaults)
         self.ternary_threshold = ternary_threshold
         self._verbose = verbose

@@ -52,20 +52,40 @@ the implementation is split across focused modules (config, helpers,
 journal, tables, kernels, state/predict/learn/revert/io mixins, model).
 """
 
-from .helpers import (_HASH_P, _MASK64, _MIX1, _MIX2,
-                      _group_add, _group_totals,
-                      _load_teacher_embedding, _mix64, _s64,
-                      _scatter_sum)
 from .config import FluxConfig
+from .helpers import (
+                      _HASH_P,
+                      _MASK64,
+                      _MIX1,
+                      _MIX2,
+                      _group_add,
+                      _group_totals,
+                      _load_teacher_embedding,
+                      _mix64,
+                      _s64,
+                      _scatter_sum,
+)
 from .journal import FluxJournal
-from .tables import _GPUCellTables
 from .kernels import HAS_TRITON
-from .model import FluxLM
 from .knobhead import KnobHead
+from .model import FluxLM
+from .tables import _GPUCellTables
 
 __all__ = [
-    "FluxLM", "FluxConfig", "FluxJournal", "KnobHead", "HAS_TRITON",
-    "_GPUCellTables", "_HASH_P", "_MASK64", "_MIX1", "_MIX2",
-    "_load_teacher_embedding", "_mix64", "_s64", "_scatter_sum",
-    "_group_add", "_group_totals",
+                      "HAS_TRITON",
+                      "_HASH_P",
+                      "_MASK64",
+                      "_MIX1",
+                      "_MIX2",
+                      "FluxConfig",
+                      "FluxJournal",
+                      "FluxLM",
+                      "KnobHead",
+                      "_GPUCellTables",
+                      "_group_add",
+                      "_group_totals",
+                      "_load_teacher_embedding",
+                      "_mix64",
+                      "_s64",
+                      "_scatter_sum",
 ]

@@ -157,7 +157,7 @@ class HadamardLiftLinear(QuantizedLinearMixin):
 
         if optimize_p:
             optimizer = torch.optim.Adam([P], lr=p_lr)
-            for step in range(p_steps):
+            for _step in range(p_steps):
                 optimizer.zero_grad()
                 W_lifted = torch.einsum('Dd,ond->onD', P, W_vectors)
                 # Quantize with STE
@@ -722,7 +722,7 @@ class TernaryLiftLinear(QuantizedLinearMixin):
 
         if optimize_p:
             optimizer = torch.optim.Adam([P], lr=p_lr)
-            for step in range(p_steps):
+            for _step in range(p_steps):
                 optimizer.zero_grad()
                 W_lifted = torch.einsum('Dd,ond->onD', P, W_vec)
                 # Ternary quantize with STE
@@ -887,7 +887,7 @@ def estimate_quantized_memory(model: nn.Module) -> dict:
     total_bytes = 0
     total_params = 0
 
-    for name, module in model.named_modules():
+    for _name, module in model.named_modules():
         if isinstance(module, HadamardLiftLinear):
             # 1-bit per sign (theoretical with bit-packing)
             n_bits = module.q_signs.numel()  # 1 bit each theoretically
