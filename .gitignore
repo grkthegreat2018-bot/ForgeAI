@@ -176,3 +176,31 @@ scripts/sft/**/*.parquet
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Evolve-loop generated artifacts (regenerable from forge_evolve.db)
+*.jsonl
+.tmp_*
+*.err
+keycheck.txt
+tok_test.txt
+None
+scratch/
+logs/
+
+# llama.cpp vendored binaries — redistributables, not repo content
+tools/llama/
+
+# all local CUDA/ggml binaries — parity-test assets, not repo content
+tools/llama/
+parity_*.txt
+
+# venvs / model artifacts (multi-GB, local-only)
+venv_ov/
+venv_train/
+adapters/
+forge/evolution/proposer_ckpt/
+forge/evolution/proposer_ckpt.safetensors.meta.json
+forge/evolution/proposer_mla_moe/
+forge/evolution/loras/
+forge/evolution/loras_lfm3/
+.tmp_*
