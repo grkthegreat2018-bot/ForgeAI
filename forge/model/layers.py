@@ -398,7 +398,7 @@ class GroupedQueryAttention(nn.Module):
             if self.sinks is not None and self.sinks.abs().max().item() != 0.0:
                 swa = swa + self.sinks.view(1, self.n_heads, 1, 1).to(swa.dtype)
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=swa)
-            return self._finish_attn(x, out), new_kv
+            return self._finish_attn(x, out, gate_logits), new_kv
         # CSA (Compressed Sparse Attention): for long sequences, use top-k
         # position selection to reduce O(S^2) → O(S*k). Short sequences
         # use full attention (lossless when S <= top_k).
@@ -410,7 +410,7 @@ class GroupedQueryAttention(nn.Module):
                 self.n_heads, top_k=csa_top_k,
                 head_dim=self.head_dim)
             out = csa(q, k, v, is_causal=True)
-            return self._finish_attn(x, out), new_kv
+            return self._finish_attn(x, out, gate_logits), new_kv
         # LearnedSink: add per-head sink bias to attention scores.
         # sink is (n_heads,) → broadcast to (1, n_heads, 1, total_len).
         # init=0 → no-op (lossless). Training learns positive sink values.
