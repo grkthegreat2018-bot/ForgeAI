@@ -160,7 +160,18 @@ class CodeEvolveConfig:
     hop_after: int = 12                        # dry evals before basin hop
     patience: int = 30                         # dry evals before stop
     proposer: str = "mut"                      # mut | mix | llm | basin
-                                               # | none
+                                               # | api | none
+    api_url: str = ""                          # api: OpenAI-compat chat
+                                               # endpoint (empty ->
+                                               # FORGE_API_PROPOSER_URL)
+    api_model: str = "deepseek-flash"          # api: model id
+    api_key_env: str = "DEEPSEEK_API_KEY"      # api: env var / .env key
+    api_workers: int = 4                       # api: parallel requests
+    api_max_tokens: int = 2048                 # api: incl. reasoning
+    api_trace: str = ""                        # api: sidecar trace jsonl
+                                               # (reasoning+capture); ""
+                                               # -> results/api_proposer_
+                                               # traces.jsonl
     llm_every: int = 6                         # mix: LLM every Nth cycle
     basin_batch: int = 16                      # basin: LLM parents per
                                                # generate_batch pass
@@ -1635,6 +1646,112 @@ class LLMProposer:
             tok.padding_side = old_side
 
 
+class APIProposer:
+    """Remote proposer over any OpenAI-compatible chat endpoint.
+
+    Exists for two reasons: (a) zero VRAM — the API does generation so
+    the GPU stays free for training/eval between bursts; (b) reasoning
+    teachers — reasoning models (deepseek-flash/v4-pro, gpt-oss) emit a
+    `reasoning_content` channel we wrap in <think>...</think> and prepend
+    to the raw completion, so _log_gen captures the full
+    prompt->reasoning->code trace and the evolve filter (verified wins
+    only) turns it into a reasoning-distillation corpus for free.
+
+    Interface mirrors LLMProposer: propose_batch(prompts) -> list[str].
+    Auth: cfg.api_key_env names the env var; falls back to the repo .env
+    file. Transport: curl.exe (Python urllib gets Cloudflare-1010'd on
+    some routes on this box).
+    """
+
+    _TRACE_LOCK = threading.Lock()
+
+    def __init__(self, cfg, db=None, tag_sig: str = ""):
+        self.cfg = cfg
+        self.db = db
+        self.tag_sig = tag_sig
+        self.url = (cfg.api_url
+                    or os.environ.get("FORGE_API_PROPOSER_URL", "")
+                    or "https://api.deepseek.com/chat/completions")
+        self.model = cfg.api_model
+        self.api_key = self._resolve_key(cfg.api_key_env)
+        trace = cfg.api_trace or "results/api_proposer_traces.jsonl"
+        self._trace = Path(trace)
+
+    @staticmethod
+    def _resolve_key(env_name: str) -> str:
+        key = os.environ.get(env_name)
+        if key:
+            return key
+        env = Path(__file__).resolve().parents[2] / ".env"
+        if env.exists():
+            for line in env.read_text().splitlines():
+                if line.startswith(env_name + "="):
+                    return line.split("=", 1)[1].strip()
+        return ""
+
+    def _call(self, prompt: str) -> tuple[str, str]:
+        """Returns (content, reasoning). Raises on hard failure."""
+        import subprocess
+        body = json.dumps({
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": max(0.4, self.cfg.temperature),
+            "max_tokens": self.cfg.api_max_tokens,
+        }).encode()
+        last_err = "no response"
+        for attempt in range(6):
+            try:
+                r = subprocess.run(
+                    ["curl.exe", "-s", "-X", "POST", self.url,
+                     "-H", f"Authorization: Bearer {self.api_key}",
+                     "-H", "Content-Type: application/json",
+                     "--data-binary", "@-", "--max-time", "300",
+                     "-w", "\nHTTPSTATUS:%{http_code}"],
+                    input=body, capture_output=True, timeout=320)
+                txt = r.stdout.decode("utf-8", errors="replace")
+                body_txt, _, status = txt.rpartition("HTTPSTATUS:")
+                if status.strip() == "429":
+                    time.sleep(60 + 15 * attempt)
+                    continue
+                d = json.loads(body_txt)
+                if "error" in d:
+                    raise RuntimeError(str(d["error"])[:150])
+                msg = d["choices"][0]["message"]
+                return (msg.get("content") or "",
+                        msg.get("reasoning_content") or "")
+            except json.JSONDecodeError:
+                last_err = "bad json"
+            except Exception as e:
+                last_err = str(e)[:100]
+            time.sleep(20 * (attempt + 1))
+        raise RuntimeError(f"api proposer retries exhausted: {last_err}")
+
+    def propose_batch(self, prompts: list[str]) -> list[str]:
+        """One API call per prompt, threaded — no GPU involved."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(p: str) -> str:
+            content, reasoning = self._call(p)
+            raw = ((f"<think>\n{reasoning}\n</think>\n" if reasoning
+                    else "") + content)
+            try:
+                with self._TRACE_LOCK:
+                    self._trace.parent.mkdir(parents=True,
+                                             exist_ok=True)
+                    with self._trace.open("a", encoding="utf-8") as w:
+                        w.write(json.dumps({
+                            "model": self.model, "prompt": p,
+                            "reasoning": reasoning, "content": content,
+                        }, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            return raw
+
+        with ThreadPoolExecutor(
+                max_workers=max(1, self.cfg.api_workers)) as ex:
+            return list(ex.map(one, prompts))
+
+
 def _extract_code(raw: str, prime: str = "",
                   required: list[str] | None = None) -> str:
     """Pull the candidate program out of an LLM completion.
@@ -1877,6 +1994,9 @@ class CodeEvolve:
                 Mutator(seed=cfg.seed, db=self.db, tag_sig=self._tag_sig()),
                 LLMProposer(cfg, db=self.db, tag_sig=self._tag_sig()),
                 llm_every=cfg.llm_every)
+        elif cfg.proposer == "api":
+            self._proposer = APIProposer(cfg, db=self.db,
+                                         tag_sig=self._tag_sig())
         elif cfg.proposer == "basin":
             # LLM emits basin parents on a background thread; the
             # mutator fans each one out deterministically. The LLM is

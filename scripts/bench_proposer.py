@@ -51,6 +51,31 @@ _PROPOSALS = [
 ]
 
 
+def _target_prompts(reps: int = 1) -> list:
+    """One prompt per real evolution target — the actual distribution
+    the proposer gates on, not 3 seeds cycled."""
+    import importlib.util
+    out = []
+    tdir = REPO / "forge" / "evolution" / "targets"
+    for f in sorted(tdir.glob("*.py")):
+        spec = importlib.util.spec_from_file_location(f.stem, f)
+        mod = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(mod)
+        except Exception:
+            continue
+        seed = getattr(mod, "SEED_CODE", "")
+        req = getattr(mod, "REQUIRED", [])
+        instr = getattr(mod, "PROMPT", "")
+        if not seed or not req:
+            continue
+        instr = (f"{instr} Keep public names ({', '.join(req)}); "
+                 "identical semantics.")
+        for _ in range(reps):
+            out.append((instr, seed, list(req)))
+    return out
+
+
 def _score_completion(raw: str, required: list[str]) -> dict:
     code = _extract_code(raw)
     out = {"has_code": bool(code.strip()), "syntax": False,
@@ -134,6 +159,9 @@ def main() -> int:
     ap.add_argument("--prompts", type=int, default=12,
                     help="proposal prompts to cycle (repeats the 3-seed "
                     "grid)")
+    ap.add_argument("--from-targets", type=int, default=0, metavar="REPS",
+                    help="bench on the real target files instead — "
+                    "REPS passes over all ~27 target prompts")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--max-new", type=int, default=512)
     ap.add_argument("--lora-tag", default=None,
@@ -144,8 +172,10 @@ def main() -> int:
     ap.add_argument("--out", default="results/proposer_bench.json")
     args = ap.parse_args()
 
-    grid = [_PROPOSALS[i % len(_PROPOSALS)]
-            for i in range(args.prompts)]
+    grid = (_target_prompts(args.from_targets)
+            if args.from_targets
+            else [_PROPOSALS[i % len(_PROPOSALS)]
+                  for i in range(args.prompts)])
     reports = []
     for mid in args.models:
         print(f"=== {mid}")
