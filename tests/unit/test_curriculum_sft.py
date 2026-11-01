@@ -1,4 +1,5 @@
 """Test curriculum SFT data pipeline: doom-loop detection, CoT classification, mix distillation."""
+
 import json
 import os
 import sys
@@ -32,15 +33,19 @@ def test_ngram_repetition_ratio():
 
 def test_is_doom_loop():
     """Doom-loop detector should flag repetitive text but not normal text."""
-    normal = "To solve this problem, we need to calculate the sum of all numbers in the list. " \
-             "We can iterate through each element and add it to a running total. " \
-             "This gives us O(n) time complexity."
+    normal = (
+        "To solve this problem, we need to calculate the sum of all numbers in the list. "
+        "We can iterate through each element and add it to a running total. "
+        "This gives us O(n) time complexity."
+    )
     assert not is_doom_loop(normal), "Normal text flagged as doom loop"
 
-    looping = "the answer is the answer is the answer is the answer is the answer is " \
-              "the answer is the answer is the answer is the answer is the answer is " \
-              "the answer is the answer is the answer is the answer is the answer is " \
-              "the answer is the answer is the answer is the answer is the answer is"
+    looping = (
+        "the answer is the answer is the answer is the answer is the answer is "
+        "the answer is the answer is the answer is the answer is the answer is "
+        "the answer is the answer is the answer is the answer is the answer is "
+        "the answer is the answer is the answer is the answer is the answer is"
+    )
     assert is_doom_loop(looping), "Doom-loop text not detected"
     print("PASS: is_doom_loop correctly identifies doom loops")
 
@@ -49,7 +54,10 @@ def test_filter_doom_loops():
     """Filter should remove doom-loop examples and keep clean ones."""
     examples = [
         {"prompt": "q1", "text": "Normal short answer that is fine and not repetitive at all."},
-        {"prompt": "q2", "text": "the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is"},
+        {
+            "prompt": "q2",
+            "text": "the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is the answer is",
+        },
         {"prompt": "q3", "text": "Another normal answer with different content entirely."},
     ]
     filtered, removed = filter_doom_loops(examples)
@@ -88,9 +96,7 @@ def test_classify_cot_length():
         # Medium (between short and long)
         {"prompt": "q4", "text": "x " * 200},  # ~50 tokens
     ]
-    short, long_cot, neutral = classify_cot_length(
-        examples, short_max_tokens=150, long_min_tokens=300
-    )
+    short, long_cot, neutral = classify_cot_length(examples, short_max_tokens=150, long_min_tokens=300)
     assert len(short) >= 1, f"Expected at least 1 short, got {len(short)}"
     assert len(long_cot) >= 2, f"Expected at least 2 long, got {len(long_cot)}"
     print(f"PASS: classify_cot_length (short={len(short)}, long={len(long_cot)}, neutral={len(neutral)})")
@@ -135,7 +141,7 @@ def test_load_save_jsonl():
 
     # Reload and verify format
     with open(out_path, encoding="utf-8") as f:
-        lines = [json.loads(l) for l in f if l.strip()]
+        lines = [json.loads(line) for line in f if line.strip()]
     assert len(lines) == 2
     assert "prompt" in lines[0] and "response" in lines[0]
 
@@ -147,17 +153,21 @@ def test_load_save_jsonl():
 def test_doom_loop_on_real_data():
     """Test doom-loop filtering on realistic reasoning data."""
     # Simulate a CoT trace that starts good but doom-loops
-    good_cot = "Let me think about this step by step. " \
-               "First, I need to understand what the problem is asking. " \
-               "The problem asks us to find the sum of the first 100 natural numbers. " \
-               "I can use the formula n*(n+1)/2 = 100*101/2 = 5050."
+    good_cot = (
+        "Let me think about this step by step. "
+        "First, I need to understand what the problem is asking. "
+        "The problem asks us to find the sum of the first 100 natural numbers. "
+        "I can use the formula n*(n+1)/2 = 100*101/2 = 5050."
+    )
     assert not is_doom_loop(good_cot), "Good CoT flagged as doom loop"
 
     # Simulate a doom-loop CoT
-    loop_cot = "So the answer is so the answer is so the answer is so the answer is " \
-               "so the answer is so the answer is so the answer is so the answer is " \
-               "so the answer is so the answer is so the answer is so the answer is " \
-               "so the answer is so the answer is so the answer is so the answer is"
+    loop_cot = (
+        "So the answer is so the answer is so the answer is so the answer is "
+        "so the answer is so the answer is so the answer is so the answer is "
+        "so the answer is so the answer is so the answer is so the answer is "
+        "so the answer is so the answer is so the answer is so the answer is"
+    )
     assert is_doom_loop(loop_cot), "Doom-loop CoT not detected"
     print("PASS: doom-loop detection works on realistic CoT data")
 

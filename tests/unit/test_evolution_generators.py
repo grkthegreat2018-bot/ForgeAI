@@ -1,6 +1,9 @@
 """Tests for forge.evolution.generators — BatchedGenerator, TemplateGenerator, GeneratorPopulation."""
 
-import sys; sys.path.insert(0, r"D:\windsurf\ForgeAI")
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
 import torch
@@ -212,9 +215,7 @@ class TestGeneratorPopulationGenerate:
 
     def test_generate_with_template(self, gen_cfg):
         template = TemplateGenerator({"block_size": [16, 32]})
-        pop = GeneratorPopulation(
-            gen_cfg, template=template, device=torch.device("cpu")
-        )
+        pop = GeneratorPopulation(gen_cfg, template=template, device=torch.device("cpu"))
         candidates = pop.generate(n_per_gen=1)
         template_candidates = [c for c in candidates if c["generator_idx"] == -1]
         assert len(template_candidates) > 0
@@ -237,7 +238,7 @@ class TestGeneratorPopulationEvolve:
         candidates = population.generate(n_per_gen=1)
         scores = [float(i) for i in range(len(candidates))]
         indices = [c["generator_idx"] for c in candidates]
-        fitness_before = population.batched_gen.fitness_ema.clone()
+        population.batched_gen.fitness_ema.clone()
         mutated = population.evolve(scores, indices)
         # n_kill = n_generators // 5 = 2 for n=10
         assert len(mutated) >= gen_cfg.n_generators // 5
@@ -267,4 +268,4 @@ class TestGeneratorPopulationUpdateContext:
         long_vec = torch.arange(20.0)
         population.update_context(long_vec)
         assert population.context.shape == (gen_cfg.context_dim,)
-        assert torch.allclose(population.context, long_vec[:gen_cfg.context_dim])
+        assert torch.allclose(population.context, long_vec[: gen_cfg.context_dim])

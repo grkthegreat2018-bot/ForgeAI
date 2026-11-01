@@ -4,7 +4,6 @@ Tests MCPManager config persistence, MCPServerConfig, MCPTool conversion,
 and mock client behavior. Pure stdlib — no Qt/torch.
 """
 
-
 from forge_gui.api.mcp_client import (
     HTTPMCPClient,
     MCPManager,
@@ -14,15 +13,18 @@ from forge_gui.api.mcp_client import (
 
 # ── MCPServerConfig ────────────────────────────────────────────────────
 
+
 class TestMCPServerConfig:
     def test_stdio_config(self):
-        c = MCPServerConfig.from_dict({
-            "name": "github",
-            "transport": "stdio",
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-github"],
-            "env": {"GITHUB_TOKEN": "xxx"},
-        })
+        c = MCPServerConfig.from_dict(
+            {
+                "name": "github",
+                "transport": "stdio",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-github"],
+                "env": {"GITHUB_TOKEN": "xxx"},
+            }
+        )
         assert c.name == "github"
         assert c.transport == "stdio"
         assert c.command == "npx"
@@ -30,11 +32,13 @@ class TestMCPServerConfig:
         assert c.env["GITHUB_TOKEN"] == "xxx"
 
     def test_http_config(self):
-        c = MCPServerConfig.from_dict({
-            "name": "linear",
-            "transport": "http",
-            "url": "http://localhost:3001/mcp",
-        })
+        c = MCPServerConfig.from_dict(
+            {
+                "name": "linear",
+                "transport": "http",
+                "url": "http://localhost:3001/mcp",
+            }
+        )
         assert c.name == "linear"
         assert c.transport == "http"
         assert c.url == "http://localhost:3001/mcp"
@@ -55,12 +59,15 @@ class TestMCPServerConfig:
 
 # ── MCPTool ────────────────────────────────────────────────────────────
 
+
 class TestMCPTool:
     def test_to_openai_def(self):
-        t = MCPTool(name="search", description="Search the web",
-                    input_schema={"type": "object",
-                                  "properties": {"q": {"type": "string"}}},
-                    server_name="web")
+        t = MCPTool(
+            name="search",
+            description="Search the web",
+            input_schema={"type": "object", "properties": {"q": {"type": "string"}}},
+            server_name="web",
+        )
         d = t.to_openai_def()
         assert d["type"] == "function"
         assert d["function"]["name"] == "search"
@@ -79,6 +86,7 @@ class TestMCPTool:
 
 
 # ── MCPManager ─────────────────────────────────────────────────────────
+
 
 class TestMCPManager:
     def test_empty_manager(self, tmp_path):
@@ -111,8 +119,7 @@ class TestMCPManager:
 
     def test_status(self, tmp_path):
         m = MCPManager(root=tmp_path)
-        m.add_server(MCPServerConfig(name="test", transport="http",
-                                     url="http://x"))
+        m.add_server(MCPServerConfig(name="test", transport="http", url="http://x"))
         status = m.status()
         assert len(status) == 1
         assert status[0]["name"] == "test"
@@ -132,19 +139,20 @@ class TestMCPManager:
 
 # ── MCPClient (mocked) ─────────────────────────────────────────────────
 
+
 class TestMCPClientMocked:
     def test_initialize_and_list_tools(self):
-        config = MCPServerConfig(name="test", transport="http",
-                                 url="http://x")
+        config = MCPServerConfig(name="test", transport="http", url="http://x")
         client = HTTPMCPClient(config)
 
         # mock the _send_request method
         responses = [
             {"serverInfo": {"name": "test-server", "version": "1.0"}},  # initialize
-            {"tools": [
-                {"name": "search", "description": "Search",
-                 "inputSchema": {"type": "object"}},
-            ]},  # list_tools
+            {
+                "tools": [
+                    {"name": "search", "description": "Search", "inputSchema": {"type": "object"}},
+                ]
+            },  # list_tools
         ]
         call_idx = [0]
 
@@ -164,8 +172,7 @@ class TestMCPClientMocked:
         assert tools[0].server_name == "test"
 
     def test_call_tool_mocked(self):
-        config = MCPServerConfig(name="test", transport="http",
-                                 url="http://x")
+        config = MCPServerConfig(name="test", transport="http", url="http://x")
         client = HTTPMCPClient(config)
 
         def mock_send(method, params=None):

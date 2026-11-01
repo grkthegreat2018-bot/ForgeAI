@@ -6,10 +6,9 @@ live, deps/globals/imports spliced, _gen_cases rename), the generated
 spec passing its own test/bench oracle, mutation safety, and prune.
 CPU-only.
 """
+
 import importlib.util
 import textwrap
-
-import pytest
 
 from forge.evolution import auto_targets
 
@@ -36,7 +35,7 @@ def test_decorator_registers():
 
 
 def test_collect_writes_spec(tmp_path):
-    mod_src = textwrap.dedent('''
+    mod_src = textwrap.dedent("""
         from forge.evolution.auto_targets import self_improve
 
 
@@ -48,7 +47,7 @@ def test_collect_writes_spec(tmp_path):
                       evals=42, tags=("test",))
         def _ut_emit(x):
             return x * 10
-    ''')
+    """)
     f = tmp_path / "prod_mod.py"
     f.write_text(mod_src, encoding="utf-8")
     spec = importlib.util.spec_from_file_location("prod_mod", f)
@@ -89,6 +88,7 @@ def test_generated_specs_pass_own_gate():
     emitted = auto_targets.collect_targets()
     assert len(emitted) >= 10, emitted
     from forge.evolution.code_evolve import Target
+
     for name in emitted:
         spec_mod = Target(Target.resolve(name)).mod
         ns = {}
@@ -103,6 +103,7 @@ def test_generated_specs_pass_own_gate():
 def test_rejected_candidate_fails_gate(tmp_path):
     """A wrong-semantics candidate must NOT pass the oracle."""
     from forge.evolution.code_evolve import Target
+
     auto_targets.collect_targets()
     spec_mod = Target(Target.resolve("auto_ngram_lookup")).mod
     bad = "def _ngram_lookup(seq, ngram_size, draft_length):\n    return []"

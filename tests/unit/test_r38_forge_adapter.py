@@ -1,4 +1,5 @@
 """Tests for R38-6: ForgeAdapter — Entropy-Guided Dynamic Adapter Fusion."""
+
 from __future__ import annotations
 
 import torch
@@ -66,8 +67,7 @@ class TestForgeAdapter:
         A = adapter.adapters_A[-1]  # highest rank
         B = adapter.adapters_B[-1]
         scale = adapter.alpha / adapter.ranks[-1]
-        lora = torch.nn.functional.linear(
-            torch.nn.functional.linear(x, A.T), B.T) * scale
+        lora = torch.nn.functional.linear(torch.nn.functional.linear(x, A.T), B.T) * scale
         expected = base + lora
         assert torch.allclose(out, expected, atol=1e-5)
 
@@ -159,6 +159,7 @@ class TestApplyForgeAdapter:
 
     def test_apply_to_model(self):
         """Apply ForgeAdapter to all Linear layers in a model."""
+
         class SmallModel(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -176,6 +177,7 @@ class TestApplyForgeAdapter:
 
     def test_apply_with_target_modules(self):
         """Apply only to specific modules."""
+
         class SmallModel(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -195,6 +197,7 @@ class TestApplyForgeAdapter:
 
     def test_forward_after_apply(self):
         """Model forward works after applying ForgeAdapter."""
+
         class SmallModel(nn.Module):
             def __init__(self):
                 super().__init__()

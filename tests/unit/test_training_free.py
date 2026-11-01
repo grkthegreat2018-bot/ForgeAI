@@ -2,6 +2,7 @@
 
 Runs on CPU with the tiny_test config (no GPU required).
 """
+
 import pytest
 import torch
 
@@ -123,13 +124,10 @@ class TestReflexion:
 
 
 class TestSteering:
-    def test_task_vectors_shape_and_normalization(self, tiny_model,
-                                                  tiny_tokenizer):
+    def test_task_vectors_shape_and_normalization(self, tiny_model, tiny_tokenizer):
         steerer = ActivationSteerer(tiny_model)
-        pos = steerer.collect_activations(
-            tiny_tokenizer, ["solve a b c", "solve d e f"], device="cpu")
-        neg = steerer.collect_activations(
-            tiny_tokenizer, ["fail x y z", "fail q r s"], device="cpu")
+        pos = steerer.collect_activations(tiny_tokenizer, ["solve a b c", "solve d e f"], device="cpu")
+        neg = steerer.collect_activations(tiny_tokenizer, ["fail x y z", "fail q r s"], device="cpu")
         assert pos and neg
         vectors = ActivationSteerer.task_vectors(pos, neg, normalize=True)
         assert set(vectors.keys()) == set(pos.keys())
@@ -137,13 +135,10 @@ class TestSteering:
             assert v.dim() == 1
             assert abs(v.norm().item() - 1.0) < 1e-3
 
-    def test_injection_changes_output_and_removes_cleanly(self, tiny_model,
-                                                          tiny_tokenizer):
+    def test_injection_changes_output_and_removes_cleanly(self, tiny_model, tiny_tokenizer):
         steerer = ActivationSteerer(tiny_model)
-        pos = steerer.collect_activations(
-            tiny_tokenizer, ["solve a b c"], device="cpu")
-        neg = steerer.collect_activations(
-            tiny_tokenizer, ["fail x y z"], device="cpu")
+        pos = steerer.collect_activations(tiny_tokenizer, ["solve a b c"], device="cpu")
+        neg = steerer.collect_activations(tiny_tokenizer, ["fail x y z"], device="cpu")
         vectors = ActivationSteerer.task_vectors(pos, neg)
         assert vectors
 
@@ -180,9 +175,14 @@ class TestRAIN:
             return 0.1  # always below threshold -> force rewinds
 
         gen = RAINGenerator(
-            tiny_model, tiny_tokenizer, device="cpu",
-            eval_fn=bad_eval, threshold=0.5, rewind_tokens=2,
-            max_rewinds=2, max_tokens=8,
+            tiny_model,
+            tiny_tokenizer,
+            device="cpu",
+            eval_fn=bad_eval,
+            threshold=0.5,
+            rewind_tokens=2,
+            max_rewinds=2,
+            max_tokens=8,
         )
         _text, score, scores = gen.generate("solve a b c")
         assert gen.rewinds_used == 2
@@ -191,9 +191,13 @@ class TestRAIN:
 
     def test_no_rewind_when_score_ok(self, tiny_model, tiny_tokenizer):
         gen = RAINGenerator(
-            tiny_model, tiny_tokenizer, device="cpu",
-            eval_fn=lambda t, l: 0.9, threshold=0.5,
-            max_rewinds=3, max_tokens=8,
+            tiny_model,
+            tiny_tokenizer,
+            device="cpu",
+            eval_fn=lambda t, _l: 0.9,
+            threshold=0.5,
+            max_rewinds=3,
+            max_tokens=8,
         )
         _text, _score, scores = gen.generate("solve a b c")
         assert gen.rewinds_used == 0
@@ -206,8 +210,11 @@ class TestRAIN:
 class TestTrainingFreeSolver:
     def test_end_to_end(self, tiny_model, tiny_tokenizer):
         solver = TrainingFreeSolver(
-            tiny_model, tiny_tokenizer, device="cpu",
-            max_tokens=8, capture_activations=True,
+            tiny_model,
+            tiny_tokenizer,
+            device="cpu",
+            max_tokens=8,
+            capture_activations=True,
         )
         out = solver.generate("write a function")
         assert isinstance(out, str) and out
@@ -231,8 +238,11 @@ class TestTrainingFreeSolver:
 
     def test_no_vector_without_negatives(self, tiny_model, tiny_tokenizer):
         solver = TrainingFreeSolver(
-            tiny_model, tiny_tokenizer, device="cpu",
-            max_tokens=4, capture_activations=False,
+            tiny_model,
+            tiny_tokenizer,
+            device="cpu",
+            max_tokens=4,
+            capture_activations=False,
         )
         assert solver.build_task_vector() == {}
         assert solver.apply_steering() is False
@@ -248,21 +258,34 @@ class TestSandboxIntegration:
         from forge.self_play.self_play_sandbox import SelfPlaySandbox
 
         solver = TrainingFreeSolver(
-            tiny_model, tiny_tokenizer, device="cpu", max_tokens=8,
+            tiny_model,
+            tiny_tokenizer,
+            device="cpu",
+            max_tokens=8,
             capture_activations=True,
         )
         sandbox = SelfPlaySandbox(
-            tiny_model, tiny_tokenizer, device="cpu",
-            max_gen_tokens=8, training_free=solver,
+            tiny_model,
+            tiny_tokenizer,
+            device="cpu",
+            max_gen_tokens=8,
+            training_free=solver,
             temp_dir=tempfile.gettempdir(),
         )
 
         class FakeExec:
             def execute(self, code, expected_output):
-                return {"stdout": "55", "stderr": "", "returncode": 0,
-                        "output_matches_expected": True, "io_score": 1.0,
-                        "exec_time_ms": 0.1, "peak_memory_kb": 0,
-                        "file_size_bytes": 10, "timed_out": False}
+                return {
+                    "stdout": "55",
+                    "stderr": "",
+                    "returncode": 0,
+                    "output_matches_expected": True,
+                    "io_score": 1.0,
+                    "exec_time_ms": 0.1,
+                    "peak_memory_kb": 0,
+                    "file_size_bytes": 10,
+                    "timed_out": False,
+                }
 
         sandbox.executor = FakeExec()
         packet = sandbox.run_task("Compute 5+5", expected_output="10")

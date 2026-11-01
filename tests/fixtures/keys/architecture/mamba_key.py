@@ -40,6 +40,7 @@ Usage:
     # Cross-arch (Mamba1 <-> Mamba2)
     result = key.cross_arch(mamba1_state, Mamba2Key())
 """
+
 from __future__ import annotations
 
 import torch
@@ -58,15 +59,15 @@ MAMBA1_WEIGHTS = (
     "x_proj.weight",
     "dt_proj.weight",
     "dt_proj.bias",
-    "A_log",       # Parameter, not Linear
-    "D",           # Parameter, not Linear
+    "A_log",  # Parameter, not Linear
+    "D",  # Parameter, not Linear
     "out_proj.weight",
 )
 
 # Mamba2 adds 4 RMSNorm weights and changes A_log shape
 # Jamba uses: dt_layernorm, b_layernorm, c_layernorm (no a_layernorm)
 MAMBA2_EXTRA_WEIGHTS = (
-    "dt_norm.weight",       # generic name
+    "dt_norm.weight",  # generic name
     "A_norm.weight",
     "B_norm.weight",
     "C_norm.weight",
@@ -96,24 +97,31 @@ def _hf_to_forge_layer(hf_key: str, layer_idx: int) -> str | None:
     if not hf_key.startswith(prefix):
         return None
 
-    suffix = hf_key[len(prefix):]
+    suffix = hf_key[len(prefix) :]
 
     # Mamba: mixer.{name} or mamba.{name} -> attn.{name}
     # Jamba uses "mamba.", generic HF Mamba uses "mixer."
     # Strip .weight from norm parameters (dt/b/c_layernorm are bare nn.Parameters)
-    _NORM_STRIP = {"dt_layernorm.weight", "b_layernorm.weight", "c_layernorm.weight",
-                   "dt_norm.weight", "A_norm.weight", "B_norm.weight", "C_norm.weight"}
+    _NORM_STRIP = {
+        "dt_layernorm.weight",
+        "b_layernorm.weight",
+        "c_layernorm.weight",
+        "dt_norm.weight",
+        "A_norm.weight",
+        "B_norm.weight",
+        "C_norm.weight",
+    }
     for mamba_prefix in ("mixer.", "mamba."):
         if suffix.startswith(mamba_prefix):
-            name = suffix[len(mamba_prefix):]
+            name = suffix[len(mamba_prefix) :]
             if name in _NORM_STRIP:
-                name = name[:-len(".weight")]
+                name = name[: -len(".weight")]
             return f"blocks.{layer_idx}.attn.{name}"
 
     # Attention: self_attn.{name} -> attn.{name}
     # Handle o_proj -> out_proj mapping (Jamba uses o_proj, ForgeAI uses out_proj)
     if suffix.startswith("self_attn."):
-        name = suffix[len("self_attn."):]
+        name = suffix[len("self_attn.") :]
         if name == "o_proj.weight":
             name = "out_proj.weight"
         return f"blocks.{layer_idx}.attn.{name}"
@@ -126,7 +134,7 @@ def _hf_to_forge_layer(hf_key: str, layer_idx: int) -> str | None:
     # Jamba uses gate_proj/up_proj/down_proj; Zamba uses w1/w2/w3
     for ffn_prefix in ("feed_forward.", "mlp."):
         if suffix.startswith(ffn_prefix):
-            name = suffix[len(ffn_prefix):]
+            name = suffix[len(ffn_prefix) :]
             ffn_map = {
                 "w1.weight": "ffn.w_gate.weight",
                 "w2.weight": "ffn.w_down.weight",
@@ -141,10 +149,9 @@ def _hf_to_forge_layer(hf_key: str, layer_idx: int) -> str | None:
     return None
 
 
-def _forge_to_hf_layer(forge_key: str, layer_idx: int,
-                       is_mamba: bool = True,
-                       mamba_prefix: str = "mamba",
-                       ffn_style: str = "jamba") -> str | None:
+def _forge_to_hf_layer(
+    forge_key: str, layer_idx: int, is_mamba: bool = True, mamba_prefix: str = "mamba", ffn_style: str = "jamba"
+) -> str | None:
     """Map a ForgeAI internal key to HuggingFace key.
 
     Args:
@@ -156,15 +163,14 @@ def _forge_to_hf_layer(forge_key: str, layer_idx: int,
     if not forge_key.startswith(prefix):
         return None
 
-    suffix = forge_key[len(prefix):]
+    suffix = forge_key[len(prefix) :]
 
     # Attention/Mamba: attn.{name}
     if suffix.startswith("attn."):
-        name = suffix[len("attn."):]
+        name = suffix[len("attn.") :]
         if is_mamba:
             # Add .weight back for norm parameters (bare nn.Parameter -> .weight in HF)
-            _NORM_ADD = {"dt_layernorm", "b_layernorm", "c_layernorm",
-                         "dt_norm", "A_norm", "B_norm", "C_norm"}
+            _NORM_ADD = {"dt_layernorm", "b_layernorm", "c_layernorm", "dt_norm", "A_norm", "B_norm", "C_norm"}
             if name in _NORM_ADD:
                 name = name + ".weight"
             return f"model.layers.{layer_idx}.{mamba_prefix}.{name}"
@@ -184,15 +190,19 @@ def _forge_to_hf_layer(forge_key: str, layer_idx: int,
 
     # FFN
     if suffix.startswith("ffn."):
-        name = suffix[len("ffn."):]
+        name = suffix[len("ffn.") :]
         if ffn_style == "jamba":
-            ffn_rmap = {"w_gate.weight": "feed_forward.gate_proj.weight",
-                        "w_down.weight": "feed_forward.down_proj.weight",
-                        "w_up.weight": "feed_forward.up_proj.weight"}
+            ffn_rmap = {
+                "w_gate.weight": "feed_forward.gate_proj.weight",
+                "w_down.weight": "feed_forward.down_proj.weight",
+                "w_up.weight": "feed_forward.up_proj.weight",
+            }
         else:
-            ffn_rmap = {"w_gate.weight": "feed_forward.w1.weight",
-                        "w_down.weight": "feed_forward.w2.weight",
-                        "w_up.weight": "feed_forward.w3.weight"}
+            ffn_rmap = {
+                "w_gate.weight": "feed_forward.w1.weight",
+                "w_down.weight": "feed_forward.w2.weight",
+                "w_up.weight": "feed_forward.w3.weight",
+            }
         if name in ffn_rmap:
             return f"model.layers.{layer_idx}.{ffn_rmap[name]}"
 
@@ -202,6 +212,7 @@ def _forge_to_hf_layer(forge_key: str, layer_idx: int,
 # ═══════════════════════════════════════════════════════════════════════════════
 # MambaKey — lossless checkpoint conversion
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class MambaKey(Key):
     """Lossless checkpoint conversion key for Mamba (S6) layers.
@@ -213,8 +224,13 @@ class MambaKey(Key):
     KeyClass.BI: both forward and reverse are exact inverses.
     """
 
-    def __init__(self, n_layers: int = 1, layer_types: list[str] | None = None,
-                 mamba_prefix: str = "mamba", ffn_style: str = "jamba"):
+    def __init__(
+        self,
+        n_layers: int = 1,
+        layer_types: list[str] | None = None,
+        mamba_prefix: str = "mamba",
+        ffn_style: str = "jamba",
+    ):
         """
         Args:
             n_layers: number of layers in the model
@@ -234,8 +250,10 @@ class MambaKey(Key):
 
     @property
     def description(self) -> str:
-        return ("Lossless checkpoint conversion for Mamba (S6 selective SSM) "
-                "layers. Pure key rename, no weight transformation.")
+        return (
+            "Lossless checkpoint conversion for Mamba (S6 selective SSM) "
+            "layers. Pure key rename, no weight transformation."
+        )
 
     def key_class(self) -> KeyClass:
         return KeyClass.BI
@@ -293,9 +311,7 @@ class MambaKey(Key):
         return KeyResult(
             success=True,
             weights=forge_state,
-            metadata={"unmapped_keys": unmapped,
-                      "n_mapped": len(forge_state),
-                      "n_input": len(data)},
+            metadata={"unmapped_keys": unmapped, "n_mapped": len(forge_state), "n_input": len(data)},
         )
 
     def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
@@ -315,9 +331,9 @@ class MambaKey(Key):
 
             for i in range(self.n_layers):
                 is_mamba = self._is_mamba_layer(i)
-                hf_key = _forge_to_hf_layer(forge_key, i, is_mamba=is_mamba,
-                                            mamba_prefix=self.mamba_prefix,
-                                            ffn_style=self.ffn_style)
+                hf_key = _forge_to_hf_layer(
+                    forge_key, i, is_mamba=is_mamba, mamba_prefix=self.mamba_prefix, ffn_style=self.ffn_style
+                )
                 if hf_key is not None:
                     hf_state[hf_key] = tensor
                     mapped = True
@@ -344,9 +360,7 @@ class MambaKey(Key):
         return KeyResult(
             success=True,
             data=hf_state,
-            metadata={"unmapped_keys": unmapped,
-                      "n_mapped": len(hf_state),
-                      "n_input": len(weights)},
+            metadata={"unmapped_keys": unmapped, "n_mapped": len(hf_state), "n_input": len(weights)},
         )
 
 
@@ -366,8 +380,10 @@ class Mamba2Key(MambaKey):
 
     @property
     def description(self) -> str:
-        return ("Lossless checkpoint conversion for Mamba2 (SSD) layers. "
-                "Same as Mamba1 plus 4 RMSNorm weights (dt/A/B/C norm).")
+        return (
+            "Lossless checkpoint conversion for Mamba2 (SSD) layers. "
+            "Same as Mamba1 plus 4 RMSNorm weights (dt/A/B/C norm)."
+        )
 
     def forward(self, data: dict[str, torch.Tensor]) -> KeyResult:
         """HuggingFace Mamba2 -> ForgeAI (same as Mamba1, extra norms pass through)."""
@@ -381,6 +397,7 @@ class Mamba2Key(MambaKey):
 # ═══════════════════════════════════════════════════════════════════════════════
 # Cross-arch conversion: Mamba1 <-> Mamba2
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class Mamba1To2Key(Key):
     """Convert Mamba1 weights to Mamba2 format (PARTIAL — needs A reshaping).
@@ -401,9 +418,11 @@ class Mamba1To2Key(Key):
 
     @property
     def description(self) -> str:
-        return ("Convert Mamba1 to Mamba2 format. A_log is averaged across "
-                "d_state to get scalar per head (LOSSY). Other weights pass "
-                "through unchanged. Mamba2 norms are initialized to ones.")
+        return (
+            "Convert Mamba1 to Mamba2 format. A_log is averaged across "
+            "d_state to get scalar per head (LOSSY). Other weights pass "
+            "through unchanged. Mamba2 norms are initialized to ones."
+        )
 
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
@@ -445,12 +464,10 @@ class Mamba1To2Key(Key):
         result["B_norm.weight"] = torch.ones(d_state)
         result["C_norm.weight"] = torch.ones(d_state)
 
-        return KeyResult(success=True, weights=result,
-                         metadata={"conversion": "mamba1->mamba2",
-                                  "lossy": ["A_log"]})
+        return KeyResult(success=True, weights=result, metadata={"conversion": "mamba1->mamba2", "lossy": ["A_log"]})
 
     def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         """Mamba2 -> Mamba1 is not supported (A scalar can't expand back)."""
-        return KeyResult(success=False,
-                        error="Mamba2 -> Mamba1 not supported (A is scalar, "
-                              "cannot recover per-channel diagonal)")
+        return KeyResult(
+            success=False, error="Mamba2 -> Mamba1 not supported (A is scalar, cannot recover per-channel diagonal)"
+        )

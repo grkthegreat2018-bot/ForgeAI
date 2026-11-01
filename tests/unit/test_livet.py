@@ -14,8 +14,7 @@ from forge.model_loader import ConfigurableResearchLLM
 
 def _model(seed: int = 0, **kw):
     torch.manual_seed(seed)
-    cfg = livet_config(vocab_size=256, d_model=64, n_layers=2,
-                       n_heads=2, **kw)
+    cfg = livet_config(vocab_size=256, d_model=64, n_layers=2, n_heads=2, **kw)
     return ConfigurableResearchLLM(cfg).eval()
 
 
@@ -38,8 +37,8 @@ def test_lossless_init():
     """gate=0 memory + gdn2 branches contribute nothing at init."""
     torch.manual_seed(0)
     plain = ConfigurableResearchLLM(
-        livet_config(vocab_size=256, d_model=64, n_layers=2, n_heads=2,
-                     use_gdn2=False, use_titan_memory=False)).eval()
+        livet_config(vocab_size=256, d_model=64, n_layers=2, n_heads=2, use_gdn2=False, use_titan_memory=False)
+    ).eval()
     live = _model()
     live.load_state_dict(plain.state_dict(), strict=False)
     ids = torch.randint(0, 256, (1, 16))
@@ -86,10 +85,10 @@ def test_memory_persists_across_reset():
     s.ingest(_seq(48))
     mem = s.mem_layers[0]
     w_before = mem.memory.clone()
-    s.reset()                      # new stream: working mem cleared
+    s.reset()  # new stream: working mem cleared
     assert m.blocks[0]._gdn2._state is None
-    assert torch.equal(mem.memory, w_before)   # long-term keeps
-    s.reset(memory_too=True)       # full wipe only when asked
+    assert torch.equal(mem.memory, w_before)  # long-term keeps
+    s.reset(memory_too=True)  # full wipe only when asked
     assert mem.memory.abs().sum() == 0
 
 
@@ -160,8 +159,7 @@ def test_bootstrap_then_live_recall():
     model.train()
     boot = pairs_stream(boot_map, reps=10)
     for _ in range(8):
-        _logits, loss = model(boot[:-1].unsqueeze(0),
-                             targets=boot[1:].unsqueeze(0))
+        _logits, loss = model(boot[:-1].unsqueeze(0), targets=boot[1:].unsqueeze(0))
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -177,14 +175,13 @@ def test_bootstrap_then_live_recall():
     def fact_loss():
         with torch.no_grad():
             logits = model(probe[:-1].unsqueeze(0))[0]
-            ce = torch.nn.functional.cross_entropy(
-                logits[0].float(), probe[1:], reduction="none")
+            ce = torch.nn.functional.cross_entropy(logits[0].float(), probe[1:], reduction="none")
         return float(ce[val_idx[1:]].mean())
 
     s.reset()
     loss_before = fact_loss()
     s.ingest(pairs_stream(live_map, reps=6))
-    s.reset()                      # memory persists; working state clears
+    s.reset()  # memory persists; working state clears
     loss_after = fact_loss()
     assert loss_after < loss_before
 
@@ -193,16 +190,16 @@ def test_sparse_exact_sidecar():
     """NGramMemory: exact-suffix store journals + reverts with the
     session, lifts verbatim recall far beyond fuzzy fast weights."""
     from forge.model.ngram_mem import NGramMemory
+
     m = _model()
-    s = LiveSession(m, LiveConfig(chunk=16, open_gates=True,
-                                  mem_lr=0.0))     # fuzzy writes off
+    s = LiveSession(m, LiveConfig(chunk=16, open_gates=True, mem_lr=0.0))  # fuzzy writes off
     s.attach_sparse(NGramMemory(256, orders=(4,), gate=1.0))
     ids = _seq(64)
     nll_before = s.eval_nll(ids)
     mark = s.mark()
     s.ingest(ids)
     nll_after = s.eval_nll(ids)
-    assert nll_after < nll_before - 0.5   # exact recall, not marginal
+    assert nll_after < nll_before - 0.5  # exact recall, not marginal
     assert s.revert(mark) == 1
     nll_reverted = s.eval_nll(ids)
     assert abs(nll_reverted - nll_before) < 1e-6
@@ -217,7 +214,7 @@ def test_eval_nll_warm_parity():
     s.ingest(ids)
     a = s.eval_nll(ids)
     b = s.eval_nll(ids, warm=True)
-    assert abs(a - b) < 1.0   # same ballpark; state fully restored after
+    assert abs(a - b) < 1.0  # same ballpark; state fully restored after
 
 
 def test_ngram_lift_novel_successor_finite():
@@ -227,6 +224,7 @@ def test_ngram_lift_novel_successor_finite():
     import math
 
     from forge.model.ngram_mem import NGramMemory
+
     mem = NGramMemory(256, orders=(4,), gate=1.0)
     # Teach only tokens < 64 so token 200 keeps unigram=0.
     mem.update(torch.tensor([[1, 2, 3, 4, 5, 1, 2, 3, 4, 5]]))

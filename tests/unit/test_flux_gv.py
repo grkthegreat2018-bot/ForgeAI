@@ -5,6 +5,7 @@ order tables - same-class 1-edit suffix variants probed via rolling-
 hash linearity.  It owns no state, so removed/changed weight
 information can never persist through it.
 """
+
 import numpy as np
 import pytest
 
@@ -36,26 +37,24 @@ def test_gv_opt_in():
     assert "gv" not in _mk().channels
     m = _mk(gen_variants=True)
     assert "gv" in m.channels
-    assert m._pmask[m._chix["gv"]]              # device abstain
+    assert m._pmask[m._chix["gv"]]  # device abstain
 
 
 def test_gv_fires_on_same_class_variant():
     """(a,B)->c trained; context (a,C) - same class at the varied
     position - must surface c's votes."""
     m = _mk(gen_variants=True, gen_fix_tail=0, orders=(2,))
-    m.ingest([97, 66, 99] * 10, tag="t")        # a B c
-    _ctx(m, [97, 67])                            # a C (unseen pair)
+    m.ingest([97, 66, 99] * 10, tag="t")  # a B c
+    _ctx(m, [97, 67])  # a C (unseen pair)
     votes = m._gen_votes(m._count - 1, m._keys_at(m._count - 1))
-    assert votes.get(99, 0.0) > 0               # c via (a,B) variant
+    assert votes.get(99, 0.0) > 0  # c via (a,B) variant
 
 
 def test_gv_sleeps_when_exact_cell_rich():
-    m = _mk(gen_variants=True, gen_fix_tail=0, orders=(2,),
-            gen_min_tot=2.0)
+    m = _mk(gen_variants=True, gen_fix_tail=0, orders=(2,), gen_min_tot=2.0)
     m.ingest([97, 66, 99] * 10, tag="t")
-    _ctx(m, [97, 66])                            # exact (a,B) seen 10x
-    assert m._gen_votes(m._count - 1,
-                        m._keys_at(m._count - 1)) == {}
+    _ctx(m, [97, 66])  # exact (a,B) seen 10x
+    assert m._gen_votes(m._count - 1, m._keys_at(m._count - 1)) == {}
 
 
 def test_gv_no_persistence_after_delete():
@@ -66,17 +65,17 @@ def test_gv_no_persistence_after_delete():
     _ctx(m, [97, 67])
     end = m._count - 1
     assert m._gen_votes(end, m._keys_at(end)).get(99, 0.0) > 0
-    m._tables[2].clear()                        # all order-2 cells gone
+    m._tables[2].clear()  # all order-2 cells gone
     m._totals[2].clear()
     votes = m._gen_votes(end, m._keys_at(end))
-    assert votes == {}                          # removed info is gone
+    assert votes == {}  # removed info is gone
 
 
 def test_gv_deletion_via_revert():
     """Partial removal via journaled writes: reverting the writes
     shrinks variant votes by exactly that evidence."""
     m = _mk(gen_variants=True, gen_fix_tail=0, orders=(2,))
-    for _i in range(10):                         # journaled writes
+    for _i in range(10):  # journaled writes
         for t in (97, 66, 99):
             m._learn_token(t)
     n0 = len(m.journal.entries)
@@ -88,7 +87,7 @@ def test_gv_deletion_via_revert():
     before = m._gen_votes(end, m._keys_at(end))[99]
     m.revert_since(n0)
     after = m._gen_votes(end, m._keys_at(end))[99]
-    assert 0 < after < before                   # shrank, not vanished
+    assert 0 < after < before  # shrank, not vanished
 
 
 def test_gv_snapshot_clone_deterministic():
@@ -98,8 +97,7 @@ def test_gv_snapshot_clone_deterministic():
     end = m._count - 1
     cl = m.clone()
     end_c = cl._count - 1
-    assert cl._gen_votes(end_c, cl._keys_at(end_c)) == \
-        m._gen_votes(end, m._keys_at(end))
+    assert cl._gen_votes(end_c, cl._keys_at(end_c)) == m._gen_votes(end, m._keys_at(end))
 
 
 def test_gv_channel_prob_semantics():
@@ -107,10 +105,8 @@ def test_gv_channel_prob_semantics():
     m.ingest([97, 66, 99] * 10, tag="t")
     _ctx(m, [97, 67])
     denom = m._total + m.config.uni_alpha * 256
-    p_c, awake = m._channel_prob("gv", 99, m._keys_at(m._count - 1),
-                               None, denom)
-    p_z, _ = m._channel_prob("gv", 90, m._keys_at(m._count - 1),
-                             None, denom)
+    p_c, awake = m._channel_prob("gv", 99, m._keys_at(m._count - 1), None, denom)
+    p_z, _ = m._channel_prob("gv", 90, m._keys_at(m._count - 1), None, denom)
     assert awake and p_c > p_z
 
 
@@ -139,8 +135,7 @@ def _mk_cuda(**kw) -> FluxLM:
     return _mk(**kw)
 
 
-@pytest.mark.skipif(not __import__("torch").cuda.is_available(),
-                    reason="no cuda")
+@pytest.mark.skipif(not __import__("torch").cuda.is_available(), reason="no cuda")
 def test_gv_cuda_lift_and_no_persistence():
     """Device path: variant votes read _gt directly - lift appears on
     unseen same-class contexts and vanishes when the source cells do."""
@@ -151,10 +146,10 @@ def test_gv_cuda_lift_and_no_persistence():
         _ctx(m, [97, 67])
     lg_on = on._predict().cpu()
     lg_off = off._predict().cpu()
-    assert float(lg_on[99]) > float(lg_off[99])      # lift landed
+    assert float(lg_on[99]) > float(lg_off[99])  # lift landed
     # persistence contract on device: clear the GPU order-2 row and
     # the generalized lift must die with it
-    on._gt.ttoks[0, :] = -1    # orders=(2,) -> order-2 table is row 0
+    on._gt.ttoks[0, :] = -1  # orders=(2,) -> order-2 table is row 0
     on._gt.tcnt[0, :] = 0
     on._gt.ttot[0, :] = 0
     on._gt.tkeys[0, :] = 0

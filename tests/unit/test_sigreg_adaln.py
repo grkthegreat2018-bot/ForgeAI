@@ -7,6 +7,7 @@ Covers:
   - AdaLN-zero forward with conditioning changes the output.
   - AdaLN-zero backward compatibility: model works without cond when cond_dim=None.
 """
+
 from __future__ import annotations
 
 import torch
@@ -17,6 +18,7 @@ from forge.training.losses.adaln_zero import AdaLNZero, AdaLNZeroModulation
 from forge.training.losses.sigreg import SIGRegLoss
 
 # ── SIGReg tests ──────────────────────────────────────────────────────────────
+
 
 class TestSIGReg:
     """SIGReg spectral regularization loss tests."""
@@ -87,6 +89,7 @@ class TestSIGReg:
 
 # ── AdaLN-zero tests ──────────────────────────────────────────────────────────
 
+
 class TestAdaLNZero:
     """AdaLN-zero conditioning tests."""
 
@@ -97,10 +100,8 @@ class TestAdaLNZero:
         cond = torch.randn(2, cond_dim)
         scale, shift = mod(cond)
         # Zero-init linear → gamma=0, beta=0 → scale=0+1=1, shift=0.
-        assert torch.allclose(scale, torch.ones_like(scale), atol=1e-6), \
-            "Scale should be 1 at init (zero-init + 1)"
-        assert torch.allclose(shift, torch.zeros_like(shift), atol=1e-6), \
-            "Shift should be 0 at init"
+        assert torch.allclose(scale, torch.ones_like(scale), atol=1e-6), "Scale should be 1 at init (zero-init + 1)"
+        assert torch.allclose(shift, torch.zeros_like(shift), atol=1e-6), "Shift should be 0 at init"
 
     def test_adaln_zero_init_full_module(self):
         """AdaLNZero full module is identity w.r.t. normalization at init."""
@@ -111,8 +112,9 @@ class TestAdaLNZero:
         out_cond = adaln(x, cond)
         out_nocond = adaln(x, None)
         # At init, modulation is identity → output == plain normalization.
-        assert torch.allclose(out_cond, out_nocond, atol=1e-6), \
+        assert torch.allclose(out_cond, out_nocond, atol=1e-6), (
             "At init, AdaLNZero with cond should equal normalization without cond"
+        )
 
     def test_adaln_zero_forward(self):
         """Forward pass with conditioning changes the output after perturbing weights."""
@@ -132,8 +134,9 @@ class TestAdaLNZero:
             adaln.modulation.linear.bias.normal_(std=0.1)
 
         out_perturbed = adaln(x, cond)
-        assert not torch.allclose(out_perturbed, out_base, atol=1e-4), \
+        assert not torch.allclose(out_perturbed, out_base, atol=1e-4), (
             "After perturbing weights, conditioned output should differ from base"
+        )
 
     def test_adaln_zero_gradient(self):
         """Gradients flow through AdaLNZero modulation."""
@@ -151,11 +154,11 @@ class TestAdaLNZero:
         loss.backward()
         assert x.grad is not None, "Gradient should flow to x"
         assert cond.grad is not None, "Gradient should flow to cond"
-        assert adaln.modulation.linear.weight.grad is not None, \
-            "Gradient should flow to modulation weights"
+        assert adaln.modulation.linear.weight.grad is not None, "Gradient should flow to modulation weights"
 
 
 # ── Model integration tests ───────────────────────────────────────────────────
+
 
 class TestModelIntegration:
     """Model-level integration tests for AdaLN-zero and SIGReg."""
@@ -212,8 +215,9 @@ class TestModelIntegration:
         logits_nocond = out_without_cond[0]
         assert logits_cond.shape == (2, 8, cfg.vocab_size)
         # At init, should be (nearly) identical.
-        assert torch.allclose(logits_cond, logits_nocond, atol=1e-5), \
+        assert torch.allclose(logits_cond, logits_nocond, atol=1e-5), (
             "At init, AdaLN-zero should be identity (cond has no effect)"
+        )
 
     def test_model_return_hidden_states(self):
         """Model returns per-layer hidden states when return_hidden_states=True."""

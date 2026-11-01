@@ -2,9 +2,11 @@
 
 CPU-only. Uses a small nn.Linear(in=64, out=128) for all tests.
 """
-import sys
 
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch
 from torch import nn
@@ -16,6 +18,7 @@ from forge.training.dora import apply_to_model as dora_apply
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
+
 def _lin(in_f=64, out_f=128, seed=0):
     torch.manual_seed(seed)
     return nn.Linear(in_f, out_f, bias=False)
@@ -23,6 +26,7 @@ def _lin(in_f=64, out_f=128, seed=0):
 
 def _model(seed=0):
     torch.manual_seed(seed)
+
     class M(nn.Module):
         def __init__(self):
             super().__init__()
@@ -31,10 +35,12 @@ def _model(seed=0):
 
         def forward(self, x):
             return self.fc2(torch.relu(self.fc1(x)))
+
     return M()
 
 
 # ── DLoRA tests ───────────────────────────────────────────────────────────
+
 
 def test_dlora_construction():
     a = DLoRAAdapter(64, 128, initial_rank=4, max_rank=32, alpha=8)
@@ -137,15 +143,14 @@ def test_dlora_grow_rank_by_idx():
 
 def test_dlora_apply_to_model():
     model = _model()
-    _mgr, n, params = dlora_apply(model, initial_rank=4, max_rank=16,
-                                 min_size=32)
+    _mgr, n, params = dlora_apply(model, initial_rank=4, max_rank=16, min_size=32)
     assert n == 2  # fc1 (64→128), fc2 (128→64)
     assert len(params) == 4  # 2 adapters × (A, B)
     # Base weights frozen.
     assert not model.fc1.weight.requires_grad
     assert not model.fc2.weight.requires_grad
     # Adapters attached.
-    assert hasattr(model.fc1, 'lora_adapter')
+    assert hasattr(model.fc1, "lora_adapter")
     assert isinstance(model.fc1.lora_adapter, DLoRAAdapter)
     assert model.fc1.lora_adapter.current_rank == 4
     # Forward works (no-op since B zero).
@@ -174,6 +179,7 @@ def test_dlora_scale_fixed_with_rank():
 
 
 # ── DoRA tests ────────────────────────────────────────────────────────────
+
 
 def test_dora_construction():
     d = DoRALinear(64, 128, rank=8, alpha=16)
@@ -257,8 +263,7 @@ def test_dora_merge_with_delta():
     x = torch.randn(3, 64)
     out_after = d(x)
     w_eff = d._effective_weight()
-    assert torch.allclose(out_after, torch.nn.functional.linear(x, w_eff),
-                          atol=1e-5)
+    assert torch.allclose(out_after, torch.nn.functional.linear(x, w_eff), atol=1e-5)
 
 
 def test_dora_apply_to_model():

@@ -8,9 +8,11 @@ Covers:
 
 CPU-only, small dims.
 """
-import sys
 
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch
 
@@ -19,8 +21,9 @@ from forge.quant.rotorquant import RotorQuantCache
 
 
 def _mk(bits=4, **kw):
-    return RotorQuantCache(d_model=64, n_heads=4, head_dim=16, bits=bits,
-                           max_seq_len=64, n_kv_heads=2, device="cpu", **kw)
+    return RotorQuantCache(
+        d_model=64, n_heads=4, head_dim=16, bits=bits, max_seq_len=64, n_kv_heads=2, device="cpu", **kw
+    )
 
 
 def test_symmetric_bits_unchanged():
@@ -46,20 +49,17 @@ def test_asymmetric_v_bits():
     torch.manual_seed(0)
     c.append(torch.randn(1, 2, 8, 16), torch.randn(1, 2, 8, 16))
     c.append(torch.randn(1, 2, 1, 16), torch.randn(1, 2, 1, 16))
-    assert c._v_idx.max().item() < 8   # 3-bit indices
+    assert c._v_idx.max().item() < 8  # 3-bit indices
     assert c._k_idx.max().item() < 16  # 4-bit indices
 
 
 def test_boundary_v_layers():
     """First/last ``boundary_layers`` layers get boundary_v_bits for V."""
-    c_edge = _mk(bits=4, bits_v=3, layer_idx=0, n_layers=8,
-                 boundary_v_bits=8)
-    assert c_edge.bits_v == 8          # boundary layer → high-precision V
-    c_mid = _mk(bits=4, bits_v=3, layer_idx=4, n_layers=8,
-                boundary_v_bits=8)
-    assert c_mid.bits_v == 3           # interior layer → coarse V
-    c_last = _mk(bits=4, bits_v=3, layer_idx=7, n_layers=8,
-                 boundary_v_bits=8)
+    c_edge = _mk(bits=4, bits_v=3, layer_idx=0, n_layers=8, boundary_v_bits=8)
+    assert c_edge.bits_v == 8  # boundary layer → high-precision V
+    c_mid = _mk(bits=4, bits_v=3, layer_idx=4, n_layers=8, boundary_v_bits=8)
+    assert c_mid.bits_v == 3  # interior layer → coarse V
+    c_last = _mk(bits=4, bits_v=3, layer_idx=7, n_layers=8, boundary_v_bits=8)
     assert c_last.bits_v == 8
 
 
@@ -79,8 +79,8 @@ def test_sparse_v_skips_low_attn_positions():
     c.append(torch.randn(1, 2, 10, 16), v)
     c.append(torch.randn(1, 2, 1, 16), torch.randn(1, 2, 1, 16))
     T = 11
-    attn = torch.full((1, 2, T), 1e-9)        # (B, Hkv, T)
-    attn[..., 3] = 0.9                        # only position 3 matters
+    attn = torch.full((1, 2, T), 1e-9)  # (B, Hkv, T)
+    attn[..., 3] = 0.9  # only position 3 matters
     attn[..., 7] = 0.05
     v_hat, keep = c.get_sparse_v(attn, threshold=1e-6)
     assert keep.shape == (T,)
@@ -125,8 +125,7 @@ def test_strategy_wires_bits_and_reports_effective():
     """build_kv_cache kwargs reach the cache; info() reports real bits."""
     cache = build_kv_cache("rotorquant", bits=4, bits_v=3)
     assert isinstance(cache, RotorQuantKVCache)
-    cache.init(n_heads=4, head_dim=16, n_kv_heads=2, max_seq_len=32,
-               device="cpu", dtype=torch.float32)
+    cache.init(n_heads=4, head_dim=16, n_kv_heads=2, max_seq_len=32, device="cpu", dtype=torch.float32)
     info = cache.info()
     assert info["bits_k"] == 4 and info["bits_v"] == 3
     # append/get roundtrip through the strategy interface

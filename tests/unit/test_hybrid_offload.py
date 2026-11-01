@@ -3,6 +3,7 @@
 Verifies that the hybrid CPU-GPU optimizer produces the same parameter updates
 as standard AdamW (within fp32 precision), and that the overlap mode works.
 """
+
 import os
 import sys
 
@@ -42,7 +43,7 @@ def test_numerical_equivalence():
         opt_cpu.step()
 
     # Compare final weights
-    for (n_a, p_a), (_n_b, p_b) in zip(model_a.named_parameters(), model_b.named_parameters()):
+    for (n_a, p_a), (_n_b, p_b) in zip(model_a.named_parameters(), model_b.named_parameters(), strict=False):
         diff = (p_a - p_b).abs().max().item()
         assert diff < 1e-4, f"Param {n_a}: max diff {diff} exceeds 1e-4"
     print("PASS: CPUAdamW matches AdamW (max param diff < 1e-4) over 20 steps")
@@ -78,7 +79,7 @@ def test_gpu_offload():
         loss_b.backward()
         opt_cpu.step()
 
-    for (n_a, p_a), (_n_b, p_b) in zip(model_a.named_parameters(), model_b.named_parameters()):
+    for (n_a, p_a), (_n_b, p_b) in zip(model_a.named_parameters(), model_b.named_parameters(), strict=False):
         diff = (p_a - p_b).abs().max().item()
         assert diff < 1e-3, f"GPU param {n_a}: max diff {diff} exceeds 1e-3 (bf16 transfer tolerance)"
     print("PASS: CPUAdamW GPU offload matches AdamW (max diff < 1e-3) over 20 steps")
@@ -115,7 +116,7 @@ def test_overlap_mode():
         opt_overlap.step()
         opt_overlap.wait()  # ensure async CPU step completes
 
-    for (n_a, p_a), (_n_b, p_b) in zip(model_a.named_parameters(), model_b.named_parameters()):
+    for (n_a, p_a), (_n_b, p_b) in zip(model_a.named_parameters(), model_b.named_parameters(), strict=False):
         diff = (p_a - p_b).abs().max().item()
         assert diff < 1e-4, f"Overlap param {n_a}: max diff {diff} exceeds 1e-4"
     print("PASS: overlap mode matches sync mode (max diff < 1e-4)")

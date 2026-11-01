@@ -3,6 +3,7 @@
 Tests category parsing, MODE_CATEGORY_MAP, and LoraHarness logic
 (mocked runtime — no actual engine loading).
 """
+
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,6 +19,7 @@ from forge_gui.api.lora_store import (
 )
 
 # ── Category parsing ───────────────────────────────────────────────────
+
 
 class TestParseCategory:
     def test_coding_category(self):
@@ -43,6 +45,7 @@ class TestParseCategory:
 
 
 # ── Category constants ─────────────────────────────────────────────────
+
 
 class TestCategoryConstants:
     def test_all_categories_have_info(self):
@@ -72,6 +75,7 @@ class TestCategoryConstants:
 
 # ── LoRAEntry with category ────────────────────────────────────────────
 
+
 class TestLoRAEntryCategory:
     def test_default_category(self):
         e = LoRAEntry(name="test.safetensors", path="test")
@@ -83,6 +87,7 @@ class TestLoRAEntryCategory:
 
 
 # ── LoraHarness ────────────────────────────────────────────────────────
+
 
 class TestLoraHarness:
     @pytest.fixture()
@@ -123,26 +128,20 @@ class TestLoraHarness:
     def test_adapters_by_category(self, harness, monkeypatch):
         # mock scan to return test entries
         test_entries = [
-            LoRAEntry(name="coding_lora.safetensors", path="a",
-                      category="coding"),
-            LoRAEntry(name="math_lora.safetensors", path="b",
-                      category="math"),
+            LoRAEntry(name="coding_lora.safetensors", path="a", category="coding"),
+            LoRAEntry(name="math_lora.safetensors", path="b", category="math"),
         ]
-        monkeypatch.setattr("forge_gui.api.lora_store.scan_lora_adapters",
-                            lambda: test_entries)
+        monkeypatch.setattr("forge_gui.api.lora_store.scan_lora_adapters", lambda: test_entries)
         by_cat = harness.adapters_by_category()
         assert len(by_cat["coding"]) == 1
         assert len(by_cat["math"]) == 1
 
     def test_recommend_for_mode(self, harness, monkeypatch):
         test_entries = [
-            LoRAEntry(name="coding_lora.safetensors", path="a",
-                      category="coding", modified=100.0),
-            LoRAEntry(name="agentic_lora.safetensors", path="b",
-                      category="agentic", modified=200.0),
+            LoRAEntry(name="coding_lora.safetensors", path="a", category="coding", modified=100.0),
+            LoRAEntry(name="agentic_lora.safetensors", path="b", category="agentic", modified=200.0),
         ]
-        monkeypatch.setattr("forge_gui.api.lora_store.scan_lora_adapters",
-                            lambda: test_entries)
+        monkeypatch.setattr("forge_gui.api.lora_store.scan_lora_adapters", lambda: test_entries)
         # agent mode prefers agentic
         rec = harness.recommend_for_mode("agent")
         assert rec is not None
@@ -150,11 +149,9 @@ class TestLoraHarness:
 
     def test_recommend_no_match(self, harness, monkeypatch):
         test_entries = [
-            LoRAEntry(name="vision_lora.safetensors", path="a",
-                      category="vision"),
+            LoRAEntry(name="vision_lora.safetensors", path="a", category="vision"),
         ]
-        monkeypatch.setattr("forge_gui.api.lora_store.scan_lora_adapters",
-                            lambda: test_entries)
+        monkeypatch.setattr("forge_gui.api.lora_store.scan_lora_adapters", lambda: test_entries)
         # chat mode prefers chat_assist, reasoning, coding — none available
         rec = harness.recommend_for_mode("chat")
         assert rec is None

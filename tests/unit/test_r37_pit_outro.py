@@ -7,6 +7,7 @@ OutRo: construction, sink detection, non-causal mask generation, forward
 
 All tests run on CPU with small shapes for speed.
 """
+
 import torch
 
 from forge.keys.architecture.pit_tying_key import PITKey
@@ -59,10 +60,12 @@ class TestPITKey:
 
     def test_forward_shape_mismatch(self):
         key = PITKey()
-        res = key.forward({
-            "W_emb": torch.randn(V, D),
-            "W_unemb": torch.randn(D + 1, V),  # wrong d
-        })
+        res = key.forward(
+            {
+                "W_emb": torch.randn(V, D),
+                "W_unemb": torch.randn(D + 1, V),  # wrong d
+            }
+        )
         assert not res.success
         assert "Shape mismatch" in res.error
 
@@ -75,9 +78,8 @@ class TestPITKey:
         res = key.forward({"W_emb": W_emb, "W_unemb": W_unemb})
         assert res.success
         M = res.weights["M"]
-        I = torch.eye(D, dtype=M.dtype, device=M.device)
-        assert torch.allclose(M @ M.T, I, atol=1e-5), (
-            "M is not orthonormal: M @ M.T deviates from I")
+        ident = torch.eye(D, dtype=M.dtype, device=M.device)
+        assert torch.allclose(M @ M.T, ident, atol=1e-5), "M is not orthonormal: M @ M.T deviates from I"
 
     def test_reverse_reconstruction(self):
         """reverse reconstructs W_emb and W_unemb from M + projections."""
@@ -122,10 +124,8 @@ class TestPITKey:
 
         # The reconstructed weights equal the originals (M is orthonormal so
         # the projection equations hold exactly up to solve precision).
-        assert torch.allclose(rev.data["W_emb"], fwd.weights["P_emb"] @ fwd.weights["M"],
-                              atol=1e-4)
-        assert torch.allclose(rev.data["W_unemb"], fwd.weights["M"] @ fwd.weights["P_unemb"],
-                              atol=1e-4)
+        assert torch.allclose(rev.data["W_emb"], fwd.weights["P_emb"] @ fwd.weights["M"], atol=1e-4)
+        assert torch.allclose(rev.data["W_unemb"], fwd.weights["M"] @ fwd.weights["P_unemb"], atol=1e-4)
 
     def test_bi_key_class(self):
         """PITKey reports BI (both directions, round-trip identity)."""
@@ -163,8 +163,7 @@ class TestOutRoKey:
             attn[..., 10, :] = attn[..., 10, :] * 0.2
             attn[..., 10, 0] = 0.8  # position 10 is a sink
             # Renormalize rows that we modified partially.
-            attn[..., 10, :] = attn[..., 10, :] / attn[..., 10, :].sum(
-                dim=-1, keepdim=True)
+            attn[..., 10, :] = attn[..., 10, :] / attn[..., 10, :].sum(dim=-1, keepdim=True)
         return attn
 
     def test_sink_detection(self):

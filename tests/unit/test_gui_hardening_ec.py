@@ -4,6 +4,7 @@ Self-contained, CPU-only: no engine, no torch, no Qt event loop. Each
 test names the EC item it guards so a regression maps straight back to
 the critique entry.
 """
+
 from __future__ import annotations
 
 import json
@@ -37,6 +38,7 @@ class _FakeHub:
 
 # ── EC-184: agent command allowlist + argv[0] confinement ────────────
 
+
 def test_cmd_allowlist_excludes_interpreters_and_vcs():
     for banned in ("python", "python3", "pip", "pip3", "git"):
         assert banned not in CMD_ALLOWLIST
@@ -44,10 +46,12 @@ def test_cmd_allowlist_excludes_interpreters_and_vcs():
 
 def test_run_cmd_rejects_path_argv0(tmp_path):
     sb = ToolSandbox(tmp_path)
-    for evil in (r"..\tools\pytest.exe --version",
-                 r"..\\evil\\pytest.exe",
-                 "C:/Windows/System32/cmd.exe /c dir",
-                 "./pytest --version"):
+    for evil in (
+        r"..\tools\pytest.exe --version",
+        r"..\\evil\\pytest.exe",
+        "C:/Windows/System32/cmd.exe /c dir",
+        "./pytest --version",
+    ):
         res = sb.tool_run_cmd(evil)
         assert "error" in res, evil
         assert "bare name" in res["error"]
@@ -55,7 +59,7 @@ def test_run_cmd_rejects_path_argv0(tmp_path):
 
 def test_run_cmd_rejects_non_allowlisted_names(tmp_path):
     sb = ToolSandbox(tmp_path)
-    res = sb.tool_run_cmd("python -c \"print(1)\"")
+    res = sb.tool_run_cmd('python -c "print(1)"')
     assert "not in allowlist" in res["error"]
     res = sb.tool_run_cmd("git status")
     assert "not in allowlist" in res["error"]
@@ -63,13 +67,12 @@ def test_run_cmd_rejects_non_allowlisted_names(tmp_path):
 
 # ── EC-185 / EC-077: launch presets ───────────────────────────────────
 
+
 def test_preset_overrides_fill_only_declared_args():
     preset = ProcessPreset(
-        name="t", script="scripts/x.py", description="",
-        arg_defaults={"--data": "", "--epochs": "3"})
-    cmd = build_command(preset, {"--data": "d.jsonl",
-                                 "--evil-flag": "1",
-                                 "argv0": "calc.exe"})
+        name="t", script="scripts/x.py", description="", arg_defaults={"--data": "", "--epochs": "3"}
+    )
+    cmd = build_command(preset, {"--data": "d.jsonl", "--evil-flag": "1", "argv0": "calc.exe"})
     assert cmd[1].endswith("scripts\\x.py") or cmd[1].endswith("scripts/x.py")
     joined = " ".join(cmd)
     assert "--evil-flag" not in joined
@@ -80,6 +83,7 @@ def test_preset_overrides_fill_only_declared_args():
 
 def test_all_presets_have_existing_scripts():
     from forge_gui.api.process_manager import get_presets
+
     presets = get_presets()
     assert presets, "expected at least one launch preset"
     for p in presets:
@@ -88,13 +92,21 @@ def test_all_presets_have_existing_scripts():
 
 # ── EC-186: backup restore zip validation + staging ──────────────────
 
+
 def test_zip_member_validation():
     v = BackupService._validate_zip_member
-    v("data/chats/conversations.json")          # clean member OK
+    v("data/chats/conversations.json")  # clean member OK
     v("nested/dir/file.txt")
-    for bad in ("../escape.txt", "a/../../x", "..\\win\\x",
-                "C:/abs/x", "C:\\abs\\x", "/root/x", "\\unc\\x",
-                "x/../../y"):
+    for bad in (
+        "../escape.txt",
+        "a/../../x",
+        "..\\win\\x",
+        "C:/abs/x",
+        "C:\\abs\\x",
+        "/root/x",
+        "\\unc\\x",
+        "x/../../y",
+    ):
         with pytest.raises(ValueError):
             v(bad)
 
@@ -135,11 +147,12 @@ def test_restore_stages_then_swaps(tmp_path):
         zf.writestr("data/new.txt", "new-content")
     svc._restore_backup(str(good))
     assert (tmp_path / "data" / "new.txt").read_text() == "new-content"
-    assert not (tmp_path / "old.txt").exists()      # wiped then swapped
+    assert not (tmp_path / "old.txt").exists()  # wiped then swapped
     assert not list(svc.backup_dir.glob(".restore_staging_*"))
 
 
 # ── EC-203: file change hashing ───────────────────────────────────────
+
 
 def test_hash_file_catches_late_edits(tmp_path):
     f = tmp_path / "big.txt"
@@ -155,12 +168,12 @@ def test_hash_file_catches_late_edits(tmp_path):
 
 # ── EC-211 / EC-212: store locking + immutable fields + counter ──────
 
+
 def test_lorebook_update_cannot_rewrite_identity(tmp_path):
     lb = Lorebook(root=tmp_path)
     e = lb.add(keys=["python"], content="original")
     old_created = e.created
-    lb.update(e.id, id="hijacked", keys=["other"], created="x",
-              trigger_count=99, content="updated", constant=True)
+    lb.update(e.id, id="hijacked", keys=["other"], created="x", trigger_count=99, content="updated", constant=True)
     e2 = lb.get(e.id)
     assert e2.id == e.id
     assert e2.keys == ["python"]
@@ -172,7 +185,7 @@ def test_lorebook_update_cannot_rewrite_identity(tmp_path):
 def test_approval_ids_unique_under_threads():
     ch = ApprovalChannel(_FakeHub())
     ids = []
-    lock = threading.Lock()
+    threading.Lock()
 
     def req():
         # timeout 0 → returns immediately; id still consumed
@@ -191,15 +204,18 @@ def test_approval_ids_unique_under_threads():
 
 # ── EC-194: chat-store batch persistence ──────────────────────────────
 
+
 def test_append_messages_single_save(tmp_path):
     store = ChatStore(root=tmp_path)
     conv = store.create()
     calls = []
     orig = store.save
     store.save = lambda: (calls.append(1), orig())
-    msgs = [{"role": "assistant", "content": "a"},
-            {"role": "tool", "name": "t", "content": "{}"},
-            {"role": "assistant", "content": "b"}]
+    msgs = [
+        {"role": "assistant", "content": "a"},
+        {"role": "tool", "name": "t", "content": "{}"},
+        {"role": "assistant", "content": "b"},
+    ]
     store.append_messages(conv["id"], msgs)
     assert calls == [1]
     got = store.get(conv["id"])
@@ -207,6 +223,7 @@ def test_append_messages_single_save(tmp_path):
 
 
 # ── EC-207: log tail + status_file confinement ───────────────────────
+
 
 def test_log_tail_seeks_and_confines(tmp_path):
     runs = tmp_path / "runs"
@@ -229,10 +246,9 @@ def test_log_tail_seeks_and_confines(tmp_path):
 
 # ── EC-208: cheap task summaries + kill guard ─────────────────────────
 
+
 def test_to_dict_no_lines_unless_tailed():
-    t = TaskInfo(id="t1", name="n", command=["x"],
-                 started_at=time.time(), status="done",
-                 ended_at=time.time())
+    t = TaskInfo(id="t1", name="n", command=["x"], started_at=time.time(), status="done", ended_at=time.time())
     t.lines = [f"l{i}" for i in range(5000)]
     d = t.to_dict()
     assert "lines" not in d and d["n_lines"] == 5000
@@ -242,9 +258,7 @@ def test_to_dict_no_lines_unless_tailed():
 
 def test_kill_does_not_clobber_finished_task(tmp_path):
     svc = ProcessService(_FakeHub())
-    t = TaskInfo(id="t1", name="n", command=["x"],
-                 started_at=time.time() - 5, status="done",
-                 ended_at=time.time() - 1)
+    t = TaskInfo(id="t1", name="n", command=["x"], started_at=time.time() - 5, status="done", ended_at=time.time() - 1)
     svc.tasks["t1"] = t
     svc.kill("t1")
     assert svc.tasks["t1"].status == "done"
@@ -252,18 +266,21 @@ def test_kill_does_not_clobber_finished_task(tmp_path):
 
 # ── EC-215: task id collision after restart ───────────────────────────
 
+
 def test_task_ids_skip_stale_dirs(tmp_path, monkeypatch):
     import forge_gui_server.services.procs as procs_mod
+
     monkeypatch.setattr(procs_mod, "project_root", lambda: tmp_path)
     stale = tmp_path / "research" / "tasks" / "task_0001"
     stale.mkdir(parents=True)
     svc = ProcessService(_FakeHub())
     tid = svc.launch("t", ["definitely-not-a-real-exec-xyz"])
-    assert tid != "task_0001"          # didn't reuse the stale dir
+    assert tid != "task_0001"  # didn't reuse the stale dir
     assert (tmp_path / "research" / "tasks" / tid).is_dir()
 
 
 # ── EC-216: hub cross-thread safety ──────────────────────────────────
+
 
 def test_hub_publish_without_loop_keeps_recent():
     hub = EventHub()
@@ -272,18 +289,18 @@ def test_hub_publish_without_loop_keeps_recent():
     assert evt["seq"] == 1
     # no running loop → not fanned out to a foreign-thread queue
     assert q.empty()
-    q2 = hub.subscribe()           # replay sees it
+    q2 = hub.subscribe()  # replay sees it
     assert not q2.empty()
 
 
 # ── EC-220: self-play status path caching ────────────────────────────
 
+
 def test_status_path_cached_between_polls(tmp_path):
     ckpts = tmp_path / "checkpoints"
     sp = ckpts / "self_play"
     sp.mkdir(parents=True)
-    (sp / "status.json").write_text(
-        json.dumps({"status": "running", "step": 5}), encoding="utf-8")
+    (sp / "status.json").write_text(json.dumps({"status": "running", "step": 5}), encoding="utf-8")
     er = EventsReader(search_dirs=[ckpts])
     s1 = er.latest_status()
     assert s1 and s1["step"] == 5
@@ -295,9 +312,11 @@ def test_status_path_cached_between_polls(tmp_path):
 
 # ── EC-190 / EC-206: cancel token + lora confine ─────────────────────
 
+
 def test_cancel_tokens():
     from forge_gui_server.services.chat_loop import ChatCancel
     from forge_gui_server.services.gen import StreamCancel
+
     for tok in (ChatCancel(), StreamCancel()):
         assert not tok.cancelled
         tok.cancel()
@@ -307,7 +326,8 @@ def test_cancel_tokens():
 def test_lora_path_confinement():
     pytest.importorskip("forge_gui.api.lora_store")
     from forge_gui_server.services.lora import LoraService
-    ck = (Path(__file__).resolve().parents[2] / "research" / "checkpoints")
+
+    ck = Path(__file__).resolve().parents[2] / "research" / "checkpoints"
     with pytest.raises(ValueError):
         LoraService._confine("../../etc/passwd", [ck])
     with pytest.raises(ValueError):

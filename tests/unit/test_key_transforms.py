@@ -13,10 +13,13 @@ hypothesis dependency — we use fixed seeds and parameterized cases.
 
 import importlib.util
 import sys
+from pathlib import Path
 
 import pytest
 import torch
 import torch.nn as nn
+
+REPO = Path(__file__).resolve().parents[2]
 
 
 # Load keys dynamically (avoid importing full research package which may
@@ -31,9 +34,11 @@ def _load_module(name, path):
 
 # --- Fixtures ---
 
+
 @pytest.fixture
 def small_model():
     """A small model for testing key application."""
+
     class SmallModel(nn.Module):
         def __init__(self):
             super().__init__()
@@ -42,6 +47,7 @@ def small_model():
             self.lm_head = nn.Linear(32, 100, bias=False)
             # Tie weights
             self.lm_head.weight = self.embed_tokens.weight
+
         def forward(self, x):
             if isinstance(x, torch.Tensor) and x.dtype == torch.long:
                 h = self.embed_tokens(x)
@@ -49,6 +55,7 @@ def small_model():
                 h = x  # assume already embedded
             h = self.linear(h)
             return self.lm_head(h)
+
     return SmallModel()
 
 
@@ -60,12 +67,13 @@ def test_input_ids():
 
 # --- PIT Key Properties ---
 
+
 class TestPITKey:
     """Property tests for PIT (Pseudo-Inverse Tying) key."""
 
     def test_identity_init_forward(self, small_model, test_input_ids):
         """PIT with L=I should produce identical output to standard tying."""
-        pit = _load_module("pit_test", r"D:\windsurf\ForgeAI\forge\keys\misc\pit_key.py")
+        pit = _load_module("pit_test", REPO / "forge" / "keys" / "misc" / "pit_key.py")
 
         original_out = small_model(test_input_ids).clone()
 
@@ -79,12 +87,13 @@ class TestPITKey:
         small_model.lm_head = pit_head
 
         pit_out = small_model(test_input_ids)
-        assert torch.allclose(original_out, pit_out, atol=1e-4), \
+        assert torch.allclose(original_out, pit_out, atol=1e-4), (
             f"PIT identity init mismatch: {(original_out - pit_out).abs().max()}"
+        )
 
     def test_T_is_spd(self):
         """T = L @ L^T should always be symmetric positive definite."""
-        pit = _load_module("pit_test2", r"D:\windsurf\ForgeAI\forge\keys\misc\pit_key.py")
+        pit = _load_module("pit_test2", REPO / "forge" / "keys" / "misc" / "pit_key.py")
         embed = pit.PITEmbedding(50, 16, init="standard")
 
         # Random L (lower triangular)
@@ -100,7 +109,7 @@ class TestPITKey:
 
     def test_key_roundtrip(self):
         """PITKey forward then reverse should recover the original weight."""
-        pit = _load_module("pit_test3", r"D:\windsurf\ForgeAI\forge\keys\misc\pit_key.py")
+        pit = _load_module("pit_test3", REPO / "forge" / "keys" / "misc" / "pit_key.py")
         key = pit.PITKey()
 
         original_weight = torch.randn(50, 16)
@@ -115,12 +124,13 @@ class TestPITKey:
 
 # --- LeRoPE Key Properties ---
 
+
 class TestLeRoPEKey:
     """Property tests for LeRoPE/AdaRoPE."""
 
     def test_identity_init(self):
         """LeRoPE with freq_scale=1 should match standard RoPE."""
-        lr = _load_module("lerope_test", r"D:\windsurf\ForgeAI\forge\keys\position\lerope_key.py")
+        lr = _load_module("lerope_test", REPO / "forge" / "keys" / "position" / "lerope_key.py")
 
         dim = 16
         max_seq = 32
@@ -137,7 +147,7 @@ class TestLeRoPEKey:
 
     def test_finiteness(self):
         """All RoPE outputs should be finite."""
-        lr = _load_module("lerope_test2", r"D:\windsurf\ForgeAI\forge\keys\position\lerope_key.py")
+        lr = _load_module("lerope_test2", REPO / "forge" / "keys" / "position" / "lerope_key.py")
         lerope = lr.LeRoPEEmbedding(dim=16, max_seq_len=32)
 
         x = torch.randn(2, 4, 16, 16)
@@ -152,7 +162,7 @@ class TestLeRoPEKey:
 
     def test_adarope_per_head_differentiation(self):
         """AdaRoPE should allow per-head different frequencies."""
-        lr = _load_module("lerope_test3", r"D:\windsurf\ForgeAI\forge\keys\position\lerope_key.py")
+        lr = _load_module("lerope_test3", REPO / "forge" / "keys" / "position" / "lerope_key.py")
         adarope = lr.AdaRoPEEmbedding(dim=16, n_heads=4, max_seq_len=32)
 
         # At init, all heads should be the same
@@ -169,12 +179,13 @@ class TestLeRoPEKey:
 
 # --- AttnRes Key Properties ---
 
+
 class TestAttnResKey:
     """Property tests for AttnRes."""
 
     def test_identity_init_zero_gates(self):
         """AttnRes gates should be 0 at init (lossless)."""
-        ar = _load_module("attnres_test", r"D:\windsurf\ForgeAI\forge\keys\architecture\attn_residual_key.py")
+        ar = _load_module("attnres_test", REPO / "forge" / "keys" / "architecture" / "attn_residual_key.py")
         module = ar.AttnResModule(64, 8, k=4, n_heads=4)
         assert (module.gates == 0).all()
 
@@ -186,7 +197,7 @@ class TestAttnResKey:
 
     def test_finiteness_with_nonzero_gate(self):
         """AttnRes output should be finite even with non-zero gates."""
-        ar = _load_module("attnres_test2", r"D:\windsurf\ForgeAI\forge\keys\architecture\attn_residual_key.py")
+        ar = _load_module("attnres_test2", REPO / "forge" / "keys" / "architecture" / "attn_residual_key.py")
         module = ar.AttnResModule(64, 8, k=4, n_heads=4)
         module.gates.data.fill_(1.0)
 
@@ -198,12 +209,13 @@ class TestAttnResKey:
 
 # --- mHC Key Properties ---
 
+
 class TestMHCKey:
     """Property tests for mHC."""
 
     def test_identity_init_standard_residual(self):
         """mHC with gate=0 should be standard residual."""
-        mhc = _load_module("mhc_test", r"D:\windsurf\ForgeAI\forge\keys\architecture\mhc_key.py")
+        mhc = _load_module("mhc_test", REPO / "forge" / "keys" / "architecture" / "mhc_key.py")
         module = mhc.MHCModule(64, rank=16)
         assert module.gate.item() == 0.0
 
@@ -214,7 +226,7 @@ class TestMHCKey:
 
     def test_T_spd_property(self):
         """U @ V^T should produce valid projections."""
-        mhc = _load_module("mhc_test2", r"D:\windsurf\ForgeAI\forge\keys\architecture\mhc_key.py")
+        mhc = _load_module("mhc_test2", REPO / "forge" / "keys" / "architecture" / "mhc_key.py")
         module = mhc.MHCModule(64, rank=16)
 
         # The projection W = U @ V^T
@@ -225,17 +237,19 @@ class TestMHCKey:
 
 # --- Safety Framework Properties ---
 
+
 class TestSafetyFramework:
     """Property tests for the safety validation framework."""
 
     def test_safe_apply_catches_nan(self):
         """safe_apply should catch NaN corruption and rollback."""
-        safety = _load_module("safety_test", r"D:\windsurf\ForgeAI\forge\keys\safety.py")
+        safety = _load_module("safety_test", REPO / "forge" / "keys" / "safety.py")
 
         class M(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.w = nn.Linear(16, 16)
+
             def forward(self, x):
                 return self.w(x)
 
@@ -247,20 +261,20 @@ class TestSafetyFramework:
             return m
 
         with pytest.raises(safety.KeySafetyError):
-            safety.safe_apply(model, corrupt, identity_init=False,
-                            test_input=torch.randn(1, 4, 16))
+            safety.safe_apply(model, corrupt, identity_init=False, test_input=torch.randn(1, 4, 16))
 
         # Verify rollback
         assert torch.allclose(model.w.weight, original_w, atol=1e-6)
 
     def test_safe_apply_catches_identity_violation(self):
         """safe_apply should catch identity-init violations."""
-        safety = _load_module("safety_test2", r"D:\windsurf\ForgeAI\forge\keys\safety.py")
+        safety = _load_module("safety_test2", REPO / "forge" / "keys" / "safety.py")
 
         class M(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.w = nn.Linear(16, 16)
+
             def forward(self, x):
                 return self.w(x)
 
@@ -272,17 +286,17 @@ class TestSafetyFramework:
             return m
 
         with pytest.raises(safety.KeySafetyError):
-            safety.safe_apply(model, modify, identity_init=True,
-                            test_input=test_input)
+            safety.safe_apply(model, modify, identity_init=True, test_input=test_input)
 
     def test_verify_model_integrity_healthy(self):
         """verify_model_integrity should pass for a healthy model."""
-        safety = _load_module("safety_test3", r"D:\windsurf\ForgeAI\forge\keys\safety.py")
+        safety = _load_module("safety_test3", REPO / "forge" / "keys" / "safety.py")
 
         class M(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.w = nn.Linear(16, 16)
+
             def forward(self, x):
                 return self.w(x)
 
@@ -293,12 +307,13 @@ class TestSafetyFramework:
 
     def test_verify_model_integrity_corrupted(self):
         """verify_model_integrity should detect NaN corruption."""
-        safety = _load_module("safety_test4", r"D:\windsurf\ForgeAI\forge\keys\safety.py")
+        safety = _load_module("safety_test4", REPO / "forge" / "keys" / "safety.py")
 
         class M(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.w = nn.Linear(16, 16)
+
             def forward(self, x):
                 return self.w(x)
 

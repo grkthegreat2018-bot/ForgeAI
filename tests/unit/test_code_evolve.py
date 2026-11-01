@@ -3,6 +3,7 @@
 Pure-python dummy target + scripted proposer — no LLM, no GPU. Each
 subprocess eval is ~0.5s; budgets kept tiny.
 """
+
 from __future__ import annotations
 
 import textwrap
@@ -10,11 +11,16 @@ import textwrap
 import pytest
 
 from forge.evolution.code_evolve import (
-    CodeEvolve, CodeEvolveConfig, LLMProposer, Target, _OPS,
-    _extract_code, _norm_hash,
+    _OPS,
+    CodeEvolve,
+    CodeEvolveConfig,
+    LLMProposer,
+    Target,
+    _extract_code,
+    _norm_hash,
 )
 
-DUMMY = textwrap.dedent('''\
+DUMMY = textwrap.dedent("""\
     NAME = "fast_sum"
     GOAL = "min"
     METRIC = "ms_per_call"
@@ -47,7 +53,7 @@ DUMMY = textwrap.dedent('''\
         for _ in range(30):
             fn(*a)
         return {"ms_per_call": (time.perf_counter() - t0) / 30 * 1000}
-    ''')
+    """)
 
 FAST = "def fast_sum(xs):\n    return sum(xs)\n"
 WRONG = "def fast_sum(xs):\n    return 0.0\n"
@@ -62,16 +68,25 @@ def target_file(tmp_path):
 
 
 def _ce(target_file, tmp_path, **kw):
-    cfg = CodeEvolveConfig(target=target_file,
-                           db_path=str(tmp_path / "cev.db"),
-                           proposer="none", reps=1, evals_budget=10,
-                           islands=1, patience=3, hop_after=99,
-                           timeout_s=30, verbose=False, **kw)
+    cfg = CodeEvolveConfig(
+        target=target_file,
+        db_path=str(tmp_path / "cev.db"),
+        proposer="none",
+        reps=1,
+        evals_budget=10,
+        islands=1,
+        patience=3,
+        hop_after=99,
+        timeout_s=30,
+        verbose=False,
+        **kw,
+    )
     return cfg
 
 
 class _Scripted:
     """Proposer that returns a fixed queue of programs, then repeats."""
+
     def __init__(self, programs):
         self.programs = list(programs)
         self.calls = 0
@@ -84,24 +99,24 @@ class _Scripted:
 
 
 def test_extract_code():
-    raw = 'text\n```python\ndef f():\n    return 1\n```\n# Write more\nx = 2\n'
+    raw = "text\n```python\ndef f():\n    return 1\n```\n# Write more\nx = 2\n"
     assert "def f" in _extract_code(raw)
     assert "# Write more" not in _extract_code(raw)
 
 
 def test_extract_code_unclosed_fence_and_prime():
     # truncated generation: unclosed fence -> take tail after last ```
-    raw = 'blah\n```python\ndef f():\n    return 1\n    return'
+    raw = "blah\n```python\ndef f():\n    return 1\n    return"
     assert "return 1" in _extract_code(raw)
     # primed completion: raw continues a def line -> re-attach prime
     prime = "import torch\n\n\ndef f(x: torch.Tensor) -> torch.Tensor:"
-    raw = '\n    return x.relu()'
+    raw = "\n    return x.relu()"
     code = _extract_code(raw, prime)
     assert code.startswith("import torch")
     assert "return x.relu()" in code
     compile(code, "<c>", "exec")
     # salvage: trailing prose that breaks compile gets trimmed
-    raw = 'def f():\n    return 1\nHere is why this is faster: no sort!'
+    raw = "def f():\n    return 1\nHere is why this is faster: no sort!"
     assert compile(_extract_code(raw), "<c>", "exec") is not None
 
 
@@ -120,8 +135,8 @@ def test_promotes_faster_impl(target_file, tmp_path):
     assert res["improvement_pct"] > 10.0
     # insight written for the verified win (fresh conn — run() closes its own)
     import sqlite3
-    n = sqlite3.connect(cfg.db_path).execute(
-        "SELECT COUNT(*) FROM code_insights").fetchone()[0]
+
+    n = sqlite3.connect(cfg.db_path).execute("SELECT COUNT(*) FROM code_insights").fetchone()[0]
     assert n >= 1
 
 
@@ -129,7 +144,7 @@ def test_wrong_impl_never_promoted(target_file, tmp_path):
     prop = _Scripted([WRONG, WRONG, WRONG, WRONG])
     cfg = _ce(target_file, tmp_path)
     res = CodeEvolve(cfg, propose_fn=prop).run()
-    assert "for x in xs" in res["best_code"]   # still the seed
+    assert "for x in xs" in res["best_code"]  # still the seed
     assert res["improvement_pct"] == pytest.approx(0.0)
 
 
@@ -147,17 +162,23 @@ def test_budget_gate(target_file, tmp_path):
     prop = _Scripted([FAST] * 4)
     cfg = _ce(target_file, tmp_path)
     cfg_t = Target(target_file)
-    cfg_t.budgets["ms_per_call"] = ("<=", 1e-9)   # unattainable
+    cfg_t.budgets["ms_per_call"] = ("<=", 1e-9)  # unattainable
     # monkeypatch the loaded target's budgets via a new spec file
-    import re
+
     p = tmp_path / "fast_sum_gated.py"
-    src = DUMMY.replace("BUDGETS = {}",
-                        'BUDGETS = {"ms_per_call": ("<=", 1e-9)}')
+    src = DUMMY.replace("BUDGETS = {}", 'BUDGETS = {"ms_per_call": ("<=", 1e-9)}')
     p.write_text(src, encoding="utf-8")
-    cfg = CodeEvolveConfig(target=str(p), db_path=str(tmp_path / "b.db"),
-                           proposer="none", reps=1, evals_budget=6,
-                           islands=1, patience=4, timeout_s=30,
-                           verbose=False)
+    cfg = CodeEvolveConfig(
+        target=str(p),
+        db_path=str(tmp_path / "b.db"),
+        proposer="none",
+        reps=1,
+        evals_budget=6,
+        islands=1,
+        patience=4,
+        timeout_s=30,
+        verbose=False,
+    )
     res = CodeEvolve(cfg, propose_fn=prop).run()
     assert "for x in xs" in res["best_code"]
 
@@ -165,11 +186,10 @@ def test_budget_gate(target_file, tmp_path):
 def test_programs_logged(target_file, tmp_path):
     prop = _Scripted([FAST, WRONG])
     cfg = _ce(target_file, tmp_path)
-    cfg.judge = False   # scripted queue must not feed judge calls
+    cfg.judge = False  # scripted queue must not feed judge calls
     ce = CodeEvolve(cfg, propose_fn=prop)
     ce.run()
-    rows = ce.db.conn.execute(
-        "SELECT stage, ok FROM code_programs").fetchall()
+    rows = ce.db.conn.execute("SELECT stage, ok FROM code_programs").fetchall()
     stages = {r[0] for r in rows}
     assert "done" in stages and "test" in stages
 
@@ -185,21 +205,23 @@ def test_resume_continues_from_prior_best(target_file, tmp_path):
     ce2 = CodeEvolve(cfg2, propose_fn=_Scripted(["pass\n"] * 30))
     res = ce2.run()
     assert "sum(xs)" in res["best_code"]
-    assert res["improvement_pct"] > 0   # seed was beaten before run 2 began
+    assert res["improvement_pct"] > 0  # seed was beaten before run 2 began
 
 
 def test_mutator_bandit_persists(tmp_path):
     """Op stats written by note() are visible to a fresh Mutator — the
     policy literally resumes across runs."""
     import sqlite3
+
     from forge.evolution.code_evolve import _CODE_DDL
     from forge.evolution.mutator import Mutator
+
     conn = sqlite3.connect(str(tmp_path / "m.db"))
     for stmt in _CODE_DDL:
         conn.execute(stmt)
     conn.commit()
 
-    class _DB:   # minimal conn shim — Mutator only needs .conn
+    class _DB:  # minimal conn shim — Mutator only needs .conn
         def __init__(self, c):
             self.conn = c
 
@@ -215,6 +237,7 @@ def test_mutator_bandit_persists(tmp_path):
 
 def test_export_pairs(target_file, tmp_path):
     from forge.evolution.code_evolve import export_pairs
+
     db = tmp_path / "cev.db"
     cfg = _ce(target_file, tmp_path)
     cfg.db_path = str(db)
@@ -229,28 +252,32 @@ def test_literal_never_touches_call_args():
     """Regression for the min_k drift: a linspace endpoint perturbation
     changed real filtering behavior while passing the old gate. Tuning
     literals live in Assign/Compare positions only."""
+    import ast
+
+    import numpy as np
+
     from forge.evolution.mutator import _LiteralPerturb
-    import numpy as np, ast
-    src = ("import torch\n"
-           "def f(x):\n"
-           "    eps = 1e-8\n"
-           "    w = torch.linspace(1.0, 0.1, 5)\n"
-           "    if x > 0.5:\n"
-           "        return x * 2\n"
-           "    return x\n")
+
+    src = (
+        "import torch\n"
+        "def f(x):\n"
+        "    eps = 1e-8\n"
+        "    w = torch.linspace(1.0, 0.1, 5)\n"
+        "    if x > 0.5:\n"
+        "        return x * 2\n"
+        "    return x\n"
+    )
     for seed in range(30):
-        t = _LiteralPerturb(np.random.default_rng(seed)).visit(
-            ast.parse(src))
+        t = _LiteralPerturb(np.random.default_rng(seed)).visit(ast.parse(src))
         out = ast.unparse(t)
-        assert "0.1, 5" in out          # ctor args immutable
+        assert "0.1, 5" in out  # ctor args immutable
     perturbed = False
     for seed in range(60):
-        t = _LiteralPerturb(np.random.default_rng(seed)).visit(
-            ast.parse(src))
+        t = _LiteralPerturb(np.random.default_rng(seed)).visit(ast.parse(src))
         out = ast.unparse(t)
         if "1e-08" not in out or "0.5" not in out:
             perturbed = True
-    assert perturbed                    # assign/compare CAN drift
+    assert perturbed  # assign/compare CAN drift
 
 
 def test_workers_auto_smoke(target_file, tmp_path):
@@ -270,27 +297,31 @@ def test_mutants_for_unique_and_deterministic():
     AND distinct code — uniqueness by construction, the fix for the
     measured 91.6% dup-reject rate."""
     import ast
+
     from forge.evolution.mutator import Mutator
-    src = ("import torch\n"
-           "def f(x):\n"
-           "    y = x.masked_fill(x > 0.5, 0.0)\n"
-           "    z = x.masked_fill(x < -0.5, 0.0)\n"
-           "    s, i = torch.sort(y + z, dim=-1)\n"
-           "    t = s.sort(dim=-1).values\n"
-           "    eps = 1e-4\n"
-           "    if eps > 0.5:\n"
-           "        return s\n"
-           "    return t\n")
+
+    src = (
+        "import torch\n"
+        "def f(x):\n"
+        "    y = x.masked_fill(x > 0.5, 0.0)\n"
+        "    z = x.masked_fill(x < -0.5, 0.0)\n"
+        "    s, i = torch.sort(y + z, dim=-1)\n"
+        "    t = s.sort(dim=-1).values\n"
+        "    eps = 1e-4\n"
+        "    if eps > 0.5:\n"
+        "        return s\n"
+        "    return t\n"
+    )
     fam1 = list(Mutator(seed=0).mutants_for(src, seed_base=3))
     assert len(fam1) >= 6
     sigs = [s for s, _ in fam1]
     codes = [c for _, c in fam1]
-    assert len(set(sigs)) == len(sigs)          # distinct op keys
-    assert len(set(codes)) == len(codes)        # distinct programs
+    assert len(set(sigs)) == len(sigs)  # distinct op keys
+    assert len(set(codes)) == len(codes)  # distinct programs
     canon = ast.unparse(ast.parse(src))
-    for sig, code in fam1:
-        assert code != canon                    # no unchanged trees
-        compile(code, "<m>", "exec")            # always syntactically valid
+    for _sig, code in fam1:
+        assert code != canon  # no unchanged trees
+        compile(code, "<m>", "exec")  # always syntactically valid
     # Same seed_base -> identical family (deterministic enumeration)
     fam2 = [c for _, c in Mutator(seed=0).mutants_for(src, seed_base=3)]
     assert fam2 == codes
@@ -305,13 +336,12 @@ def test_mutants_for_thin_seed_surface():
     attrs used >=1x (was >=3x, which left zero mutation surface on the
     canon_key target and stalled the basin path before first emit)."""
     from forge.evolution.mutator import Mutator
-    src = ("import ast\n\n\n"
-           "def canon_code(src):\n"
-           "    return ast.unparse(ast.parse(src))\n")
+
+    src = "import ast\n\n\ndef canon_code(src):\n    return ast.unparse(ast.parse(src))\n"
     fam = list(Mutator(seed=0).mutants_for(src, seed_base=0))
     assert len(fam) >= 1
     assert any(s.startswith("locals_bind") for s, _ in fam)
-    for sig, code in fam:
+    for _sig, code in fam:
         compile(code, "<m>", "exec")
 
 
@@ -319,6 +349,7 @@ def test_eval_pool_sync_and_many(tmp_path):
     """Persistent workers: eval_sync + eval_many evaluate the dummy
     target without subprocess-per-eval; results in submitted order."""
     from forge.evolution.eval_pool import EvalPool
+
     p = tmp_path / "fast_sum.py"
     p.write_text(DUMMY, encoding="utf-8")
     pool = EvalPool(str(p), n_workers=2, timeout_s=60)
@@ -328,9 +359,7 @@ def test_eval_pool_sync_and_many(tmp_path):
         assert res["metrics"]["ms_per_call"] > 0
         bad = pool.eval_sync("def fast_sum(xs):\n    return 0.0\n")
         assert not bad["ok"] and bad["stage"] == "test"
-        ress = pool.eval_many([
-            "def fast_sum(xs):\n    return sum(xs)\n",
-            "def fast_sum(xs):\n    return 0.0\n"])
+        ress = pool.eval_many(["def fast_sum(xs):\n    return sum(xs)\n", "def fast_sum(xs):\n    return 0.0\n"])
         assert ress[0]["ok"] and not ress[1]["ok"]
     finally:
         pool.close()
@@ -357,14 +386,14 @@ def test_incumbent_verify_cache(target_file, tmp_path):
     ce.incumbent_score = -1.0
     fast = "def fast_sum(xs):\n    return sum(xs)\n"
     ce._verified(fast, -0.01, workdir)
-    first = calls["n"]              # 1 challenger + 2 incumbent
+    first = calls["n"]  # 1 challenger + 2 incumbent
     assert first == 3
     ce._verified(fast, -0.01, workdir)
-    second = calls["n"] - first     # challenger only — incumbent cached
+    second = calls["n"] - first  # challenger only — incumbent cached
     assert second == 1
     ce._eval_n += cfg.inc_stale + 1
     ce._verified(fast, -0.01, workdir)
-    assert calls["n"] - first - second == 3   # cache expired -> re-bench
+    assert calls["n"] - first - second == 3  # cache expired -> re-bench
 
 
 def test_no_regression_ratchet(target_file, tmp_path):
@@ -376,29 +405,27 @@ def test_no_regression_ratchet(target_file, tmp_path):
     workdir = tmp_path / "wd"
     workdir.mkdir()
     ce.incumbent_code = ce.target.seed_code
-    ce.incumbent_score = -0.02          # recorded best: 0.02 ms/call
+    ce.incumbent_score = -0.02  # recorded best: 0.02 ms/call
 
     # First-eval gate passes (-0.015 > -0.02), but the verified mean
     # lands BELOW the recorded best — a regression wearing a win.
-    ce._verified = lambda code, cs, wd: (True, {
-        "challenger_mean": -0.03, "incumbent_mean": -0.05,
-        "reps": 3, "margin": 0.001, "delta": 0.02, "z": 2.0})
+    ce._verified = lambda code, cs, wd: (
+        True,
+        {"challenger_mean": -0.03, "incumbent_mean": -0.05, "reps": 3, "margin": 0.001, "delta": 0.02, "z": 2.0},
+    )
     worse = "def fast_sum(xs):\n    return sum(xs) + 0\n"
-    ce._handle_result(worse, 0, None, "h1",
-                      {"ok": True, "stage": "done",
-                       "metrics": {"ms_per_call": 0.015}}, workdir)
-    assert ce.incumbent_score == -0.02          # bar did not drop
+    ce._handle_result(worse, 0, None, "h1", {"ok": True, "stage": "done", "metrics": {"ms_per_call": 0.015}}, workdir)
+    assert ce.incumbent_score == -0.02  # bar did not drop
     assert ce.incumbent_code != worse
 
     # A challenger whose verified mean really does beat the recorded
     # best still promotes.
-    ce._verified = lambda code, cs, wd: (True, {
-        "challenger_mean": -0.01, "incumbent_mean": -0.05,
-        "reps": 3, "margin": 0.001, "delta": 0.04, "z": 3.0})
+    ce._verified = lambda code, cs, wd: (
+        True,
+        {"challenger_mean": -0.01, "incumbent_mean": -0.05, "reps": 3, "margin": 0.001, "delta": 0.04, "z": 3.0},
+    )
     better = "def fast_sum(xs):\n    return sum(xs)\n"
-    ce._handle_result(better, 0, None, "h2",
-                      {"ok": True, "stage": "done",
-                       "metrics": {"ms_per_call": 0.009}}, workdir)
+    ce._handle_result(better, 0, None, "h2", {"ok": True, "stage": "done", "metrics": {"ms_per_call": 0.009}}, workdir)
     assert ce.incumbent_score == -0.01
     assert ce.incumbent_code == better
 
@@ -407,24 +434,26 @@ def test_basin_mode_unique_proposals(target_file, tmp_path):
     """basin proposer: queued LLM parents fan out into unique-by-
     construction candidates through the gate — no dup slot waste."""
     import queue as _q
+
     cfg = _ce(target_file, tmp_path)
     cfg.proposer = "basin"
     cfg.patience = 30
     ce = CodeEvolve(cfg, propose_fn=None)
-    ce._basin_llm = None              # families only — no emitter thread
+    ce._basin_llm = None  # families only — no emitter thread
     ce.incumbent_code = ce.target.seed_code
-    rich = ("import torch\n"
-            "def fast_sum(xs):\n"
-            "    t = torch.tensor(xs, dtype=torch.float64)\n"
-            "    y = t.masked_fill(t < 0.5, 0.0)\n"
-            "    s, i = torch.sort(y, dim=-1)\n"
-            "    if 0.5 > 0.1:\n"
-            "        return float(s.sum())\n"
-            "    return float(y.sum())\n")
+    rich = (
+        "import torch\n"
+        "def fast_sum(xs):\n"
+        "    t = torch.tensor(xs, dtype=torch.float64)\n"
+        "    y = t.masked_fill(t < 0.5, 0.0)\n"
+        "    s, i = torch.sort(y, dim=-1)\n"
+        "    if 0.5 > 0.1:\n"
+        "        return float(s.sum())\n"
+        "    return float(y.sum())\n"
+    )
     ce._basin_q = _q.Queue()
     for _ in range(3):
-        ce._basin_q.put({"code": rich, "island": 0, "prompt": "p",
-                         "parent_h": None, "adapter": None})
+        ce._basin_q.put({"code": rich, "island": 0, "prompt": "p", "parent_h": None, "adapter": None})
     cands = []
     for _ in range(60):
         c = ce._propose_basin()
@@ -433,7 +462,7 @@ def test_basin_mode_unique_proposals(target_file, tmp_path):
         if len(cands) >= 12:
             break
     hashes = {c[3] for c in cands}
-    assert len(hashes) == len(cands) >= 4   # distinct, non-trivial yield
+    assert len(hashes) == len(cands) >= 4  # distinct, non-trivial yield
 
 
 def test_eval_pool_recycle_requeue(tmp_path):
@@ -441,6 +470,7 @@ def test_eval_pool_recycle_requeue(tmp_path):
     enqueue onto the RESPAWNED worker's queue — the old code put the
     job into the dead worker's job_q where it could never be read."""
     from forge.evolution.eval_pool import EvalPool
+
     p = tmp_path / "fast_sum.py"
     p.write_text(DUMMY, encoding="utf-8")
     pool = EvalPool(str(p), n_workers=1, timeout_s=60, max_jobs=1)
@@ -458,13 +488,12 @@ def test_eval_pool_timeout_kill(tmp_path):
     the worker, job reports stage=timeout, and the respawned worker
     keeps evaluating."""
     from forge.evolution.eval_pool import EvalPool
+
     p = tmp_path / "fast_sum.py"
     p.write_text(DUMMY, encoding="utf-8")
     pool = EvalPool(str(p), n_workers=1, timeout_s=4)
     try:
-        hung = ("def fast_sum(xs):\n"
-                "    while True:\n"
-                "        pass\n")
+        hung = "def fast_sum(xs):\n    while True:\n        pass\n"
         res = pool.eval_sync(hung, timeout_s=3)
         assert not res["ok"] and res["stage"] == "timeout"
         good = pool.eval_sync("def fast_sum(xs):\n    return sum(xs)\n")
@@ -479,9 +508,9 @@ def test_eval_pool_boot_breaker(tmp_path):
     must trip: consecutive no-completion deaths open the circuit and
     submit() returns staged spawn failures without touching workers."""
     from forge.evolution.eval_pool import EvalPool
+
     p = tmp_path / "bad_target.py"
-    p.write_text("import os\nraise RuntimeError('cannot load')\n",
-                 encoding="utf-8")
+    p.write_text("import os\nraise RuntimeError('cannot load')\n", encoding="utf-8")
     pool = EvalPool(str(p), n_workers=1, timeout_s=60)
     pool._boot_trip = 2
     try:
@@ -500,14 +529,16 @@ def test_db_lazy_reconnect(tmp_path):
     property must lazily reopen so post-run reads still work, while
     close() stays terminal (context-manager/__exit__ contract)."""
     import sqlite3 as _sq
+
     from forge.evolution.database import FindingsDB
+
     db = FindingsDB(tmp_path / "x.db")
     db.conn.execute("SELECT 1")
     db.release()
     assert db.conn.execute("SELECT 1").fetchone() == (1,)
     db.close()
     try:
-        db.conn
+        db.conn  # noqa: B018 — intentional access; must raise after close()
         raise AssertionError("close() must be terminal")
     except _sq.ProgrammingError:
         pass
@@ -520,15 +551,25 @@ def test_lazy_package_import():
     import os
     import subprocess
     import sys
+    from pathlib import Path
+
+    repo = str(Path(__file__).resolve().parents[2])
     env = dict(os.environ)
-    env["PYTHONPATH"] = "D:/windsurf/ForgeAI"
+    env["PYTHONPATH"] = repo
     out = subprocess.run(
-        [sys.executable, "-c",
-         "import sys, forge.evolution.code_evolve as m; "
-         "sys.exit(0 if 'forge.evolution.engine' not in sys.modules "
-         "else 3)"],
-        capture_output=True, text=True, cwd="D:/windsurf/ForgeAI",
-        env=env, timeout=120)
+        [
+            sys.executable,
+            "-c",
+            "import sys, forge.evolution.code_evolve as m; "
+            "sys.exit(0 if 'forge.evolution.engine' not in sys.modules "
+            "else 3)",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=repo,
+        env=env,
+        timeout=120,
+    )
     assert out.returncode == 0, out.stderr[-300:]
 
 
@@ -541,6 +582,7 @@ def test_promos_counted(target_file, tmp_path):
     res = ce.run()
     assert res["promotions"] >= 1 and ce._promos >= 1
     import json
+
     st = json.loads((tmp_path / "st.json").read_text())
     assert st["promos"] >= 1
 
@@ -549,12 +591,21 @@ def test_new_engine_targets_self_consistent():
     """Every shipped target's own SEED_CODE must pass its gate — a
     broken gate burns the entire campaign on reject noise."""
     from pathlib import Path
-    tdir = Path(__file__).resolve().parents[2] / \
-        "forge" / "evolution" / "targets"
-    for name in ("sample_pipeline", "suffix_mem", "prefix_hash",
-                 "stop_matcher", "radix_prefix", "canon_key",
-                 "min_k_filter", "top_p_filter", "top_p_probs",
-                 "dry_penalties", "fast_softmax"):
+
+    tdir = Path(__file__).resolve().parents[2] / "forge" / "evolution" / "targets"
+    for name in (
+        "sample_pipeline",
+        "suffix_mem",
+        "prefix_hash",
+        "stop_matcher",
+        "radix_prefix",
+        "canon_key",
+        "min_k_filter",
+        "top_p_filter",
+        "top_p_probs",
+        "dry_penalties",
+        "fast_softmax",
+    ):
         t = Target(str(tdir / f"{name}.py"))
         ns: dict = {}
         exec(t.seed_code, ns)
@@ -567,19 +618,25 @@ def test_emit_target_scaffold(tmp_path):
     import os
     import subprocess
     import sys
+    from pathlib import Path
+
+    repo = str(Path(__file__).resolve().parents[2])
     env = dict(os.environ)
-    env["PYTHONPATH"] = "D:/windsurf/ForgeAI"
+    env["PYTHONPATH"] = repo
     out = subprocess.run(
-        [sys.executable, "scripts/fn_evolve.py", "--emit-target",
-         "forge.evolution.scout:run_scout"],
-        capture_output=True, text=True, cwd="D:/windsurf/ForgeAI",
-        env=env, timeout=120)
+        [sys.executable, "scripts/fn_evolve.py", "--emit-target", "forge.evolution.scout:run_scout"],
+        capture_output=True,
+        text=True,
+        cwd=repo,
+        env=env,
+        timeout=120,
+    )
     assert out.returncode == 0, out.stderr[-400:]
     compile(out.stdout, "<scaffold>", "exec")
     assert 'REQUIRED = ["run_scout"]' in out.stdout
 
 
-def test_lora_base_ok_guard():
+def test_lora_base_ok_guard(tmp_path):
     """Wrong-base registry adapters must not attach � the loras/
     'default' adapter trained on qwen3b_hone2_fq was crashing every
     basin proposal with a 896-vs-2048 shape error on the mla_moe
@@ -589,8 +646,8 @@ def test_lora_base_ok_guard():
 
     from forge.evolution.code_evolve import _lora_base_ok
 
-    mla = str(Path("D:/windsurf/ForgeAI/forge/evolution/proposer_mla_moe")
-              .resolve())
+    repo = Path(__file__).resolve().parents[2]
+    mla = str((repo / "forge" / "evolution" / "proposer_mla_moe").resolve())
     # relative dir base, different checkpoint -> reject
     ent = SimpleNamespace(base="research\\checkpoints\\qwen3b_hone2_fq")
     assert not _lora_base_ok(ent, mla)
@@ -598,7 +655,7 @@ def test_lora_base_ok_guard():
     ent = SimpleNamespace(base=mla)
     assert _lora_base_ok(ent, mla)
     # moved/renamed absolute path with matching dir tail -> accept
-    ent = SimpleNamespace(base="D:\\other\\place\\proposer_mla_moe")
+    ent = SimpleNamespace(base=str(tmp_path / "other" / "place" / "proposer_mla_moe"))
     assert _lora_base_ok(ent, mla)
     # HF-id style base matching the ckpt dir tail -> accept
     ent = SimpleNamespace(base="proposer_mla_moe")
@@ -609,6 +666,7 @@ def test_lora_base_ok_guard():
 
 
 # ── web-research tool calls (LLMProposer SEARCH: loop) ───────────────
+
 
 class _StubTok:
     eos_token_id = 0
@@ -638,13 +696,21 @@ def _search_proposer(tmp_path, **kw):
     prewarm), bare-dir model_id -> primed=True, lora_root doubles as the
     jsonl search-cache dir."""
     import threading  # noqa: F401  (caller builds the lock)
+
     from forge.evolution.code_evolve import LLMProposer
+
     (tmp_path / "m").mkdir(exist_ok=True)
     prop = LLMProposer.__new__(LLMProposer)
     prop.cfg = CodeEvolveConfig(
-        target="x", model_id=str(tmp_path / "m"), research=True,
-        research_budget=8, lora_root=str(tmp_path / "loras"),
-        proposer_device="cpu", verbose=False, **kw)
+        target="x",
+        model_id=str(tmp_path / "m"),
+        research=True,
+        research_budget=8,
+        lora_root=str(tmp_path / "loras"),
+        proposer_device="cpu",
+        verbose=False,
+        **kw,
+    )
     prop._eng = None
     prop._hf = None
     prop._lora_resolved = False
@@ -657,6 +723,7 @@ def _search_proposer(tmp_path, **kw):
 
 def _reset_search_state():
     from forge.evolution.code_evolve import LLMProposer
+
     LLMProposer._SEARCH_CACHE.clear()
     LLMProposer._SEARCH_CACHE_SEEN.clear()
     LLMProposer._SEARCH_SPENT = 0
@@ -665,6 +732,7 @@ def _reset_search_state():
 def _mock_hits(monkeypatch, hits):
     """Canned search backend; returns a call counter."""
     import forge.evolution.research as res
+
     calls = {"n": 0}
 
     def fake_tavily(q, n=4):
@@ -682,35 +750,34 @@ def test_search_intercept_flow(tmp_path, monkeypatch):
     batched regen -> code block still parses. The regen prompt must
     carry the hits BEFORE the primed fence."""
     import threading
-    from forge.evolution.code_evolve import LLMProposer
+
     _reset_search_state()
-    calls = _mock_hits(monkeypatch, [
-        {"title": "Fast top-p kernel", "url": "https://x/k",
-         "snippet": "partial sort via torch.topk"}])
+    calls = _mock_hits(
+        monkeypatch, [{"title": "Fast top-p kernel", "url": "https://x/k", "snippet": "partial sort via torch.topk"}]
+    )
     prop = _search_proposer(tmp_path)
-    eng = _StubEng([
-        # first batch: row 0 asks for a lookup, row 1 answers code
-        ["SEARCH: fast top-p sampling kernel\n",
-         "```python\ndef f():\n    return 2\n```"],
-        # regen batch (row 0 only): now it writes the code
-        ["```python\ndef f():\n    return 1\n```"],
-    ])
+    eng = _StubEng(
+        [
+            # first batch: row 0 asks for a lookup, row 1 answers code
+            ["SEARCH: fast top-p sampling kernel\n", "```python\ndef f():\n    return 2\n```"],
+            # regen batch (row 0 only): now it writes the code
+            ["```python\ndef f():\n    return 1\n```"],
+        ]
+    )
     prop._engine = lambda: ("forge", eng, threading.Lock())
 
-    raws = prop.propose_batch(["task A\n```python\ndef f(x):",
-                               "task B\n```python\ndef f(y):"])
-    assert calls["n"] == 1                   # one API query
-    assert len(eng.seen) == 2                # ONE extra round-trip
-    assert len(eng.seen[1]) == 1             # only the SEARCH row regen'd
+    raws = prop.propose_batch(["task A\n```python\ndef f(x):", "task B\n```python\ndef f(y):"])
+    assert calls["n"] == 1  # one API query
+    assert len(eng.seen) == 2  # ONE extra round-trip
+    assert len(eng.seen[1]) == 1  # only the SEARCH row regen'd
     regen_prompt = eng.seen[1][0]
     assert "Fast top-p kernel" in regen_prompt
     assert "https://x/k" in regen_prompt
     assert "partial sort" in regen_prompt
     # hits were injected BEFORE the primed ```python fence
-    assert regen_prompt.rindex("Fast top-p kernel") < \
-        regen_prompt.rindex("```python")
+    assert regen_prompt.rindex("Fast top-p kernel") < regen_prompt.rindex("```python")
     assert "return 1" in raws[0] and "return 2" in raws[1]
-    assert "SEARCH" not in raws[0]           # intercepted pre-parse
+    assert "SEARCH" not in raws[0]  # intercepted pre-parse
     assert "def f" in _extract_code(raws[0])
 
 
@@ -718,33 +785,32 @@ def test_search_cache_and_budget(tmp_path, monkeypatch):
     """Repeat queries are free (in-process dict + lora-root jsonl); the
     process budget caps uncached API calls."""
     _reset_search_state()
-    calls = _mock_hits(monkeypatch, [
-        {"title": "t", "url": "u", "snippet": "s"}])
+    calls = _mock_hits(monkeypatch, [{"title": "t", "url": "u", "snippet": "s"}])
     prop = _search_proposer(tmp_path)
     assert prop._search("q1")[0]["url"] == "u"
     assert prop._search("q1") == prop._search("q1")
-    assert calls["n"] == 1                   # cached, no second call
+    assert calls["n"] == 1  # cached, no second call
     # jsonl written under lora_root
     cache = tmp_path / "loras" / "research_cache.jsonl"
     assert cache.exists() and '"q1"' in cache.read_text()
     assert '"key"' not in cache.read_text().lower()  # no key persisted
     # budget: 1 remaining slot (research_budget=8 here; spend it)
-    prop.cfg.research_budget = calls["n"]    # pretend budget already met
-    assert prop._search("q2") is None        # budget exhausted
+    prop.cfg.research_budget = calls["n"]  # pretend budget already met
+    assert prop._search("q2") is None  # budget exhausted
     # persisted cache reloads into a fresh process state for free
     _reset_search_state()
     prop2 = _search_proposer(tmp_path)
     assert prop2._search("q1")[0]["url"] == "u"
-    assert calls["n"] == 1                   # reload cost nothing
+    assert calls["n"] == 1  # reload cost nothing
 
 
 def test_search_no_regen_when_no_query(tmp_path, monkeypatch):
     """No SEARCH line -> zero API calls, zero extra round-trips; an
     exhausted budget strips the SEARCH line and keeps the raw."""
     import threading
+
     _reset_search_state()
-    calls = _mock_hits(monkeypatch, [
-        {"title": "t", "url": "u", "snippet": "s"}])
+    calls = _mock_hits(monkeypatch, [{"title": "t", "url": "u", "snippet": "s"}])
     prop = _search_proposer(tmp_path)
     eng = _StubEng([["```python\ndef f():\n    return 3\n```"]])
     prop._engine = lambda: ("forge", eng, threading.Lock())
@@ -757,7 +823,7 @@ def test_search_no_regen_when_no_query(tmp_path, monkeypatch):
     eng2 = _StubEng([["SEARCH: something\nsome prose"]])
     prop._engine = lambda: ("forge", eng2, threading.Lock())
     raws = prop.propose_batch(["task\n```python\ndef f(x):"])
-    assert calls["n"] == 0 and len(eng2.seen) == 1   # no regen
+    assert calls["n"] == 0 and len(eng2.seen) == 1  # no regen
     assert "SEARCH" not in raws[0] and "some prose" in raws[0]
 
 
@@ -765,28 +831,30 @@ def test_search_query_cap_and_single_path(tmp_path, monkeypatch):
     """Max research_max_queries per proposal (extras ignored); the
     serial __call__ path does the same intercept->regen dance."""
     _reset_search_state()
-    calls = _mock_hits(monkeypatch, [
-        {"title": "t", "url": "u", "snippet": "s"}])
+    calls = _mock_hits(monkeypatch, [{"title": "t", "url": "u", "snippet": "s"}])
     prop = _search_proposer(tmp_path, research_max_queries=2)
     raw = "SEARCH: a\nSEARCH: b\nSEARCH: c\nSEARCH: d\n"
-    assert prop._tool_calls(raw) == [("SEARCH", "a"),
-                                     ("SEARCH", "b")]   # dedup + cap
+    assert prop._tool_calls(raw) == [("SEARCH", "a"), ("SEARCH", "b")]  # dedup + cap
 
     class _OneShotEng(_StubEng):
         def generate(self, prompt, **kw):
             self.seen.append(prompt)
             return self.responses.pop(0)
 
-    eng = _OneShotEng([
-        "SEARCH: q one\n",
-        "```python\ndef f():\n    return 7\n```",
-    ])
+    eng = _OneShotEng(
+        [
+            "SEARCH: q one\n",
+            "```python\ndef f():\n    return 7\n```",
+        ]
+    )
     import threading
+
     prop._engine = lambda: ("forge", eng, threading.Lock())
     out = prop("task\n```python\ndef f(x):")
-    assert calls["n"] == 1 and len(eng.seen) == 2    # one extra ask
+    assert calls["n"] == 1 and len(eng.seen) == 2  # one extra ask
     assert "SEARCH: q one" in eng.seen[1]
     assert "return 7" in out and "SEARCH" not in out
+
 
 def test_funsearch_k2_shots(target_file, tmp_path):
     """Island with >=2 programs -> prompt shows the pair sorted
@@ -803,7 +871,7 @@ def test_funsearch_k2_shots(target_file, tmp_path):
     ce._push_elite(0, hi, -0.5, "hhi")
     parent, insp, shots = ce._parents(0)
     assert shots is not None and len(shots) == 2
-    assert shots[0][1] <= shots[1][1]          # v0 worse, v1 better
+    assert shots[0][1] <= shots[1][1]  # v0 worse, v1 better
     prompt = ce._build_prompt(parent, insp, primed=False, shots=shots)
     assert "# v0 (score" in prompt and "# v1 (score" in prompt
     assert "write v2" in prompt
@@ -822,7 +890,7 @@ def test_repair_regen_on_error(target_file, tmp_path):
     and re-evaluates the repaired code. Score-misses (detail
     'failed') and already-repair prompts never queue."""
     cfg = _ce(target_file, tmp_path)
-    cfg.judge = False   # repair-queue behavior, not judge coverage
+    cfg.judge = False  # repair-queue behavior, not judge coverage
     ce = CodeEvolve(cfg, propose_fn=_Scripted([FAST]))
     ce.incumbent_code = ce.target.seed_code
     ce.incumbent_metrics = {"ms_per_call": 1.0}
@@ -830,16 +898,16 @@ def test_repair_regen_on_error(target_file, tmp_path):
     workdir = tmp_path / "wd"
     workdir.mkdir()
     # bare 'failed' = a score miss, not an artifact -> no repair
-    ce._handle_result(WRONG, 0, None, "h0",
-                      {"ok": False, "stage": "test", "detail": "failed"},
-                      workdir, prompt="# p0")
+    ce._handle_result(WRONG, 0, None, "h0", {"ok": False, "stage": "test", "detail": "failed"}, workdir, prompt="# p0")
     assert not ce._repair_q
-    res = {"ok": False, "stage": "exec",
-           "detail": "Traceback (most recent call last):\n"
-                     "  File \"c\", line 1, in <m>\n"
-                     "NameError: name 'xs' is not defined"}
-    ce._handle_result(WRONG, 0, None, "h1", res, workdir,
-                      prompt="# orig prompt")
+    res = {
+        "ok": False,
+        "stage": "exec",
+        "detail": "Traceback (most recent call last):\n"
+        '  File "c", line 1, in <m>\n'
+        "NameError: name 'xs' is not defined",
+    }
+    ce._handle_result(WRONG, 0, None, "h1", res, workdir, prompt="# orig prompt")
     assert len(ce._repair_q) == 1
     seen = []
     prop = ce._proposer
@@ -847,10 +915,9 @@ def test_repair_regen_on_error(target_file, tmp_path):
     ce._drain_repairs(workdir, None, None, {}, [])
     assert seen and "# Previous attempt failed" in seen[0]
     assert "NameError" in seen[0]
-    assert ce._eval_n == 1               # repaired code was re-evaluated
+    assert ce._eval_n == 1  # repaired code was re-evaluated
     # the repair marker suppresses chained re-repairs
-    ce._handle_result(WRONG, 0, None, "h2", res, workdir,
-                      prompt="# orig\n# Previous attempt failed with:\n# x")
+    ce._handle_result(WRONG, 0, None, "h2", res, workdir, prompt="# orig\n# Previous attempt failed with:\n# x")
     assert not ce._repair_q
 
 
@@ -862,8 +929,10 @@ def test_fetch_and_insight_tools(tmp_path, monkeypatch):
     budget, INSIGHT does not."""
     import sqlite3
     import threading
+
     _reset_search_state()
     import forge.evolution.research as res
+
     calls = {"fetch": 0}
 
     def fake_jina(url, timeout=20.0):
@@ -871,38 +940,37 @@ def test_fetch_and_insight_tools(tmp_path, monkeypatch):
         return "PAGE BODY fastest kernel uses tl.dot for tiles"
 
     monkeypatch.setattr(res, "jina_fetch", fake_jina)
-    monkeypatch.setattr(res, "trafilatura_fetch",
-                        lambda url, timeout=20.0: "")
+    monkeypatch.setattr(res, "trafilatura_fetch", lambda url, timeout=20.0: "")
     # insights db with one row matching the INSIGHT topic
     from forge.evolution.code_evolve import _CODE_DDL
+
     dbp = tmp_path / "ins.db"
     conn = sqlite3.connect(str(dbp))
     for stmt in _CODE_DDL:
         conn.execute(stmt)
     conn.execute(
-        "INSERT INTO code_insights(target,tags,kind,summary,delta,score,ts)"
-        " VALUES (?,?,?,?,?,?,?)",
-        ("top_p_probs", "kernel,sampling", "win",
-         "partial-sort beats full sort by 2x", 0.4, -0.1, 1.0))
+        "INSERT INTO code_insights(target,tags,kind,summary,delta,score,ts) VALUES (?,?,?,?,?,?,?)",
+        ("top_p_probs", "kernel,sampling", "win", "partial-sort beats full sort by 2x", 0.4, -0.1, 1.0),
+    )
     conn.commit()
     conn.close()
 
     prop = _search_proposer(tmp_path, db_path=str(dbp))
-    eng = _StubEng([
-        # row 0 asks for both tools, row 1 answers code
-        ["FETCH: https://x/page\nINSIGHT: partial sort\n",
-         "```python\ndef f():\n    return 2\n```"],
-        ["```python\ndef f():\n    return 1\n```"],   # regen for row 0
-    ])
+    eng = _StubEng(
+        [
+            # row 0 asks for both tools, row 1 answers code
+            ["FETCH: https://x/page\nINSIGHT: partial sort\n", "```python\ndef f():\n    return 2\n```"],
+            ["```python\ndef f():\n    return 1\n```"],  # regen for row 0
+        ]
+    )
     prop._engine = lambda: ("forge", eng, threading.Lock())
-    raws = prop.propose_batch(["task A\n```python\ndef f(x):",
-                               "task B\n```python\ndef f(y):"])
-    assert calls["fetch"] == 1                 # one web call total
-    assert LLMProposer_spend() == 1            # INSIGHT spent no budget
-    assert len(eng.seen) == 2                  # ONE extra round-trip
+    raws = prop.propose_batch(["task A\n```python\ndef f(x):", "task B\n```python\ndef f(y):"])
+    assert calls["fetch"] == 1  # one web call total
+    assert LLMProposer_spend() == 1  # INSIGHT spent no budget
+    assert len(eng.seen) == 2  # ONE extra round-trip
     regen = eng.seen[1][0]
-    assert "PAGE BODY" in regen                # fetch text injected
-    assert "partial-sort beats full sort" in regen   # insight row
+    assert "PAGE BODY" in regen  # fetch text injected
+    assert "partial-sort beats full sort" in regen  # insight row
     # injected BEFORE the primed ```python fence
     assert regen.rindex("PAGE BODY") < regen.rindex("```python")
     assert "return 1" in raws[0] and "return 2" in raws[1]
@@ -915,6 +983,7 @@ def test_fetch_and_insight_tools(tmp_path, monkeypatch):
 
 def LLMProposer_spend() -> int:
     from forge.evolution.code_evolve import LLMProposer
+
     return LLMProposer._SEARCH_SPENT
 
 
@@ -923,8 +992,8 @@ def test_noncode_domain_specs():
     resolve via Target.resolve's domains/ leg and pass their own
     test+bench contract (a broken gate burns campaign evals on noise)."""
     from pathlib import Path
-    tdir = Path(__file__).resolve().parents[2] / \
-        "forge" / "evolution" / "domains"
+
+    tdir = Path(__file__).resolve().parents[2] / "forge" / "evolution" / "domains"
     for name in ("cev_math_solver", "cev_rle_codec"):
         t = Target(str(tdir / f"{name}.py"))
         # also resolvable by bare name through Target.resolve
@@ -937,11 +1006,11 @@ def test_noncode_domain_specs():
         assert t.metric in b, f"{name}: {b}"
         for m, (op, v) in t.budgets.items():
             if m in b:
-                assert _OPS[op](b[m], v), \
-                    f"{name}: seed violates budget {m} {op} {v} ({b[m]})"
+                assert _OPS[op](b[m], v), f"{name}: seed violates budget {m} {op} {v} ({b[m]})"
 
 
 # ── prior-art ports: hint bandit, eval cascade, island cull, MAP-elites ──
+
 
 def test_hint_bandit_attribution(tmp_path):
     """Meta-prompt evolution-lite: note(code, credit, delta, prompt)
@@ -949,7 +1018,9 @@ def test_hint_bandit_attribution(tmp_path):
     persists it to mutator_op_stats as 'hint:<idx>' rows keyed by
     tag_sig — a fresh proposer resumes the learned policy."""
     import sqlite3
+
     from forge.evolution.code_evolve import _CODE_DDL, LLMProposer
+
     conn = sqlite3.connect(str(tmp_path / "h.db"))
     for stmt in _CODE_DDL:
         conn.execute(stmt)
@@ -976,9 +1047,7 @@ def test_hint_bandit_attribution(tmp_path):
     prop._note_hint("prompt P", 3)
     prop.note("some code", 1.0, 0.5, prompt="prompt P")
     assert prop._hint_stats[3][0] > 1.0
-    rows = conn.execute(
-        "SELECT op, alpha, n FROM mutator_op_stats WHERE op='hint:3'"
-    ).fetchall()
+    rows = conn.execute("SELECT op, alpha, n FROM mutator_op_stats WHERE op='hint:3'").fetchall()
     assert rows and rows[0][1] > 1.0 and rows[0][2] == 1
     # no attribution -> graceful no-op (mut-made code, missing prompt)
     prop.note("other code", 1.0, 0.5, prompt=None)
@@ -1006,16 +1075,15 @@ def test_island_cull_clone(target_file, tmp_path):
     ce.incumbent_score = -1.0
     # island scores: 3 worst(-9), 2 bad(-5), 1 ok(-2), 0 best(-0.5)
     for isl, s in ((3, -9.0), (2, -5.0), (1, -2.0), (0, -0.5)):
-        ce._push_elite(isl, f"# c{isl}\ndef fast_sum(xs):\n    return 1\n",
-                       s, f"h{isl}")
+        ce._push_elite(isl, f"# c{isl}\ndef fast_sum(xs):\n    return 1\n", s, f"h{isl}")
     ce._arms[0] = [5.0, 1.0]
     ce._dry = cfg.hop_after
     assert ce._stagnation_check() is False
     # ranked worst->best: 3, 2 culled; clone slot = 2 gets island 0's set
     assert ce.elites[3] == []
     assert ce.elites[2] == list(ce.elites[0])
-    assert ce._arms[2] == [5.0, 1.0]          # clone inherits arm
-    assert ce._arms[3] == [1.0, 1.0]          # emptied slot reset fresh
+    assert ce._arms[2] == [5.0, 1.0]  # clone inherits arm
+    assert ce._arms[3] == [1.0, 1.0]  # emptied slot reset fresh
 
 
 def test_map_elites_len_bins(target_file, tmp_path):
@@ -1027,23 +1095,24 @@ def test_map_elites_len_bins(target_file, tmp_path):
     ce = CodeEvolve(cfg, propose_fn=_Scripted([]))
     short1 = "def fast_sum(xs):\n    return 1\n"
     short2 = "def fast_sum(xs):\n    return 2\n"
-    longp = ("def fast_sum(xs):\n"
-             "    a = 1  # pad pad pad pad pad pad pad pad pad pad pad\n"
-             "    b = 2  # pad pad pad pad pad pad pad pad pad pad pad\n"
-             "    return a + b\n")
+    longp = (
+        "def fast_sum(xs):\n"
+        "    a = 1  # pad pad pad pad pad pad pad pad pad pad pad\n"
+        "    b = 2  # pad pad pad pad pad pad pad pad pad pad pad\n"
+        "    return a + b\n"
+    )
     ce._push_elite(0, short1, -0.1, "s1")
     ce._push_elite(0, short2, -0.2, "s2")
     ce._push_elite(0, longp, -9.0, "L1")
     kept = {h for _, _, h in ce.elites[0]}
-    assert "L1" in kept                       # long bin survived
+    assert "L1" in kept  # long bin survived
     assert len(kept) <= 2
     # legacy flat behavior with map_elites off
     cfg2 = _ce(target_file, tmp_path)
     cfg2.n_elites = 2
     cfg2.map_elites = False
     ce2 = CodeEvolve(cfg2, propose_fn=_Scripted([]))
-    for code, s, h in ((short1, -0.1, "s1"), (short2, -0.2, "s2"),
-                       (longp, -9.0, "L1")):
+    for code, s, h in ((short1, -0.1, "s1"), (short2, -0.2, "s2"), (longp, -9.0, "L1")):
         ce2._push_elite(0, code, s, h)
     assert {h for _, _, h in ce2.elites[0]} == {"s1", "s2"}
 
@@ -1057,8 +1126,10 @@ def test_cheap_gate_cascade(tmp_path):
     import subprocess
     import sys
     from pathlib import Path
+
     spec = tmp_path / "cheap_t.py"
-    spec.write_text(textwrap.dedent('''\
+    spec.write_text(
+        textwrap.dedent("""\
         NAME = "cheap_demo"
         GOAL = "min"
         METRIC = "ms_per_call"
@@ -1074,62 +1145,61 @@ def test_cheap_gate_cascade(tmp_path):
             for _ in range(BENCH_REPS):
                 fn(1)
             return {"ms_per_call": (time.perf_counter() - t0) * 1000}
-        '''), encoding="utf-8")
+        """),
+        encoding="utf-8",
+    )
     cand = tmp_path / "cand.py"
-    cand.write_text("def work(n):\n    import time\n"
-                    "    time.sleep(0.02)\n    return n\n",
-                    encoding="utf-8")
-    ev = (Path(__file__).resolve().parents[2]
-          / "forge" / "evolution" / "_candidate_eval.py")
-    cheap = json.dumps({"reps": 1, "metric": "ms_per_call",
-                        "incumbent": 1e-6, "goal": "min", "margin": 1.0})
+    cand.write_text("def work(n):\n    import time\n    time.sleep(0.02)\n    return n\n", encoding="utf-8")
+    ev = Path(__file__).resolve().parents[2] / "forge" / "evolution" / "_candidate_eval.py"
+    cheap = json.dumps({"reps": 1, "metric": "ms_per_call", "incumbent": 1e-6, "goal": "min", "margin": 1.0})
     out = subprocess.run(
-        [sys.executable, "-X", "utf8", str(ev), str(spec), str(cand),
-         cheap], capture_output=True, text=True, timeout=60)
-    line = next(l for l in out.stdout.splitlines()
-                if l.startswith("__RESULT__"))
-    res = json.loads(line[len("__RESULT__"):])
+        [sys.executable, "-X", "utf8", str(ev), str(spec), str(cand), cheap], capture_output=True, text=True, timeout=60
+    )
+    line = next(x for x in out.stdout.splitlines() if x.startswith("__RESULT__"))
+    res = json.loads(line[len("__RESULT__") :])
     assert res["ok"] and res["stage"] == "cheap_gate"
     # close/incumbent-beating candidates still pay the full bench
-    cheap2 = json.dumps({"reps": 1, "metric": "ms_per_call",
-                         "incumbent": 1e9, "goal": "min", "margin": 1.0})
+    cheap2 = json.dumps({"reps": 1, "metric": "ms_per_call", "incumbent": 1e9, "goal": "min", "margin": 1.0})
     out2 = subprocess.run(
-        [sys.executable, "-X", "utf8", str(ev), str(spec), str(cand),
-         cheap2], capture_output=True, text=True, timeout=60)
-    line2 = next(l for l in out2.stdout.splitlines()
-                 if l.startswith("__RESULT__"))
-    assert json.loads(line2[len("__RESULT__"):])["stage"] == "done"
+        [sys.executable, "-X", "utf8", str(ev), str(spec), str(cand), cheap2],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    line2 = next(x for x in out2.stdout.splitlines() if x.startswith("__RESULT__"))
+    assert json.loads(line2[len("__RESULT__") :])["stage"] == "done"
 
 
 # ── proposal validity: extraction + gate repair + telemetry ─────────
+
 
 def test_extract_code_think_block_and_markers():
     """<think> reasoning is stripped BEFORE selection — the answer is
     the post-think block; a fenced fragment inside the think must not
     win. Code inside a closed think still survives via salvage when
     nothing follows it."""
-    raw = ('<think>first idea\n```python\ndef f():\n    return sorted(x)\n```\n'
-           '</think>\n```python\ndef f():\n    return sum(x) / len(x)\n```')
+    raw = (
+        "<think>first idea\n```python\ndef f():\n    return sorted(x)\n```\n"
+        "</think>\n```python\ndef f():\n    return sum(x) / len(x)\n```"
+    )
     out = _extract_code(raw)
     assert "sum(x)" in out and "sorted" not in out
-    raw = '<think>\n```python\ndef f():\n    return 3\n```\n</think>'
+    raw = "<think>\n```python\ndef f():\n    return 3\n```\n</think>"
     assert "return 3" in _extract_code(raw)
 
 
 def test_extract_code_fence_variants_and_preamble():
     """```py / ```Python fences, prose preambles, and uniformly-indented
     programs all recover — they were syntax-gate rejects before."""
-    out = _extract_code(
-        'Sure! Here is the code:\n```py\ndef f():\n    return 2\n```\nbye')
+    out = _extract_code("Sure! Here is the code:\n```py\ndef f():\n    return 2\n```\nbye")
     compile(out, "<c>", "exec")
     assert "return 2" in out
-    out = _extract_code('```Python\ndef f():\n    return 9\n```')
+    out = _extract_code("```Python\ndef f():\n    return 9\n```")
     assert "return 9" in out
-    out = _extract_code('Here is the improved version:\ndef f():\n'
-                        '    return 7\n')
+    out = _extract_code("Here is the improved version:\ndef f():\n    return 7\n")
     compile(out, "<c>", "exec")
     assert "return 7" in out
-    out = _extract_code('    def f():\n        return 5\n')
+    out = _extract_code("    def f():\n        return 5\n")
     compile(out, "<c>", "exec")
     assert "return 5" in out
 
@@ -1138,11 +1208,9 @@ def test_extract_code_required_preference():
     """A block defining EVERY required name beats an earlier fragment —
     multi-required targets were losing their complete program to the
     first def-block."""
-    raw = ('```python\ndef helper():\n    return 1\n```\n'
-           '```python\ndef main():\n    return helper()\n```')
+    raw = "```python\ndef helper():\n    return 1\n```\n```python\ndef main():\n    return helper()\n```"
     assert "def main" in _extract_code(raw, required=["main"])
-    raw = ('```python\ndef a():\n    return 1\n```\n'
-           '```python\ndef a():\n    return 1\ndef b():\n    return 2\n```')
+    raw = "```python\ndef a():\n    return 1\n```\n```python\ndef a():\n    return 1\ndef b():\n    return 2\n```"
     out = _extract_code(raw, required=["a", "b"])
     assert "def b" in out
 
@@ -1156,9 +1224,12 @@ def test_gate_repair_regen(target_file, tmp_path):
     res = CodeEvolve(cfg, propose_fn=_Scripted([BROKEN, WRONG, FAST])).run()
     assert "sum(xs)" in res["best_code"]
     import sqlite3
-    rows = sqlite3.connect(cfg.db_path).execute(
-        "SELECT prompt, ok FROM code_programs WHERE prompt LIKE "
-        "'%Previous attempt failed%'").fetchall()
+
+    rows = (
+        sqlite3.connect(cfg.db_path)
+        .execute("SELECT prompt, ok FROM code_programs WHERE prompt LIKE '%Previous attempt failed%'")
+        .fetchall()
+    )
     assert rows, "no repair-regen prompt was logged"
     assert any(ok == 1 for _p, ok in rows)
 
@@ -1173,18 +1244,17 @@ def test_dup_repair_regen(target_file, tmp_path):
     cfg.patience = 8
     # FAST promotes; the second FAST hits the dup gate and queues a
     # regen that drains after ALT's eval (drain pulls "pass\n").
-    res = CodeEvolve(
-        cfg, propose_fn=_Scripted([FAST, FAST, ALT] + ["pass\n"] * 30)
-    ).run()
+    res = CodeEvolve(cfg, propose_fn=_Scripted([FAST, FAST, ALT] + ["pass\n"] * 30)).run()
     import sqlite3
-    rows = sqlite3.connect(cfg.db_path).execute(
-        "SELECT stage, COUNT(*) FROM code_programs GROUP BY stage"
-    ).fetchall()
-    stages = {s: n for s, n in rows}
+
+    rows = sqlite3.connect(cfg.db_path).execute("SELECT stage, COUNT(*) FROM code_programs GROUP BY stage").fetchall()
+    stages = dict(rows)
     assert stages.get("dup", 0) >= 1
-    p = sqlite3.connect(cfg.db_path).execute(
-        "SELECT COUNT(*) FROM code_programs WHERE prompt LIKE "
-        "'%MATERIALLY DIFFERENT%'").fetchone()[0]
+    p = (
+        sqlite3.connect(cfg.db_path)
+        .execute("SELECT COUNT(*) FROM code_programs WHERE prompt LIKE '%MATERIALLY DIFFERENT%'")
+        .fetchone()[0]
+    )
     assert p >= 1
     assert "sum(xs)" in res["best_code"]
 
@@ -1194,8 +1264,7 @@ def test_proposal_telemetry(target_file, tmp_path):
     proposer's quality signal; make the metric observable."""
     cfg = _ce(target_file, tmp_path)
     cfg.judge = False
-    res = CodeEvolve(
-        cfg, propose_fn=_Scripted([FAST, WRONG, BROKEN])).run()
+    res = CodeEvolve(cfg, propose_fn=_Scripted([FAST, WRONG, BROKEN])).run()
     p = res["proposals"]
     assert p["raws"] >= 3 and p["gated"] >= 2
     assert 0 < p["valid_pct"] <= 100
@@ -1204,6 +1273,7 @@ def test_proposal_telemetry(target_file, tmp_path):
 def test_burst_same_batch_dedup(target_file, tmp_path):
     """Identical programs inside ONE burst gate once — repeats log as
     dup_batch and never reach _gate (no island penalty, no _dry)."""
+
     class _Batch:
         primed = False
 
@@ -1236,8 +1306,7 @@ def test_tried_approaches_in_prompt(target_file, tmp_path):
     prompt = ce._build_prompt(None, None)
     assert "Already evaluated" in prompt and "masked_fill" in prompt
     # gated candidates record their approach fingerprint
-    cand = ce._gate("def fast_sum(xs):\n    return sum(xs)\n", 0,
-                    "# p", None)
+    cand = ce._gate("def fast_sum(xs):\n    return sum(xs)\n", 0, "# p", None)
     assert cand is not None
     assert "sum" in list(ce._tried_gists)[-1]
 
@@ -1249,16 +1318,17 @@ def test_validity_pairs_export(target_file, tmp_path):
     format-compliance teaching signal — soup/dup were logged but never
     turned into 'rejected' examples before."""
     import json
+
     from forge.evolution.code_evolve import export_validity_pairs
+
     ALT = "def fast_sum(xs):\n    return sum(list(xs))\n"
     cfg = _ce(target_file, tmp_path)
     cfg.judge = False
-    CodeEvolve(cfg, propose_fn=_Scripted(
-        [FAST, BROKEN, ALT, FAST] + ["pass\n"] * 30)).run()
+    CodeEvolve(cfg, propose_fn=_Scripted([FAST, BROKEN, ALT, FAST] + ["pass\n"] * 30)).run()
     out = tmp_path / "vp.jsonl"
     n = export_validity_pairs(cfg.db_path, str(out))
-    rows = [json.loads(l) for l in out.read_text().splitlines()]
-    assert n >= 2 and len(rows) == n          # syntax + dup at minimum
+    rows = [json.loads(x) for x in out.read_text().splitlines()]
+    assert n >= 2 and len(rows) == n  # syntax + dup at minimum
     whys = {r["why"] for r in rows}
     assert "syntax" in whys and "dup" in whys
     for r in rows:
@@ -1268,7 +1338,7 @@ def test_validity_pairs_export(target_file, tmp_path):
         # stored code IS the gated program; export must swap in a
         # different sibling (ALT) or drop the row.
         assert r["chosen"].strip() != r["rejected"].strip()
-    dup = [r for r in rows if r["why"] == "dup"][0]
+    dup = next(r for r in rows if r["why"] == "dup")
     assert "sum(list(xs))" in dup["chosen"]
 
 
@@ -1277,21 +1347,22 @@ def test_sft_export_primed_body(target_file, tmp_path):
     the response — a fenced-restart target teaches the model to abandon
     the prime at inference (train/inference mismatch)."""
     import json
+
     from forge.evolution.code_evolve import export_sft
+
     cfg = _ce(target_file, tmp_path)
     cfg.judge = False
     CodeEvolve(cfg, propose_fn=_Scripted([FAST] * 8)).run()
     out = tmp_path / "sft.jsonl"
     n = export_sft(cfg.db_path, str(out))
     assert n >= 1
-    rows = [json.loads(l) for l in out.read_text().splitlines()]
-    primed = [r for r in rows
-              if "```python" in r["prompt"]
-              and "```" not in r["prompt"].rsplit("```python", 1)[1]]
+    rows = [json.loads(x) for x in out.read_text().splitlines()]
+    primed = [r for r in rows if "```python" in r["prompt"] and "```" not in r["prompt"].rsplit("```python", 1)[1]]
     assert primed, "no primed-prompt rows exported"
     for r in primed:
         assert not r["response"].startswith("```"), r["response"][:80]
         assert "return sum" in r["response"]
+
 
 def test_norm_hash_string_comment_collision():
     """'#' inside a string literal is data, not a comment — the old
@@ -1301,7 +1372,7 @@ def test_norm_hash_string_comment_collision():
     b = 'def f():\n    return ""\n'
     c = 'def f():  # trailing comment\n    return "#notacomment"   \n\n'
     assert _norm_hash(a) != _norm_hash(b)
-    assert _norm_hash(a) == _norm_hash(c)   # comments/ws still stripped
+    assert _norm_hash(a) == _norm_hash(c)  # comments/ws still stripped
 
 
 def test_extract_code_primed_restart_docstring():
@@ -1309,7 +1380,7 @@ def test_extract_code_primed_restart_docstring():
     decorator abandoned the prime — gluing it under the signature used
     to produce `def f():\\n\"\"\"doc\"\"\"` soup."""
     prime = "def f(x):\n"
-    raw = '\"\"\"module doc\"\"\"\ndef f(x):\n    return 1\n'
+    raw = '"""module doc"""\ndef f(x):\n    return 1\n'
     code = _extract_code(raw, prime)
     assert code.count("def f(") == 1
     compile(code, "<c>", "exec")
@@ -1324,25 +1395,28 @@ def test_diff_swap_axis():
     """`x[:-1]-x[1:]` slices axis 0, not -1 — the old always--1 rewrite
     silently diffs the wrong axis on multi-dim tensors."""
     import ast
+
     from forge.evolution.mutator import _DiffSwap
+
     def tx(src):
         t = _DiffSwap()
         out = ast.unparse(t.visit(ast.parse(src)))
         return out if t.changed else None
+
     assert "dim=-1" in tx("y = x[..., :-1] - x[..., 1:]\n")
     assert "dim=0" in tx("y = x[:-1] - x[1:]\n")
     assert "dim=0" in tx("y = x[:-1, :] - x[1:, :]\n")
-    assert tx("y = x[:-1, :] - x[:, 1:]\n") is None   # different axes
+    assert tx("y = x[:-1, :] - x[:, 1:]\n") is None  # different axes
 
 
 def test_sort_reuse_skips_non_name_targets():
     """`self.a, self.b = torch.sort(x)` must not be rewritten — the old
     transform rebound attribute stores to plain names."""
     import ast
+
     from forge.evolution.mutator import _SortReuse
-    src = ("def f(self, x):\n"
-           "    self.a, self.b = torch.sort(x, dim=-1)\n"
-           "    return self.a\n")
+
+    src = "def f(self, x):\n    self.a, self.b = torch.sort(x, dim=-1)\n    return self.a\n"
     t = _SortReuse()
     out = ast.unparse(t.visit(ast.parse(src)))
     assert "self.a, self.b" in out
@@ -1352,11 +1426,9 @@ def test_hoist_ctor_no_aliasing():
     """The _ctor cache returns v.clone() — a caller mutating the result
     must not poison the shared entry (torch.full/ones alias bug)."""
     from forge.evolution.mutator import _CTOR_PREAMBLE, Mutator
-    src = ("import torch\n\n\ndef f(x):\n"
-           "    m = torch.full((4,), 0.5)\n"
-           "    return x + m.sum()\n")
-    fam = [c for s, c in Mutator(seed=0).mutants_for(src, seed_base=0)
-           if "hoist_ctor" in s]
+
+    src = "import torch\n\n\ndef f(x):\n    m = torch.full((4,), 0.5)\n    return x + m.sum()\n"
+    fam = [c for s, c in Mutator(seed=0).mutants_for(src, seed_base=0) if "hoist_ctor" in s]
     assert fam, "hoist_ctor variant not enumerated"
     assert ".clone()" in _CTOR_PREAMBLE
 
@@ -1369,26 +1441,29 @@ def test_stagnation_hop_overshoot_once(target_file, tmp_path):
     cfg.patience = 99
     cfg.islands = 2
     ce = CodeEvolve(cfg, propose_fn=_Scripted([]))
-    ce._dry = 30                        # jumped right past hop_after
+    ce._dry = 30  # jumped right past hop_after
     ce.elites = [[], [("x", 1.0, "s")]]
     t0 = cfg.temperature
     assert ce._stagnation_check() is False
-    assert cfg.temperature > t0          # hop fired on the overshoot
+    assert cfg.temperature > t0  # hop fired on the overshoot
     t1 = cfg.temperature
     ce._dry += 10
     assert ce._stagnation_check() is False
-    assert cfg.temperature == t1         # no second hop same plateau
-    ce._promos += 1                      # promotion re-arms the hop
+    assert cfg.temperature == t1  # no second hop same plateau
+    ce._promos += 1  # promotion re-arms the hop
     assert ce._stagnation_check() is False
     assert cfg.temperature > t1
 
 
 def test_db_none_path_rejected(tmp_path):
     """FindingsDB(None) used to create a literal 'None' SQLite file —
-    a 119MB orphan at the repo root. Now it fails fast."""
+    a 119MB orphan at the repo root (written by the frontier tests).
+    None now means in-memory; ''/"None" still fail fast."""
     from forge.evolution.database import FindingsDB
-    with pytest.raises(ValueError):
-        FindingsDB(None)
+
+    db = FindingsDB(None)
+    assert db.db_path == ":memory:"
+    db.close()
     with pytest.raises(ValueError):
         FindingsDB("")
     assert not (tmp_path / "None").exists()
@@ -1399,13 +1474,27 @@ def test_ensure_lora_retries_on_zero_load(target_file, tmp_path):
     mark made later calls short-circuit: warning gone, retry impossible,
     a repaired adapter invisible."""
     import json
+
     from forge.evolution.code_evolve import LLMProposer
+
     root = tmp_path / "loras"
     root.mkdir()
     (root / "default.lora.safetensors").write_bytes(b"x")
-    (root / "manifest.json").write_text(json.dumps({"tags": {"default": {
-        "file": "default.lora.safetensors", "rank": 8, "alpha": 16,
-        "target_modules": ["q_proj"], "base": ""}}}))
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "tags": {
+                    "default": {
+                        "file": "default.lora.safetensors",
+                        "rank": 8,
+                        "alpha": 16,
+                        "target_modules": ["q_proj"],
+                        "base": "",
+                    }
+                }
+            }
+        )
+    )
     cfg = _ce(target_file, tmp_path)
     cfg.lora_root = str(root)
     cfg.lora_tag = "default"
@@ -1418,12 +1507,15 @@ def test_ensure_lora_retries_on_zero_load(target_file, tmp_path):
 
     class _E:
         checkpoint_path = "ckptA"
-        model = None                      # only used for the warning name
+        model = None  # only used for the warning name
+
         def __init__(self):
             self.calls = 0
+
         def _load_lora_impl(self, *a, **k):
             self.calls += 1
-            return 0                      # key-mismatch: zero tensors
+            return 0  # key-mismatch: zero tensors
+
         def unload_lora(self):
             pass
 
@@ -1431,7 +1523,7 @@ def test_ensure_lora_retries_on_zero_load(target_file, tmp_path):
     p._ensure_lora(e)
     assert getattr(e, "_evolve_lora_tag", None) is None
     p._ensure_lora(e)
-    assert e.calls == 2                    # retried, not short-circuited
+    assert e.calls == 2  # retried, not short-circuited
 
     class _E2(_E):
         def _load_lora_impl(self, *a, **k):
@@ -1442,7 +1534,7 @@ def test_ensure_lora_retries_on_zero_load(target_file, tmp_path):
     p._ensure_lora(e2)
     assert e2._evolve_lora_tag == "default"
     p._ensure_lora(e2)
-    assert e2.calls == 1                   # marked: skip re-attach
+    assert e2.calls == 1  # marked: skip re-attach
 
 
 def test_wrap_lfm3_official_template():
@@ -1454,17 +1546,14 @@ def test_wrap_lfm3_official_template():
     p.cfg = type("C", (), {"proposer_think": False})()
     p._lfm3_cached = True
     p._primed_cached = False
-    S, A, E = ("\x3c|startoftext|>", "\x3c|im_start|>",
-               "\x3c|im_end|>")
+    S, A, E = ("\x3c|startoftext|>", "\x3c|im_start|>", "\x3c|im_end|>")
     T = "\x3cthink>\x3c/think>"
     out = p._wrap("Do the thing.")
-    assert out == S + A + "user\nDo the thing." + E + "\n" + \
-        A + "assistant\n" + T + "```python\n"
+    assert out == S + A + "user\nDo the thing." + E + "\n" + A + "assistant\n" + T + "```python\n"
     # primed: signature goes to the assistant turn AFTER empty think
     p._primed_cached = True
     out = p._wrap("instr\n```python\ndef f(x):")
-    assert out == S + A + "user\ninstr\n" + E + "\n" + \
-        A + "assistant\n" + T + "```python\ndef f(x):"
+    assert out == S + A + "user\ninstr\n" + E + "\n" + A + "assistant\n" + T + "```python\ndef f(x):"
     # proposer_think -> open think prefill instead of the empty pair
     p._primed_cached = False
     p.cfg.proposer_think = True
@@ -1472,4 +1561,3 @@ def test_wrap_lfm3_official_template():
     # non-LFM3 stays on generic ChatML - no BOS, no think
     p._lfm3_cached = False
     assert p._wrap("x") == A + "user\nx" + E + "\n" + A + "assistant\n"
-

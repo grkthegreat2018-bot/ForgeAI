@@ -6,11 +6,13 @@ Validates that ``load_examples``:
   - raises on the first malformed row when ``strict_data=True``
   - still loads valid rows alongside bad ones when ``strict_data=False``
 """
+
 import json
 import logging
 import sys
+from pathlib import Path
 
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
 
@@ -20,10 +22,12 @@ from forge.training.runners.sft_train import load_examples
 @pytest.fixture
 def jsonl_file(tmp_path):
     """Write a JSONL file with the given lines and return its path."""
+
     def _write(lines: list[str]) -> str:
         p = tmp_path / "data.jsonl"
         p.write_text("\n".join(lines), encoding="utf-8")
         return str(p)
+
     return _write
 
 
@@ -54,8 +58,7 @@ class TestLoadExamplesLogging:
         # The bad line should appear in the logs
         assert any("JSON parse error" in rec.message for rec in caplog.records)
         # Line number should be in the log
-        assert any(":2" in rec.message or "line 2" in rec.message.lower()
-                    for rec in caplog.records)
+        assert any(":2" in rec.message or "line 2" in rec.message.lower() for rec in caplog.records)
 
     def test_schema_mismatch_logged(self, jsonl_file, caplog):
         """A row missing both 'messages' and 'prompt' should be logged."""

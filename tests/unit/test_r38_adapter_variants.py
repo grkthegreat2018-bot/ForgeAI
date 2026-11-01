@@ -10,9 +10,11 @@ Covers:
 
 All tests run on CPU with small (64x128) matrices.
 """
-import sys
 
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import math
 
@@ -29,8 +31,8 @@ from forge.training.adapter_variants import (
 
 # ── R38-3: PiSSA ─────────────────────────────────────────────────────────
 
-def _random_low_rank_weight(out_f: int, in_f: int, rank: int,
-                            seed: int = 0) -> torch.Tensor:
+
+def _random_low_rank_weight(out_f: int, in_f: int, rank: int, seed: int = 0) -> torch.Tensor:
     """Build a weight that is exactly rank-`rank` (so top-r SVD is exact)."""
     torch.manual_seed(seed)
     A = torch.randn(out_f, rank)
@@ -50,8 +52,7 @@ def test_pissa_top_rank_reconstruction():
     W = _random_low_rank_weight(64, 128, rank=4, seed=3)
     A, B = PiSSAInitializer.initialize(W, rank=4)
     recon = B @ A  # (out, in) — top-r component
-    assert torch.allclose(recon, W, atol=1e-4), \
-        f"top-r reconstruction failed: max err {(recon - W).abs().max()}"
+    assert torch.allclose(recon, W, atol=1e-4), f"top-r reconstruction failed: max err {(recon - W).abs().max()}"
 
 
 def test_pissa_selects_top_singular_values():
@@ -63,8 +64,7 @@ def test_pissa_selects_top_singular_values():
     # energy kept by PiSSA == sum of top-4 squared singular values
     kept = float((B @ A).pow(2).sum())
     top4_energy = float((S[:4] ** 2).sum())
-    assert abs(kept - top4_energy) < 1e-2, \
-        f"PiSSA kept {kept}, top-4 energy {top4_energy}"
+    assert abs(kept - top4_energy) < 1e-2, f"PiSSA kept {kept}, top-4 energy {top4_energy}"
     # and strictly more than the bottom-4 energy
     bottom4_energy = float((S[-4:] ** 2).sum())
     assert kept > bottom4_energy
@@ -115,12 +115,13 @@ def test_pissa_rank_clamp_disabled_raises():
 
 # ── MiCA (Minor-Component Adaptation) ────────────────────────────────────
 
+
 def test_mica_shapes_and_zero_a():
     W = torch.randn(64, 128)
     A, B = MiCAInitializer.initialize(W, rank=8)
     assert A.shape == (8, 128)
     assert B.shape == (64, 8)
-    assert torch.all(A == 0)          # A starts at zero — exact no-op
+    assert torch.all(A == 0)  # A starts at zero — exact no-op
 
 
 def test_mica_selects_minor_subspace():
@@ -133,8 +134,7 @@ def test_mica_selects_minor_subspace():
     minor = U[:, -4:]
     # |B^T minor| should be ~identity → B lies in the minor subspace
     overlap = (B.T @ minor).abs()
-    assert torch.allclose(overlap, torch.eye(4), atol=1e-4), \
-        f"MiCA B is not in the minor subspace: {overlap}"
+    assert torch.allclose(overlap, torch.eye(4), atol=1e-4), f"MiCA B is not in the minor subspace: {overlap}"
     # and orthogonal to the TOP-r subspace
     top = U[:, :4]
     top_overlap = (B.T @ top).abs().max().item()
@@ -189,6 +189,7 @@ def test_mica_rank_clamp_and_raise():
 
 
 # ── R38-4: AdaLoRA ───────────────────────────────────────────────────────
+
 
 def test_adalora_budget_allocation_even():
     ada = AdaLoRAClass(total_budget=32, n_layers=4)
@@ -314,6 +315,7 @@ def test_adalora_invalid_n_layers_raises():
 
 
 # ── R38-5: rsLoRA ────────────────────────────────────────────────────────
+
 
 def test_rslora_scale_is_one_over_sqrt_r():
     layer = rsLoRALinear(128, 64, rank=16, alpha=1.0)

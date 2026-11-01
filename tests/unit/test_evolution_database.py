@@ -1,7 +1,9 @@
 """Tests for forge.evolution.database — FindingsDB SQLite persistence."""
 
 import sys
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import sqlite3
 
@@ -11,16 +13,15 @@ import torch.nn as nn
 
 from forge.evolution.database import FindingsDB
 
-
 # ---------------------------------------------------------------------------
 # Mock objects
 # ---------------------------------------------------------------------------
 
+
 class _Cfg:
     """Minimal cfg object for BatchedGenerator."""
 
-    def __init__(self, noise_dim=4, context_dim=3, hidden_dim=8, output_dim=2,
-                 n_generators=2):
+    def __init__(self, noise_dim=4, context_dim=3, hidden_dim=8, output_dim=2, n_generators=2):
         self.noise_dim = noise_dim
         self.context_dim = context_dim
         self.hidden_dim = hidden_dim
@@ -31,18 +32,15 @@ class _Cfg:
 class MockBatchedGenerator(nn.Module):
     """Minimal BatchedGenerator mock with named_parameters, fitness_ema, cfg."""
 
-    def __init__(self, n_generators=2, noise_dim=4, context_dim=3, hidden_dim=8,
-                 output_dim=2):
+    def __init__(self, n_generators=2, noise_dim=4, context_dim=3, hidden_dim=8, output_dim=2):
         super().__init__()
-        self.cfg = _Cfg(noise_dim, context_dim, hidden_dim, output_dim,
-                        n_generators)
+        self.cfg = _Cfg(noise_dim, context_dim, hidden_dim, output_dim, n_generators)
         in_dim = noise_dim + context_dim
         self.W1 = nn.Parameter(torch.randn(n_generators, in_dim, hidden_dim))
         self.b1 = nn.Parameter(torch.randn(n_generators, hidden_dim))
         self.W2 = nn.Parameter(torch.randn(n_generators, hidden_dim, output_dim))
         self.b2 = nn.Parameter(torch.randn(n_generators, output_dim))
-        self.register_buffer(
-            "fitness_ema", torch.randn(n_generators, dtype=torch.float32))
+        self.register_buffer("fitness_ema", torch.randn(n_generators, dtype=torch.float32))
 
     def load_state_dict(self, sd, strict=True):
         super().load_state_dict(sd, strict=strict)
@@ -74,6 +72,7 @@ class MockSurrogate:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def db(tmp_path):
     """A FindingsDB instance backed by tmp_path / test.db."""
@@ -85,6 +84,7 @@ def db(tmp_path):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestFindingsDBInit:
     """Initialization creates the DB file and all tables."""
@@ -98,8 +98,7 @@ class TestFindingsDBInit:
 
     def test_tables_exist(self, db):
         c = db.conn.cursor()
-        c.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         names = {r[0] for r in c.fetchall()}
         assert "runs" in names
         assert "discoveries" in names
@@ -155,10 +154,8 @@ class TestSaveAndQueryDiscoveries:
     def test_save_and_query_discoveries(self, db):
         db.save_run("r1", "quant", {}, {"generations": 1}, 1.0)
         discoveries = [
-            {"generation": 0, "config": {"a": 1}, "score": 0.5,
-             "behavioral": {"b": 1}, "metadata": {"k": "v"}},
-            {"generation": 1, "config": {"a": 2}, "score": 1.5,
-             "behavioral": {"b": 2}, "metadata": {}},
+            {"generation": 0, "config": {"a": 1}, "score": 0.5, "behavioral": {"b": 1}, "metadata": {"k": "v"}},
+            {"generation": 1, "config": {"a": 2}, "score": 1.5, "behavioral": {"b": 2}, "metadata": {}},
         ]
         db.save_discoveries("r1", "quant", discoveries)
 
@@ -187,10 +184,8 @@ class TestSaveAndQueryDiscoveries:
     def test_query_discoveries_domain_filter(self, db):
         db.save_run("r1", "quant", {}, {"generations": 1}, 1.0)
         db.save_run("r2", "mesh", {}, {"generations": 1}, 2.0)
-        db.save_discoveries("r1", "quant",
-                            [{"config": {}, "score": 1.0}])
-        db.save_discoveries("r2", "mesh",
-                            [{"config": {}, "score": 5.0}])
+        db.save_discoveries("r1", "quant", [{"config": {}, "score": 1.0}])
+        db.save_discoveries("r2", "mesh", [{"config": {}, "score": 5.0}])
 
         quant = db.query_discoveries("quant")
         assert len(quant) == 1
@@ -217,11 +212,9 @@ class TestSaveAndQueryDiscoveries:
     def test_save_discoveries_dedup_lower_score(self, db):
         """Identical config with lower score is skipped (worse duplicate)."""
         db.save_run("r1", "quant", {}, {"generations": 1}, 1.0)
-        db.save_discoveries("r1", "quant",
-                            [{"config": {"a": 1}, "score": 10.0}])
+        db.save_discoveries("r1", "quant", [{"config": {"a": 1}, "score": 10.0}])
         # Same config, lower score → skipped
-        n_saved, n_skipped = db.save_discoveries(
-            "r2", "quant", [{"config": {"a": 1}, "score": 5.0}])
+        n_saved, n_skipped = db.save_discoveries("r2", "quant", [{"config": {"a": 1}, "score": 5.0}])
         assert n_saved == 0
         assert n_skipped == 1
 
@@ -233,13 +226,11 @@ class TestSaveAndQueryDiscoveries:
         """Identical config with higher score UPDATES the existing row
         (no duplicate inserted, just the score is updated)."""
         db.save_run("r1", "quant", {}, {"generations": 1}, 1.0)
-        db.save_discoveries("r1", "quant",
-                            [{"config": {"a": 1}, "score": 5.0}])
+        db.save_discoveries("r1", "quant", [{"config": {"a": 1}, "score": 5.0}])
         # Same config, higher score → updates existing row, no new row
-        n_saved, n_skipped = db.save_discoveries(
-            "r2", "quant", [{"config": {"a": 1}, "score": 15.0}])
-        assert n_saved == 0   # no new row inserted
-        assert n_skipped == 1 # 1 updated (counted as skipped/deduped)
+        n_saved, n_skipped = db.save_discoveries("r2", "quant", [{"config": {"a": 1}, "score": 15.0}])
+        assert n_saved == 0  # no new row inserted
+        assert n_skipped == 1  # 1 updated (counted as skipped/deduped)
 
         results = db.query_discoveries("quant")
         assert len(results) == 1  # still only 1 row (updated, not duplicated)
@@ -254,8 +245,7 @@ class TestSaveEvaluation:
         db.save_evaluation("r1", "quant", 0, {"x": 1}, 0.7, {"meta": "ok"})
 
         c = db.conn.cursor()
-        c.execute("SELECT run_id, domain, generation, config_json, score, "
-                  "metadata_json FROM evaluations")
+        c.execute("SELECT run_id, domain, generation, config_json, score, metadata_json FROM evaluations")
         row = c.fetchone()
         assert row is not None
         assert row[0] == "r1"
@@ -301,8 +291,7 @@ class TestSaveLoadSurrogate:
     """save_surrogate + load_surrogate round-trip; non-MLP returns early."""
 
     def test_save_and_load_surrogate(self, db):
-        surr = MockSurrogate(mode="mlp", input_dim=4, hidden_dim=8,
-                             n_trained=0)
+        surr = MockSurrogate(mode="mlp", input_dim=4, hidden_dim=8, n_trained=0)
         orig = {n: p.clone() for n, p in surr.net.named_parameters()}
 
         db.save_run("r1", "quant", {}, {"generations": 1}, 1.0)
@@ -414,6 +403,7 @@ class TestSeedFromPast:
 # Canonical generators/surrogate tests (permanent knowledge layer)
 # ---------------------------------------------------------------------------
 
+
 class TestCanonicalGenerators:
     """save_canonical_generators / load_canonical_generators round-trip."""
 
@@ -421,8 +411,7 @@ class TestCanonicalGenerators:
         gen = MockBatchedGenerator()
         # Save original weights
         orig = {n: p.clone() for n, p in gen.named_parameters()}
-        updated = db.save_canonical_generators("quant", gen, best_score=5.0,
-                                               run_id="r1")
+        updated = db.save_canonical_generators("quant", gen, best_score=5.0, run_id="r1")
         assert updated is True
 
         # Mutate the generator
@@ -441,13 +430,11 @@ class TestCanonicalGenerators:
         db.save_canonical_generators("quant", gen, best_score=10.0, run_id="r1")
 
         # Try to save with lower score — should NOT update
-        updated = db.save_canonical_generators("quant", gen, best_score=5.0,
-                                               run_id="r2")
+        updated = db.save_canonical_generators("quant", gen, best_score=5.0, run_id="r2")
         assert updated is False
 
         # Try with higher score — should update
-        updated = db.save_canonical_generators("quant", gen, best_score=15.0,
-                                               run_id="r3")
+        updated = db.save_canonical_generators("quant", gen, best_score=15.0, run_id="r3")
         assert updated is True
 
     def test_load_canonical_nonexistent_returns_false(self, db):
@@ -489,8 +476,7 @@ class TestCanonicalSurrogate:
     def test_save_and_load_canonical_surrogate(self, db):
         surr = MockSurrogate(mode="mlp", n_trained=42)
         orig = {n: p.clone() for n, p in surr.net.named_parameters()}
-        updated = db.save_canonical_surrogate("quant", surr, best_score=5.0,
-                                              run_id="r1")
+        updated = db.save_canonical_surrogate("quant", surr, best_score=5.0, run_id="r1")
         assert updated is True
 
         # Mutate
@@ -508,17 +494,14 @@ class TestCanonicalSurrogate:
     def test_save_canonical_surrogate_only_if_better(self, db):
         surr = MockSurrogate(mode="mlp")
         db.save_canonical_surrogate("quant", surr, best_score=10.0, run_id="r1")
-        updated = db.save_canonical_surrogate("quant", surr, best_score=5.0,
-                                              run_id="r2")
+        updated = db.save_canonical_surrogate("quant", surr, best_score=5.0, run_id="r2")
         assert updated is False
-        updated = db.save_canonical_surrogate("quant", surr, best_score=20.0,
-                                              run_id="r3")
+        updated = db.save_canonical_surrogate("quant", surr, best_score=20.0, run_id="r3")
         assert updated is True
 
     def test_canonical_surrogate_non_mlp_returns_false(self, db):
         surr = MockSurrogate(mode="gp")
-        updated = db.save_canonical_surrogate("quant", surr, best_score=1.0,
-                                              run_id="r1")
+        updated = db.save_canonical_surrogate("quant", surr, best_score=1.0, run_id="r1")
         assert updated is False
         loaded = db.load_canonical_surrogate("quant", surr)
         assert loaded is False
@@ -529,8 +512,7 @@ class TestCanonicalTablesExist:
 
     def test_canonical_tables_exist(self, db):
         c = db.conn.cursor()
-        c.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         names = {r[0] for r in c.fetchall()}
         assert "canonical_generators" in names
         assert "canonical_surrogate" in names

@@ -3,19 +3,19 @@
 All tests use GPU (CUDA) with the full ForgeEngine pipeline.
 CPU fallback only when CUDA is critically unavailable.
 """
+
 import os
 import tempfile
+from pathlib import Path
 
 # expandable_segments is unsupported on Windows (torch warns on every
 # CUDA alloc) — set it only where the cuMemMap path exists.
 if os.name != "nt":
-    os.environ.setdefault(
-        "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 # Triton kernel filenames can exceed Windows MAX_PATH under the default
 # %TEMP%/torchinductor_<user> cache root — use a shorter cache dir.
 if os.name == "nt":
-    os.environ.setdefault(
-        "TORCHINDUCTOR_CACHE_DIR", os.path.join(tempfile.gettempdir(), "ti"))
+    os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", os.path.join(tempfile.gettempdir(), "ti"))
 
 import pytest
 import torch
@@ -25,6 +25,7 @@ from forge.config import get_config
 CUDA_AVAILABLE = torch.cuda.is_available()
 
 # ── GPU-first config fixtures ──────────────────────────────────────────────
+
 
 def _gpu_config(preset="forgelm_tiny", vocab=256, dtype="bfloat16"):
     """Build config on GPU with bf16. Falls back to CPU only if no CUDA."""
@@ -100,6 +101,20 @@ def forge_engine(tiny_config_gpu):
     del engine
     del model
     torch.cuda.empty_cache()
+
+
+# ── Checkpoint asset gates ─────────────────────────────────────────────────
+
+V2_ASSETS = Path(__file__).resolve().parents[1] / "research" / "checkpoints"
+
+
+@pytest.fixture
+def v2_assets():
+    """Path to research/checkpoints — skips when the (gitignored) ForgeLM V2
+    checkpoint assets are not present, e.g. CI runners."""
+    if not (V2_ASSETS / "forgelm_v2_tokenizer").exists():
+        pytest.skip("ForgeLM V2 checkpoint assets not present", allow_module_level=False)
+    return V2_ASSETS
 
 
 @pytest.fixture

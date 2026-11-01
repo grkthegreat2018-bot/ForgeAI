@@ -1,4 +1,5 @@
 """Integration test: config fields for HINT4-NLRQ + Tied PEAGLE."""
+
 import pytest
 import torch
 
@@ -9,9 +10,9 @@ class TestNewTech:
     def test_config_has_new_fields(self):
         """Config should have the HINT4 + PEAGLE tied fields."""
         cfg = get_config("forgelm_v2")
-        assert hasattr(cfg, 'nlrq_use_hadamard')
-        assert hasattr(cfg, 'use_peagle_tied')
-        assert hasattr(cfg, 'peagle_lora_rank')
+        assert hasattr(cfg, "nlrq_use_hadamard")
+        assert hasattr(cfg, "use_peagle_tied")
+        assert hasattr(cfg, "peagle_lora_rank")
 
     def test_hint4_config(self):
         """HINT4 can be enabled via overrides."""
@@ -33,6 +34,7 @@ class TestNewTech:
     def test_builds_with_new_config(self):
         """Model should build without errors with new config fields."""
         from forge.model_loader import ConfigurableResearchLLM
+
         cfg = get_config("forgelm_v2")
         cfg.n_layers = 12  # need > hyperloop_begin + hyperloop_end (4+4=8)
         cfg.d_model = 256  # small for fast test
@@ -61,6 +63,7 @@ class TestNewTech:
     def test_hint4_builds(self):
         """HINT4 (INT4 + Hadamard) should build on GPU."""
         from forge.model_loader import ConfigurableResearchLLM
+
         cfg = get_config("forgelm_v2")
         cfg.n_layers = 12
         cfg.d_model = 256

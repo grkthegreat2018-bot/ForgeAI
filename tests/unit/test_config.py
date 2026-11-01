@@ -151,8 +151,8 @@ class TestHeadDim:
         import torch
 
         from forge.model.layers import GroupedQueryAttention
-        attn = GroupedQueryAttention(d_model=2560, n_heads=32, n_kv_heads=8,
-                                     head_dim=128, use_qk_norm=True)
+
+        attn = GroupedQueryAttention(d_model=2560, n_heads=32, n_kv_heads=8, head_dim=128, use_qk_norm=True)
         assert attn.q_proj.out_features == 32 * 128
         assert attn.k_proj.out_features == 8 * 128
         assert attn.out_proj.in_features == 32 * 128

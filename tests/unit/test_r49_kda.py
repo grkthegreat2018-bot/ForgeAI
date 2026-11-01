@@ -10,14 +10,14 @@ Covers the port-first contract:
 7. Prefill/decode parity + prefix-restore consistency (cache plumbing)
 8. Block-level bit-exactness: ModularBlock(use_kda=True) == baseline at init
 """
+
 import os
 import sys
 
 import pytest
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from forge.config import ModelConfig
 from forge.keys.attention.kda_key import KDA_PARAM_SUFFIXES, KDAKey, KDALayer
@@ -44,6 +44,7 @@ def _make_kda_layer(**kw) -> KDALayer:
 
 
 # ── Key contract ──────────────────────────────────────────────────────────────
+
 
 def test_key_properties():
     key = KDAKey(D_MODEL, N_HEADS, head_dim=HEAD_DIM)
@@ -130,6 +131,7 @@ def test_convert_model_state():
 
 # ── KDALayer behaviour ────────────────────────────────────────────────────────
 
+
 def test_layer_gate_zero_exact_zeros():
     layer = _make_kda_layer()
     x = torch.randn(2, 8, D_MODEL)
@@ -158,13 +160,11 @@ def test_scan_math_hand_computed():
     alpha = torch.tensor([[[[1.0, 1.0]], [[0.5, 0.5]]]])
     beta = torch.tensor([[[1.0], [1.0]]])
     S = torch.zeros(1, 1, 2, 2)
-    o0, S0 = layer._scan(q[:, :1], k[:, :1], v[:, :1],
-                         alpha[:, :1], beta[:, :1], S)
+    o0, S0 = layer._scan(q[:, :1], k[:, :1], v[:, :1], alpha[:, :1], beta[:, :1], S)
     # t=0: S0 = k0 (v0)^T ; o0 = S0^T q0 = v0 (q0=k0)
     assert torch.allclose(S0[0, 0], torch.tensor([[2.0, 3.0], [0.0, 0.0]]))
     assert torch.allclose(o0[0, 0, 0], torch.tensor([2.0, 3.0]))
-    o1, S1 = layer._scan(q[:, 1:], k[:, 1:], v[:, 1:],
-                         alpha[:, 1:], beta[:, 1:], S0)
+    o1, S1 = layer._scan(q[:, 1:], k[:, 1:], v[:, 1:], alpha[:, 1:], beta[:, 1:], S0)
     # t=1: Sa = diag(0.5) S0 = [[1,1.5],[0,0]]; pred = Sa^T k1 = col1 = (0,0)
     #      S1 = Sa + k1 (v1 - 0)^T = [[1,1.5],[5,7]]; o1 = S1^T q1 = row2 = (5,7)
     assert torch.allclose(S1[0, 0], torch.tensor([[1.0, 1.5], [5.0, 7.0]]))
@@ -193,8 +193,7 @@ def test_reset_state_clears():
     assert layer._state is not None and layer.conv_q.state is not None
     layer.reset_state()
     assert layer._state is None
-    assert layer.conv_q.state is None and layer.conv_k.state is None \
-        and layer.conv_v.state is None
+    assert layer.conv_q.state is None and layer.conv_k.state is None and layer.conv_v.state is None
 
 
 def test_prefix_restore_consistency():
@@ -228,11 +227,18 @@ def test_state_reset_flag():
 
 # ── Block-level bit-exactness ─────────────────────────────────────────────────
 
+
 def _block_config(use_kda: bool) -> ModelConfig:
     return ModelConfig(
-        vocab_size=128, d_model=D_MODEL, n_layers=1, n_heads=N_HEADS,
-        n_kv_heads=N_HEADS, max_seq_len=64,
-        layer_types=["attention"], use_kda=use_kda)
+        vocab_size=128,
+        d_model=D_MODEL,
+        n_layers=1,
+        n_heads=N_HEADS,
+        n_kv_heads=N_HEADS,
+        max_seq_len=64,
+        layer_types=["attention"],
+        use_kda=use_kda,
+    )
 
 
 def test_block_bit_exact_at_init():
@@ -240,10 +246,9 @@ def test_block_bit_exact_at_init():
     blk_kda = ModularBlock(_block_config(True), layer_idx=0)
     blk_ref = ModularBlock(_block_config(False), layer_idx=0)
     ref_sd = blk_ref.state_dict()
-    blk_kda.load_state_dict(
-        {k: v for k, v in ref_sd.items() if k in blk_kda.state_dict()},
-        strict=False)
-    blk_kda.eval(); blk_ref.eval()
+    blk_kda.load_state_dict({k: v for k, v in ref_sd.items() if k in blk_kda.state_dict()}, strict=False)
+    blk_kda.eval()
+    blk_ref.eval()
     x = torch.randn(1, 8, D_MODEL)
     with torch.no_grad():
         out_kda, _ = blk_kda(x)
@@ -259,9 +264,7 @@ def test_block_kda_opens_with_gate():
     blk._kda_gate_zero = None  # invalidate cached gate check
     x = torch.randn(1, 8, D_MODEL)
     blk2 = ModularBlock(_block_config(False), layer_idx=0)
-    blk2.load_state_dict(
-        {k: v for k, v in blk.state_dict().items()
-         if k in blk2.state_dict()}, strict=False)
+    blk2.load_state_dict({k: v for k, v in blk.state_dict().items() if k in blk2.state_dict()}, strict=False)
     blk2.eval()
     with torch.no_grad():
         out_kda, _ = blk(x)

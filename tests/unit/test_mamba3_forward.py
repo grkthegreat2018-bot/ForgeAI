@@ -1,4 +1,5 @@
 """Tests for Mamba-3 forward pass module (complex states, MIMO, exp-trapezoidal)."""
+
 from __future__ import annotations
 
 import pytest
@@ -13,6 +14,7 @@ from forge.engine.mamba3 import (
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def small_block():
@@ -47,6 +49,7 @@ def mimo_block():
 # ──────────────────────────────────────────────────────────────────────────────
 # Tests
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class TestMamba3ForwardShape:
     """Verify output shape matches input."""
@@ -103,8 +106,7 @@ class TestMamba3RecurrentMode:
     """Verify inference cache works for incremental decoding."""
 
     def test_cache_class(self):
-        cache = Mamba3Cache.create(
-            batch_size=2, n_ssm_units=4, d_state=8, d_inner=8, d_conv=4)
+        cache = Mamba3Cache.create(batch_size=2, n_ssm_units=4, d_state=8, d_inner=8, d_conv=4)
         assert cache.ssm_state_real.shape == (2, 4, 8)
         assert cache.ssm_state_imag.shape == (2, 4, 8)
         assert cache.conv_state.shape == (2, 8, 3)
@@ -141,14 +143,12 @@ class TestMamba3RecurrentMode:
 
         # Feed the 6th token (index 5) incrementally using the cache
         with torch.no_grad():
-            out_inc, _ = small_block(x[:, 5:6, :], past_key_value=present,
-                                     use_cache=True)
+            out_inc, _ = small_block(x[:, 5:6, :], past_key_value=present, use_cache=True)
 
         # The incremental output for token 5 should match the full-sequence output
         assert out_inc.shape == (1, 1, 32)
         diff = (out_inc - out_full[:, 5:6, :]).abs().max()
-        assert diff < 1e-4, (
-            f"Incremental vs full mismatch at token 5: max diff {diff:.6e}")
+        assert diff < 1e-4, f"Incremental vs full mismatch at token 5: max diff {diff:.6e}"
 
     def test_cache_from_dict(self, small_block):
         x = torch.randn(1, 4, 32)
@@ -171,16 +171,14 @@ class TestMamba3VsMamba2Init:
         d_model, d_state, d_conv, expand = 32, 8, 4, 2
 
         # Mamba-2 block
-        m2 = MambaLayer(
-            d_model=d_model, d_state=d_state, d_conv=d_conv,
-            expand=expand, dt_rank=4, use_jamba_norms=True)
+        m2 = MambaLayer(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand, dt_rank=4, use_jamba_norms=True)
         m2.eval()
 
         # Mamba-3 block with same dimensions
         torch.manual_seed(123)
         m3 = Mamba3Block(
-            d_model=d_model, d_state=d_state, d_conv=d_conv,
-            expand=expand, dt_rank=4, n_inputs=1, n_outputs=1)
+            d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand, dt_rank=4, n_inputs=1, n_outputs=1
+        )
         m3.eval()
 
         # Copy shared weights from Mamba-2 to Mamba-3 (real parts)
@@ -193,7 +191,7 @@ class TestMamba3VsMamba2Init:
             m3.conv1d.bias.copy_(m2.conv1d.bias)
             # x_proj: Mamba-3 has complex B/C (2x the B/C rows vs Mamba-2).
             # Copy dt rows (identical) and real-part rows of B/C from Mamba-2.
-            dt_rank = m2.dt_rank if hasattr(m2, 'dt_rank') else 4
+            dt_rank = m2.dt_rank if hasattr(m2, "dt_rank") else 4
             m2_xp = m2.x_proj.weight  # (dt_rank + 2*d_state, d_inner)
             m3_xp = m3.x_proj.weight  # (dt_rank + 4*d_state, d_inner)
             # dt rows are the same
@@ -202,15 +200,13 @@ class TestMamba3VsMamba2Init:
             d_state = m2.A_log.shape[1]
             m2_b_start = dt_rank
             m3_b_real_start = dt_rank
-            m3_b_imag_start = dt_rank + d_state
-            m3_xp[m3_b_real_start:m3_b_real_start + d_state].copy_(
-                m2_xp[m2_b_start:m2_b_start + d_state])
+            dt_rank + d_state
+            m3_xp[m3_b_real_start : m3_b_real_start + d_state].copy_(m2_xp[m2_b_start : m2_b_start + d_state])
             # Mamba-2 C_real rows -> Mamba-3 C_real rows
             m2_c_start = dt_rank + d_state
             m3_c_real_start = dt_rank + 2 * d_state
-            m3_c_imag_start = dt_rank + 3 * d_state
-            m3_xp[m3_c_real_start:m3_c_real_start + d_state].copy_(
-                m2_xp[m2_c_start:m2_c_start + d_state])
+            dt_rank + 3 * d_state
+            m3_xp[m3_c_real_start : m3_c_real_start + d_state].copy_(m2_xp[m2_c_start : m2_c_start + d_state])
             m3.dt_proj.weight.copy_(m2.dt_proj.weight)
             m3.dt_proj.bias.copy_(m2.dt_proj.bias)
             m3.out_proj.weight.copy_(m2.out_proj.weight)
@@ -250,8 +246,7 @@ class TestMamba3VsMamba2Init:
         flat2 = out2.flatten()
         flat3 = out3.flatten()
         corr = torch.corrcoef(torch.stack([flat2, flat3]))[0, 1]
-        assert corr.item() > 0.3, (
-            f"Mamba-3 vs Mamba-2 correlation too low: {corr.item():.4f}")
+        assert corr.item() > 0.3, f"Mamba-3 vs Mamba-2 correlation too low: {corr.item():.4f}"
 
 
 class TestMamba3GradientFlow:
@@ -318,8 +313,7 @@ class TestMamba3ExponentialTrapezoidal:
         A = torch.complex(torch.tensor([-1.0, -2.0]), torch.tensor([0.0, 0.0]))
         delta = torch.tensor([0.5]).unsqueeze(-1)  # (1, 1)
         B = torch.complex(torch.ones(2, 1), torch.zeros(2, 1))
-        A_bar, _B_bar = exp_trapezoidal_discretize(
-            A.unsqueeze(0), B.unsqueeze(0), delta)
+        A_bar, _B_bar = exp_trapezoidal_discretize(A.unsqueeze(0), B.unsqueeze(0), delta)
         # A_bar = exp(0.5 * [-1, -2]) = [exp(-0.5), exp(-1.0)]
         expected = torch.exp(torch.tensor([-0.5, -1.0]))
         assert A_bar.shape == (1, 2)
@@ -331,8 +325,7 @@ class TestMamba3ExponentialTrapezoidal:
         A = torch.complex(torch.tensor([-1.0]), torch.tensor([0.0]))  # (1,)
         delta = torch.tensor([1e-8]).unsqueeze(-1)  # (1, 1)
         B = torch.complex(torch.tensor([[2.0]]), torch.tensor([[0.0]]))  # (1, 1)
-        _A_bar, B_bar = exp_trapezoidal_discretize(
-            A.unsqueeze(0), B.unsqueeze(0), delta)
+        _A_bar, B_bar = exp_trapezoidal_discretize(A.unsqueeze(0), B.unsqueeze(0), delta)
         # B_bar ≈ delta * B = 1e-8 * 2 = 2e-8
         expected = torch.tensor([2e-8])
         assert torch.allclose(B_bar[0, :, 0].real, expected, atol=1e-10)
@@ -342,8 +335,7 @@ class TestMamba3ExponentialTrapezoidal:
         A = torch.complex(torch.tensor([-1.0]), torch.tensor([0.0]))  # (1,)
         delta = torch.tensor([1.0]).unsqueeze(-1)  # (1, 1)
         B = torch.complex(torch.tensor([[1.0]]), torch.tensor([[0.0]]))  # (1, 1)
-        _A_bar, B_bar = exp_trapezoidal_discretize(
-            A.unsqueeze(0), B.unsqueeze(0), delta)
+        _A_bar, B_bar = exp_trapezoidal_discretize(A.unsqueeze(0), B.unsqueeze(0), delta)
         da = -1.0  # delta * A = 1.0 * -1.0
         correction = (torch.exp(torch.tensor(da)) - 1) / da  # (exp(-1)-1)/(-1)
         expected = correction * 1.0 * 1.0  # correction * delta * B
@@ -354,19 +346,18 @@ class TestMamba3ExponentialTrapezoidal:
         A = torch.complex(torch.tensor([-2.0]), torch.tensor([0.0]))  # (1,)
         delta = torch.tensor([1.0]).unsqueeze(-1)  # (1, 1)
         B = torch.complex(torch.tensor([[1.0]]), torch.tensor([[0.0]]))  # (1, 1)
-        _A_bar, B_bar = exp_trapezoidal_discretize(
-            A.unsqueeze(0), B.unsqueeze(0), delta)
+        _A_bar, B_bar = exp_trapezoidal_discretize(A.unsqueeze(0), B.unsqueeze(0), delta)
         zoh_B_bar = torch.tensor([1.0])  # ZOH: delta * B = 1.0 * 1.0
         assert not torch.allclose(B_bar[0, 0, 0].real, zoh_B_bar, atol=1e-3), (
-            "Trapezoidal B_bar should differ from ZOH for finite delta*A")
+            "Trapezoidal B_bar should differ from ZOH for finite delta*A"
+        )
 
     def test_complex_A_bar(self):
         """A_bar with complex A produces complex result."""
         A = torch.complex(torch.tensor([-1.0]), torch.tensor([0.5]))  # (1,)
         delta = torch.tensor([0.5]).unsqueeze(-1)  # (1, 1)
         B = torch.complex(torch.tensor([[1.0]]), torch.tensor([[0.0]]))  # (1, 1)
-        A_bar, _B_bar = exp_trapezoidal_discretize(
-            A.unsqueeze(0), B.unsqueeze(0), delta)
+        A_bar, _B_bar = exp_trapezoidal_discretize(A.unsqueeze(0), B.unsqueeze(0), delta)
         assert A_bar.is_complex()
         # exp(0.5 * (-1 + 0.5j)) should have nonzero imaginary part
         assert A_bar[0].imag.abs().item() > 1e-6
@@ -399,8 +390,7 @@ class TestMamba3CacheIntegration:
 
         # Use cache for next step
         x_next = torch.randn(1, 1, 32)
-        out_next, present_next = small_block(
-            x_next, past_key_value=cache.to_dict(), use_cache=True)
+        out_next, present_next = small_block(x_next, past_key_value=cache.to_dict(), use_cache=True)
         assert out_next.shape == (1, 1, 32)
         assert present_next["ssm_state_real"] is not None
 
@@ -417,8 +407,9 @@ class TestMamba3CacheIntegration:
             _out2, present2 = small_block(x, past_key_value=present1, use_cache=True)
 
         # State should have evolved (not identical)
-        assert not torch.equal(present1["ssm_state_real"], present2["ssm_state_real"]), \
+        assert not torch.equal(present1["ssm_state_real"], present2["ssm_state_real"]), (
             "SSM state should evolve between steps"
+        )
 
 
 if __name__ == "__main__":

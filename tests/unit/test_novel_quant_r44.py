@@ -5,6 +5,7 @@ the dead-end lifting methods for regression protection.
 
 Run: venv\Scripts\python.exe -m pytest tests/unit/test_novel_quant_r44.py -v
 """
+
 import pytest
 import torch
 import torch.nn as nn
@@ -32,19 +33,18 @@ class TestHadamardMatrix:
     def test_hadamard_orthogonal(self):
         """Hadamard matrix should be orthogonal: H @ H^T = I."""
         for n in [1, 2, 4, 8, 16, 32]:
-            H = _hadamard_matrix(n, torch.device('cpu'), torch.float32)
-            I = H @ H.T
-            assert torch.allclose(I, torch.eye(n), atol=1e-5), \
-                f"Hadamard {n} not orthogonal"
+            H = _hadamard_matrix(n, torch.device("cpu"), torch.float32)
+            prod = H @ H.T
+            assert torch.allclose(prod, torch.eye(n), atol=1e-5), f"Hadamard {n} not orthogonal"
 
     def test_hadamard_power_of_2_only(self):
         """Non-power-of-2 should raise."""
         with pytest.raises(AssertionError):
-            _hadamard_matrix(3, torch.device('cpu'), torch.float32)
+            _hadamard_matrix(3, torch.device("cpu"), torch.float32)
 
     def test_hadamard_symmetric(self):
         """Hadamard matrix is symmetric: H = H^T."""
-        H = _hadamard_matrix(8, torch.device('cpu'), torch.float32)
+        H = _hadamard_matrix(8, torch.device("cpu"), torch.float32)
         assert torch.allclose(H, H.T, atol=1e-6)
 
 
@@ -123,8 +123,7 @@ class TestSparseResidualINT3:
         torch.manual_seed(42)
         lin = nn.Linear(256, 512, bias=False)
         lin.weight.data *= 0.1
-        ql = SparseResidualINT3Linear.from_linear(lin, group_size=64,
-                                                   n_std=1.0, base_bits=4)
+        ql = SparseResidualINT3Linear.from_linear(lin, group_size=64, n_std=1.0, base_bits=4)
         w_recon = ql._dequantize_weight(torch.float32)
         err = frob_err(lin.weight.data, w_recon)
         assert err < 0.15, f"SR-INT4 reconstruction error too high: {err:.4f}"
@@ -135,10 +134,8 @@ class TestSparseResidualINT3:
         lin = nn.Linear(256, 512, bias=False)
         lin.weight.data *= 0.1
 
-        ql3 = SparseResidualINT3Linear.from_linear(lin, group_size=64,
-                                                    n_std=2.0, base_bits=3)
-        ql4 = SparseResidualINT3Linear.from_linear(lin, group_size=64,
-                                                    n_std=2.0, base_bits=4)
+        ql3 = SparseResidualINT3Linear.from_linear(lin, group_size=64, n_std=2.0, base_bits=3)
+        ql4 = SparseResidualINT3Linear.from_linear(lin, group_size=64, n_std=2.0, base_bits=4)
         err3 = frob_err(lin.weight.data, ql3._dequantize_weight(torch.float32))
         err4 = frob_err(lin.weight.data, ql4._dequantize_weight(torch.float32))
         assert err3 > err4, f"INT3 should have higher error than INT4: {err3} vs {err4}"
@@ -152,10 +149,8 @@ class TestSparseResidualINT3:
         lin.weight.data[0, 0] = 1.0
         lin.weight.data[1, 5] = -1.5
 
-        ql_conservative = SparseResidualINT3Linear.from_linear(
-            lin, group_size=64, n_std=2.0, base_bits=4)
-        ql_aggressive = SparseResidualINT3Linear.from_linear(
-            lin, group_size=64, n_std=1.0, base_bits=4)
+        ql_conservative = SparseResidualINT3Linear.from_linear(lin, group_size=64, n_std=2.0, base_bits=4)
+        ql_aggressive = SparseResidualINT3Linear.from_linear(lin, group_size=64, n_std=1.0, base_bits=4)
 
         assert ql_aggressive.n_sparse >= ql_conservative.n_sparse
 
@@ -174,8 +169,7 @@ class TestHadamardLift:
     def test_forward_shape(self):
         """Output shape matches nn.Linear."""
         lin = nn.Linear(64, 128, bias=True)
-        ql = HadamardLiftLinear.from_linear(lin, lift_ratio=2.0, lift_dim=8,
-                                             optimize_p=False)
+        ql = HadamardLiftLinear.from_linear(lin, lift_ratio=2.0, lift_dim=8, optimize_p=False)
         x = torch.randn(2, 4, 64)
         y = ql(x)
         assert y.shape == (2, 4, 128)
@@ -183,8 +177,7 @@ class TestHadamardLift:
     def test_high_reconstruction_error(self):
         """HadamardLift with random P has high error (known limitation)."""
         lin = nn.Linear(64, 128, bias=False)
-        ql = HadamardLiftLinear.from_linear(lin, lift_ratio=2.0, lift_dim=8,
-                                             optimize_p=False)
+        ql = HadamardLiftLinear.from_linear(lin, lift_ratio=2.0, lift_dim=8, optimize_p=False)
         w_recon = ql._dequantize_weight(torch.float32)
         err = frob_err(lin.weight.data, w_recon)
         # Known to be high without optimization
@@ -197,8 +190,7 @@ class TestTernaryLift:
     def test_forward_shape(self):
         """Output shape matches nn.Linear."""
         lin = nn.Linear(64, 128, bias=True)
-        ql = TernaryLiftLinear.from_linear(lin, lift_ratio=1.5, lift_dim=8,
-                                            optimize_p=False)
+        ql = TernaryLiftLinear.from_linear(lin, lift_ratio=1.5, lift_dim=8, optimize_p=False)
         x = torch.randn(2, 4, 64)
         y = ql(x)
         assert y.shape == (2, 4, 128)
@@ -227,18 +219,18 @@ class TestModelConversion:
             nn.ReLU(),
             nn.Linear(128, 64),
         )
-        n = quantize_model_sparse_residual_int3(model, group_size=64,
-                                                  base_bits=4, verbose=False)
+        n = quantize_model_sparse_residual_int3(model, group_size=64, base_bits=4, verbose=False)
         assert n == 2
         assert isinstance(model[0], SparseResidualINT3Linear)
         assert isinstance(model[2], SparseResidualINT3Linear)
 
     def test_skip_embeddings(self):
         """Embedding-like layers should be skipped."""
-        model = nn.Sequential(
+        nn.Sequential(
             nn.Linear(100, 100),  # "embed" in name → skip
             nn.Linear(100, 200),
         )
+
         # Manually name the first module to contain "embed"
         # Since nn.Sequential names by index, we use a custom module
         class TestModel(nn.Module):
@@ -280,9 +272,9 @@ class TestMemoryEstimation:
         )
         quantize_model_adaptive_block_fp4(model, block_size=32, verbose=False)
         mem = estimate_quantized_memory(model)
-        assert mem['total_mb'] > 0
-        assert mem['total_params'] > 0
-        assert 'AdaptiveBlockFP4Linear' in mem['breakdown']
+        assert mem["total_mb"] > 0
+        assert mem["total_params"] > 0
+        assert "AdaptiveBlockFP4Linear" in mem["breakdown"]
 
     def test_memory_less_than_fp16(self):
         """Quantized memory should be less than FP16 equivalent."""
@@ -290,4 +282,4 @@ class TestMemoryEstimation:
         quantize_model_adaptive_block_fp4(model, block_size=32, verbose=False)
         mem = estimate_quantized_memory(model)
         fp16_bytes = 256 * 512 * 2  # bf16
-        assert mem['total_bytes'] < fp16_bytes
+        assert mem["total_bytes"] < fp16_bytes

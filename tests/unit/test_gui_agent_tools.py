@@ -1,4 +1,5 @@
 """Unit tests for forge_gui.api.agent_tools (workspace jail + tool behavior)."""
+
 import pytest
 
 from forge_gui.api.agent_tools import ToolSandbox, tool_defs, tool_results_to_text
@@ -12,8 +13,7 @@ def sandbox(tmp_path):
 def test_tool_defs_shape():
     defs = tool_defs()
     names = {d["function"]["name"] for d in defs}
-    assert {"list_dir", "read_file", "write_file", "run_python",
-            "run_cmd", "grep_project"} <= names
+    assert {"list_dir", "read_file", "write_file", "run_python", "run_cmd", "grep_project"} <= names
     for d in defs:
         assert d["type"] == "function"
         assert "parameters" in d["function"]
@@ -85,8 +85,7 @@ def test_run_cmd_allowlist(sandbox):
 
 
 def test_grep_project(sandbox):
-    sandbox.execute("write_file", {"path": "mod.py",
-                                   "content": "def target_fn():\n    pass\n"})
+    sandbox.execute("write_file", {"path": "mod.py", "content": "def target_fn():\n    pass\n"})
     rec = sandbox.execute("grep_project", {"pattern": "target_fn", "glob": "*.py"})
     matches = rec["result"]["matches"]
     assert len(matches) == 1

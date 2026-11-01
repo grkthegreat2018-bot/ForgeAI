@@ -11,10 +11,12 @@ tests that catch regressions automatically.
 
 Requires CUDA (skips on CPU-only environments). Uses the tiny config for speed.
 """
+
 import sys
 import time
+from pathlib import Path
 
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
 import torch
@@ -61,6 +63,7 @@ def _build_engine_and_model(preset="forgelm_tiny", vocab=65536):
     model.eval()
 
     from research.tokenizer_cache import get_tokenizer
+
     tok = get_tokenizer("research/checkpoints/forgelm_v2_tokenizer")
     engine = ForgeEngine(model, tok, device=cfg.device)
     return engine, model
@@ -79,11 +82,9 @@ def _count_quantized(model) -> int:
 def _measure_throughput(engine, n_tokens=20):
     """Measure generation throughput in tok/s."""
     # Warmup
-    engine.generate("warmup", max_new_tokens=2,
-                    finish_sentence=False, temperature=0.0)
+    engine.generate("warmup", max_new_tokens=2, finish_sentence=False, temperature=0.0)
     start = time.perf_counter()
-    engine.generate("The quick brown fox", max_new_tokens=n_tokens,
-                    finish_sentence=False, temperature=0.0)
+    engine.generate("The quick brown fox", max_new_tokens=n_tokens, finish_sentence=False, temperature=0.0)
     elapsed = time.perf_counter() - start
     return n_tokens / elapsed if elapsed > 0 else 0
 
@@ -97,8 +98,7 @@ class TestQuantModeParity:
         engine, model = _build_engine_and_model()
         try:
             # No activation — avoids compile/cuda_graph issues (known bug, F4)
-            result = engine.generate("test", max_new_tokens=5,
-                                     finish_sentence=False, temperature=0.0)
+            result = engine.generate("test", max_new_tokens=5, finish_sentence=False, temperature=0.0)
             assert isinstance(result, str)
             tps = _measure_throughput(engine, n_tokens=20)
             assert tps > 0, "Unquantized baseline produced 0 tok/s"
@@ -119,11 +119,8 @@ class TestQuantModeParity:
                 f"chain silently degraded to unquantized bf16. This is the "
                 f"hidden-failure mode the parity test exists to catch."
             )
-            result = engine.generate("test", max_new_tokens=5,
-                                     finish_sentence=False, temperature=0.0)
-            assert isinstance(result, str), (
-                f"Mode '{mode}' returned {type(result)} instead of str"
-            )
+            result = engine.generate("test", max_new_tokens=5, finish_sentence=False, temperature=0.0)
+            assert isinstance(result, str), f"Mode '{mode}' returned {type(result)} instead of str"
             assert len(result) > 0, f"Mode '{mode}' produced empty output"
         except (ImportError, RuntimeError, ValueError) as e:
             # Some modes may not be supported on all hardware — that's OK
@@ -155,15 +152,14 @@ class TestQuantModeParity:
             engine._apply_quantization(mode)
             n_quant = _count_quantized(model)
             assert n_quant > 0, (
-                f"Mode '{mode}' silently fell back to unquantized — "
-                f"throughput comparison would be meaningless"
+                f"Mode '{mode}' silently fell back to unquantized — throughput comparison would be meaningless"
             )
             quant_tps = _measure_throughput(engine, n_tokens=20)
 
             if quant_tps == 0:
                 pytest.fail(f"Mode '{mode}' produced 0 tok/s")
 
-            ratio = baseline_tps / quant_tps if quant_tps > 0 else float('inf')
+            ratio = baseline_tps / quant_tps if quant_tps > 0 else float("inf")
             MAX_RATIO = 2.0
             assert ratio <= MAX_RATIO, (
                 f"Mode '{mode}' is {ratio:.1f}× slower than unquantized "

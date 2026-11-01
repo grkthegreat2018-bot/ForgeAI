@@ -7,6 +7,7 @@ required) so they run in every CI environment:
   2. DiskKVCache — 3-tier GPU->CPU->disk offload + persistence
   3. CacheBlend — ChunkStore / RangeMatcher / BlendAssembler / RoPE re-rotation
 """
+
 import os
 import sys
 import tempfile
@@ -32,8 +33,7 @@ from forge.engine.prefix_cache import (
 # ── helpers ───────────────────────────────────────────────────────────────
 
 
-def _make_past_kv(n_layers, n_kv, seq_len, head_dim, device="cpu",
-                  dtype=torch.float32):
+def _make_past_kv(n_layers, n_kv, seq_len, head_dim, device="cpu", dtype=torch.float32):
     """Build a per-layer KV list matching the model's presents format."""
     kv = []
     for i in range(n_layers):
@@ -99,7 +99,7 @@ def test_chunked_prefix_cache_partial_hit():
     """A longer prompt reuses a shorter cached prefix (partial hit)."""
     cache = ChunkedPrefixCache(max_entries=8, chunk_size=64)
     short = list(range(128))
-    short_ids = torch.tensor([short])
+    torch.tensor([short])
     kv = _make_past_kv(4, 2, 128, 8)
     h = cache.prefix_hashes(short)[-1]
     cache.put((h, short), kv, 128)
@@ -149,7 +149,7 @@ def test_chunked_prefix_cache_collision_guard():
 def test_slice_past_kv():
     kv = _make_past_kv(3, 2, 100, 8)
     sliced = _slice_past_kv(kv, 40)
-    for orig, sl in zip(kv, sliced):
+    for orig, sl in zip(kv, sliced, strict=False):
         if orig is None:
             assert sl is None
             continue
@@ -163,10 +163,8 @@ def test_slice_past_kv():
 def test_disk_kv_cache_basic_offload_cycle():
     """Tokens cascade GPU->CPU->disk and fetch back correctly."""
     n_kv, head_dim, dtype = 2, 8, torch.float32
-    cache = DiskKVCache(hot_window_size=8, cpu_window_size=8,
-                        disk_capacity=16, persist=False)
-    cache.init(n_heads=4, head_dim=head_dim, n_kv_heads=n_kv,
-               max_seq_len=32, device="cpu", dtype=dtype)
+    cache = DiskKVCache(hot_window_size=8, cpu_window_size=8, disk_capacity=16, persist=False)
+    cache.init(n_heads=4, head_dim=head_dim, n_kv_heads=n_kv, max_seq_len=32, device="cpu", dtype=dtype)
 
     # Append 20 tokens → GPU(8) + CPU(8) + disk(4)
     for pos in range(20):
@@ -184,13 +182,12 @@ def test_disk_kv_cache_basic_offload_cycle():
 def test_disk_kv_cache_persistence(tmp_path):
     """Disk tier survives clear() when persist=True (LMCache storage mode)."""
     n_kv, head_dim, dtype = 2, 8, torch.float32
-    cache = DiskKVCache(disk_path=str(tmp_path), hot_window_size=4,
-                        cpu_window_size=4, disk_capacity=8, persist=True)
-    cache.init(n_heads=4, head_dim=head_dim, n_kv_heads=n_kv,
-               max_seq_len=16, device="cpu", dtype=dtype)
+    cache = DiskKVCache(disk_path=str(tmp_path), hot_window_size=4, cpu_window_size=4, disk_capacity=8, persist=True)
+    cache.init(n_heads=4, head_dim=head_dim, n_kv_heads=n_kv, max_seq_len=16, device="cpu", dtype=dtype)
     for pos in range(12):
-        cache.append(torch.randn(1, n_kv, 1, head_dim, dtype=dtype),
-                     torch.randn(1, n_kv, 1, head_dim, dtype=dtype), pos)
+        cache.append(
+            torch.randn(1, n_kv, 1, head_dim, dtype=dtype), torch.randn(1, n_kv, 1, head_dim, dtype=dtype), pos
+        )
     assert cache.disk_len > 0
     cache.clear()  # should save disk spool
     assert os.path.exists(os.path.join(str(tmp_path), "kv_disk_k.pt"))
@@ -199,8 +196,10 @@ def test_disk_kv_cache_persistence(tmp_path):
 def test_disk_kv_cache_factory():
     """build_kv_cache('disk_offload') returns a DiskKVCache."""
     from forge.engine.kv_backend import build_kv_cache
+
     cache = build_kv_cache("disk_offload")
     from forge.engine.kv.cpu_kv_offload import DiskKVCache as DKC
+
     assert isinstance(cache, DKC)
 
 
@@ -226,7 +225,7 @@ def test_rangematcher_finds_non_prefix_match():
     store.register_chunk(chunk, _make_past_kv(3, 2, 8, 8))
     matcher = RangeMatcher(store)
     # chunk appears at position 5 (non-prefix)
-    seq = [1, 2, 3, 4, 5] + chunk + [9, 9, 9]
+    seq = [1, 2, 3, 4, 5, *chunk, 9, 9, 9]
     matches = matcher.find_matches(seq, skip_prefix=True)
     assert len(matches) == 1
     assert matches[0].request_start == 5
@@ -239,7 +238,7 @@ def test_rangematcher_skips_prefix_match():
     chunk = list(range(100, 108))
     store.register_chunk(chunk, _make_past_kv(3, 2, 8, 8))
     matcher = RangeMatcher(store)
-    seq = chunk + [1, 2, 3]
+    seq = [*chunk, 1, 2, 3]
     matches = matcher.find_matches(seq, skip_prefix=True)
     assert len(matches) == 0
 
@@ -252,7 +251,7 @@ def test_rangematcher_collision_guard():
     # Corrupt the stored tokens so the hash matches but tokens differ.
     store._chunks[h].token_ids = list(range(200, 208))
     matcher = RangeMatcher(store)
-    seq = [1, 2] + chunk + [3, 4]
+    seq = [1, 2, *chunk, 3, 4]
     matches = matcher.find_matches(seq, skip_prefix=True)
     assert len(matches) == 0  # verification rejected it
 
@@ -284,14 +283,14 @@ def test_blend_assembler_assembles_layout():
     kv = _make_past_kv(3, 2, 12, 8)
     store.register_chunk(chunk, kv)
     matcher = RangeMatcher(store)
-    seq = [1, 2, 3, 4, 5] + chunk + [6, 7]  # chunk at [5, 17)
+    seq = [1, 2, 3, 4, 5, *chunk, 6, 7]  # chunk at [5, 17)
     matches = matcher.find_matches(seq, skip_prefix=True)
     assert len(matches) == 1
     rope_modules = [None, _FakeRope(8, 64), _FakeRope(8, 64)]
     asm = BlendAssembler(recompute_fraction=0.2)
-    plan = asm.assemble(matches, request_len=len(seq), n_layers=3,
-                        device="cpu", dtype=torch.float32,
-                        rope_modules=rope_modules)
+    plan = asm.assemble(
+        matches, request_len=len(seq), n_layers=3, device="cpu", dtype=torch.float32, rope_modules=rope_modules
+    )
     assert plan.covered_len == 17
     assert plan.past_kv is not None
     assert len(plan.past_kv) == 3
@@ -310,12 +309,15 @@ def test_cache_blend_miss_on_short_prompt():
     blend = CacheBlend(min_cover_tokens=64)
     # No chunks registered, short prompt
     ids = torch.tensor([list(range(10))])
+
     # Use a dummy engine shell — blend_prefill only touches ids length
     # and the matcher (no model call on the miss path).
     class _Dummy:
         device = torch.device("cpu")
+
         class model:
             dtype = torch.float32
+
     assert blend.blend_prefill(_Dummy(), ids) is None
     # Short-prompt path is a skip (not counted as a miss); no hits.
     assert blend.stats()["blend_hits"] == 0

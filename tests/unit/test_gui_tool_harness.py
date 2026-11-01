@@ -13,20 +13,17 @@ from forge_gui.api.tool_harness import ToolHarness
 @pytest.fixture()
 def harness(tmp_path):
     lore = Lorebook(root=tmp_path)
-    return ToolHarness(workspace=str(tmp_path), lorebook=lore,
-                       lora_harness=None, read_only=False,
-                       enable_safety=True)
+    return ToolHarness(workspace=str(tmp_path), lorebook=lore, lora_harness=None, read_only=False, enable_safety=True)
 
 
 @pytest.fixture()
 def read_only_harness(tmp_path):
     lore = Lorebook(root=tmp_path)
-    return ToolHarness(workspace=str(tmp_path), lorebook=lore,
-                       lora_harness=None, read_only=True,
-                       enable_safety=True)
+    return ToolHarness(workspace=str(tmp_path), lorebook=lore, lora_harness=None, read_only=True, enable_safety=True)
 
 
 # ── Tool definitions ───────────────────────────────────────────────────
+
 
 class TestToolDefs:
     def test_coding_tools_present(self, harness):
@@ -61,6 +58,7 @@ class TestToolDefs:
 
 # ── Coding tools ───────────────────────────────────────────────────────
 
+
 class TestCodingTools:
     def test_list_dir(self, harness):
         rec = harness.execute("list_dir", {"path": "."})
@@ -74,24 +72,21 @@ class TestCodingTools:
         assert rec["result"]["content"] == "hello"
 
     def test_read_only_blocks_write(self, read_only_harness):
-        rec = read_only_harness.execute("write_file",
-                                        {"path": "test.txt", "content": "x"})
+        rec = read_only_harness.execute("write_file", {"path": "test.txt", "content": "x"})
         assert not rec["ok"]
         assert "read-only" in rec["result"]["error"]
 
 
 # ── Safety integration ─────────────────────────────────────────────────
 
+
 class TestSafetyIntegration:
     def test_safe_write_passes(self, harness):
-        rec = harness.execute("write_file",
-                              {"path": "safe.py", "content": "x = 1"})
+        rec = harness.execute("write_file", {"path": "safe.py", "content": "x = 1"})
         assert rec["ok"]
 
     def test_dangerous_write_blocked(self, harness):
-        rec = harness.execute("write_file",
-                              {"path": "evil.py",
-                               "content": "import os\nos.system('rm -rf /')"})
+        rec = harness.execute("write_file", {"path": "evil.py", "content": "import os\nos.system('rm -rf /')"})
         assert not rec["ok"]
         assert "SAFETY" in rec["result"]["error"]
         assert rec["result"]["strikes"] == 1
@@ -103,9 +98,7 @@ class TestSafetyIntegration:
 
     def test_three_strikes_terminate(self, harness):
         for i in range(3):
-            harness.execute("write_file",
-                            {"path": f"evil{i}.py",
-                             "content": "import os\nos.system('rm -rf /')"})
+            harness.execute("write_file", {"path": f"evil{i}.py", "content": "import os\nos.system('rm -rf /')"})
         assert harness.strikes.terminated
 
     def test_safe_python_passes(self, harness):
@@ -113,15 +106,12 @@ class TestSafetyIntegration:
         assert rec["ok"]
 
     def test_dangerous_python_blocked(self, harness):
-        rec = harness.execute("run_python",
-                              {"code": "import os\nos.system('ls')"})
+        rec = harness.execute("run_python", {"code": "import os\nos.system('ls')"})
         assert not rec["ok"]
         assert "SAFETY" in rec["result"]["error"]
 
     def test_reset_strikes(self, harness):
-        harness.execute("write_file",
-                        {"path": "evil.py",
-                         "content": "import os\nos.system('rm -rf /')"})
+        harness.execute("write_file", {"path": "evil.py", "content": "import os\nos.system('rm -rf /')"})
         assert harness.strikes.count == 1
         harness.reset_strikes()
         assert harness.strikes.count == 0
@@ -129,29 +119,28 @@ class TestSafetyIntegration:
 
 # ── Memory tools ───────────────────────────────────────────────────────
 
+
 class TestMemoryToolsInHarness:
     def test_remember(self, harness):
-        rec = harness.execute("remember",
-                              {"keys": ["python"], "content": "use snake_case"})
+        rec = harness.execute("remember", {"keys": ["python"], "content": "use snake_case"})
         assert rec["ok"]
         assert "id" in rec["result"]
 
     def test_recall_memory(self, harness):
-        harness.execute("remember",
-                        {"keys": ["python"], "content": "use snake_case"})
+        harness.execute("remember", {"keys": ["python"], "content": "use snake_case"})
         rec = harness.execute("recall_memory", {"query": "python"})
         assert rec["ok"]
         assert rec["result"]["count"] == 1
 
     def test_forget(self, harness):
-        harness.execute("remember",
-                        {"keys": ["python"], "content": "use snake_case"})
+        harness.execute("remember", {"keys": ["python"], "content": "use snake_case"})
         rec = harness.execute("forget", {"keys": ["python"]})
         assert rec["ok"]
         assert rec["result"]["deleted"] == 1
 
 
 # ── Summary ────────────────────────────────────────────────────────────
+
 
 class TestSummary:
     def test_summary_includes_strikes(self, harness):

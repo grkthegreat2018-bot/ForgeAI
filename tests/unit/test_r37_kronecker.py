@@ -10,6 +10,7 @@ Tests the KroneckerEmbedKey and KroneckerEmbedding for:
 
 Runs on CPU with small dimensions for fast, GPU-independent testing.
 """
+
 import pytest
 import torch
 import torch.nn as nn
@@ -38,9 +39,7 @@ LARGE_MAX_CHAR_LEN = 8
 
 @pytest.fixture
 def key():
-    return KroneckerEmbedKey(
-        vocab_size=VOCAB, d_model=D_MODEL,
-        d_char=D_CHAR, max_char_len=MAX_CHAR_LEN)
+    return KroneckerEmbedKey(vocab_size=VOCAB, d_model=D_MODEL, d_char=D_CHAR, max_char_len=MAX_CHAR_LEN)
 
 
 @pytest.fixture
@@ -51,6 +50,7 @@ def standard_embedding():
 
 
 # ── Key construction and properties ───────────────────────────────────────────
+
 
 class TestKeyConstruction:
     def test_inherits_key(self, key):
@@ -78,6 +78,7 @@ class TestKeyConstruction:
 
 # ── Param reduction calculation ───────────────────────────────────────────────
 
+
 class TestParamReduction:
     def test_small_config_reduction(self, key):
         """Small config: 256*32 + 4*32 + 32*4*128 = 8192 + 128 + 16384 = 24704."""
@@ -94,14 +95,14 @@ class TestParamReduction:
     def test_large_config_reduction_gt_90(self):
         """Large config (65536×2048): should achieve >90% reduction."""
         key = KroneckerEmbedKey(
-            vocab_size=LARGE_VOCAB, d_model=LARGE_D_MODEL,
-            d_char=LARGE_D_CHAR, max_char_len=LARGE_MAX_CHAR_LEN)
-        standard = key.standard_param_count()  # 134.2M
+            vocab_size=LARGE_VOCAB, d_model=LARGE_D_MODEL, d_char=LARGE_D_CHAR, max_char_len=LARGE_MAX_CHAR_LEN
+        )
+        key.standard_param_count()  # 134.2M
         kronecker = key.param_count()
         # 256*64 + 8*64 + 64*8*2048 = 16384 + 512 + 1048576 = 1065472
-        expected = (256 * LARGE_D_CHAR
-                    + LARGE_MAX_CHAR_LEN * LARGE_D_CHAR
-                    + LARGE_D_CHAR * LARGE_MAX_CHAR_LEN * LARGE_D_MODEL)
+        expected = (
+            256 * LARGE_D_CHAR + LARGE_MAX_CHAR_LEN * LARGE_D_CHAR + LARGE_D_CHAR * LARGE_MAX_CHAR_LEN * LARGE_D_MODEL
+        )
         assert kronecker == expected
         pct = key.reduction_pct()
         assert pct > 90.0, f"Reduction {pct:.1f}% should be >90% for large config"
@@ -116,6 +117,7 @@ class TestParamReduction:
 
 
 # ── Forward: standard → Kronecker (SVD init) ──────────────────────────────────
+
 
 class TestForward:
     def test_forward_success(self, key, standard_embedding):
@@ -154,8 +156,7 @@ class TestForward:
     def test_forward_pos_encode_zero_init(self, key, standard_embedding):
         """Spec: pos_encode zero-init (warm start)."""
         result = key.forward({"weight": standard_embedding.weight})
-        assert torch.allclose(
-            result.weights["pos_encode"], torch.zeros(MAX_CHAR_LEN, D_CHAR))
+        assert torch.allclose(result.weights["pos_encode"], torch.zeros(MAX_CHAR_LEN, D_CHAR))
 
     def test_forward_projection_from_svd(self, key, standard_embedding):
         """Projection should contain SVD right singular vectors (scaled by S)."""
@@ -186,6 +187,7 @@ class TestForward:
 
 
 # ── Reverse: Kronecker → standard (reconstruction) ────────────────────────────
+
 
 class TestReverse:
     def test_reverse_success(self, key):
@@ -237,8 +239,7 @@ class TestReverse:
         char_embed = torch.randn(256, D_CHAR)
         pos_encode = torch.randn(MAX_CHAR_LEN, D_CHAR)
         projection = torch.randn(D_CHAR * MAX_CHAR_LEN, D_MODEL)
-        weights = {"char_embed": char_embed, "pos_encode": pos_encode,
-                   "projection": projection}
+        weights = {"char_embed": char_embed, "pos_encode": pos_encode, "projection": projection}
         result = key.reverse(weights)
         W = result.data["weight"]
 
@@ -250,11 +251,11 @@ class TestReverse:
             char_vec = char_embed[b] + pos_encode  # (L, d_char)
             flat = char_vec.view(-1)  # (L*d_char,)
             expected = flat @ projection  # (d_model,)
-            assert torch.allclose(W[t], expected, atol=1e-5), (
-                f"Token {t}: reverse mismatch")
+            assert torch.allclose(W[t], expected, atol=1e-5), f"Token {t}: reverse mismatch"
 
 
 # ── Round-trip quality ────────────────────────────────────────────────────────
+
 
 class TestRoundTrip:
     def test_round_trip_shapes(self, key, standard_embedding):
@@ -290,8 +291,7 @@ class TestRoundTrip:
 
         # Error is bounded (finite, relative error <= 1.0)
         assert torch.isfinite(error)
-        assert relative_error <= 1.0 + 1e-6, (
-            f"Relative error {relative_error:.4f} should be <= 1.0")
+        assert relative_error <= 1.0 + 1e-6, f"Relative error {relative_error:.4f} should be <= 1.0"
 
     def test_round_trip_with_nonzero_weights(self, key):
         """Round-trip with non-zero Kronecker weights: reverse → forward → reverse.
@@ -304,8 +304,7 @@ class TestRoundTrip:
         char_embed = torch.randn(256, D_CHAR) * 0.1
         pos_encode = torch.randn(MAX_CHAR_LEN, D_CHAR) * 0.1
         projection = torch.randn(D_CHAR * MAX_CHAR_LEN, D_MODEL) * 0.1
-        weights = {"char_embed": char_embed, "pos_encode": pos_encode,
-                   "projection": projection}
+        weights = {"char_embed": char_embed, "pos_encode": pos_encode, "projection": projection}
 
         # Reverse: get effective W
         rev1 = key.reverse(weights)
@@ -319,7 +318,7 @@ class TestRoundTrip:
         # Reverse: reconstruct from SVD-initialized Kronecker
         rev2 = key.reverse(fwd.weights)
         assert rev2.success
-        W_recon = rev2.data["weight"]
+        rev2.data["weight"]
 
         # The SVD projection captures the top-k directions.
         # With zero char/pos, reconstruction is zero, but the projection
@@ -344,10 +343,12 @@ class TestRoundTrip:
         # The projection rows should have norms matching singular values
         proj_row_norms = proj[:k, :].norm(dim=1)
         assert torch.allclose(proj_row_norms, S[:k], atol=1e-4), (
-            f"Projection row norms {proj_row_norms[:5]} vs S {S[:5]}")
+            f"Projection row norms {proj_row_norms[:5]} vs S {S[:5]}"
+        )
 
 
 # ── Shape correctness for all factored components ─────────────────────────────
+
 
 class TestShapeCorrectness:
     def test_char_embed_shape(self, key, standard_embedding):
@@ -373,6 +374,7 @@ class TestShapeCorrectness:
 
 
 # ── KroneckerEmbedding nn.Module ──────────────────────────────────────────────
+
 
 class TestKroneckerEmbedding:
     def test_init(self):
@@ -409,8 +411,7 @@ class TestKroneckerEmbedding:
         """from_embedding should produce a Kronecker embedding that approximates W."""
         torch.manual_seed(42)
         original = nn.Embedding(VOCAB, D_MODEL)
-        kron = KroneckerEmbedding.from_embedding(original, d_char=D_CHAR,
-                                                  max_char_len=MAX_CHAR_LEN)
+        kron = KroneckerEmbedding.from_embedding(original, d_char=D_CHAR, max_char_len=MAX_CHAR_LEN)
         # Check that the effective weight is finite and roughly shaped
         W_eff = kron.weight  # (V, d_model) computed
         W_orig = original.weight
@@ -418,15 +419,13 @@ class TestKroneckerEmbedding:
         assert torch.isfinite(W_eff).all()
         # Least-squares init should give some approximation (not exact)
         relative_error = (W_eff - W_orig).norm() / W_orig.norm()
-        assert relative_error < 1.0, (
-            f"from_embedding relative error {relative_error:.4f} should be < 1.0")
+        assert relative_error < 1.0, f"from_embedding relative error {relative_error:.4f} should be < 1.0"
 
     def test_from_embedding_better_than_zero_init(self):
         """from_embedding (least-squares) should be at least slightly better than zero."""
         torch.manual_seed(42)
         original = nn.Embedding(VOCAB, D_MODEL)
-        kron = KroneckerEmbedding.from_embedding(original, d_char=D_CHAR,
-                                                  max_char_len=MAX_CHAR_LEN)
+        kron = KroneckerEmbedding.from_embedding(original, d_char=D_CHAR, max_char_len=MAX_CHAR_LEN)
         W_eff = kron.weight
         W_orig = original.weight
         error_ls = (W_eff - W_orig).norm().item()
@@ -435,16 +434,16 @@ class TestKroneckerEmbedding:
         error_zero = W_orig.norm().item()
         # Least-squares should be at least marginally better than zero
         assert error_ls <= error_zero, (
-            f"Least-squares error {error_ls:.4f} should be <= zero-init "
-            f"error {error_zero:.4f}")
+            f"Least-squares error {error_ls:.4f} should be <= zero-init error {error_zero:.4f}"
+        )
 
     def test_vocab_too_large_raises(self):
         with pytest.raises(AssertionError):
-            KroneckerEmbedding(vocab_size=256**4 + 1, d_model=64,
-                               d_char=8, max_char_len=4)
+            KroneckerEmbedding(vocab_size=256**4 + 1, d_model=64, d_char=8, max_char_len=4)
 
 
 # ── Byte conversion utility ───────────────────────────────────────────────────
+
 
 class TestIdsToBytes:
     def test_basic_conversion(self):

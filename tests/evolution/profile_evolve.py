@@ -21,15 +21,17 @@ Usage:
     # Seed configs only (quick check)
     python profile_evolve.py --seeds-only
 """
-import sys
+
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-import time
-import json
 import argparse
-import torch
-import numpy as np
+import json
+import time
 from pathlib import Path
+
+import torch
 
 from forge.evolution.domains import DOMAINS, list_domains
 
@@ -56,8 +58,7 @@ def resolve_domains(category: str | None, domain_list: str | None) -> list[str]:
     return [d for d in cats[category]["domains"] if d in DOMAINS]
 
 
-def profile_domain(name: str, n_evals: int = 20, seeds_only: bool = False,
-                   track_vram: bool = True) -> dict:
+def profile_domain(name: str, n_evals: int = 20, seeds_only: bool = False, track_vram: bool = True) -> dict:
     """Profile a single domain. Returns {name, ms, peak_mb, error}."""
     cls = DOMAINS[name]
     try:
@@ -113,8 +114,7 @@ def main():
     parser.add_argument("--category", default=None, help="Domain category")
     parser.add_argument("--domains", default=None, help="Comma-separated domain names")
     parser.add_argument("--evals", type=int, default=20, help="Evals per domain")
-    parser.add_argument("--threshold", type=float, default=0,
-                        help="Only show domains above this ms/eval")
+    parser.add_argument("--threshold", type=float, default=0, help="Only show domains above this ms/eval")
     parser.add_argument("--seeds-only", action="store_true", help="Only profile seed configs")
     parser.add_argument("--no-vram", action="store_true", help="Skip VRAM tracking")
     parser.add_argument("--json", action="store_true", help="Output JSON instead of table")
@@ -125,8 +125,7 @@ def main():
 
     results = []
     for name in names:
-        r = profile_domain(name, n_evals=args.evals, seeds_only=args.seeds_only,
-                           track_vram=not args.no_vram)
+        r = profile_domain(name, n_evals=args.evals, seeds_only=args.seeds_only, track_vram=not args.no_vram)
         if r["error"]:
             print(f"  {name:<30s} FAIL: {r['error']}")
         elif args.threshold == 0 or r["ms"] > args.threshold:
@@ -146,7 +145,7 @@ def main():
     if valid:
         total_ms = sum(r["ms"] for r in valid)
         slow = [r for r in valid if r["ms"] > 10]
-        print(f"\n  {len(valid)} domains, avg {total_ms/len(valid):.1f} ms/eval")
+        print(f"\n  {len(valid)} domains, avg {total_ms / len(valid):.1f} ms/eval")
         if slow:
             print(f"  {len(slow)} slow domains (>10ms):")
             for r in sorted(slow, key=lambda x: x["ms"], reverse=True):

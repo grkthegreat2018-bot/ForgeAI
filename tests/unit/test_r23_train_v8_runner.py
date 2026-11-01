@@ -4,12 +4,14 @@ The V8 runner adds 5 warm-start modes (scratch, lora-seed, dlora-warmstart,
 hypercloning, ligo), ETA projection, rolling checkpoint retention, resume
 bundles, VRAM preflight, and NaN guards on top of the V7-8B training path.
 """
+
 import math
 import os
 import sys
 import tempfile
+from pathlib import Path
 
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch
 import torch.nn.functional as F
@@ -19,23 +21,39 @@ _DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
+
 def _tiny_v8_config(**extra):
     """Create a tiny V8-like config that builds on CPU in <1s.
 
     V10 is a plain GQA port — V8 features (MTP, etc.) must be explicitly enabled.
     """
     from forge.config import get_config
+
     overrides = {
-        "vocab_size": 256, "d_model": 64, "n_layers": 4, "n_heads": 4, "n_kv_heads": 2,
-        "intermediate_size": 128, "max_seq_len": 128, "titan_memory_rank": 16,
-        "embed_factorized_rank": 32, "mtp_n_heads": 2,
-        "use_triton_kernels": False, "use_varlen": False,
-        "bitnet_int8_training": False, "use_gradient_checkpointing": False,
-        "use_hyperloop": False, "use_lisa": False, "ngram_host": False,
+        "vocab_size": 256,
+        "d_model": 64,
+        "n_layers": 4,
+        "n_heads": 4,
+        "n_kv_heads": 2,
+        "intermediate_size": 128,
+        "max_seq_len": 128,
+        "titan_memory_rank": 16,
+        "embed_factorized_rank": 32,
+        "mtp_n_heads": 2,
+        "use_triton_kernels": False,
+        "use_varlen": False,
+        "bitnet_int8_training": False,
+        "use_gradient_checkpointing": False,
+        "use_hyperloop": False,
+        "use_lisa": False,
+        "ngram_host": False,
         # Explicitly enable V8 features (not on by default in V10)
-        "use_mtp": True, "use_bitnet": False,
+        "use_mtp": True,
+        "use_bitnet": False,
         # Disable V10's IRI-FP4 + SpectralKV + BitNetResidual (not compatible with V8 feature tests)
-        "use_iri_fp4": False, "use_spectral_kv": False, "use_bitnet_residual": False,
+        "use_iri_fp4": False,
+        "use_spectral_kv": False,
+        "use_bitnet_residual": False,
     }
     overrides.update(extra)
     cfg = get_config("forgelm_v2", **overrides)
@@ -47,6 +65,7 @@ def _tiny_v8_config(**extra):
 def _build_tiny_v8(**extra):
     """Build a tiny V8 model + config."""
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = _tiny_v8_config(**extra)
     model = ConfigurableResearchLLM(cfg)
     return model, cfg
@@ -63,6 +82,7 @@ def _manual_ce_loss(model, ids, vocab_size):
 
 # ── Test 1: Imports ───────────────────────────────────────────────────────
 
+
 def test_train_v8_imports():
     """train_v8 module should expose parse_args() and run() functions."""
     import forge.training.runners.train_v8 as mod
@@ -75,6 +95,7 @@ def test_train_v8_imports():
 
 
 # ── Test 2: Mode parsing ──────────────────────────────────────────────────
+
 
 def test_train_v8_modes():
     """parse_args should accept --mode with all 5 warm-start choices."""
@@ -94,6 +115,7 @@ def test_train_v8_modes():
 
 # ── Test 3: ETA projection ────────────────────────────────────────────────
 
+
 def test_train_v8_eta_projection():
     """ETA projection should compute remaining time from step_times + tokens."""
     from forge.training.runners.train_v8 import project_eta
@@ -106,13 +128,13 @@ def test_train_v8_eta_projection():
     assert "eta_seconds" in eta, "ETA dict should have eta_seconds"
     assert "eta_str" in eta, "ETA dict should have eta_str"
     expected = 50.0  # 50 remaining steps × 1s
-    assert abs(eta["eta_seconds"] - expected) < 5.0, \
-        f"ETA should be ~{expected}s, got {eta['eta_seconds']:.1f}s"
+    assert abs(eta["eta_seconds"] - expected) < 5.0, f"ETA should be ~{expected}s, got {eta['eta_seconds']:.1f}s"
     print(f"  ETA: {eta['eta_seconds']:.1f}s remaining ({eta['eta_str']})")
     print("  train_v8_eta_projection: PASS")
 
 
 # ── Test 4: Rolling checkpoint retention ──────────────────────────────────
+
 
 def test_train_v8_rolling_checkpoints():
     """Rolling retention should keep only the last N step checkpoints."""
@@ -129,14 +151,13 @@ def test_train_v8_rolling_checkpoints():
             torch.save({"step": step, "fake": torch.zeros(4)}, path)
 
         # Use CheckpointWriter's _rotate to clean up
-        writer = CheckpointWriter(keep=keep, ckpt_dir=os.path.join(tmpdir, "ckpts"),
-                                  prefix="ForgeLM_V8")
+        writer = CheckpointWriter(keep=keep, ckpt_dir=os.path.join(tmpdir, "ckpts"), prefix="ForgeLM_V8")
         writer._rotate()
 
         import glob
+
         remaining = sorted(glob.glob(os.path.join(ckpt_dir, "ForgeLM_V8_step*.safetensors")))
-        assert len(remaining) == keep, \
-            f"Should keep {keep} checkpoints, got {len(remaining)}"
+        assert len(remaining) == keep, f"Should keep {keep} checkpoints, got {len(remaining)}"
         # Should keep the LAST 3 (steps 2, 3, 4)
         for p in remaining:
             step = int(os.path.basename(p).split("step")[1].split(".")[0])
@@ -147,6 +168,7 @@ def test_train_v8_rolling_checkpoints():
 
 # ── Test 5: Resume bundle ─────────────────────────────────────────────────
 
+
 def test_train_v8_resume_bundle():
     """Resume bundle should save and restore step, BAdam state, RNG, best_val."""
     from forge.training.runners.train_v8 import load_resume_bundle, save_resume_bundle
@@ -155,13 +177,11 @@ def test_train_v8_resume_bundle():
         # Create a fake resume bundle
         step = 42
         badam_state = {"block_idx": 2, "step_count": 42, "steps_in_block": 5}
-        rng_state = {"torch": torch.get_rng_state(), "cuda": None,
-                     "numpy": None, "python": None}
+        rng_state = {"torch": torch.get_rng_state(), "cuda": None, "numpy": None, "python": None}
         best_val = 2.345
 
         bundle_path = os.path.join(tmpdir, "resume.pt")
-        save_resume_bundle(bundle_path, step=step, badam_state=badam_state,
-                           rng=rng_state, best_val=best_val)
+        save_resume_bundle(bundle_path, step=step, badam_state=badam_state, rng=rng_state, best_val=best_val)
 
         # Load it back
         loaded = load_resume_bundle(bundle_path)
@@ -169,12 +189,15 @@ def test_train_v8_resume_bundle():
         assert loaded["badam_state"]["block_idx"] == 2
         assert loaded["best_val"] == best_val
         assert torch.equal(loaded["rng"]["torch"], rng_state["torch"]), "RNG mismatch"
-        print(f"  Resume: step={loaded['step']}, block={loaded['badam_state']['block_idx']}, "
-              f"best_val={loaded['best_val']:.3f}")
+        print(
+            f"  Resume: step={loaded['step']}, block={loaded['badam_state']['block_idx']}, "
+            f"best_val={loaded['best_val']:.3f}"
+        )
         print("  train_v8_resume_bundle: PASS")
 
 
 # ── Test 6: VRAM preflight ────────────────────────────────────────────────
+
 
 def test_train_v8_vram_preflight():
     """preflight_vram_check should return dict with ok, est_inc_gb, available_gb."""
@@ -185,6 +208,7 @@ def test_train_v8_vram_preflight():
 
     model, _cfg = _build_tiny_v8()
     from forge.training.runners.train_8b_all import freeze_dead_params_
+
     freeze_dead_params_(model, torch.device("cpu"), use_flce=False)
 
     opt = BAdam(model, lr=1e-3, switch_every=1, verbose=False)
@@ -196,12 +220,12 @@ def test_train_v8_vram_preflight():
     assert "available_gb" in result, "Should have 'available_gb' key"
     # On CPU, should always be ok (no VRAM limit)
     assert result["ok"] is True, "CPU preflight should pass"
-    print(f"  Preflight: ok={result['ok']}, est_inc={result['est_inc_gb']:.2f}GB, "
-          f"avail={result['available_gb']:.2f}GB")
+    print(f"  Preflight: ok={result['ok']}, est_inc={result['est_inc_gb']:.2f}GB, avail={result['available_gb']:.2f}GB")
     print("  train_v8_vram_preflight: PASS")
 
 
 # ── Test 7: NaN guard ─────────────────────────────────────────────────────
+
 
 def test_train_v8_nan_guard():
     """NaN guard should skip a step when loss is NaN instead of crashing."""
@@ -219,7 +243,7 @@ def test_train_v8_nan_guard():
     with torch.no_grad():
         for p in model.parameters():
             if p.requires_grad:
-                p.data.fill_(float('nan'))
+                p.data.fill_(float("nan"))
                 break
 
     skipped = False
@@ -248,6 +272,7 @@ def test_train_v8_nan_guard():
 
 # ── Test 8: Dead param freeze (MTP) ───────────────────────────────────────
 
+
 def test_train_v8_dead_param_freeze():
     """freeze_dead_params_ should freeze MTP params when mtp_weight=0."""
     from forge.training.runners.train_8b_all import freeze_dead_params_
@@ -269,13 +294,13 @@ def test_train_v8_dead_param_freeze():
     mtp_frozen = sum(1 for p in mtp_params if not p.requires_grad)
     # Most MTP params should be frozen; shared params (e.g. tied embedding)
     # may still receive gradients from the main loss and remain trainable.
-    assert mtp_frozen >= len(mtp_params) - 1, \
-        f"Most MTP params should be frozen, got {mtp_frozen}/{len(mtp_params)}"
+    assert mtp_frozen >= len(mtp_params) - 1, f"Most MTP params should be frozen, got {mtp_frozen}/{len(mtp_params)}"
     print(f"  Dead param freeze: {n_dead} frozen, MTP {mtp_frozen}/{len(mtp_params)} frozen")
     print("  train_v8_dead_param_freeze: PASS")
 
 
 # ── Test 9: Loss decreases ────────────────────────────────────────────────
+
 
 def test_train_v8_loss_decreases():
     """10 training steps with BAdam on tiny V8 should decrease loss."""
@@ -296,15 +321,15 @@ def test_train_v8_loss_decreases():
         losses.append(loss.item())
         del loss
 
-    assert all(math.isfinite(l) for l in losses), "All losses should be finite"
+    assert all(math.isfinite(x) for x in losses), "All losses should be finite"
     # Loss should generally decrease (allow some noise from BAdam block switching)
-    assert losses[-1] < losses[0], \
-        f"Loss should decrease: {losses[0]:.3f} → {losses[-1]:.3f}"
+    assert losses[-1] < losses[0], f"Loss should decrease: {losses[0]:.3f} → {losses[-1]:.3f}"
     print(f"  Loss: {losses[0]:.3f} → {losses[-1]:.3f} over 10 steps")
     print("  train_v8_loss_decreases: PASS")
 
 
 # ── Test 10: Checkpoint roundtrip ─────────────────────────────────────────
+
 
 def test_train_v8_checkpoint_roundtrip():
     """Save checkpoint, load into new model, forward pass should match."""
@@ -329,13 +354,15 @@ def test_train_v8_checkpoint_roundtrip():
         out_after = model2(ids)
         logits_after = out_after[0] if isinstance(out_after, tuple) else out_after
 
-    assert torch.allclose(logits_before, logits_after, atol=1e-5), \
+    assert torch.allclose(logits_before, logits_after, atol=1e-5), (
         f"Forward mismatch: max diff {(logits_before - logits_after).abs().max():.6f}"
+    )
     print(f"  Checkpoint roundtrip: max diff {(logits_before - logits_after).abs().max():.6f}")
     print("  train_v8_checkpoint_roundtrip: PASS")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────
+
 
 def main_r23_v8():
     print("=" * 70)

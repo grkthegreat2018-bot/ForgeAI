@@ -24,15 +24,18 @@ Usage:
     # Stats summary
     python query_evolve.py --db forge_evolve_deep.db stats
 """
-import sys
+
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-import json
 import argparse
+import json
 import sqlite3
-import numpy as np
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
+
+import numpy as np
 
 RESULTS_DIR = Path(__file__).resolve().parents[2] / "research" / "results"
 
@@ -50,10 +53,12 @@ def cmd_list_runs(args):
     c = conn.cursor()
 
     if args.domain:
-        c.execute("""SELECT run_id, domain, generations, total_evals,
+        c.execute(
+            """SELECT run_id, domain, generations, total_evals,
                       discoveries, best_score, start_time, end_time
                    FROM runs WHERE domain LIKE ? ORDER BY start_time DESC""",
-                  (f"%{args.domain}%",))
+            (f"%{args.domain}%",),
+        )
     else:
         c.execute("""SELECT run_id, domain, generations, total_evals,
                       discoveries, best_score, start_time, end_time
@@ -65,7 +70,7 @@ def cmd_list_runs(args):
         return
 
     print(f"{'Run ID':<35s} {'Domain':<25s} {'Gens':>5s} {'Evals':>6s} {'Disc':>5s} {'Best':>10s} {'Time':>8s}")
-    print(f"{'-'*35} {'-'*25} {'-'*5} {'-'*6} {'-'*5} {'-'*10} {'-'*8}")
+    print(f"{'-' * 35} {'-' * 25} {'-' * 5} {'-' * 6} {'-' * 5} {'-' * 10} {'-' * 8}")
     for r in rows:
         dur = (r[7] - r[6]) if r[6] and r[7] else 0
         print(f"{r[0]:<35s} {r[1]:<25s} {r[2]:5d} {r[3]:6d} {r[4]:5d} {r[5]:10.2f} {dur:7.1f}s")
@@ -78,16 +83,21 @@ def cmd_top(args):
     c = conn.cursor()
 
     if args.domain:
-        c.execute("""SELECT domain, config_json, score, behavioral_json, metadata_json,
+        c.execute(
+            """SELECT domain, config_json, score, behavioral_json, metadata_json,
                       run_id, generation
                    FROM discoveries WHERE domain LIKE ? AND score IS NOT NULL
                    ORDER BY score DESC LIMIT ?""",
-                  (f"%{args.domain}%", args.n))
+            (f"%{args.domain}%", args.n),
+        )
     else:
-        c.execute("""SELECT domain, config_json, score, behavioral_json, metadata_json,
+        c.execute(
+            """SELECT domain, config_json, score, behavioral_json, metadata_json,
                       run_id, generation
                    FROM discoveries WHERE score IS NOT NULL
-                   ORDER BY score DESC LIMIT ?""", (args.n,))
+                   ORDER BY score DESC LIMIT ?""",
+            (args.n,),
+        )
 
     rows = c.fetchall()
     if not rows:
@@ -98,7 +108,7 @@ def cmd_top(args):
     for i, r in enumerate(rows):
         config = json.loads(r[1]) if r[1] else {}
         meta = json.loads(r[4]) if r[4] else {}
-        print(f"  [{i+1}] {r[0]:<25s} score={r[2]:.2f}  gen={r[6]}")
+        print(f"  [{i + 1}] {r[0]:<25s} score={r[2]:.2f}  gen={r[6]}")
         print(f"       config: {json.dumps(config, default=str)}")
         if meta:
             print(f"       meta:   {json.dumps(meta, default=str)}")
@@ -111,9 +121,12 @@ def cmd_progression(args):
     conn = sqlite3.connect(db)
     c = conn.cursor()
 
-    c.execute("""SELECT generation, score, config_json
+    c.execute(
+        """SELECT generation, score, config_json
                  FROM discoveries WHERE domain LIKE ? AND score IS NOT NULL
-                 ORDER BY generation""", (f"%{args.domain}%",))
+                 ORDER BY generation""",
+        (f"%{args.domain}%",),
+    )
     rows = c.fetchall()
     if not rows:
         print(f"No discoveries for domain '{args.domain}'.")
@@ -125,7 +138,7 @@ def cmd_progression(args):
         by_gen[r[0]].append(r[1])
 
     print(f"  {'Gen':>5s} {'Best':>10s} {'Mean':>10s} {'Count':>6s}")
-    print(f"  {'-'*5} {'-'*10} {'-'*10} {'-'*6}")
+    print(f"  {'-' * 5} {'-' * 10} {'-' * 10} {'-' * 6}")
     for gen in sorted(by_gen.keys()):
         scores = by_gen[gen]
         print(f"  {gen:5d} {max(scores):10.2f} {np.mean(scores):10.2f} {len(scores):6d}")
@@ -142,12 +155,17 @@ def cmd_export(args):
     rows = c.fetchall()
     data = []
     for r in rows:
-        data.append({
-            "domain": r[0], "config": json.loads(r[1]) if r[1] else {},
-            "score": r[2], "behavioral": json.loads(r[3]) if r[3] else [],
-            "metadata": json.loads(r[4]) if r[4] else {},
-            "run_id": r[5], "generation": r[6],
-        })
+        data.append(
+            {
+                "domain": r[0],
+                "config": json.loads(r[1]) if r[1] else {},
+                "score": r[2],
+                "behavioral": json.loads(r[3]) if r[3] else [],
+                "metadata": json.loads(r[4]) if r[4] else {},
+                "run_id": r[5],
+                "generation": r[6],
+            }
+        )
     out_path = args.out or str(RESULTS_DIR / "discoveries_export.json")
     with open(out_path, "w") as f:
         json.dump(data, f, indent=2, default=str)
@@ -184,7 +202,7 @@ def cmd_stats(args):
     rows = c.fetchall()
     if rows:
         print(f"\n  {'Domain':<30s} {'Count':>6s} {'Best':>10s} {'Avg':>10s}")
-        print(f"  {'-'*30} {'-'*6} {'-'*10} {'-'*10}")
+        print(f"  {'-' * 30} {'-' * 6} {'-' * 10} {'-' * 10}")
         for r in rows:
             print(f"  {r[0]:<30s} {r[1]:6d} {r[2]:10.2f} {r[3]:10.2f}")
     conn.close()
@@ -216,8 +234,10 @@ def main():
         return
 
     {
-        "list-runs": cmd_list_runs, "top": cmd_top,
-        "progression": cmd_progression, "export": cmd_export,
+        "list-runs": cmd_list_runs,
+        "top": cmd_top,
+        "progression": cmd_progression,
+        "export": cmd_export,
         "stats": cmd_stats,
     }[args.command](args)
 

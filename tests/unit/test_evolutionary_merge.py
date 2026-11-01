@@ -7,6 +7,7 @@ ForgeEngine.evolve_merge() callable methods.
 State dicts use the ForgeAI key convention:
   blocks.{i}.<submodule>.weight, embed.weight, head.weight, norm.weight
 """
+
 import pytest
 import torch
 
@@ -34,8 +35,8 @@ from research.merge_models import (
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
-def _make_block_state(n_blocks: int = 4, seed: int = 0,
-                      with_qscale: bool = False) -> dict:
+
+def _make_block_state(n_blocks: int = 4, seed: int = 0, with_qscale: bool = False) -> dict:
     """Build a state dict matching ForgeAI's blocks.{i}.<...> convention."""
     g = torch.Generator().manual_seed(seed)
     state = {
@@ -45,17 +46,12 @@ def _make_block_state(n_blocks: int = 4, seed: int = 0,
     }
     for i in range(n_blocks):
         prefix = f"blocks.{i}."
-        state[prefix + "attn.q_proj.weight"] = torch.randn(
-            16, 16, generator=g, dtype=torch.float32)
-        state[prefix + "attn.v_proj.weight"] = torch.randn(
-            16, 16, generator=g, dtype=torch.float32)
-        state[prefix + "ffn.w_gate.weight"] = torch.randn(
-            32, 16, generator=g, dtype=torch.float32)
-        state[prefix + "ffn.w_down.weight"] = torch.randn(
-            16, 32, generator=g, dtype=torch.float32)
+        state[prefix + "attn.q_proj.weight"] = torch.randn(16, 16, generator=g, dtype=torch.float32)
+        state[prefix + "attn.v_proj.weight"] = torch.randn(16, 16, generator=g, dtype=torch.float32)
+        state[prefix + "ffn.w_gate.weight"] = torch.randn(32, 16, generator=g, dtype=torch.float32)
+        state[prefix + "ffn.w_down.weight"] = torch.randn(16, 32, generator=g, dtype=torch.float32)
         if with_qscale:
-            state[prefix + "ffn.w_gate.qscale"] = torch.tensor(
-                [0.5 + 0.01 * i], dtype=torch.float32)
+            state[prefix + "ffn.w_gate.qscale"] = torch.tensor([0.5 + 0.01 * i], dtype=torch.float32)
     return state
 
 
@@ -80,6 +76,7 @@ def parent_b_qscale():
 
 
 # ── Helper function tests ─────────────────────────────────────────────────
+
 
 class TestBlockIndex:
     def test_block_key(self):
@@ -112,6 +109,7 @@ class TestNonBlockKeys:
 
 # ── Crossover tests ───────────────────────────────────────────────────────
 
+
 class TestCrossoverBlockwise:
     def test_produces_valid_state(self, parent_a, parent_b):
         child = crossover_blockwise(parent_a, parent_b, split_block=2)
@@ -136,13 +134,11 @@ class TestCrossoverBlockwise:
         assert torch.equal(child["head.weight"], parent_a["head.weight"])
 
     def test_non_block_from_b(self, parent_a, parent_b):
-        child = crossover_blockwise(parent_a, parent_b, split_block=2,
-                                    non_block_source="b")
+        child = crossover_blockwise(parent_a, parent_b, split_block=2, non_block_source="b")
         assert torch.equal(child["embed.weight"], parent_b["embed.weight"])
 
     def test_non_block_avg(self, parent_a, parent_b):
-        child = crossover_blockwise(parent_a, parent_b, split_block=2,
-                                    non_block_source="avg")
+        child = crossover_blockwise(parent_a, parent_b, split_block=2, non_block_source="avg")
         expected = (parent_a["embed.weight"] + parent_b["embed.weight"]) * 0.5
         assert torch.allclose(child["embed.weight"], expected)
 
@@ -156,8 +152,7 @@ class TestCrossoverBlockwise:
         b = dict(parent_a)
         b["blocks.0.attn.q_proj.weight"] = torch.randn(8, 8)
         child = crossover_blockwise(parent_a, b, split_block=2)
-        assert torch.equal(child["blocks.0.attn.q_proj.weight"],
-                           parent_a["blocks.0.attn.q_proj.weight"])
+        assert torch.equal(child["blocks.0.attn.q_proj.weight"], parent_a["blocks.0.attn.q_proj.weight"])
 
 
 class TestCrossoverBlockRandom:
@@ -202,6 +197,7 @@ class TestCrossoverUniform:
 
 
 # ── Mutation tests ────────────────────────────────────────────────────────
+
 
 class TestMutateGaussian:
     def test_preserves_shapes(self, parent_a):
@@ -272,6 +268,7 @@ class TestMutateBlockSwap:
 
 # ── Selection tests ───────────────────────────────────────────────────────
 
+
 class TestSelectTournament:
     def test_returns_valid_index(self):
         idx = select_tournament([1.0, 2.0, 3.0, 4.0], k=2, seed=1)
@@ -298,8 +295,7 @@ class TestSelectRank:
         # selected more often than worst
         counts = [0] * 4
         for s in range(100):
-            idx = select_rank([1.0, 2.0, 3.0, 4.0],
-                              selection_pressure=2.0, seed=s)
+            idx = select_rank([1.0, 2.0, 3.0, 4.0], selection_pressure=2.0, seed=s)
             counts[idx] += 1
         # Best (index 3) should be selected more than worst (index 0)
         assert counts[3] > counts[0]
@@ -349,12 +345,12 @@ class TestSelectDiversity:
         # With diversity_weight=0, should behave like roulette on fitness
         pop = [parent_a, parent_b]
         for s in range(20):
-            idx = select_diversity([1.0, 2.0], pop,
-                                   diversity_weight=0.0, seed=s)
+            idx = select_diversity([1.0, 2.0], pop, diversity_weight=0.0, seed=s)
             assert 0 <= idx < 2
 
 
 # ── Fitness scaling tests ─────────────────────────────────────────────────
+
 
 class TestScaleFitnessSigma:
     def test_preserves_length(self):
@@ -387,6 +383,7 @@ class TestScaleFitnessRank:
 
 # ── Diversity helper tests ────────────────────────────────────────────────
 
+
 class TestStateDistance:
     def test_identical_states_zero_distance(self, parent_a):
         d = _state_distance(parent_a, parent_a)
@@ -412,63 +409,83 @@ class TestPopulationDiversity:
 
 # ── Evolve loop tests ─────────────────────────────────────────────────────
 
+
 class TestEvolve:
     def test_runs_n_generations(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         # Fitness: negative L2 norm (cheaper than benchmark, deterministic)
         def fit(s):
-            return -sum(v.float().norm().item() for v in s.values()
-                        if v.is_floating_point()) / 1e3
-        result = evolve(pop, fit, n_generations=3, population_size=4,
-                        mutation_rate=0.5, elitism=1, seed=0, verbose=False)
+            return -sum(v.float().norm().item() for v in s.values() if v.is_floating_point()) / 1e3
+
+        result = evolve(
+            pop, fit, n_generations=3, population_size=4, mutation_rate=0.5, elitism=1, seed=0, verbose=False
+        )
         assert len(result["history"]) == 4  # 3 gens + final
         assert result["best"] is not None
         assert result["best_fitness"] > float("-inf")
 
     def test_best_fitness_improves_or_stable(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         def fit(s):
-            return -sum(v.float().norm().item() for v in s.values()
-                        if v.is_floating_point()) / 1e3
-        result = evolve(pop, fit, n_generations=5, population_size=6,
-                        elitism=2, seed=0, verbose=False)
+            return -sum(v.float().norm().item() for v in s.values() if v.is_floating_point()) / 1e3
+
+        result = evolve(pop, fit, n_generations=5, population_size=6, elitism=2, seed=0, verbose=False)
         # With elitism, best fitness should be non-decreasing
         fitnesses = [h["best_fitness"] for h in result["history"]]
         for i in range(1, len(fitnesses)):
-            assert fitnesses[i] >= fitnesses[i-1] - 1e-9
+            assert fitnesses[i] >= fitnesses[i - 1] - 1e-9
 
     def test_saves_checkpoints(self, parent_a, parent_b, tmp_path):
         pop = [parent_a, parent_b]
+
         def fit(s):
-            return -sum(v.float().norm().item() for v in s.values()
-                        if v.is_floating_point()) / 1e3
+            return -sum(v.float().norm().item() for v in s.values() if v.is_floating_point()) / 1e3
+
         out_dir = str(tmp_path / "evolved")
-        result = evolve(pop, fit, n_generations=2, population_size=4,
-                        seed=0, save_fn=save_checkpoint, out_dir=out_dir,
-                        verbose=False)
+        result = evolve(
+            pop,
+            fit,
+            n_generations=2,
+            population_size=4,
+            seed=0,
+            save_fn=save_checkpoint,
+            out_dir=out_dir,
+            verbose=False,
+        )
         assert result["best_path"] is not None
         import os
+
         assert os.path.exists(result["best_path"])
 
     def test_final_population_size(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         def fit(s):
             return 1.0
-        result = evolve(pop, fit, n_generations=2, population_size=8,
-                        seed=0, verbose=False)
+
+        result = evolve(pop, fit, n_generations=2, population_size=8, seed=0, verbose=False)
         assert len(result["final_population"]) == 8
 
     def test_custom_crossover_and_mutation(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         def fit(s):
-            return sum(v.float().abs().mean().item() for v in s.values()
-                       if v.is_floating_point())
-        result = evolve(pop, fit, n_generations=2, population_size=4,
-                        crossover="block_random",
-                        crossover_kwargs={"p": 0.3},
-                        mutation="gaussian",
-                        mutation_kwargs={"sigma": 0.02, "rate": 0.1},
-                        seed=0, verbose=False)
+            return sum(v.float().abs().mean().item() for v in s.values() if v.is_floating_point())
+
+        result = evolve(
+            pop,
+            fit,
+            n_generations=2,
+            population_size=4,
+            crossover="block_random",
+            crossover_kwargs={"p": 0.3},
+            mutation="gaussian",
+            mutation_kwargs={"sigma": 0.02, "rate": 0.1},
+            seed=0,
+            verbose=False,
+        )
         assert result["best"] is not None
 
 
@@ -477,32 +494,39 @@ class TestEvolveSophisticatedSelection:
 
     def test_rank_selection(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         def fit(s):
-            return -sum(v.float().norm().item() for v in s.values()
-                        if v.is_floating_point()) / 1e3
-        result = evolve(pop, fit, n_generations=3, population_size=4,
-                        selection="rank", seed=0, verbose=False)
+            return -sum(v.float().norm().item() for v in s.values() if v.is_floating_point()) / 1e3
+
+        result = evolve(pop, fit, n_generations=3, population_size=4, selection="rank", seed=0, verbose=False)
         assert result["best"] is not None
         assert len(result["history"]) == 4
 
     def test_roulette_selection(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         def fit(s):
-            return sum(v.float().abs().mean().item() for v in s.values()
-                       if v.is_floating_point())
-        result = evolve(pop, fit, n_generations=3, population_size=4,
-                        selection="roulette", seed=0, verbose=False)
+            return sum(v.float().abs().mean().item() for v in s.values() if v.is_floating_point())
+
+        result = evolve(pop, fit, n_generations=3, population_size=4, selection="roulette", seed=0, verbose=False)
         assert result["best"] is not None
 
     def test_diversity_selection(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         def fit(s):
-            return sum(v.float().abs().mean().item() for v in s.values()
-                       if v.is_floating_point())
-        result = evolve(pop, fit, n_generations=3, population_size=4,
-                        selection="diversity",
-                        selection_kwargs={"diversity_weight": 0.3},
-                        seed=0, verbose=False)
+            return sum(v.float().abs().mean().item() for v in s.values() if v.is_floating_point())
+
+        result = evolve(
+            pop,
+            fit,
+            n_generations=3,
+            population_size=4,
+            selection="diversity",
+            selection_kwargs={"diversity_weight": 0.3},
+            seed=0,
+            verbose=False,
+        )
         assert result["best"] is not None
 
 
@@ -511,38 +535,38 @@ class TestEvolveScoreRewarding:
 
     def test_sigma_scaling(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         def fit(s):
-            return -sum(v.float().norm().item() for v in s.values()
-                        if v.is_floating_point()) / 1e3
-        result = evolve(pop, fit, n_generations=3, population_size=4,
-                        fitness_scaling="sigma", seed=0, verbose=False)
+            return -sum(v.float().norm().item() for v in s.values() if v.is_floating_point()) / 1e3
+
+        result = evolve(pop, fit, n_generations=3, population_size=4, fitness_scaling="sigma", seed=0, verbose=False)
         assert result["best"] is not None
 
     def test_rank_scaling(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         def fit(s):
-            return -sum(v.float().norm().item() for v in s.values()
-                        if v.is_floating_point()) / 1e3
-        result = evolve(pop, fit, n_generations=3, population_size=4,
-                        fitness_scaling="rank", seed=0, verbose=False)
+            return -sum(v.float().norm().item() for v in s.values() if v.is_floating_point()) / 1e3
+
+        result = evolve(pop, fit, n_generations=3, population_size=4, fitness_scaling="rank", seed=0, verbose=False)
         assert result["best"] is not None
 
     def test_progress_bonus(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         def fit(s):
-            return sum(v.float().abs().mean().item() for v in s.values()
-                       if v.is_floating_point())
-        result = evolve(pop, fit, n_generations=3, population_size=4,
-                        progress_bonus=0.5, seed=0, verbose=False)
+            return sum(v.float().abs().mean().item() for v in s.values() if v.is_floating_point())
+
+        result = evolve(pop, fit, n_generations=3, population_size=4, progress_bonus=0.5, seed=0, verbose=False)
         assert result["best"] is not None
 
     def test_diversity_bonus(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         def fit(s):
-            return sum(v.float().abs().mean().item() for v in s.values()
-                       if v.is_floating_point())
-        result = evolve(pop, fit, n_generations=3, population_size=4,
-                        diversity_bonus=0.3, seed=0, verbose=False)
+            return sum(v.float().abs().mean().item() for v in s.values() if v.is_floating_point())
+
+        result = evolve(pop, fit, n_generations=3, population_size=4, diversity_bonus=0.3, seed=0, verbose=False)
         assert result["best"] is not None
         # History should include diversity metric
         assert "diversity" in result["history"][0]
@@ -553,11 +577,11 @@ class TestEvolveAdaptiveMutation:
 
     def test_adaptive_mutation_runs(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         def fit(s):
-            return -sum(v.float().norm().item() for v in s.values()
-                        if v.is_floating_point()) / 1e3
-        result = evolve(pop, fit, n_generations=3, population_size=4,
-                        adaptive_mutation=True, seed=0, verbose=False)
+            return -sum(v.float().norm().item() for v in s.values() if v.is_floating_point()) / 1e3
+
+        result = evolve(pop, fit, n_generations=3, population_size=4, adaptive_mutation=True, seed=0, verbose=False)
         assert result["best"] is not None
         # History should include mutation_rate
         assert "mutation_rate" in result["history"][0]
@@ -568,11 +592,11 @@ class TestEvolveHallOfFame:
 
     def test_hof_populated(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         def fit(s):
-            return -sum(v.float().norm().item() for v in s.values()
-                        if v.is_floating_point()) / 1e3
-        result = evolve(pop, fit, n_generations=3, population_size=4,
-                        hall_of_fame_size=5, seed=0, verbose=False)
+            return -sum(v.float().norm().item() for v in s.values() if v.is_floating_point()) / 1e3
+
+        result = evolve(pop, fit, n_generations=3, population_size=4, hall_of_fame_size=5, seed=0, verbose=False)
         assert "hall_of_fame" in result
         assert len(result["hall_of_fame"]) <= 5
         assert len(result["hall_of_fame"]) > 0
@@ -585,20 +609,21 @@ class TestEvolveHallOfFame:
 
     def test_hof_sorted_by_fitness(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         def fit(s):
-            return -sum(v.float().norm().item() for v in s.values()
-                        if v.is_floating_point()) / 1e3
-        result = evolve(pop, fit, n_generations=3, population_size=4,
-                        hall_of_fame_size=3, seed=0, verbose=False)
+            return -sum(v.float().norm().item() for v in s.values() if v.is_floating_point()) / 1e3
+
+        result = evolve(pop, fit, n_generations=3, population_size=4, hall_of_fame_size=3, seed=0, verbose=False)
         fits = [f for _, f in result["hall_of_fame"]]
         assert fits == sorted(fits, reverse=True)
 
     def test_hof_disabled_by_default(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         def fit(s):
             return 1.0
-        result = evolve(pop, fit, n_generations=2, population_size=4,
-                        seed=0, verbose=False)
+
+        result = evolve(pop, fit, n_generations=2, population_size=4, seed=0, verbose=False)
         assert result["hall_of_fame"] == []
 
 
@@ -607,31 +632,33 @@ class TestEvolveConvergencePatience:
 
     def test_convergence_stops_early(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         # Constant fitness → never improves → should stop early
         def fit(s):
             return 1.0
-        result = evolve(pop, fit, n_generations=10, population_size=4,
-                        convergence_patience=2, seed=0, verbose=False)
+
+        result = evolve(pop, fit, n_generations=10, population_size=4, convergence_patience=2, seed=0, verbose=False)
         # Should stop well before 10 generations
         assert len(result["history"]) < 12  # 10 gens + final = 12 max
 
     def test_no_convergence_check_by_default(self, parent_a, parent_b):
         pop = [parent_a, parent_b]
+
         def fit(s):
             return 1.0
-        result = evolve(pop, fit, n_generations=3, population_size=4,
-                        seed=0, verbose=False)
+
+        result = evolve(pop, fit, n_generations=3, population_size=4, seed=0, verbose=False)
         # Should run all 3 generations + final
         assert len(result["history"]) == 4
 
 
 # ── ForgeEngine method tests ──────────────────────────────────────────────
 
+
 class TestForgeEngineMergeCheckpoints:
     """Test ForgeEngine.merge_checkpoints() with saved checkpoint files."""
 
-    def test_merge_two_checkpoints(self, forge_engine, parent_a, parent_b,
-                                   tmp_path):
+    def test_merge_two_checkpoints(self, forge_engine, parent_a, parent_b, tmp_path):
         # Save parent checkpoints
         path_a = str(tmp_path / "a.safetensors")
         path_b = str(tmp_path / "b.safetensors")
@@ -639,24 +666,27 @@ class TestForgeEngineMergeCheckpoints:
         save_checkpoint(parent_b, path_b)
 
         out = forge_engine.merge_checkpoints(
-            [path_a, path_b], method="blockwise_crossover",
-            out_path=str(tmp_path / "merged.safetensors"), split_block=2)
+            [path_a, path_b], method="blockwise_crossover", out_path=str(tmp_path / "merged.safetensors"), split_block=2
+        )
         import os
+
         assert os.path.exists(out)
         loaded = load_checkpoint(out)
         assert set(loaded.keys()) == set(parent_a.keys())
 
-    def test_merge_load_result(self, forge_engine, parent_a, parent_b,
-                               tmp_path):
+    def test_merge_load_result(self, forge_engine, parent_a, parent_b, tmp_path):
         path_a = str(tmp_path / "a.safetensors")
         path_b = str(tmp_path / "b.safetensors")
         save_checkpoint(parent_a, path_a)
         save_checkpoint(parent_b, path_b)
 
-        out = forge_engine.merge_checkpoints(
-            [path_a, path_b], method="uniform_crossover",
+        forge_engine.merge_checkpoints(
+            [path_a, path_b],
+            method="uniform_crossover",
             out_path=str(tmp_path / "merged.safetensors"),
-            load_result=True, p=0.5)
+            load_result=True,
+            p=0.5,
+        )
         # Engine weights should now be the merged ones (no crash = success)
         assert forge_engine._awake
 
@@ -664,27 +694,27 @@ class TestForgeEngineMergeCheckpoints:
         path_a = str(tmp_path / "a.safetensors")
         save_checkpoint(parent_a, path_a)
         from forge.engine.errors import ConfigurationError
+
         with pytest.raises(ConfigurationError):
             forge_engine.merge_checkpoints(
-                [path_a], method="nonexistent_method",
-                out_path=str(tmp_path / "out.safetensors"))
+                [path_a], method="nonexistent_method", out_path=str(tmp_path / "out.safetensors")
+            )
 
     def test_mutation_method(self, forge_engine, parent_a, tmp_path):
         path_a = str(tmp_path / "a.safetensors")
         save_checkpoint(parent_a, path_a)
         out = forge_engine.merge_checkpoints(
-            [path_a], method="gaussian_mutation",
-            out_path=str(tmp_path / "mutated.safetensors"),
-            sigma=0.02, rate=0.1)
+            [path_a], method="gaussian_mutation", out_path=str(tmp_path / "mutated.safetensors"), sigma=0.02, rate=0.1
+        )
         import os
+
         assert os.path.exists(out)
 
 
 class TestForgeEngineEvolveMerge:
     """Test ForgeEngine.evolve_merge() end-to-end."""
 
-    def test_evolve_with_custom_fitness(self, forge_engine, parent_a,
-                                        parent_b, tmp_path):
+    def test_evolve_with_custom_fitness(self, forge_engine, parent_a, parent_b, tmp_path):
         path_a = str(tmp_path / "a.safetensors")
         path_b = str(tmp_path / "b.safetensors")
         save_checkpoint(parent_a, path_a)
@@ -692,68 +722,70 @@ class TestForgeEngineEvolveMerge:
 
         # Custom fitness: negative L2 norm (no GPU needed, fast)
         def fit(state):
-            return -sum(v.float().norm().item() for v in state.values()
-                        if v.is_floating_point()) / 1e3
+            return -sum(v.float().norm().item() for v in state.values() if v.is_floating_point()) / 1e3
 
         result = forge_engine.evolve_merge(
-            [path_a, path_b], fitness_fn=fit,
-            n_generations=2, population_size=4,
+            [path_a, path_b],
+            fitness_fn=fit,
+            n_generations=2,
+            population_size=4,
             out_dir=str(tmp_path / "evolved"),
-            restore_original=True, verbose=False)
+            restore_original=True,
+            verbose=False,
+        )
         assert "best" in result
         assert "history" in result
         assert len(result["history"]) == 3  # 2 gens + final
         assert result["best_fitness"] > float("-inf")
 
-    def test_evolve_restores_original_weights(self, forge_engine, parent_a,
-                                              parent_b, tmp_path):
+    def test_evolve_restores_original_weights(self, forge_engine, parent_a, parent_b, tmp_path):
         path_a = str(tmp_path / "a.safetensors")
         path_b = str(tmp_path / "b.safetensors")
         save_checkpoint(parent_a, path_a)
         save_checkpoint(parent_b, path_b)
 
         # Snapshot original engine weights
-        original = {k: v.detach().clone()
-                    for k, v in forge_engine.model.state_dict().items()}
+        original = {k: v.detach().clone() for k, v in forge_engine.model.state_dict().items()}
 
         def fit(state):
             return 1.0  # constant fitness (all equal)
 
         forge_engine.evolve_merge(
-            [path_a, path_b], fitness_fn=fit,
-            n_generations=1, population_size=2,
-            restore_original=True, verbose=False)
+            [path_a, path_b], fitness_fn=fit, n_generations=1, population_size=2, restore_original=True, verbose=False
+        )
 
         # Verify weights were restored
         current = forge_engine.model.state_dict()
         for k in original:
-            assert torch.equal(current[k].cpu(), original[k].cpu()), \
-                f"Weight {k} was not restored after evolution"
+            assert torch.equal(current[k].cpu(), original[k].cpu()), f"Weight {k} was not restored after evolution"
 
-    def test_evolve_too_few_parents_raises(self, forge_engine, parent_a,
-                                           tmp_path):
+    def test_evolve_too_few_parents_raises(self, forge_engine, parent_a, tmp_path):
         path_a = str(tmp_path / "a.safetensors")
         save_checkpoint(parent_a, path_a)
         from forge.engine.errors import ConfigurationError
+
         with pytest.raises(ConfigurationError):
             forge_engine.evolve_merge([path_a], n_generations=1)
 
-    def test_evolve_saves_best_checkpoint(self, forge_engine, parent_a,
-                                          parent_b, tmp_path):
+    def test_evolve_saves_best_checkpoint(self, forge_engine, parent_a, parent_b, tmp_path):
         path_a = str(tmp_path / "a.safetensors")
         path_b = str(tmp_path / "b.safetensors")
         save_checkpoint(parent_a, path_a)
         save_checkpoint(parent_b, path_b)
 
         def fit(state):
-            return -sum(v.float().norm().item() for v in state.values()
-                        if v.is_floating_point()) / 1e3
+            return -sum(v.float().norm().item() for v in state.values() if v.is_floating_point()) / 1e3
 
         result = forge_engine.evolve_merge(
-            [path_a, path_b], fitness_fn=fit,
-            n_generations=2, population_size=4,
+            [path_a, path_b],
+            fitness_fn=fit,
+            n_generations=2,
+            population_size=4,
             out_dir=str(tmp_path / "evolved"),
-            restore_original=True, verbose=False)
+            restore_original=True,
+            verbose=False,
+        )
         import os
+
         assert result["best_path"] is not None
         assert os.path.exists(result["best_path"])

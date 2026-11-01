@@ -52,8 +52,10 @@ class TestDecompress:
         u_scale = ug.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / 127.0
         u_q = torch.clamp(torch.round(ug / u_scale), -127, 127).to(torch.int8)
         state = {
-            "w1_U_q": u_q, "w1_U_scale": u_scale.squeeze(-1),
-            "w1_S": S, "w1_Vh_q": Vh,
+            "w1_U_q": u_q,
+            "w1_U_scale": u_scale.squeeze(-1),
+            "w1_S": S,
+            "w1_Vh_q": Vh,
             "w1_Vh_scale": torch.ones(Vh.shape[0]),
             "w1_U_shape": torch.tensor([U.shape[0], U.shape[1]]),
             "w1_Vh_shape": torch.tensor([Vh.shape[0], Vh.shape[1]]),
@@ -70,24 +72,21 @@ class TestBakeExpert:
         up = t["blocks.0.ffn.w_up.weight"] + torch.full((3, 2), 1.0)
         down = t["blocks.0.ffn.w_down.weight"] + torch.full((3, 2), 0.5)
         expert_path = tmp_path / "expert_l0_math.safetensors"
-        _save(expert_path, {
-            "w1.weight": gate, "w2.weight": up, "w3.weight": down})
+        _save(expert_path, {"w1.weight": gate, "w2.weight": up, "w3.weight": down})
 
         out = str(tmp_path / "baked.safetensors")
-        bake_expert(str(target_path), [str(expert_path)], alpha=0.5,
-                    out_path=out)
+        bake_expert(str(target_path), [str(expert_path)], alpha=0.5, out_path=out)
 
         merged = load_checkpoint(out, map_location="cpu")
         # target + 0.5 * delta
         assert torch.allclose(
-            merged["blocks.0.ffn.w_gate.weight"].float(),
-            t["blocks.0.ffn.w_gate.weight"] + 1.0, atol=1e-5)
+            merged["blocks.0.ffn.w_gate.weight"].float(), t["blocks.0.ffn.w_gate.weight"] + 1.0, atol=1e-5
+        )
         assert torch.allclose(
-            merged["blocks.0.ffn.w_up.weight"].float(),
-            t["blocks.0.ffn.w_up.weight"] + 0.5, atol=1e-5)
+            merged["blocks.0.ffn.w_up.weight"].float(), t["blocks.0.ffn.w_up.weight"] + 0.5, atol=1e-5
+        )
         # Unrelated layer untouched.
-        assert torch.equal(merged["blocks.1.ffn.w_gate.weight"],
-                           t["blocks.1.ffn.w_gate.weight"])
+        assert torch.equal(merged["blocks.1.ffn.w_gate.weight"], t["blocks.1.ffn.w_gate.weight"])
 
     def test_multi_expert_averages(self, tmp_path):
         target_path, t = _make_target(tmp_path)
@@ -97,13 +96,10 @@ class TestBakeExpert:
         _save(e1, {"w1.weight": base + 4.0})
         _save(e2, {"w1.weight": base + 8.0})
         out = str(tmp_path / "baked.safetensors")
-        bake_expert(str(target_path), [str(e1), str(e2)], alpha=1.0,
-                    out_path=out)
+        bake_expert(str(target_path), [str(e1), str(e2)], alpha=1.0, out_path=out)
         merged = load_checkpoint(out, map_location="cpu")
         # mean delta = 6.0
-        assert torch.allclose(
-            merged["blocks.0.ffn.w_gate.weight"].float(), base + 6.0,
-            atol=1e-5)
+        assert torch.allclose(merged["blocks.0.ffn.w_gate.weight"].float(), base + 6.0, atol=1e-5)
 
     def test_svd_expert_folds(self, tmp_path):
         target_path, t = _make_target(tmp_path)
@@ -113,12 +109,10 @@ class TestBakeExpert:
         _save(expert_path, {"w1_U": U, "w1_S": S, "w1_Vh": Vh})
 
         out = str(tmp_path / "baked.safetensors")
-        bake_expert(str(target_path), [str(expert_path)], alpha=1.0,
-                    out_path=out)
+        bake_expert(str(target_path), [str(expert_path)], alpha=1.0, out_path=out)
         merged = load_checkpoint(out, map_location="cpu")
         expected = t["blocks.0.ffn.w_gate.weight"] + 3.0
-        assert torch.allclose(
-            merged["blocks.0.ffn.w_gate.weight"].float(), expected, atol=1e-3)
+        assert torch.allclose(merged["blocks.0.ffn.w_gate.weight"].float(), expected, atol=1e-3)
 
     def test_layer_parsing(self):
         assert _layer_from_filename("expert_l7_math.safetensors") == 7

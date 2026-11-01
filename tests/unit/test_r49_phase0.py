@@ -1,4 +1,5 @@
 """R49 Phase-0 tests: sigmoid MoE gating, Dion2 sampling, QK-Clip, CISPO, ETR."""
+
 import torch
 import torch.nn as nn
 
@@ -7,6 +8,7 @@ from forge.training.optim.muon_sf_blockwise import MuonSFBlockwise, _dion2_updat
 from forge.training.optim.qk_clip import QKClipMonitor
 
 # ── MoE sigmoid gating (MiniMax-M2 style) ───────────────────────────────────
+
 
 class TestSigmoidGating:
     def test_weights_renormalized(self):
@@ -40,8 +42,7 @@ class TestSigmoidGating:
         assert torch.isfinite(aux)
 
     def test_aux_free_sigmoid(self):
-        r = Router(8, 4, top_k=2, noisy_gating=False, mode="aux_free",
-                   gating="sigmoid")
+        r = Router(8, 4, top_k=2, noisy_gating=False, mode="aux_free", gating="sigmoid")
         _mask, _weights, aux = r(torch.randn(5, 8))
         assert torch.isfinite(aux)
         r.update_bias()
@@ -53,6 +54,7 @@ class TestSigmoidGating:
 
 
 # ── Dion2 row-sampled orthogonalization ─────────────────────────────────────
+
 
 class TestDion2:
     def test_sparse_update_rows(self):
@@ -76,10 +78,15 @@ class TestDion2:
         lin = torch.nn.Linear(16, 8)
         emb = torch.nn.Embedding(4, 8)
         groups = [
-            {"params": [emb.weight], "lr": 1e-3, "betas": (0.8, 0.95),
-             "eps": 1e-10, "use_muon": False, "weight_decay": 0.0},
-            {"params": [lin.weight, lin.bias], "lr": 1e-2, "momentum": 0.95,
-             "use_muon": True, "weight_decay": 0.1},
+            {
+                "params": [emb.weight],
+                "lr": 1e-3,
+                "betas": (0.8, 0.95),
+                "eps": 1e-10,
+                "use_muon": False,
+                "weight_decay": 0.0,
+            },
+            {"params": [lin.weight, lin.bias], "lr": 1e-2, "momentum": 0.95, "use_muon": True, "weight_decay": 0.1},
         ]
         for rf in (1.0, 0.25):
             opt = MuonSFBlockwise([dict(g) for g in groups], rank_fraction=rf)
@@ -93,11 +100,12 @@ class TestDion2:
 
 # ── QK-Clip ─────────────────────────────────────────────────────────────────
 
+
 class TestQKClip:
     def _attn(self, d_model=32, n_heads=4):
         from forge.model_loader import GroupedQueryAttention
-        return GroupedQueryAttention(d_model=d_model, n_heads=n_heads,
-                                     n_kv_heads=n_heads, max_seq_len=64)
+
+        return GroupedQueryAttention(d_model=d_model, n_heads=n_heads, n_kv_heads=n_heads, max_seq_len=64)
 
     def test_disabled_by_default(self):
         attn = self._attn()
@@ -140,9 +148,9 @@ class TestQKClip:
 
 # ── CISPO + ETR in GRPOTrainer ──────────────────────────────────────────────
 
+
 class _MockTok:
-    def __call__(self, text, return_tensors="pt", truncation=False,
-                 max_length=None, add_special_tokens=True):
+    def __call__(self, text, return_tensors="pt", truncation=False, max_length=None, add_special_tokens=True):
         n = 3 + len(text)
         return type("Enc", (), {"input_ids": torch.tensor([[1] * n])})()
 
@@ -160,6 +168,7 @@ class _TinyLM(nn.Module):
 
 def _trainer(**cfg_kw):
     from forge.self_play.grpo_trainer import GRPOConfig, GRPOTrainer
+
     cfg = GRPOConfig(group_size=2, grad_accum_steps=1, **cfg_kw)
     model = _TinyLM()
     ref = _TinyLM()
@@ -169,6 +178,7 @@ def _trainer(**cfg_kw):
 class TestCISPO:
     def test_config_defaults(self):
         from forge.self_play.grpo_trainer import GRPOConfig
+
         cfg = GRPOConfig()
         assert cfg.rl_algorithm == "grpo"
         assert cfg.cispo_epsilon_low == 0.2
@@ -200,6 +210,7 @@ class TestCISPO:
 class TestETR:
     def test_config_defaults(self):
         from forge.self_play.grpo_trainer import GRPOConfig
+
         cfg = GRPOConfig()
         assert cfg.use_etr_reward is False
         assert cfg.etr_coeff == 0.1

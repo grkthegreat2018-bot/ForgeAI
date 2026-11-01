@@ -26,6 +26,7 @@ Port path (from V11 attention-only checkpoint):
 
 This is lossless at warm start (zero-init SSM = identical output to V11).
 """
+
 from __future__ import annotations
 
 import torch
@@ -43,9 +44,13 @@ class ForgeHybridKey(Key):
     Lossless at warm start: SSM path zero-init = identical to pure attention.
     """
 
-    def __init__(self, d_model: int = 2048, d_state: int = 16,
-                 sink_threshold: float = float("inf"),
-                 n_ssm_layers: int | None = None):
+    def __init__(
+        self,
+        d_model: int = 2048,
+        d_state: int = 16,
+        sink_threshold: float = float("inf"),
+        n_ssm_layers: int | None = None,
+    ):
         """
         Args:
             d_model: Model hidden dimension.
@@ -67,9 +72,11 @@ class ForgeHybridKey(Key):
 
     @property
     def description(self) -> str:
-        return ("Sink-aware SSM+Attention routing. Zero-init SSM path "
-                "alongside attention. Router = sink norm signal (no "
-                "learned router). Lossless warm start from pure attention.")
+        return (
+            "Sink-aware SSM+Attention routing. Zero-init SSM path "
+            "alongside attention. Router = sink norm signal (no "
+            "learned router). Lossless warm start from pure attention."
+        )
 
     def key_class(self) -> KeyClass:
         return KeyClass.BI
@@ -124,7 +131,7 @@ class ForgeHybridKey(Key):
                     "sink_threshold": self.sink_threshold,
                     "lossless": True,
                     "warm_start": "zero_init_ssm",
-                }
+                },
             )
         except Exception as e:
             return KeyResult(success=False, error=str(e))
@@ -149,13 +156,12 @@ class ForgeHybridKey(Key):
                 metadata={
                     "extracted": "attention_only",
                     "dropped_ssm": True,
-                }
+                },
             )
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
-    def detect_sinks(self, attention_weights: torch.Tensor,
-                     threshold: float = 0.5) -> torch.Tensor:
+    def detect_sinks(self, attention_weights: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
         """Detect sink tokens from attention weights.
 
         Sink tokens are positions that receive disproportionately high
@@ -176,8 +182,7 @@ class ForgeHybridKey(Key):
         received_norm = received / received.max().clamp(min=1e-8)
         return received_norm > threshold
 
-    def compute_sink_norm_ratio(self, hidden_states: torch.Tensor,
-                                sink_idx: int = 0) -> torch.Tensor:
+    def compute_sink_norm_ratio(self, hidden_states: torch.Tensor, sink_idx: int = 0) -> torch.Tensor:
         """Compute sink norm ratio for each token.
 
         The sink norm ratio = ||h_token|| / ||h_sink||.
@@ -192,7 +197,7 @@ class ForgeHybridKey(Key):
             (batch, seq_len) tensor of norm ratios.
         """
         norms = hidden_states.norm(dim=-1)  # (batch, seq_len)
-        sink_norm = norms[:, sink_idx:sink_idx + 1].clamp(min=1e-8)
+        sink_norm = norms[:, sink_idx : sink_idx + 1].clamp(min=1e-8)
         return norms / sink_norm
 
     def route_tokens(self, sink_norm_ratio: torch.Tensor) -> torch.Tensor:

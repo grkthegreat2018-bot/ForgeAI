@@ -17,6 +17,7 @@ from forge_gui.api.safety_checker import (
 
 # ── Layer 1: AST ───────────────────────────────────────────────────────
 
+
 class TestASTLayer:
     def test_clean_python_passes(self):
         v = check_ast("x = 1 + 2\nprint(x)", "test.py")
@@ -78,6 +79,7 @@ class TestASTLayer:
 
 # ── Layer 2: Pattern matching ──────────────────────────────────────────
 
+
 class TestPatternLayer:
     def test_clean_text_passes(self):
         v = check_patterns("hello world\nprint('hi')", "test.py")
@@ -118,6 +120,7 @@ class TestPatternLayer:
 
 # ── Path safety ────────────────────────────────────────────────────────
 
+
 class TestPathSafety:
     def test_normal_path_passes(self):
         v = check_path_safety("src/main.py")
@@ -141,6 +144,7 @@ class TestPathSafety:
 
 
 # ── Layer 3: Heuristics ────────────────────────────────────────────────
+
 
 class TestHeuristics:
     def test_normal_file_passes(self):
@@ -166,6 +170,7 @@ class TestHeuristics:
 
 # ── Combined check_edit ────────────────────────────────────────────────
 
+
 class TestCheckEdit:
     def test_clean_edit_passes(self):
         v = check_edit("x = 1\nprint(x)", "test.py")
@@ -186,6 +191,7 @@ class TestCheckEdit:
 
 # ── Command checking ───────────────────────────────────────────────────
 
+
 class TestCheckCommand:
     def test_safe_command_passes(self):
         v = check_command("python test.py")
@@ -205,6 +211,7 @@ class TestCheckCommand:
 
 
 # ── Strike tracker ──────────────────────────────────────────────────────
+
 
 class TestStrikeTracker:
     def test_clean_start(self):

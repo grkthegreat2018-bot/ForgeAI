@@ -13,19 +13,21 @@ import torch
 
 # ── 1. SnapKV + 4-bit KV Cache ─────────────────────────────────────────────
 
+
 class TestSnapKV4BitCache:
     """Test the combined SnapKV eviction + Hadamard INT4 quantization cache."""
 
     def test_factory_creates_snapkv_4bit(self):
         from forge.engine.kv_backend import SnapKV4BitCache, build_kv_cache
+
         cache = build_kv_cache("snapkv_4bit")
         assert isinstance(cache, SnapKV4BitCache)
 
     def test_init_and_append(self):
         from forge.engine.kv_backend import build_kv_cache
+
         cache = build_kv_cache("snapkv_4bit")
-        cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
-                   max_seq_len=256, device="cpu", dtype=torch.float32)
+        cache.init(n_heads=8, head_dim=64, n_kv_heads=2, max_seq_len=256, device="cpu", dtype=torch.float32)
         # Append a small sequence
         k = torch.randn(1, 2, 4, 64)
         v = torch.randn(1, 2, 4, 64)
@@ -34,9 +36,9 @@ class TestSnapKV4BitCache:
 
     def test_get_returns_correct_shape(self):
         from forge.engine.kv_backend import build_kv_cache
+
         cache = build_kv_cache("snapkv_4bit")
-        cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
-                   max_seq_len=256, device="cpu", dtype=torch.float32)
+        cache.init(n_heads=8, head_dim=64, n_kv_heads=2, max_seq_len=256, device="cpu", dtype=torch.float32)
         k = torch.randn(1, 2, 8, 64)
         v = torch.randn(1, 2, 8, 64)
         cache.append(k, v, position=0)
@@ -46,10 +48,10 @@ class TestSnapKV4BitCache:
 
     def test_eviction_triggers_at_capacity(self):
         from forge.engine.kv_backend import build_kv_cache
+
         cache = build_kv_cache("snapkv_4bit")
         # Small budget to trigger eviction quickly
-        cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
-                   max_seq_len=256, device="cpu", dtype=torch.float32)
+        cache.init(n_heads=8, head_dim=64, n_kv_heads=2, max_seq_len=256, device="cpu", dtype=torch.float32)
         cache.obs_window = 4
         cache.budget = 8
         cache.max_capacity = 12
@@ -65,9 +67,9 @@ class TestSnapKV4BitCache:
 
     def test_info_reports_compression(self):
         from forge.engine.kv_backend import build_kv_cache
+
         cache = build_kv_cache("snapkv_4bit")
-        cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
-                   max_seq_len=256, device="cpu", dtype=torch.float32)
+        cache.init(n_heads=8, head_dim=64, n_kv_heads=2, max_seq_len=256, device="cpu", dtype=torch.float32)
         k = torch.randn(1, 2, 4, 64)
         v = torch.randn(1, 2, 4, 64)
         cache.append(k, v, position=0)
@@ -80,9 +82,9 @@ class TestSnapKV4BitCache:
 
     def test_clear(self):
         from forge.engine.kv_backend import build_kv_cache
+
         cache = build_kv_cache("snapkv_4bit")
-        cache.init(n_heads=8, head_dim=64, n_kv_heads=2,
-                   max_seq_len=256, device="cpu", dtype=torch.float32)
+        cache.init(n_heads=8, head_dim=64, n_kv_heads=2, max_seq_len=256, device="cpu", dtype=torch.float32)
         k = torch.randn(1, 2, 4, 64)
         v = torch.randn(1, 2, 4, 64)
         cache.append(k, v, position=0)
@@ -92,6 +94,7 @@ class TestSnapKV4BitCache:
 
 
 # ── 2. Golden Trajectory Injection ──────────────────────────────────────────
+
 
 class TestGoldenTrajectoryInjection:
     """Test GRPOTrainer replay buffer integration."""
@@ -104,14 +107,14 @@ class TestGoldenTrajectoryInjection:
         # Create dummy model, tokenizer, ref_model
         model = torch.nn.Linear(10, 10)
         ref_model = torch.nn.Linear(10, 10)
-        tokenizer = type("MockTok", (), {
-            "__call__": lambda self, text, **kw: type("Enc", (), {
-                "input_ids": torch.tensor([[1, 2, 3, 4, 5]])})()
-        })()
+        tokenizer = type(
+            "MockTok",
+            (),
+            {"__call__": lambda self, text, **kw: type("Enc", (), {"input_ids": torch.tensor([[1, 2, 3, 4, 5]])})()},
+        )()
 
         buf = ReplayBuffer(max_size=100)
-        trainer = GRPOTrainer(model, tokenizer, ref_model,
-                              device="cpu", replay_buffer=buf)
+        trainer = GRPOTrainer(model, tokenizer, ref_model, device="cpu", replay_buffer=buf)
         assert trainer.replay_buffer is buf
 
     def test_inject_golden_replays_skips_small_buffer(self):
@@ -121,18 +124,18 @@ class TestGoldenTrajectoryInjection:
 
         model = torch.nn.Linear(10, 10)
         ref_model = torch.nn.Linear(10, 10)
-        tokenizer = type("MockTok", (), {
-            "__call__": lambda self, text, **kw: type("Enc", (), {
-                "input_ids": torch.tensor([[1, 2, 3]])})()
-        })()
+        tokenizer = type(
+            "MockTok",
+            (),
+            {"__call__": lambda self, text, **kw: type("Enc", (), {"input_ids": torch.tensor([[1, 2, 3]])})()},
+        )()
 
         buf = ReplayBuffer(max_size=100)
         # Add only a few items — below replay_min_buffer_size (50)
         for i in range(10):
             buf.add({"prompt": f"p{i}", "solution": f"s{i}", "quality": 1.0})
 
-        trainer = GRPOTrainer(model, tokenizer, ref_model,
-                              device="cpu", replay_buffer=buf)
+        trainer = GRPOTrainer(model, tokenizer, ref_model, device="cpu", replay_buffer=buf)
         prompts = ["test prompt"]
         completions = [["comp1", "comp2"]]
         rewards = [[1.0, 0.0]]
@@ -147,20 +150,19 @@ class TestGoldenTrajectoryInjection:
 
         model = torch.nn.Linear(10, 10)
         ref_model = torch.nn.Linear(10, 10)
-        tokenizer = type("MockTok", (), {
-            "__call__": lambda self, text, **kw: type("Enc", (), {
-                "input_ids": torch.tensor([[1, 2, 3]])})()
-        })()
+        tokenizer = type(
+            "MockTok",
+            (),
+            {"__call__": lambda self, text, **kw: type("Enc", (), {"input_ids": torch.tensor([[1, 2, 3]])})()},
+        )()
 
         buf = ReplayBuffer(max_size=1000)
         # Fill buffer above min size
         for i in range(60):
-            buf.add({"prompt": f"prompt_{i}", "solution": f"solution_{i}",
-                     "quality": 1.0, "test_passed": True})
+            buf.add({"prompt": f"prompt_{i}", "solution": f"solution_{i}", "quality": 1.0, "test_passed": True})
 
         config = GRPOConfig(replay_ratio=0.2, replay_min_buffer_size=50)
-        trainer = GRPOTrainer(model, tokenizer, ref_model,
-                              device="cpu", config=config, replay_buffer=buf)
+        trainer = GRPOTrainer(model, tokenizer, ref_model, device="cpu", config=config, replay_buffer=buf)
 
         prompts = ["p1", "p2", "p3"]
         completions = [["c1a", "c1b"], ["c2a", "c2b"], ["c3a", "c3b"]]
@@ -180,14 +182,14 @@ class TestGoldenTrajectoryInjection:
 
         model = torch.nn.Linear(10, 10)
         ref_model = torch.nn.Linear(10, 10)
-        tokenizer = type("MockTok", (), {
-            "__call__": lambda self, text, **kw: type("Enc", (), {
-                "input_ids": torch.tensor([[1, 2, 3]])})()
-        })()
+        tokenizer = type(
+            "MockTok",
+            (),
+            {"__call__": lambda self, text, **kw: type("Enc", (), {"input_ids": torch.tensor([[1, 2, 3]])})()},
+        )()
 
         buf = ReplayBuffer(max_size=1000)
-        trainer = GRPOTrainer(model, tokenizer, ref_model,
-                              device="cpu", replay_buffer=buf)
+        trainer = GRPOTrainer(model, tokenizer, ref_model, device="cpu", replay_buffer=buf)
 
         prompts = ["p1", "p2"]
         completions = [["good_sol", "bad_sol"], ["ok_sol", "great_sol"]]
@@ -203,17 +205,20 @@ class TestGoldenTrajectoryInjection:
 
 # ── 3. ELO-Driven Curriculum ────────────────────────────────────────────────
 
+
 class TestEloTracker:
     """Test the ELO matchmaking system."""
 
     def test_initial_state(self):
         from forge.self_play.elo_tracker import EloTracker
+
         elo = EloTracker(initial_rating=1200.0)
         assert elo.model_rating == 1200.0
         assert len(elo.prompt_ratings) == 0
 
     def test_register_prompt(self):
         from forge.self_play.elo_tracker import EloTracker
+
         elo = EloTracker()
         elo.register_prompt("task_1")
         assert "task_1" in elo.prompt_ratings
@@ -221,18 +226,21 @@ class TestEloTracker:
 
     def test_expected_win_prob_equal_rating(self):
         from forge.self_play.elo_tracker import EloTracker
+
         elo = EloTracker(initial_rating=1200.0)
         prob = elo.expected_win_prob(1200.0)
         assert abs(prob - 0.5) < 1e-6  # equal rating = 50%
 
     def test_expected_win_prob_higher_model(self):
         from forge.self_play.elo_tracker import EloTracker
+
         elo = EloTracker(initial_rating=1400.0)  # model is 200 points higher
         prob = elo.expected_win_prob(1200.0)
         assert prob > 0.5  # model favored
 
     def test_update_model_rating_success(self):
         from forge.self_play.elo_tracker import EloTracker
+
         elo = EloTracker(initial_rating=1200.0)
         elo.register_prompt("task_1", rating=1200.0)
         elo.update_model_rating("task_1", success=True)
@@ -243,6 +251,7 @@ class TestEloTracker:
 
     def test_update_model_rating_failure(self):
         from forge.self_play.elo_tracker import EloTracker
+
         elo = EloTracker(initial_rating=1200.0)
         elo.register_prompt("task_1", rating=1200.0)
         elo.update_model_rating("task_1", success=False)
@@ -253,6 +262,7 @@ class TestEloTracker:
 
     def test_zero_sum_update(self):
         from forge.self_play.elo_tracker import EloTracker
+
         elo = EloTracker(initial_rating=1200.0)
         elo.register_prompt("task_1", rating=1200.0)
         initial_sum = elo.model_rating + elo.prompt_ratings["task_1"].rating
@@ -262,6 +272,7 @@ class TestEloTracker:
 
     def test_select_prompts_goldilocks(self):
         from forge.self_play.elo_tracker import EloTracker
+
         elo = EloTracker(initial_rating=1200.0)
         # Register prompts at various difficulty levels
         for i, rating in enumerate([800, 1000, 1200, 1400, 1600]):
@@ -273,6 +284,7 @@ class TestEloTracker:
 
     def test_select_mixed_prompts(self):
         from forge.self_play.elo_tracker import EloTracker
+
         elo = EloTracker(initial_rating=1200.0)
         for i in range(20):
             elo.register_prompt(f"task_{i}", rating=1000 + i * 50)
@@ -281,6 +293,7 @@ class TestEloTracker:
 
     def test_k_factor_decreases_with_attempts(self):
         from forge.self_play.elo_tracker import EloTracker
+
         elo = EloTracker(initial_rating=1200.0, k_factor=32.0, k_factor_min=8.0)
         elo.register_prompt("task_1", rating=1200.0)
         # First attempt: full K-factor
@@ -294,6 +307,7 @@ class TestEloTracker:
 
     def test_domain_stats(self):
         from forge.self_play.elo_tracker import EloTracker
+
         elo = EloTracker(initial_rating=1200.0)
         for i in range(5):
             elo.register_prompt(f"task_{i}", rating=1200.0 + i * 50)
@@ -305,6 +319,7 @@ class TestEloTracker:
 
 
 # ── 4. Fused QK-Norm + RoPE ─────────────────────────────────────────────────
+
 
 class TestFusedQKNormRoPE:
     """Test the fused RMSNorm + RoPE kernel (PyTorch fallback on CPU)."""
@@ -324,8 +339,7 @@ class TestFusedQKNormRoPE:
         eps = 1e-6
 
         # Fused (will use PyTorch fallback on CPU)
-        q_fused, k_fused = fused_qk_norm_rope(
-            q, k, q_weight, k_weight, cos, sin, eps, use_triton=False)
+        q_fused, k_fused = fused_qk_norm_rope(q, k, q_weight, k_weight, cos, sin, eps, use_triton=False)
 
         # Reference: separate ops
         q_rms = q.pow(2).mean(-1, keepdim=True).add(eps).rsqrt()
@@ -335,7 +349,7 @@ class TestFusedQKNormRoPE:
 
         def rotate_half(x):
             d = x.shape[-1]
-            return torch.cat((-x[..., d // 2:], x[..., :d // 2]), dim=-1)
+            return torch.cat((-x[..., d // 2 :], x[..., : d // 2]), dim=-1)
 
         cos_b = cos.unsqueeze(0).unsqueeze(0)
         sin_b = sin.unsqueeze(0).unsqueeze(0)
@@ -359,8 +373,7 @@ class TestFusedQKNormRoPE:
         sin = torch.zeros(T, head_dim)
         eps = 1e-6
 
-        q_out, _k_out = fused_qk_norm_rope(
-            q, k, q_weight, k_weight, cos, sin, eps, use_triton=False)
+        q_out, _k_out = fused_qk_norm_rope(q, k, q_weight, k_weight, cos, sin, eps, use_triton=False)
 
         # With cos=1, sin=0: output = normed * 1 + rotate_half(normed) * 0 = normed
         # So output should just be the RMSNormed input
@@ -381,8 +394,7 @@ class TestFusedQKNormRoPE:
         sin = torch.zeros(T, head_dim)
         eps = 1e-6
 
-        q_out, _ = fused_qk_norm_rope(
-            q, k, q_weight, k_weight, cos, sin, eps, use_triton=False)
+        q_out, _ = fused_qk_norm_rope(q, k, q_weight, k_weight, cos, sin, eps, use_triton=False)
 
         q_rms = q.pow(2).mean(-1, keepdim=True).add(eps).rsqrt()
         q_expected = q * q_rms * q_weight
@@ -419,8 +431,7 @@ class TestFusedQKNormRoPE:
         sin = torch.zeros(T, head_dim)
 
         # Should work (uses PyTorch fallback)
-        q_out, _k_out = fused_qk_norm_rope(
-            q, k, q_weight, k_weight, cos, sin, use_triton=False)
+        q_out, _k_out = fused_qk_norm_rope(q, k, q_weight, k_weight, cos, sin, use_triton=False)
         assert q_out.shape == q.shape
 
 
@@ -452,9 +463,7 @@ class _EngineTokenizer:
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.tolist()
         return "".join(
-            str(token_id)
-            for token_id in token_ids
-            if not skip_special_tokens or token_id != self.eos_token_id
+            str(token_id) for token_id in token_ids if not skip_special_tokens or token_id != self.eos_token_id
         )
 
 
@@ -466,8 +475,7 @@ class _EngineModel(torch.nn.Module):
         self.eos_token_id = 7
         self.next_token = next_token
 
-    def forward(self, input_ids, past_key_values=None, use_cache=False,
-                logits_last_only=False, **kwargs):
+    def forward(self, input_ids, past_key_values=None, use_cache=False, logits_last_only=False, **kwargs):
         batch, seq_len = input_ids.shape
         logits = torch.full((batch, seq_len, self.config.vocab_size), -10.0)
         logits[..., self.next_token] = 10.0
@@ -495,8 +503,7 @@ class TestForgeEngineRefactor:
         raw_engine = _make_engine()
         stream_engine = _make_engine()
         raw = raw_engine.generate_raw("prompt", max_new_tokens=3, temperature=0.0)
-        streamed = "".join(stream_engine.generate_stream(
-            "prompt", max_new_tokens=3, temperature=0.0))
+        streamed = "".join(stream_engine.generate_stream("prompt", max_new_tokens=3, temperature=0.0))
         assert raw == streamed == "333"
         assert raw_engine.total_tokens_generated == 3
         assert stream_engine.total_tokens_generated == 3
@@ -509,10 +516,8 @@ class TestForgeEngineRefactor:
         prefix = " ".join(f"prefix{i}" for i in range(32))
         first_prompt = f"{prefix} first suffix tokens"
         second_prompt = f"{prefix} second different suffix"
-        assert engine.generate(
-            first_prompt, max_new_tokens=1, finish_sentence=False) == "3"
-        assert engine.generate(
-            second_prompt, max_new_tokens=1, finish_sentence=False) == "3"
+        assert engine.generate(first_prompt, max_new_tokens=1, finish_sentence=False) == "3"
+        assert engine.generate(second_prompt, max_new_tokens=1, finish_sentence=False) == "3"
         assert engine._prefix_cache.stats()["entries"] == 1
 
     def test_sleep_level_one_transitions_a_fresh_engine(self):
@@ -538,8 +543,7 @@ class TestForgeEngineRefactor:
 
         engine = _make_engine()
         engine.checkpoint_path = "fake.safetensors"
-        engine.activate(kv_cache="standard", decoding="standard",
-                        use_prefix_cache=True, warmup=False)
+        engine.activate(kv_cache="standard", decoding="standard", use_prefix_cache=True, warmup=False)
         assert engine.kv_cache is not None
         assert engine.decoding is not None
         assert isinstance(engine._prefix_cache, LRUPrefixCache)
@@ -552,8 +556,8 @@ class TestForgeEngineRefactor:
         # Mock the model reload to return a fresh _EngineModel
         def fake_build(config, checkpoint_path, dtype):
             return _EngineModel()
-        monkeypatch.setattr(
-            ModelLoader, "build_model_fast", staticmethod(fake_build))
+
+        monkeypatch.setattr(ModelLoader, "build_model_fast", staticmethod(fake_build))
 
         engine.wake()
         assert engine.is_awake
@@ -566,8 +570,7 @@ class TestForgeEngineRefactor:
         from forge.engine.prefix_cache import LRUPrefixCache
 
         engine = _make_engine()
-        engine.activate(kv_cache="standard", decoding="standard",
-                        use_prefix_cache=True, warmup=False)
+        engine.activate(kv_cache="standard", decoding="standard", use_prefix_cache=True, warmup=False)
         assert engine.kv_cache.info()["type"] == "standard_prealloc"
         assert engine.decoding.name == "StandardDecoding"
         assert isinstance(engine._prefix_cache, LRUPrefixCache)

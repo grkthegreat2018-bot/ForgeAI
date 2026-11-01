@@ -6,12 +6,14 @@ Verifies that:
    automatically via the protocol — no string matching needed.
 3. ``merge_lora_adapters`` dispatches to ``merge_lora()`` on quantized linears.
 """
+
 import torch
 import torch.nn as nn
 
 from forge.quant.protocol import QuantizedLinearMixin, is_quantized_linear
 
 # ── 1. All known quantized linear classes have the protocol ────────────────
+
 
 def _make_linear(in_f=64, out_f=64, bias=True):
     return nn.Linear(in_f, out_f, bias=bias)
@@ -20,6 +22,7 @@ def _make_linear(in_f=64, out_f=64, bias=True):
 def test_quantized_linear_has_mixin():
     """QuantizedLinear (inference_quant) has the mixin."""
     from forge.quant.inference_quant import QuantizedLinear
+
     lin = QuantizedLinear(_make_linear(), bits=8)
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -29,6 +32,7 @@ def test_quantized_linear_has_mixin():
 def test_fast_int8_linear_has_mixin():
     """FastINT8Linear (inference_quant) has the mixin."""
     from forge.quant.inference_quant import FastINT8Linear
+
     lin = FastINT8Linear(_make_linear())
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -37,6 +41,7 @@ def test_fast_int8_linear_has_mixin():
 def test_nf4_linear_has_mixin():
     """NF4Linear (bitnet_lora) has the mixin."""
     from forge.training.bitnet_lora import NF4Linear
+
     lin = NF4Linear(64, 64, bias=False)
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -45,6 +50,7 @@ def test_nf4_linear_has_mixin():
 def test_iri_fp4_linear_key_has_mixin():
     """IRIFP4Linear (iri_fp4_key) has the mixin."""
     from forge.keys.quantization.iri_fp4_key import IRIFP4Linear
+
     lin = IRIFP4Linear(64, 64, bias=False)
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -53,6 +59,7 @@ def test_iri_fp4_linear_key_has_mixin():
 def test_iri_fp4_linear_novel_quant_has_mixin():
     """IRIFP4Linear (novel_quant) has the mixin."""
     from forge.engine.quant.novel_quant import IRIFP4Linear
+
     lin = IRIFP4Linear(64, 64, bias=False)
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -61,6 +68,7 @@ def test_iri_fp4_linear_novel_quant_has_mixin():
 def test_forge_quant_linear_has_mixin():
     """ForgeQuantLinear (forge_quant) has the mixin."""
     from forge.engine.quant.forge_quant import ForgeQuantLinear
+
     lin = ForgeQuantLinear(64, 64, bias=False)
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -69,6 +77,7 @@ def test_forge_quant_linear_has_mixin():
 def test_grinqh_linear_has_mixin():
     """GRINQHLinear (grinqh) has the mixin."""
     from forge.engine.quant.grinqh import GRINQHLinear
+
     lin = GRINQHLinear(64, 64, bias=False)
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -77,6 +86,7 @@ def test_grinqh_linear_has_mixin():
 def test_nvfp4_linear_has_mixin():
     """NVFP4Linear (nvfp4_quant) has the mixin."""
     from forge.engine.quant.nvfp4_quant import NVFP4Linear
+
     lin = NVFP4Linear(64, 64, bias=False)
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -85,6 +95,7 @@ def test_nvfp4_linear_has_mixin():
 def test_w8a8_linear_has_mixin():
     """W8A8Linear (w8a8_quant) has the mixin."""
     from forge.engine.quant.w8a8_quant import W8A8Linear
+
     lin = W8A8Linear(64, 64, bias=False)
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -93,6 +104,7 @@ def test_w8a8_linear_has_mixin():
 def test_fp8_linear_w8a8_has_mixin():
     """FP8Linear (w8a8_quant) has the mixin."""
     from forge.engine.quant.w8a8_quant import FP8Linear
+
     lin = FP8Linear(64, 64, bias=False)
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -101,6 +113,7 @@ def test_fp8_linear_w8a8_has_mixin():
 def test_fp8_linear_fp8_infer_has_mixin():
     """FP8Linear (fp8_infer) has the mixin."""
     from forge.quant.fp8_infer import FP8Linear
+
     lin = FP8Linear(_make_linear())
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -109,6 +122,7 @@ def test_fp8_linear_fp8_infer_has_mixin():
 def test_asfp4_linear_has_mixin():
     """ASFP4Linear (novel_quant) has the mixin."""
     from forge.engine.quant.novel_quant import ASFP4Linear
+
     lin = ASFP4Linear(64, 64, bias=False)
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -117,6 +131,7 @@ def test_asfp4_linear_has_mixin():
 def test_residual_fp4_linear_has_mixin():
     """ResidualFP4Linear (novel_quant) has the mixin."""
     from forge.engine.quant.novel_quant import ResidualFP4Linear
+
     lin = ResidualFP4Linear(64, 64, bias=False)
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -125,6 +140,7 @@ def test_residual_fp4_linear_has_mixin():
 def test_sr_fp4_linear_has_mixin():
     """SRFP4Linear (novel_quant) has the mixin."""
     from forge.engine.quant.novel_quant import SRFP4Linear
+
     lin = SRFP4Linear(64, 64, bias=False)
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -133,6 +149,7 @@ def test_sr_fp4_linear_has_mixin():
 def test_acbq_linear_has_mixin():
     """ACBQLinear (acbq) has the mixin."""
     from forge.engine.quant.acbq import ACBQLinear
+
     lin = ACBQLinear(64, 64, bias=False)
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -141,6 +158,7 @@ def test_acbq_linear_has_mixin():
 def test_mixllm_linear_has_mixin():
     """MixLLMLinear (mixllm) has the mixin."""
     from forge.engine.quant.mixllm import MixLLMLinear
+
     lin = MixLLMLinear(64, 64, bias=False)
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
@@ -149,12 +167,14 @@ def test_mixllm_linear_has_mixin():
 def test_quamba2_linear_has_mixin():
     """Quamba2Linear (quamba2) has the mixin."""
     from forge.quant.quamba2 import Quamba2Linear
+
     lin = Quamba2Linear(64, 64, bias=False)
     assert isinstance(lin, QuantizedLinearMixin)
     assert is_quantized_linear(lin)
 
 
 # ── 2. add_lora_adapters detects new quantized linears automatically ──────
+
 
 class _DummyQuantLinear(QuantizedLinearMixin):
     """A dummy quantized linear that the bitnet_lora code has never seen.
@@ -237,6 +257,7 @@ def test_add_lora_adapters_skips_plain_linear_below_min_size():
 
 # ── 3. merge_lora works on quantized linears ─────────────────────────────
 
+
 def test_merge_lora_adapters_dispatches_to_quant_linear():
     """merge_lora_adapters calls merge_lora() on quantized linears."""
     from forge.training.bitnet_lora import LoRAAdapter, merge_lora_adapters
@@ -277,6 +298,7 @@ def test_merge_lora_default_returns_false():
 
 
 # ── 4. Backward compatibility: getattr fallback ────────────────────────────
+
 
 def test_is_quantized_linear_attr_fallback():
     """is_quantized_linear returns True for objects with is_quantized_linear=True

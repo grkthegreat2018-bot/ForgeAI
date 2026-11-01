@@ -3,6 +3,7 @@
 Tests entry CRUD, keyword matching, hybrid injection, search, and
 MemoryTools dispatch. Uses tmp_path for isolation.
 """
+
 import pytest
 
 from forge_gui.api.lorebook import (
@@ -20,6 +21,7 @@ def lore(tmp_path):
 
 # ── LoreEntry ──────────────────────────────────────────────────────────
 
+
 class TestLoreEntry:
     def test_matches_keyword(self):
         e = LoreEntry(id="1", keys=["python", "naming"], content="use snake_case")
@@ -32,8 +34,7 @@ class TestLoreEntry:
         assert not e.matches("anything")
 
     def test_to_dict_roundtrip(self):
-        e = LoreEntry(id="1", keys=["a"], content="b", constant=True,
-                      priority=50, category="user_pref")
+        e = LoreEntry(id="1", keys=["a"], content="b", constant=True, priority=50, category="user_pref")
         d = e.to_dict()
         e2 = LoreEntry.from_dict(d)
         assert e2.id == "1"
@@ -45,6 +46,7 @@ class TestLoreEntry:
 
 
 # ── Lorebook CRUD ──────────────────────────────────────────────────────
+
 
 class TestLorebookCRUD:
     def test_empty_lorebook(self, lore):
@@ -94,6 +96,7 @@ class TestLorebookCRUD:
 
 # ── Search ─────────────────────────────────────────────────────────────
 
+
 class TestLorebookSearch:
     def test_search_by_key(self, lore):
         lore.add(["python", "naming"], "use snake_case")
@@ -124,6 +127,7 @@ class TestLorebookSearch:
 
 
 # ── Injection ──────────────────────────────────────────────────────────
+
 
 class TestLorebookInjection:
     def test_empty_injection(self, lore):
@@ -173,6 +177,7 @@ class TestLorebookInjection:
 
 # ── Stats ──────────────────────────────────────────────────────────────
 
+
 class TestLorebookStats:
     def test_stats(self, lore):
         lore.add(["a"], "x", constant=True, category="user_pref")
@@ -187,6 +192,7 @@ class TestLorebookStats:
 
 # ── MemoryTools ────────────────────────────────────────────────────────
 
+
 class TestMemoryTools:
     def test_tool_defs(self):
         defs = memory_tool_defs()
@@ -197,9 +203,7 @@ class TestMemoryTools:
 
     def test_remember(self, lore):
         mt = MemoryTools(lore)
-        result = mt.execute("remember", {
-            "keys": ["python"], "content": "use snake_case",
-            "category": "user_pref"})
+        result = mt.execute("remember", {"keys": ["python"], "content": "use snake_case", "category": "user_pref"})
         assert result["ok"] is True
         assert "id" in result["result"]
 

@@ -3,11 +3,13 @@
 Verifies that all 4 optimizers work correctly and that the memory math
 fits the 22.4 GB available RAM on the target system.
 """
+
 import os
 import sys
 import tempfile
+from pathlib import Path
 
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch
 import torch.nn as nn
@@ -29,6 +31,7 @@ def _make_tiny_model(d=128, n_layers=4, ternary=False):
 
 
 # ── R20a: 4-bit AdamW ───────────────────────────────────────────────────────
+
 
 def test_adamw4bit_basic():
     """4-bit AdamW should reduce loss on a simple task."""
@@ -74,17 +77,19 @@ def test_adamw4bit_memory():
     # Verify round-trip accuracy
     t_dq = _dequantize_4bit(packed, scales, t.shape)
     err = (t - t_dq).abs().mean().item() / t.abs().mean().item()
-    print(f"  4-bit round-trip error: {err*100:.2f}%")
-    assert err < 0.15, f"Round-trip error too high: {err*100:.2f}%"
+    print(f"  4-bit round-trip error: {err * 100:.2f}%")
+    assert err < 0.15, f"Round-trip error too high: {err * 100:.2f}%"
     print("  AdamW4Bit memory: PASS")
 
 
 def _dequantize_4bit(packed, scales, shape, block_size=128):
     from forge.training.optim.r20_memory_optimizers import _dequantize_4bit as _dq
+
     return _dq(packed, scales, shape, block_size)
 
 
 # ── R20b: NVMe-streamed BAdam ───────────────────────────────────────────────
+
 
 def test_nvme_streamed_badam():
     """NVMe-streamed BAdam should train and cycle through blocks."""
@@ -96,9 +101,7 @@ def test_nvme_streamed_badam():
     y = torch.randn(8, 64, device=_DEV)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        opt = NVMeStreamedBAdam(
-            model, lr=1e-2, nvme_path=tmpdir,
-            state_bytes=4, switch_every=3, verbose=False)
+        opt = NVMeStreamedBAdam(model, lr=1e-2, nvme_path=tmpdir, state_bytes=4, switch_every=3, verbose=False)
 
         initial_loss = nn.MSELoss()(model(x), y).item()
         for _ in range(20):
@@ -120,6 +123,7 @@ def test_nvme_streamed_badam():
 
 
 # ── R20c: Muon-BitNet 4-bit ─────────────────────────────────────────────────
+
 
 def test_muon_bitnet_4bit():
     """Muon with 4-bit momentum should reduce loss."""
@@ -164,6 +168,7 @@ def test_muon_bitnet_memory():
 
 # ── R20d: Ternary optimizer ─────────────────────────────────────────────────
 
+
 def test_ternary_optimizer():
     """Ternary optimizer should work with BitNet ternary weights."""
     from forge.training.optim.r20_memory_optimizers import TernaryOptimizer
@@ -192,8 +197,7 @@ def test_ternary_optimizer():
     for p in model.parameters():
         if p.dim() >= 2:
             vals = p.data.unique()
-            assert all(v in (-1.0, 0.0, 1.0) for v in vals.tolist()), \
-                f"Weights should be ternary, got {vals}"
+            assert all(v in (-1.0, 0.0, 1.0) for v in vals.tolist()), f"Weights should be ternary, got {vals}"
     print("  TernaryOptimizer: PASS")
 
 
@@ -211,6 +215,7 @@ def test_ternary_memory():
 
 
 # ── Full V7-8B memory verification ──────────────────────────────────────────
+
 
 def test_v7_8b_memory_fits():
     """Verify all R20 approaches fit the 22.4 GB available RAM."""
@@ -252,12 +257,11 @@ def test_v7_8b_memory_fits():
     total_combo = master + opt_combo
     approaches.append(("R20b+c: NVMe + 4-bit Muon", total_combo, total_combo < avail_ram))
 
-    all_fit = True
     for name, total, fits in approaches:
         status = "FITS" if fits else "EXCEEDS"
-        print(f"  {name:<25} {total/1e9:5.1f} GB  {status}")
+        print(f"  {name:<25} {total / 1e9:5.1f} GB  {status}")
         if not fits:
-            all_fit = False
+            pass
 
     # At least 3 approaches should fit
     fitting = sum(1 for _, _, f in approaches if f)

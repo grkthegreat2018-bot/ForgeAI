@@ -1,22 +1,22 @@
 """Tests for SharedCheckerModel and HeuristicChecker.
 
 Run with:
-    set PYTHONPATH=D:\\windsurf\\ForgeAI
-    D:\\windsurf\\ForgeAI\\venv\\Scripts\\python.exe -m pytest tests/evolution/test_checker_model.py -v
+    set PYTHONPATH=<repo-root>
+    python -m pytest tests/evolution/test_checker_model.py -v
 """
+
 import pytest
 
 from forge.evolution.checker_model import (
     HeuristicChecker,
     SharedCheckerModel,
-    _parse_score,
     _BoundedLRUCache,
-    get_checker,
+    _parse_score,
     reset_checker,
 )
 
-
 # ── HeuristicChecker tests ──────────────────────────────────────────────────
+
 
 class TestHeuristicChecker:
     def setup_method(self):
@@ -75,29 +75,34 @@ class TestHeuristicChecker:
 
 # ── Score parsing tests ─────────────────────────────────────────────────────
 
+
 class TestParseScore:
-    @pytest.mark.parametrize("text,expected", [
-        ("Score: 85", 85.0),
-        ("score: 42", 42.0),
-        ("Score = 73", 73.0),
-        ("85/100", 85.0),
-        ("85", 85.0),
-        ("  90  \n", 90.0),
-        ("85 points", 85.0),
-        ("85 pts", 85.0),
-        ("The score is 95 out of 100", 95.0),  # fallback catches 95
-        ("hello world", None),
-        ("", None),
-        ("Score: 0", 0.0),
-        ("Score: 100", 100.0),
-        ("Score: 150", None),  # > 100, should not match first pattern
-    ])
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("Score: 85", 85.0),
+            ("score: 42", 42.0),
+            ("Score = 73", 73.0),
+            ("85/100", 85.0),
+            ("85", 85.0),
+            ("  90  \n", 90.0),
+            ("85 points", 85.0),
+            ("85 pts", 85.0),
+            ("The score is 95 out of 100", 95.0),  # fallback catches 95
+            ("hello world", None),
+            ("", None),
+            ("Score: 0", 0.0),
+            ("Score: 100", 100.0),
+            ("Score: 150", None),  # > 100, should not match first pattern
+        ],
+    )
     def test_parse(self, text, expected):
         result = _parse_score(text)
         assert result == expected, f"parse({text!r}) = {result}, expected {expected}"
 
 
 # ── Bounded LRU Cache tests ─────────────────────────────────────────────────
+
 
 class TestBoundedLRUCache:
     def test_basic_get_put(self):
@@ -138,6 +143,7 @@ class TestBoundedLRUCache:
 
 # ── SharedCheckerModel tests (heuristic fallback path) ──────────────────────
 
+
 class TestSharedCheckerModel:
     def test_heuristic_only(self):
         """When model build fails, check() falls back to heuristic."""
@@ -163,7 +169,9 @@ class TestSharedCheckerModel:
         """Same input returns cached score on second call."""
         checker = SharedCheckerModel.__new__(SharedCheckerModel)
         import threading
+
         import torch
+
         checker._lock = threading.RLock()
         checker._cache = _BoundedLRUCache()
         checker._heuristic = HeuristicChecker()
@@ -185,7 +193,9 @@ class TestSharedCheckerModel:
     def test_clear_cache(self):
         checker = SharedCheckerModel.__new__(SharedCheckerModel)
         import threading
+
         import torch
+
         checker._lock = threading.RLock()
         checker._cache = _BoundedLRUCache()
         checker._heuristic = HeuristicChecker()
@@ -208,7 +218,9 @@ class TestSharedCheckerModel:
         """Batch check with heuristic fallback."""
         checker = SharedCheckerModel.__new__(SharedCheckerModel)
         import threading
+
         import torch
+
         checker._lock = threading.RLock()
         checker._cache = _BoundedLRUCache()
         checker._heuristic = HeuristicChecker()
@@ -235,7 +247,9 @@ class TestSharedCheckerModel:
     def test_batch_empty(self):
         checker = SharedCheckerModel.__new__(SharedCheckerModel)
         import threading
+
         import torch
+
         checker._lock = threading.RLock()
         checker._cache = _BoundedLRUCache()
         checker._heuristic = HeuristicChecker()
@@ -255,7 +269,9 @@ class TestSharedCheckerModel:
         """sleep/wake are no-ops when model failed to build."""
         checker = SharedCheckerModel.__new__(SharedCheckerModel)
         import threading
+
         import torch
+
         checker._lock = threading.RLock()
         checker._cache = _BoundedLRUCache()
         checker._heuristic = HeuristicChecker()
@@ -278,11 +294,13 @@ class TestSharedCheckerModel:
 
 # ── Singleton tests ─────────────────────────────────────────────────────────
 
+
 class TestSingleton:
     def test_reset_clears_instance(self):
         """reset_checker() clears the singleton reference."""
         reset_checker()
         import forge.evolution.checker_model as cm
+
         assert cm._checker_instance is None
 
 

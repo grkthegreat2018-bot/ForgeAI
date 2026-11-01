@@ -4,6 +4,7 @@ base-hint guessing, _human_bytes).
 Uses temp directories + fake safetensors headers — no real adapters or
 torch needed.
 """
+
 import json
 import struct
 import time
@@ -17,12 +18,13 @@ from forge_gui.api.lora_store import (
 
 # ── _human_bytes ───────────────────────────────────────────────────────
 
+
 def test_human_bytes_units():
     assert _human_bytes(0) == "0.0 B"
     assert _human_bytes(512) == "512.0 B"
     assert _human_bytes(1024) == "1.0 KB"
     assert _human_bytes(1024 * 1024) == "1.0 MB"
-    assert _human_bytes(1024 ** 3) == "1.0 GB"
+    assert _human_bytes(1024**3) == "1.0 GB"
 
 
 def test_human_bytes_small():
@@ -30,6 +32,7 @@ def test_human_bytes_small():
 
 
 # ── _base_hint ─────────────────────────────────────────────────────────
+
 
 def test_base_hint_underscore_lora():
     assert _base_hint("forgelm_v2_tooluse.lora.safetensors") == "forgelm_v2_tooluse"
@@ -44,6 +47,7 @@ def test_base_hint_no_marker():
 
 
 # ── read_adapter_header ────────────────────────────────────────────────
+
 
 def _write_fake_safetensors(path, header_dict: dict) -> None:
     """Write a minimal safetensors file (header + zero data)."""
@@ -94,6 +98,7 @@ def test_read_header_missing_file(tmp_path):
 
 # ── scan_lora_adapters ─────────────────────────────────────────────────
 
+
 def test_scan_finds_lora_files(tmp_path, monkeypatch):
     """scan_lora_adapters uses project_root()/research/checkpoints —
     monkeypatch project_root to our tmp dir."""
@@ -113,6 +118,7 @@ def test_scan_finds_lora_files(tmp_path, monkeypatch):
     _write_fake_safetensors(base_file, {"weight": {"shape": [10], "dtype": "F32"}})
 
     import forge_gui.api.lora_store as ls
+
     monkeypatch.setattr(ls, "project_root", lambda: tmp_path)
 
     entries = scan_lora_adapters()
@@ -128,6 +134,7 @@ def test_scan_finds_lora_files(tmp_path, monkeypatch):
 
 def test_scan_empty_when_no_checkpoints(tmp_path, monkeypatch):
     import forge_gui.api.lora_store as ls
+
     monkeypatch.setattr(ls, "project_root", lambda: tmp_path)
     entries = scan_lora_adapters()
     assert entries == []
@@ -145,9 +152,11 @@ def test_scan_sorted_by_modified_desc(tmp_path, monkeypatch):
 
     # make 'new' newer
     import os
+
     os.utime(new, (time.time() + 100, time.time() + 100))
 
     import forge_gui.api.lora_store as ls
+
     monkeypatch.setattr(ls, "project_root", lambda: tmp_path)
 
     entries = scan_lora_adapters()

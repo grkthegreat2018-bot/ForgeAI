@@ -9,13 +9,13 @@ Covers the previously-orphaned/wired components and the I/O-focus revamp:
 All CPU-only, fast, no model weights required.
 """
 
-
 from forge.self_play.data_quality import DataQualityPipeline
 from forge.self_play.io_match import io_match, io_similarity
 from forge.self_play.monitoring import SelfPlayMonitor
 from forge.self_play.replay_buffer import ReplayBuffer
 
 # ── io_match ────────────────────────────────────────────────────────────────
+
 
 class TestIoMatch:
     def test_exact_match(self):
@@ -71,6 +71,7 @@ class TestIoMatch:
 
 # ── ReplayBuffer ────────────────────────────────────────────────────────────
 
+
 class TestReplayBuffer:
     def test_add_and_len(self):
         buf = ReplayBuffer(max_size=10)
@@ -114,6 +115,7 @@ class TestReplayBuffer:
             buf.add({"tag": "recent"}, optimizer_magnitude=0.0)
         counts = {"old": 0, "recent": 0}
         import numpy as np
+
         rng_state = np.random.get_state()
         np.random.seed(0)
         try:
@@ -142,6 +144,7 @@ class TestReplayBuffer:
 
 
 # ── DataQualityPipeline ─────────────────────────────────────────────────────
+
 
 class TestDataQualityPipeline:
     def _sample(self, prompt, solution, quality=0.8):
@@ -219,11 +222,17 @@ class TestDataQualityPipeline:
 
 # ── SelfPlayMonitor ─────────────────────────────────────────────────────────
 
+
 class TestSelfPlayMonitor:
     def _healthy_step(self):
-        return {"mean_reward": 0.5, "diversity_score": 0.9,
-                "kl_divergence": 0.1, "intrinsic_reward": 0.5,
-                "grounded_reward": 0.5, "advantage_collapse_rate": 0.0}
+        return {
+            "mean_reward": 0.5,
+            "diversity_score": 0.9,
+            "kl_divergence": 0.1,
+            "intrinsic_reward": 0.5,
+            "grounded_reward": 0.5,
+            "advantage_collapse_rate": 0.0,
+        }
 
     def test_no_alerts_when_healthy(self):
         m = SelfPlayMonitor(window_size=10)
@@ -271,8 +280,7 @@ class TestSelfPlayMonitor:
         m = SelfPlayMonitor(window_size=10)
         m.record_step(self._healthy_step())
         s = m.summary()
-        for key in ("step_count", "mean_reward", "diversity_score",
-                    "kl_divergence", "intrinsic_ground_gap"):
+        for key in ("step_count", "mean_reward", "diversity_score", "kl_divergence", "intrinsic_ground_gap"):
             assert key in s
 
     def test_plot_data_lengths(self):

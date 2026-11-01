@@ -34,6 +34,7 @@ Theory:
     The network architecture defines a computation graph. We compute weights
     that make that graph implement the statistical language model directly.
 """
+
 from collections import Counter
 
 import numpy as np
@@ -43,8 +44,7 @@ import torch
 class TextToWeightsKey:
     """Synthesize model weights from raw text using analytical methods."""
 
-    def __init__(self, max_vocab: int = 65536, cooc_window: int = 4,
-                 svd_rank: int = 2048, random_seed: int = 42):
+    def __init__(self, max_vocab: int = 65536, cooc_window: int = 4, svd_rank: int = 2048, random_seed: int = 42):
         """
         Args:
             max_vocab: maximum vocabulary size
@@ -57,9 +57,9 @@ class TextToWeightsKey:
         self.svd_rank = svd_rank
         self.seed = random_seed
 
-    def synthesize(self, text_path: str, config, tokenizer,
-                   device: str = "cpu", max_lines: int = 0,
-                   progress: bool = True) -> dict:
+    def synthesize(
+        self, text_path: str, config, tokenizer, device: str = "cpu", max_lines: int = 0, progress: bool = True
+    ) -> dict:
         """Synthesize a complete state_dict from raw text.
 
         Args:
@@ -73,6 +73,7 @@ class TextToWeightsKey:
         Returns:
             state_dict ready for model.load_state_dict(assign=True)
         """
+
         def log(msg):
             if progress:
                 print(f"  [TextToWeights] {msg}", flush=True)
@@ -92,8 +93,7 @@ class TextToWeightsKey:
 
         # ── Step 1: Tokenize corpus and build co-occurrence ──
         log("Step 1: Tokenizing corpus and building co-occurrence matrix...")
-        cooc, _token_freq = self._build_cooccurrence(
-            text_path, tokenizer, vocab, self.cooc_window, max_lines, log)
+        cooc, _token_freq = self._build_cooccurrence(text_path, tokenizer, vocab, self.cooc_window, max_lines, log)
 
         # ── Step 2: SVD → embeddings ──
         log("Step 2: SVD decomposition → embedding weights...")
@@ -106,7 +106,7 @@ class TextToWeightsKey:
 
         # Embedding + head (tied)
         state["embed.weight"] = embed_weight.to(dev)
-        if getattr(config, 'tie_word_embeddings', True):
+        if getattr(config, "tie_word_embeddings", True):
             state["head.weight"] = embed_weight.to(dev)
         else:
             state["head.weight"] = embed_weight.to(dev).clone()
@@ -122,8 +122,9 @@ class TextToWeightsKey:
                 state = self._conv_layer_weights(state, prefix, d, config, dev, log)
             else:
                 # Attention layer: Q/K/V/O projections + QK norm
-                state = self._attn_layer_weights(state, prefix, d, n_heads, n_kv,
-                                                  head_dim, config, dev, embed_weight, i)
+                state = self._attn_layer_weights(
+                    state, prefix, d, n_heads, n_kv, head_dim, config, dev, embed_weight, i
+                )
             # FFN: SwiGLU gate/up/down (ALL layers have FFN, including conv)
             state = self._ffn_layer_weights(state, prefix, d, inter, dev, i)
 
@@ -135,7 +136,7 @@ class TextToWeightsKey:
         state["ln_f.weight"] = torch.ones(d, device=dev)
 
         n_params = sum(v.numel() for v in state.values())
-        log(f"Done: {len(state)} tensors, {n_params/1e6:.1f}M params")
+        log(f"Done: {len(state)} tensors, {n_params / 1e6:.1f}M params")
         return state
 
     def _build_cooccurrence(self, text_path, tokenizer, vocab, window, max_lines, log):
@@ -147,7 +148,7 @@ class TextToWeightsKey:
         total_tokens = 0
         lines_read = 0
 
-        with open(text_path, encoding='utf-8', errors='replace') as f:
+        with open(text_path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 if max_lines > 0 and lines_read >= max_lines:
                     break
@@ -177,9 +178,9 @@ class TextToWeightsKey:
                         cooc[tok, ids[k]] += weight
 
                 if lines_read % 10000 == 0:
-                    log(f"  Processed {lines_read} lines, {total_tokens/1e6:.1f}M tokens")
+                    log(f"  Processed {lines_read} lines, {total_tokens / 1e6:.1f}M tokens")
 
-        log(f"  Total: {lines_read} lines, {total_tokens/1e6:.1f}M tokens, {len(token_freq)} unique")
+        log(f"  Total: {lines_read} lines, {total_tokens / 1e6:.1f}M tokens, {len(token_freq)} unique")
         return csr_matrix(cooc), token_freq
 
     def _svd_embeddings(self, cooc, vocab, d, log):
@@ -262,8 +263,7 @@ class TextToWeightsKey:
         log(f"  Embedding: {embed.shape}, norm={np.linalg.norm(embed):.2f}")
         return torch.from_numpy(embed.astype(np.float32))
 
-    def _attn_layer_weights(self, state, prefix, d, n_heads, n_kv, head_dim,
-                             config, dev, embed_weight, layer_idx):
+    def _attn_layer_weights(self, state, prefix, d, n_heads, n_kv, head_dim, config, dev, embed_weight, layer_idx):
         """Synthesize attention layer weights from embedding statistics."""
         # Q projection: maps token embedding to query space
         # Key insight: Q should project to a space where "similar tokens attend to each other"
@@ -287,12 +287,12 @@ class TextToWeightsKey:
         state[f"{prefix}.attn.out_proj.weight"] = o_proj
 
         # QK norm weights (unit = identity)
-        if getattr(config, 'use_qk_norm', False):
+        if getattr(config, "use_qk_norm", False):
             state[f"{prefix}.attn.q_norm.weight"] = torch.ones(head_dim, device=dev)
             state[f"{prefix}.attn.k_norm.weight"] = torch.ones(head_dim, device=dev)
 
         # Biases (if any)
-        if getattr(config, 'attn_bias', False):
+        if getattr(config, "attn_bias", False):
             state[f"{prefix}.attn.q_proj.bias"] = torch.zeros(n_heads * head_dim, device=dev)
             state[f"{prefix}.attn.k_proj.bias"] = torch.zeros(n_kv * head_dim, device=dev)
             state[f"{prefix}.attn.v_proj.bias"] = torch.zeros(n_kv * head_dim, device=dev)
@@ -328,7 +328,7 @@ class TextToWeightsKey:
 
     def _conv_layer_weights(self, state, prefix, d, config, dev, log):
         """Synthesize conv layer weights using DCT basis vectors."""
-        ksize = getattr(config, 'conv_kernel_size', 3)
+        ksize = getattr(config, "conv_kernel_size", 3)
 
         # in_proj: d → 3d (B gate, C gate, x projection)
         # Use identity-like init so the conv layer starts as near-identity

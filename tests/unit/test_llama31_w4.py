@@ -7,6 +7,7 @@ Covers:
     forward correctness on CPU
   - from_checkpoint load_quantize plumbing (decision path, not full load)
 """
+
 from __future__ import annotations
 
 import math
@@ -19,6 +20,7 @@ import torch.nn as nn
 class TestLlama31Preset:
     def test_preset_shapes(self):
         from forge.config import get_config
+
         c = get_config("llama31_8b")
         assert c.vocab_size == 128256
         assert c.d_model == 4096
@@ -37,14 +39,14 @@ class TestLlama31Preset:
 
     def test_preset_independent_copy(self):
         from forge.config import MODEL_CONFIGS, get_config
+
         c = get_config("llama31_8b", device="cpu")
         c.vocab_size = 1
         assert MODEL_CONFIGS["llama31_8b"].vocab_size == 128256
 
 
 class TestLlama3RoPE:
-    def _hf_reference(self, inv_freq, factor=8.0, low_f=1.0, high_f=4.0,
-                      orig_len=8192):
+    def _hf_reference(self, inv_freq, factor=8.0, low_f=1.0, high_f=4.0, orig_len=8192):
         """Reference: transformers llama3 rope scaling (piecewise)."""
         low_wl = orig_len / low_f
         high_wl = orig_len / high_f
@@ -57,37 +59,38 @@ class TestLlama3RoPE:
 
     def test_llama3_inv_freq_matches_hf(self):
         from forge.model.layers import RotaryEmbedding
+
         dim = 128
         inv = 1.0 / (500000.0 ** (torch.arange(0, dim, 2).float() / dim))
-        cfg = {"factor": 8.0, "low_freq_factor": 1.0,
-               "high_freq_factor": 4.0,
-               "original_max_position_embeddings": 8192}
+        cfg = {"factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0, "original_max_position_embeddings": 8192}
         got = RotaryEmbedding._llama3_inv_freq(inv, cfg)
         ref = self._hf_reference(inv)
-        assert torch.allclose(got, ref, atol=1e-12), \
-            f"max diff {(got - ref).abs().max()}"
+        assert torch.allclose(got, ref, atol=1e-12), f"max diff {(got - ref).abs().max()}"
 
     def test_rope_module_uses_scaling(self):
         from forge.model.layers import RotaryEmbedding
-        cfg = {"rope_type": "llama3", "factor": 8.0,
-               "low_freq_factor": 1.0, "high_freq_factor": 4.0,
-               "original_max_position_embeddings": 8192}
-        r = RotaryEmbedding(128, max_seq_len=512, base=500000.0,
-                            rope_scaling=cfg)
-        ref = self._hf_reference(
-            1.0 / (500000.0 ** (torch.arange(0, 128, 2).float() / 128)))
+
+        cfg = {
+            "rope_type": "llama3",
+            "factor": 8.0,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192,
+        }
+        r = RotaryEmbedding(128, max_seq_len=512, base=500000.0, rope_scaling=cfg)
+        ref = self._hf_reference(1.0 / (500000.0 ** (torch.arange(0, 128, 2).float() / 128)))
         assert torch.allclose(r.inv_freq, ref, atol=1e-12)
         x = torch.randn(1, 4, 8, 128)
         out = r(x)
         assert out.shape == x.shape
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(),
-                    reason="aten::_convert_weight_to_int4pack is CUDA-only")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="aten::_convert_weight_to_int4pack is CUDA-only")
 class TestQuantizeW4:
     def _tiny_model(self):
         from forge.config import get_config
         from forge.model_loader import ModelLoader
+
         cfg = get_config("llama31_8b", device="cpu")
         cfg.vocab_size = 512
         cfg.d_model = 256
@@ -101,6 +104,7 @@ class TestQuantizeW4:
 
     def test_w4_packs_linear_weights(self):
         from forge.quant.inference_quant import quantize_model_w4
+
         model = self._tiny_model()
         n = quantize_model_w4(model, device="cuda", verbose=False)
         assert n > 0
@@ -113,6 +117,7 @@ class TestQuantizeW4:
 
     def test_w4_skips_head_and_norms(self):
         from forge.quant.inference_quant import quantize_model_w4
+
         model = self._tiny_model()
         quantize_model_w4(model, device="cuda", verbose=False)
         assert isinstance(model.head.weight, torch.Tensor)
@@ -121,6 +126,7 @@ class TestQuantizeW4:
 
     def test_w4_forward_cuda(self):
         from forge.quant.inference_quant import quantize_model_w4
+
         model = self._tiny_model()
         model.eval()
         quantize_model_w4(model, device="cuda", verbose=False)
@@ -149,10 +155,9 @@ class TestQuantizeW4:
         quantize_model_w4(model, device="cuda", verbose=False)
         w = model.q_proj.weight
         assert hasattr(w, "qdata")
-        packed_bytes = (w.qdata.numel() * w.qdata.element_size()
-                        + w.scale_and_zero.numel()
-                        * w.scale_and_zero.element_size())
+        packed_bytes = (
+            w.qdata.numel() * w.qdata.element_size() + w.scale_and_zero.numel() * w.scale_and_zero.element_size()
+        )
         b_per_param = packed_bytes / w.numel()
         # int4 = 0.5B/param + scale/zero overhead → ~0.55, well under 0.75
-        assert b_per_param < 0.75, \
-            f"packed {b_per_param:.3f} B/param — expected ~0.53"
+        assert b_per_param < 0.75, f"packed {b_per_param:.3f} B/param — expected ~0.53"

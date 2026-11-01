@@ -9,6 +9,7 @@ Tests for:
 
 All tests use small mock models on CPU — no CUDA required.
 """
+
 import pytest
 import torch
 import torch.nn as nn
@@ -24,6 +25,7 @@ from forge.engine.structured.xgrammar import XGrammarConstrainer
 # Mock tokenizer for XGrammar tests
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class MockTokenizer:
     """Simple character-level tokenizer for testing.
 
@@ -34,17 +36,8 @@ class MockTokenizer:
     def __init__(self, vocab_chars=None):
         if vocab_chars is None:
             # Include all printable ASCII + common JSON structural chars.
-            vocab_chars = (
-                ' \t\n\r'
-                '{}[]":,'
-                '0123456789'
-                '-+.eE'
-                'tfn'
-                'abcdefghijklmnopqrstuvwxyz'
-                'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-                '_-/'
-            )
-        self._vocab = [""] + list(vocab_chars)  # token 0 = empty
+            vocab_chars = ' \t\n\r{}[]":,0123456789-+.eEtfnabcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/'
+        self._vocab = ["", *list(vocab_chars)]  # token 0 = empty
         self._id_to_char = dict(enumerate(self._vocab))
         self._char_to_id = {c: i for i, c in enumerate(self._vocab)}
 
@@ -70,6 +63,7 @@ class MockTokenizer:
 # Mock model for SelfSpeculative tests
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class MockSparseModel(nn.Module):
     """Mock model that produces different tokens for sparse vs full attention.
 
@@ -80,16 +74,19 @@ class MockSparseModel(nn.Module):
     and acceptance rate (drafts rejected when sparse != full).
     """
 
-    def __init__(self, vocab_size=20, full_token=5, sparse_token=3,
-                 head_dim=8, eos_token_id=None):
+    def __init__(self, vocab_size=20, full_token=5, sparse_token=3, head_dim=8, eos_token_id=None):
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(1))
-        self.config = type("Cfg", (), {
-            "vocab_size": vocab_size,
-            "head_dim": head_dim,
-            "n_kv_heads": 1,
-            "n_layers": 1,
-        })()
+        self.config = type(
+            "Cfg",
+            (),
+            {
+                "vocab_size": vocab_size,
+                "head_dim": head_dim,
+                "n_kv_heads": 1,
+                "n_layers": 1,
+            },
+        )()
         self.eos_token_id = eos_token_id
         self.full_token = full_token
         self.sparse_token = sparse_token
@@ -97,13 +94,11 @@ class MockSparseModel(nn.Module):
         self._head_dim = head_dim
         self.call_log: list[str] = []  # 'sparse' or 'full'
 
-    def forward(self, input_ids, past_key_values=None, use_cache=False,
-                sparse_k=None, **kwargs):
+    def forward(self, input_ids, past_key_values=None, use_cache=False, sparse_k=None, **kwargs):
         batch, seq_len = input_ids.shape
         is_sparse = sparse_k is not None
         token = self.sparse_token if is_sparse else self.full_token
-        logits = torch.full(
-            (batch, seq_len, self._vocab_size), -10.0)
+        logits = torch.full((batch, seq_len, self._vocab_size), -10.0)
         logits[..., token] = 10.0
         key = torch.zeros(batch, 1, seq_len, self._head_dim)
         value = torch.zeros_like(key)
@@ -120,22 +115,24 @@ class MockDeterministicModel(nn.Module):
     def __init__(self, vocab_size=20, token=5, head_dim=8, eos_token_id=None):
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(1))
-        self.config = type("Cfg", (), {
-            "vocab_size": vocab_size,
-            "head_dim": head_dim,
-            "n_kv_heads": 1,
-            "n_layers": 1,
-        })()
+        self.config = type(
+            "Cfg",
+            (),
+            {
+                "vocab_size": vocab_size,
+                "head_dim": head_dim,
+                "n_kv_heads": 1,
+                "n_layers": 1,
+            },
+        )()
         self.eos_token_id = eos_token_id
         self.token = token
         self._vocab_size = vocab_size
         self._head_dim = head_dim
 
-    def forward(self, input_ids, past_key_values=None, use_cache=False,
-                sparse_k=None, **kwargs):
+    def forward(self, input_ids, past_key_values=None, use_cache=False, sparse_k=None, **kwargs):
         batch, seq_len = input_ids.shape
-        logits = torch.full(
-            (batch, seq_len, self._vocab_size), -10.0)
+        logits = torch.full((batch, seq_len, self._vocab_size), -10.0)
         logits[..., self.token] = 10.0
         key = torch.zeros(batch, 1, seq_len, self._head_dim)
         value = torch.zeros_like(key)
@@ -145,6 +142,7 @@ class MockDeterministicModel(nn.Module):
 # ═══════════════════════════════════════════════════════════════════════
 # R39-5: XGrammarConstrainer Tests
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestXGrammarConstrainer:
     """R39-5: Constrained decoding with XGrammar-style token masking."""
@@ -183,13 +181,13 @@ class TestXGrammarConstrainer:
                 allowed_chars.add(tok.convert_ids_to_tokens(tid))
         # Must include " and }
         assert '"' in allowed_chars, f'" should be allowed after {{, got {allowed_chars}'
-        assert '}' in allowed_chars, f'}} should be allowed after {{, got {allowed_chars}'
+        assert "}" in allowed_chars, f"}} should be allowed after {{, got {allowed_chars}"
         # Must NOT include digits, letters (except as part of whitespace), [, etc.
-        assert '0' not in allowed_chars, "digits should NOT be allowed after {"
-        assert '[' not in allowed_chars, "[ should NOT be allowed after {"
-        assert 't' not in allowed_chars, "t should NOT be allowed after {"
-        assert 'f' not in allowed_chars, "f should NOT be allowed after {"
-        assert 'n' not in allowed_chars, "n should NOT be allowed after {"
+        assert "0" not in allowed_chars, "digits should NOT be allowed after {"
+        assert "[" not in allowed_chars, "[ should NOT be allowed after {"
+        assert "t" not in allowed_chars, "t should NOT be allowed after {"
+        assert "f" not in allowed_chars, "f should NOT be allowed after {"
+        assert "n" not in allowed_chars, "n should NOT be allowed after {"
 
     def test_mask_at_start_allows_value_start_chars(self):
         """At START (no type constraint), the mask should allow all value-start chars."""
@@ -202,14 +200,14 @@ class TestXGrammarConstrainer:
             if mask[tid]:
                 allowed_chars.add(tok.convert_ids_to_tokens(tid))
         # Should allow {, [, ", digits, -, t, f, n, whitespace
-        assert '{' in allowed_chars
-        assert '[' in allowed_chars
+        assert "{" in allowed_chars
+        assert "[" in allowed_chars
         assert '"' in allowed_chars
-        assert '0' in allowed_chars
-        assert '-' in allowed_chars
-        assert 't' in allowed_chars
-        assert 'f' in allowed_chars
-        assert 'n' in allowed_chars
+        assert "0" in allowed_chars
+        assert "-" in allowed_chars
+        assert "t" in allowed_chars
+        assert "f" in allowed_chars
+        assert "n" in allowed_chars
 
     def test_mask_object_type_constrains_to_brace(self):
         """When schema type='object', START should only allow ``{``."""
@@ -220,8 +218,8 @@ class TestXGrammarConstrainer:
         for tid in range(len(tok._vocab)):
             if mask[tid]:
                 allowed_chars.add(tok.convert_ids_to_tokens(tid))
-        assert '{' in allowed_chars
-        assert '[' not in allowed_chars, "array start should NOT be allowed for object type"
+        assert "{" in allowed_chars
+        assert "[" not in allowed_chars, "array start should NOT be allowed for object type"
         assert '"' not in allowed_chars, "string start should NOT be allowed for object type"
 
     def test_state_transition_key_to_colon(self):
@@ -238,9 +236,9 @@ class TestXGrammarConstrainer:
         for tid in range(len(tok._vocab)):
             if mask[tid]:
                 allowed_chars.add(tok.convert_ids_to_tokens(tid))
-        assert ':' in allowed_chars
+        assert ":" in allowed_chars
         assert '"' not in allowed_chars, '" should NOT be allowed after key (expecting :)'
-        assert '}' not in allowed_chars, '} should NOT be allowed after key (expecting :)'
+        assert "}" not in allowed_chars, "} should NOT be allowed after key (expecting :)"
 
     def test_state_transition_colon_to_value(self):
         """After ``:``, state should allow value-start characters."""
@@ -256,8 +254,8 @@ class TestXGrammarConstrainer:
                 allowed_chars.add(tok.convert_ids_to_tokens(tid))
         # Should allow value starts: ", digits, -, t, f, n, {, [
         assert '"' in allowed_chars
-        assert '0' in allowed_chars
-        assert 't' in allowed_chars
+        assert "0" in allowed_chars
+        assert "t" in allowed_chars
 
     def test_number_masking(self):
         """Inside a number, only number chars + structural chars allowed."""
@@ -274,14 +272,14 @@ class TestXGrammarConstrainer:
             if mask[tid]:
                 allowed_chars.add(tok.convert_ids_to_tokens(tid))
         # Should allow digits, ., e, E, +, -, and structural (, })
-        assert '4' in allowed_chars, "digits should be allowed in number"
-        assert '.' in allowed_chars, ". should be allowed in number"
-        assert 'e' in allowed_chars, "e should be allowed in number"
-        assert ',' in allowed_chars, ", should be allowed (structural after value in object)"
-        assert '}' in allowed_chars, "} should be allowed (structural after value in object)"
+        assert "4" in allowed_chars, "digits should be allowed in number"
+        assert "." in allowed_chars, ". should be allowed in number"
+        assert "e" in allowed_chars, "e should be allowed in number"
+        assert "," in allowed_chars, ", should be allowed (structural after value in object)"
+        assert "}" in allowed_chars, "} should be allowed (structural after value in object)"
         # Should NOT allow letters like 'a', 'b', 'x' (not number chars)
-        assert 'a' not in allowed_chars, "arbitrary letters should NOT be allowed in number"
-        assert 'x' not in allowed_chars
+        assert "a" not in allowed_chars, "arbitrary letters should NOT be allowed in number"
+        assert "x" not in allowed_chars
 
     def test_string_masking(self):
         """Inside a string value, any printable char is allowed (string content)."""
@@ -298,11 +296,11 @@ class TestXGrammarConstrainer:
             if mask[tid]:
                 allowed_chars.add(tok.convert_ids_to_tokens(tid))
         # Should allow letters (string content) and " (to close)
-        assert 'a' in allowed_chars, "letters should be allowed in string"
+        assert "a" in allowed_chars, "letters should be allowed in string"
         assert '"' in allowed_chars, '" should be allowed to close string'
         # Inside a string, structural chars like } and , are valid string
         # content — the FSM only exits IN_STRING on '"'.
-        assert '}' in allowed_chars, "} is valid string content (FSM stays in IN_STRING)"
+        assert "}" in allowed_chars, "} is valid string content (FSM stays in IN_STRING)"
         # Non-printable / control characters should NOT be in the allowed set
         # (IN_STRING allows chr(32)..chr(126) — printable ASCII).
         assert chr(0) not in allowed_chars, "control chars should not be allowed"
@@ -326,7 +324,7 @@ class TestXGrammarConstrainer:
         for tid in range(len(tok._vocab)):
             if mask[tid]:
                 allowed_chars.add(tok.convert_ids_to_tokens(tid))
-        assert '{' in allowed_chars
+        assert "{" in allowed_chars
 
     def test_array_masking(self):
         """After ``[``, should allow value-start chars and ``]``."""
@@ -340,10 +338,10 @@ class TestXGrammarConstrainer:
         for tid in range(len(tok._vocab)):
             if mask[tid]:
                 allowed_chars.add(tok.convert_ids_to_tokens(tid))
-        assert ']' in allowed_chars, "] should be allowed after ["
+        assert "]" in allowed_chars, "] should be allowed after ["
         assert '"' in allowed_chars, '" should be allowed after ['
-        assert '0' in allowed_chars, "digits should be allowed after ["
-        assert 't' in allowed_chars, "t should be allowed after ["
+        assert "0" in allowed_chars, "digits should be allowed after ["
+        assert "t" in allowed_chars, "t should be allowed after ["
 
     def test_full_json_object_roundtrip(self):
         """Full JSON object: { "key": "value" } — mask should guide correctly."""
@@ -357,8 +355,7 @@ class TestXGrammarConstrainer:
             # The current character should be allowed by the mask.
             char_allowed = mask[tid].item()
             assert char_allowed, (
-                f"Character '{char}' (token {tid}) should be allowed "
-                f"at state {c._state} in JSON: {json_str}"
+                f"Character '{char}' (token {tid}) should be allowed at state {c._state} in JSON: {json_str}"
             )
             c.advance(tid)
         # After complete JSON, state should be END
@@ -383,6 +380,7 @@ class TestXGrammarConstrainer:
 # ═══════════════════════════════════════════════════════════════════════
 # R39-4: SelfSpeculativeSparse Tests
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestSelfSpeculativeSparse:
     """R39-4: Self-speculative decoding with sparse-attention draft."""
@@ -426,8 +424,7 @@ class TestSelfSpeculativeSparse:
         # All drafts produce token 3 (sparse), but verify expects token 5 (full).
         # So all drafts are rejected → acceptance rate = 0.
         assert strategy.acceptance_rate == 0.0, (
-            f"Acceptance rate should be 0.0 when sparse != full, "
-            f"got {strategy.acceptance_rate}"
+            f"Acceptance rate should be 0.0 when sparse != full, got {strategy.acceptance_rate}"
         )
 
     def test_acceptance_rate_one_when_sparse_equals_full(self):
@@ -439,8 +436,7 @@ class TestSelfSpeculativeSparse:
         # Drafts produce token 5 (sparse), verify expects token 5 (full).
         # All drafts accepted → acceptance rate = 1.0.
         assert strategy.acceptance_rate == 1.0, (
-            f"Acceptance rate should be 1.0 when sparse == full, "
-            f"got {strategy.acceptance_rate}"
+            f"Acceptance rate should be 1.0 when sparse == full, got {strategy.acceptance_rate}"
         )
 
     def test_lossless_output_matches_standard_decoding(self):
@@ -454,20 +450,16 @@ class TestSelfSpeculativeSparse:
         prompt = torch.tensor([[1, 2, 3]])
         # Self-speculative sparse
         strategy = SelfSpeculativeSparse(draft_len=4, sparse_k=64)
-        sparse_output = strategy.generate(
-            model_sparse, prompt, max_new_tokens=5, temperature=0.0)
+        sparse_output = strategy.generate(model_sparse, prompt, max_new_tokens=5, temperature=0.0)
         # Standard decoding
         standard = StandardDecoding()
-        standard_output = standard.generate(
-            model_standard, prompt, max_new_tokens=5, temperature=0.0)
+        standard_output = standard.generate(model_standard, prompt, max_new_tokens=5, temperature=0.0)
         # Both should produce the same tokens (all token 5).
         assert sparse_output.shape == standard_output.shape, (
-            f"Shape mismatch: sparse {sparse_output.shape} vs "
-            f"standard {standard_output.shape}"
+            f"Shape mismatch: sparse {sparse_output.shape} vs standard {standard_output.shape}"
         )
         assert torch.equal(sparse_output, standard_output), (
-            "Self-speculative sparse output should be lossless "
-            "(identical to standard full-attention decoding)"
+            "Self-speculative sparse output should be lossless (identical to standard full-attention decoding)"
         )
 
     def test_generate_returns_prompt_plus_generated(self):
@@ -480,7 +472,7 @@ class TestSelfSpeculativeSparse:
         assert output.shape[0] == 1  # batch
         assert output.shape[1] > prompt.shape[1], "Output should include generated tokens"
         # Prompt tokens should be preserved.
-        assert torch.equal(output[:, :prompt.shape[1]], prompt)
+        assert torch.equal(output[:, : prompt.shape[1]], prompt)
 
     def test_generate_respects_max_new_tokens(self):
         """Should not generate more than max_new_tokens."""
@@ -490,9 +482,7 @@ class TestSelfSpeculativeSparse:
         max_new = 8
         output = strategy.generate(model, prompt, max_new_tokens=max_new, temperature=0.0)
         n_generated = output.shape[1] - prompt.shape[1]
-        assert n_generated <= max_new, (
-            f"Generated {n_generated} tokens, expected <= {max_new}"
-        )
+        assert n_generated <= max_new, f"Generated {n_generated} tokens, expected <= {max_new}"
 
     def test_acceptance_rate_tracked_across_iterations(self):
         """Acceptance rate should accumulate across multiple iterations."""
@@ -518,6 +508,7 @@ class TestSelfSpeculativeSparse:
         ActivationError — a typo must never silently become
         StandardDecoding."""
         from forge.engine.errors import ActivationError
+
         with pytest.raises(ActivationError):
             build_decoding("nonexistent_strategy")
 
@@ -530,8 +521,7 @@ class TestSelfSpeculativeSparse:
         # With draft_len=3, each iteration drafts 3 tokens.
         # total_drafts should be a multiple of 3.
         assert strategy._total_drafts % 3 == 0, (
-            f"total_drafts ({strategy._total_drafts}) should be multiple of "
-            f"draft_len (3)"
+            f"total_drafts ({strategy._total_drafts}) should be multiple of draft_len (3)"
         )
 
     def test_sparse_k_parameter_stored(self):
@@ -566,10 +556,11 @@ class TestSelfSpeculativeSparse:
 # R39-5: XGrammar + ForgeEngine Integration Tests
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class _MockConfig:
     """Minimal config for ForgeEngine mocking."""
-    def __init__(self, vocab_size, head_dim=8, n_kv_heads=1, n_layers=1,
-                 name="mock"):
+
+    def __init__(self, vocab_size, head_dim=8, n_kv_heads=1, n_layers=1, name="mock"):
         self.vocab_size = vocab_size
         self.head_dim = head_dim
         self.n_kv_heads = n_kv_heads
@@ -583,6 +574,7 @@ class _MockModelForEngine(nn.Module):
     Used to test that the XGrammar logits processor masks out tokens
     that would produce invalid JSON.
     """
+
     def __init__(self, vocab_size, favoured_token, head_dim=8):
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(1))
@@ -591,11 +583,9 @@ class _MockModelForEngine(nn.Module):
         self._head_dim = head_dim
         self._favoured = favoured_token
 
-    def forward(self, input_ids, past_key_values=None, use_cache=False,
-                **kwargs):
+    def forward(self, input_ids, past_key_values=None, use_cache=False, **kwargs):
         batch, seq_len = input_ids.shape
-        logits = torch.full(
-            (batch, seq_len, self._vocab_size), -10.0)
+        logits = torch.full((batch, seq_len, self._vocab_size), -10.0)
         logits[..., self._favoured] = 10.0
         key = torch.zeros(batch, 1, seq_len, self._head_dim)
         value = torch.zeros_like(key)
@@ -610,6 +600,7 @@ class _CallableMockTokenizer(MockTokenizer):
     object with an ``.input_ids`` attribute.  Also adds ``__len__`` for
     ``_safe_decode_ids`` which calls ``len(self.tokenizer)``.
     """
+
     def __call__(self, text, return_tensors=None, **kwargs):
         ids = self.encode(text)
         t = torch.tensor([ids], dtype=torch.long)
@@ -622,8 +613,7 @@ class _CallableMockTokenizer(MockTokenizer):
 class TestXGrammarEngineIntegration:
     """Integration tests: XGrammarConstrainer wired into ForgeEngine."""
 
-    def _make_engine(self, vocab_chars=None, favoured_token=None,
-                     callable_tok=False):
+    def _make_engine(self, vocab_chars=None, favoured_token=None, callable_tok=False):
         """Build a minimal ForgeEngine with a mock model + tokenizer.
 
         Args:
@@ -663,14 +653,10 @@ class TestXGrammarEngineIntegration:
         # First call: generated_ids is empty → FSM at START.
         result = proc(logits, [])
         # The digit token should be masked to -inf.
-        assert result[0, digit_id] == float("-inf"), (
-            "Digit token should be masked at START for object schema"
-        )
+        assert result[0, digit_id] == float("-inf"), "Digit token should be masked at START for object schema"
         # The '{' token should NOT be masked.
         brace_id = tok.encode("{")[0]
-        assert result[0, brace_id] > float("-inf"), (
-            "'{' token should NOT be masked at START for object schema"
-        )
+        assert result[0, brace_id] > float("-inf"), "'{' token should NOT be masked at START for object schema"
 
     def test_processor_allows_brace_at_start(self):
         """At START with type='object', '{' token should survive masking."""
@@ -683,9 +669,7 @@ class TestXGrammarEngineIntegration:
         logits[0, brace_id] = 10.0
 
         result = proc(logits, [])
-        assert result[0, brace_id] == 10.0, (
-            "'{' token should not be masked at START for object schema"
-        )
+        assert result[0, brace_id] == 10.0, "'{' token should not be masked at START for object schema"
 
     def test_processor_advances_fsm_after_token(self):
         """After advancing past '{', only '"', '}', whitespace should be allowed."""
@@ -707,16 +691,10 @@ class TestXGrammarEngineIntegration:
 
         result = proc(logits1, [brace_id])
         # Digit should be masked (not allowed after '{').
-        assert result[0, digit_id] == float("-inf"), (
-            "Digit should be masked after '{' in object"
-        )
+        assert result[0, digit_id] == float("-inf"), "Digit should be masked after '{' in object"
         # '"' and '}' should NOT be masked.
-        assert result[0, quote_id] > float("-inf"), (
-            "'\"' should be allowed after '{'"
-        )
-        assert result[0, close_id] > float("-inf"), (
-            "'}' should be allowed after '{'"
-        )
+        assert result[0, quote_id] > float("-inf"), "'\"' should be allowed after '{'"
+        assert result[0, close_id] > float("-inf"), "'}' should be allowed after '{'"
 
     def test_processor_handles_1d_logits(self):
         """Processor should handle 1-D logits (vocab_size,) without error."""
@@ -736,57 +714,48 @@ class TestXGrammarEngineIntegration:
 
     def test_generate_with_json_schema_does_not_raise(self):
         """generate() with json_schema should run without error on mock model."""
-        engine, tok, model = self._make_engine(
-            favoured_token=None, callable_tok=True)
+        engine, tok, model = self._make_engine(favoured_token=None, callable_tok=True)
         # Favoured token = '{' so the model produces valid JSON object start.
         brace_id = tok.encode("{")[0]
         model._favoured = brace_id
 
         schema = {"type": "object", "properties": {"x": {"type": "string"}}}
         # Use a very small max_new_tokens to keep the test fast.
-        result = engine.generate(
-            "test", max_new_tokens=3, temperature=0.0,
-            json_schema=schema, finish_sentence=False)
+        result = engine.generate("test", max_new_tokens=3, temperature=0.0, json_schema=schema, finish_sentence=False)
         assert isinstance(result, str)
 
     def test_generate_raw_with_json_schema_does_not_raise(self):
         """generate_raw() with json_schema should run without error."""
-        engine, tok, model = self._make_engine(
-            favoured_token=None, callable_tok=True)
+        engine, tok, model = self._make_engine(favoured_token=None, callable_tok=True)
         brace_id = tok.encode("{")[0]
         model._favoured = brace_id
 
         schema = {"type": "object", "properties": {"x": {"type": "string"}}}
-        result = engine.generate_raw(
-            "test", max_new_tokens=3, temperature=0.0,
-            json_schema=schema)
+        result = engine.generate_raw("test", max_new_tokens=3, temperature=0.0, json_schema=schema)
         assert isinstance(result, str)
 
     def test_generate_raw_json_schema_takes_precedence_over_processor(self):
         """When both json_schema and logits_processor are given, schema wins."""
-        engine, tok, model = self._make_engine(
-            favoured_token=None, callable_tok=True)
+        engine, tok, model = self._make_engine(favoured_token=None, callable_tok=True)
         brace_id = tok.encode("{")[0]
         model._favoured = brace_id
 
         # A no-op processor that should be overridden.
         def dummy_proc(logits, ids):
             return logits
+
         schema = {"type": "object"}
         result = engine.generate_raw(
-            "test", max_new_tokens=2, temperature=0.0,
-            logits_processor=dummy_proc, json_schema=schema)
+            "test", max_new_tokens=2, temperature=0.0, logits_processor=dummy_proc, json_schema=schema
+        )
         assert isinstance(result, str)
 
     def test_generate_without_json_schema_unchanged(self):
         """generate() without json_schema should use the normal path."""
-        engine, tok, model = self._make_engine(
-            favoured_token=None, callable_tok=True)
+        engine, tok, model = self._make_engine(favoured_token=None, callable_tok=True)
         brace_id = tok.encode("{")[0]
         model._favoured = brace_id
 
         # No json_schema → normal decoding path.
-        result = engine.generate(
-            "test", max_new_tokens=2, temperature=0.0,
-            finish_sentence=False)
+        result = engine.generate("test", max_new_tokens=2, temperature=0.0, finish_sentence=False)
         assert isinstance(result, str)

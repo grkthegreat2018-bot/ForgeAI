@@ -3,6 +3,7 @@
 Tests run on CPU. Uses CPU-safe dtypes (float32, float16, bfloat16) to
 avoid fp8 CPU limitations in some torch builds.
 """
+
 from __future__ import annotations
 
 import torch
@@ -11,6 +12,7 @@ from forge.engine.kv.matryoshka_kv import MatryoshkaKVCache
 from forge.engine.kv_backend import build_kv_cache
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
+
 
 def _make_cache(
     n_levels: int = 3,
@@ -30,8 +32,12 @@ def _make_cache(
         importance_metric=importance_metric,
     )
     cache.init(
-        n_heads=8, head_dim=head_dim, n_kv_heads=n_kv,
-        max_seq_len=max_seq_len, device="cpu", dtype=torch.float32,
+        n_heads=8,
+        head_dim=head_dim,
+        n_kv_heads=n_kv,
+        max_seq_len=max_seq_len,
+        device="cpu",
+        dtype=torch.float32,
     )
     return cache
 
@@ -46,6 +52,7 @@ def _make_kv(batch=2, n_kv=4, seq=8, head_dim=64, seed=42):
 
 # ── Tests ───────────────────────────────────────────────────────────────────
 
+
 class TestMatryoshkaKVBasic:
     """Basic append/get and shape verification."""
 
@@ -57,7 +64,7 @@ class TestMatryoshkaKVBasic:
 
         # Append in chunks of 1 (decode-style)
         for i in range(8):
-            cache.append(k[:, :, i:i+1, :], v[:, :, i:i+1, :], position=i)
+            cache.append(k[:, :, i : i + 1, :], v[:, :, i : i + 1, :], position=i)
 
         k_out, v_out = cache.get(positions=None)
         assert k_out is not None, "get() returned None after append"
@@ -124,9 +131,7 @@ class TestMatryoshkaKVCompression:
         cache = _make_cache(head_dim=64, dtypes=[torch.float32, torch.float16, torch.bfloat16])
         info = cache.info()
         # 256 / 160 = 1.6
-        assert abs(info["compression"] - 1.6) < 0.01, (
-            f"Expected compression ~1.6, got {info['compression']}"
-        )
+        assert abs(info["compression"] - 1.6) < 0.01, f"Expected compression ~1.6, got {info['compression']}"
 
     def test_info_has_levels(self):
         """info() includes n_levels and dims_per_level."""
@@ -169,21 +174,13 @@ class TestMatryoshkaKVReconstruction:
         # Cosine similarity per token (flatten over head_dim)
         k_flat = k.reshape(-1, head_dim)
         k_out_flat = k_out.reshape(-1, head_dim)
-        cos_sim_k = torch.nn.functional.cosine_similarity(
-            k_flat, k_out_flat, dim=-1
-        )
-        assert cos_sim_k.mean() > 0.9, (
-            f"K cosine similarity too low: {cos_sim_k.mean().item():.4f}"
-        )
+        cos_sim_k = torch.nn.functional.cosine_similarity(k_flat, k_out_flat, dim=-1)
+        assert cos_sim_k.mean() > 0.9, f"K cosine similarity too low: {cos_sim_k.mean().item():.4f}"
 
         v_flat = v.reshape(-1, head_dim)
         v_out_flat = v_out.reshape(-1, head_dim)
-        cos_sim_v = torch.nn.functional.cosine_similarity(
-            v_flat, v_out_flat, dim=-1
-        )
-        assert cos_sim_v.mean() > 0.9, (
-            f"V cosine similarity too low: {cos_sim_v.mean().item():.4f}"
-        )
+        cos_sim_v = torch.nn.functional.cosine_similarity(v_flat, v_out_flat, dim=-1)
+        assert cos_sim_v.mean() > 0.9, f"V cosine similarity too low: {cos_sim_v.mean().item():.4f}"
 
     def test_reconstruction_with_quantization(self):
         """Even with lower precision on some levels, reconstruction is good."""
@@ -199,13 +196,9 @@ class TestMatryoshkaKVReconstruction:
         k_out, _v_out = cache.get(positions=None)
         k_flat = k.reshape(-1, head_dim)
         k_out_flat = k_out.reshape(-1, head_dim)
-        cos_sim = torch.nn.functional.cosine_similarity(
-            k_flat, k_out_flat, dim=-1
-        )
+        cos_sim = torch.nn.functional.cosine_similarity(k_flat, k_out_flat, dim=-1)
         # float16 has enough precision for cosine sim > 0.95
-        assert cos_sim.mean() > 0.95, (
-            f"K cosine similarity too low with quantization: {cos_sim.mean().item():.4f}"
-        )
+        assert cos_sim.mean() > 0.95, f"K cosine similarity too low with quantization: {cos_sim.mean().item():.4f}"
 
 
 class TestMatryoshkaKVClear:
@@ -345,8 +338,12 @@ class TestMatryoshkaKVFactory:
         """Factory-built cache can be init'd and used."""
         cache = build_kv_cache("matryoshka")
         cache.init(
-            n_heads=8, head_dim=64, n_kv_heads=4,
-            max_seq_len=128, device="cpu", dtype=torch.float32,
+            n_heads=8,
+            head_dim=64,
+            n_kv_heads=4,
+            max_seq_len=128,
+            device="cpu",
+            dtype=torch.float32,
         )
         k, v = _make_kv(seq=4, head_dim=64)
         cache.append(k, v, position=0)
@@ -366,8 +363,12 @@ class TestMatryoshkaKVConfig:
             dtypes_per_level=[torch.float32, torch.float16],
         )
         cache.init(
-            n_heads=8, head_dim=head_dim, n_kv_heads=4,
-            max_seq_len=128, device="cpu", dtype=torch.float32,
+            n_heads=8,
+            head_dim=head_dim,
+            n_kv_heads=4,
+            max_seq_len=128,
+            device="cpu",
+            dtype=torch.float32,
         )
         info = cache.info()
         assert info["dims_per_level"] == [16, 48]
@@ -382,8 +383,12 @@ class TestMatryoshkaKVConfig:
             dtypes_per_level=[torch.float32],
         )
         cache.init(
-            n_heads=8, head_dim=head_dim, n_kv_heads=4,
-            max_seq_len=128, device="cpu", dtype=torch.float32,
+            n_heads=8,
+            head_dim=head_dim,
+            n_kv_heads=4,
+            max_seq_len=128,
+            device="cpu",
+            dtype=torch.float32,
         )
         k, v = _make_kv(seq=8, head_dim=head_dim)
         cache.append(k, v, position=0)
@@ -397,8 +402,12 @@ class TestMatryoshkaKVConfig:
         head_dim = 128
         cache = MatryoshkaKVCache(n_levels=3)
         cache.init(
-            n_heads=8, head_dim=head_dim, n_kv_heads=4,
-            max_seq_len=256, device="cpu", dtype=torch.float32,
+            n_heads=8,
+            head_dim=head_dim,
+            n_kv_heads=4,
+            max_seq_len=256,
+            device="cpu",
+            dtype=torch.float32,
         )
         info = cache.info()
         assert sum(info["dims_per_level"]) == head_dim

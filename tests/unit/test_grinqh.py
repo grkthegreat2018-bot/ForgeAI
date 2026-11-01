@@ -1,4 +1,5 @@
 """Smoke test for GRINQH quantization."""
+
 from __future__ import annotations
 
 import torch
@@ -53,8 +54,7 @@ def test_model_replacement():
         nn.ReLU(),
         nn.Linear(64, 32),
     )
-    n = quantize_model_grinqh(model, group_size=128, target_effective_bits=2.5,
-                              verbose=False)
+    n = quantize_model_grinqh(model, group_size=128, target_effective_bits=2.5, verbose=False)
     assert n == 2, f"expected 2 layers, got {n}"
     assert isinstance(model[0], GRINQHLinear)
     assert isinstance(model[2], GRINQHLinear)

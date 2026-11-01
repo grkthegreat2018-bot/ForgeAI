@@ -7,11 +7,11 @@ Validates the specific bugs fixed in the refactor commit:
 4. FORGE optimizer hook registration is AFTER optimizer creation (not before)
 5. Gradient checkpointing warns on unknown strategy
 """
+
 import sys
-
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
-
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch
 
@@ -21,6 +21,7 @@ class TestLoadAnchorCached:
 
     def test_function_exists(self):
         from forge.training.training_utils import load_anchor_cached
+
         assert callable(load_anchor_cached)
 
     def test_caches_by_path_mtime(self, tmp_path):
@@ -41,7 +42,7 @@ class TestLoadAnchorCached:
         assert len(_ANCHOR_CACHE) == 1
 
         # Second load — cache hit (same mtime)
-        sd2 = load_anchor_cached(anchor_path)
+        load_anchor_cached(anchor_path)
         assert len(_ANCHOR_CACHE) == 1  # no new entry
 
     def test_lru_eviction(self, tmp_path):
@@ -71,6 +72,7 @@ class TestRestoreEmaImportable:
 
     def test_importable(self):
         from forge.training.training_utils import restore_ema
+
         assert callable(restore_ema)
 
     def test_restores_weights(self):
@@ -129,7 +131,7 @@ class TestGradientCheckpointingWarning:
         try:
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
-                model = ConfigurableResearchLLM(cfg)
+                ConfigurableResearchLLM(cfg)
                 # Check that a warning was issued
                 assert any("Unknown gradient checkpointing" in str(warning.message) for warning in w), (
                     f"Expected warning about unknown strategy, got: {[str(x.message) for x in w]}"
@@ -155,7 +157,7 @@ class TestGradientCheckpointingWarning:
         try:
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
-                model = ConfigurableResearchLLM(cfg)
+                ConfigurableResearchLLM(cfg)
                 # No warning about unknown strategy
                 assert not any("Unknown gradient checkpointing" in str(warning.message) for warning in w), (
                     f"Unexpected warning for valid strategy 'all': {[str(x.message) for x in w]}"

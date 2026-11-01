@@ -17,6 +17,7 @@ This test verifies the wrapper-level delegation: when cu_seqlens is provided,
 the original (un-patched) forward is called with it, and no TypeError is
 raised. CPU-only, no real weights.
 """
+
 import torch
 import torch.nn as nn
 
@@ -49,17 +50,30 @@ class _MockAttention(nn.Module):
         # RoPE stub with cos/sin caches the fused path reads.
         cos = torch.zeros(16, head_dim)
         sin = torch.zeros(16, head_dim)
-        self.rope = type("_R", (), {
-            "cos_cached": cos, "sin_cached": sin,
-            "base": 10000.0, "dim": head_dim,
-        })()
+        self.rope = type(
+            "_R",
+            (),
+            {
+                "cos_cached": cos,
+                "sin_cached": sin,
+                "base": 10000.0,
+                "dim": head_dim,
+            },
+        )()
         # Record calls to the original forward.
         self.last_kwargs = None
 
-    def forward(self, x, past_key_value=None, use_cache=False,
-                preallocated_cache=None, layer_idx=0,
-                attention_bias=None, position_ids=None,
-                cu_seqlens=None):
+    def forward(
+        self,
+        x,
+        past_key_value=None,
+        use_cache=False,
+        preallocated_cache=None,
+        layer_idx=0,
+        attention_bias=None,
+        position_ids=None,
+        cu_seqlens=None,
+    ):
         self.last_kwargs = {"cu_seqlens": cu_seqlens, "use_cache": use_cache}
         _B, _T, _C = x.shape
         return x, (past_key_value if use_cache else None)

@@ -13,6 +13,7 @@ Covers:
 
 All CPU-only — engine is a MagicMock, the model is a tiny stub.
 """
+
 from unittest.mock import MagicMock
 
 import torch
@@ -31,11 +32,11 @@ _THINK_TAIL = "<|im_start|>assistant\n<think>\n"
 
 # ── BatchedDecoding EOS ─────────────────────────────────────────────
 
+
 class _EOSModel:
     """Fake model whose logits always argmax to <|im_end|> (519)."""
 
-    def __call__(self, ids, attention_mask=None, past_key_values=None,
-                 use_cache=False, **_kw):
+    def __call__(self, ids, attention_mask=None, past_key_values=None, use_cache=False, **_kw):
         B, L = ids.shape
         logits = torch.zeros(B, L, 600)
         logits[..., 519] = 10.0
@@ -48,10 +49,8 @@ class TestBatchedDecodingEOS:
         bd = BatchedDecoding(eos_token_ids={2, 519})
         prompts = [torch.tensor([[1, 100, 200]]), torch.tensor([[1, 300]])]
         out = bd.generate_batch(
-            _EOSModel(), prompts,
-            max_tokens_list=[50, 50],
-            temperatures=[0.0, 0.0],
-            top_ps=[1.0, 1.0])
+            _EOSModel(), prompts, max_tokens_list=[50, 50], temperatures=[0.0, 0.0], top_ps=[1.0, 1.0]
+        )
         # prompt + exactly one EOS token each — early stop fired
         assert out[0].shape[1] == 4
         assert out[1].shape[1] == 3
@@ -68,13 +67,14 @@ class TestBatchedDecodingEOS:
 
 # ── Curriculum engine routing ───────────────────────────────────────
 
+
 def _make_curriculum(tmp_path, engine=None):
     import types
-    tok = types.SimpleNamespace(
-        encode=lambda s, add_special_tokens=False: [10, 542, 11, 12])
+
+    tok = types.SimpleNamespace(encode=lambda s, add_special_tokens=False: [10, 542, 11, 12])
     return InfiniteCurriculum(
-        model=None, tokenizer=tok, device="cpu",
-        max_gen_tokens=32, task_queue_dir=str(tmp_path), engine=engine)
+        model=None, tokenizer=tok, device="cpu", max_gen_tokens=32, task_queue_dir=str(tmp_path), engine=engine
+    )
 
 
 class TestEngineGeneration:
@@ -116,7 +116,7 @@ class TestEngineGeneration:
         eng.generate_batch.assert_called_once()
         prompts = eng.generate_batch.call_args[0][0]
         assert len(prompts) == 3
-        for p, raw in zip(prompts, ["p1", "p2", "p3"]):
+        for p, raw in zip(prompts, ["p1", "p2", "p3"], strict=False):
             assert "<|im_start|>user\n" in p
             assert raw in p
             assert p.endswith(_THINK_TAIL)
@@ -129,8 +129,7 @@ class TestEngineGeneration:
         assert "double it" in p
         # Raw fallback stays the legacy completion prompt
         cur_raw = _make_curriculum(tmp_path, engine=None)
-        p_raw = cur_raw._propose_prompt("math", "easy", "(n: int) -> int",
-                                        "double it")
+        p_raw = cur_raw._propose_prompt("math", "easy", "(n: int) -> int", "double it")
         assert "def solve" in p_raw
         assert p_raw != p
 
@@ -151,15 +150,22 @@ class TestEngineGeneration:
 class TestSolveTasksBatch:
     def _tasks(self):
         return [
-            ProposedTask(id="t1", domain="math", difficulty="easy",
-                         description="add one",
-                         signature="(n: int) -> int",
-                         test_cases=[{"args": (1,), "expected": 2},
-                                     {"args": (5,), "expected": 6}]),
-            ProposedTask(id="t2", domain="math", difficulty="easy",
-                         description="double it",
-                         signature="(n: int) -> int",
-                         test_cases=[{"args": (3,), "expected": 6}]),
+            ProposedTask(
+                id="t1",
+                domain="math",
+                difficulty="easy",
+                description="add one",
+                signature="(n: int) -> int",
+                test_cases=[{"args": (1,), "expected": 2}, {"args": (5,), "expected": 6}],
+            ),
+            ProposedTask(
+                id="t2",
+                domain="math",
+                difficulty="easy",
+                description="double it",
+                signature="(n: int) -> int",
+                test_cases=[{"args": (3,), "expected": 6}],
+            ),
         ]
 
     def test_one_batch_call_and_correct_solutions(self, tmp_path):
@@ -183,10 +189,8 @@ class TestSolveTasksBatch:
 
     def test_solve_prompt_is_instruction_in_engine_mode(self, tmp_path):
         eng = MagicMock()
-        eng.generate_batch.return_value = [
-            "```python\ndef solve(n):\n    return n + 1\n```"]
-        eng.generate_raw.return_value = (
-            "```python\ndef solve(n):\n    return n + 1\n```")
+        eng.generate_batch.return_value = ["```python\ndef solve(n):\n    return n + 1\n```"]
+        eng.generate_raw.return_value = "```python\ndef solve(n):\n    return n + 1\n```"
         cur = _make_curriculum(tmp_path, engine=eng)
         cur.solve_tasks_batch(self._tasks()[:1])
         prompt = eng.generate_batch.call_args[0][0][0]
@@ -258,8 +262,7 @@ def solve(n: int) -> int:
         """A proposal that declares WRONG expectations is still valid —
         the executor's outputs replace them (was: rejected as broken)."""
         cur = _make_curriculum(tmp_path)
-        raw = self.SPEC.replace(
-            "# solve([])", "# solve([]) == 999")
+        raw = self.SPEC.replace("# solve([])", "# solve([]) == 999")
         task = cur._parse_proposal(raw, "math", "easy", "induction")
         assert task is not None
         # declared pair parsed, remaining 3 lines pending
@@ -278,23 +281,26 @@ class TestCloneGuards:
         cur = _make_curriculum(tmp_path)
         cur._mark_description_seen("Return the number of even digits in n.")
         # Different wording, same content words → clone
-        assert cur._is_seen_description(
-            "Return the sum of even digits in n") is True
+        assert cur._is_seen_description("Return the sum of even digits in n") is True
         # Genuinely different task → not a clone
-        assert cur._is_seen_description(
-            "Check if a binary tree is balanced") is False
+        assert cur._is_seen_description("Check if a binary tree is balanced") is False
 
     def test_functional_fingerprint_clone(self, tmp_path):
         cur = _make_curriculum(tmp_path)
         task = ProposedTask(
-            id="t", domain="math", difficulty="easy", description="d",
+            id="t",
+            domain="math",
+            difficulty="easy",
+            description="d",
             signature="(n: int) -> int",
-            test_cases=[{"args": (1,), "expected": 0},
-                        {"args": (2,), "expected": 1}])
-        impl_a = ("def solve(n):\n    if n == 0:\n        return 1\n"
-                  "    c = 0\n    n = abs(n)\n    while n:\n"
-                  "        d = n % 10\n        if d % 2 == 0:\n"
-                  "            c += 1\n        n //= 10\n    return c")
+            test_cases=[{"args": (1,), "expected": 0}, {"args": (2,), "expected": 1}],
+        )
+        impl_a = (
+            "def solve(n):\n    if n == 0:\n        return 1\n"
+            "    c = 0\n    n = abs(n)\n    while n:\n"
+            "        d = n % 10\n        if d % 2 == 0:\n"
+            "            c += 1\n        n //= 10\n    return c"
+        )
         impl_b = "def solve(n):\n    return sum(1 for ch in str(abs(n)) if int(ch) % 2 == 0)"
         fa = cur._functional_fingerprint(impl_a, task)
         fb = cur._functional_fingerprint(impl_b, task)
@@ -303,14 +309,15 @@ class TestCloneGuards:
     def test_distinct_functions_differ(self, tmp_path):
         cur = _make_curriculum(tmp_path)
         task = ProposedTask(
-            id="t", domain="math", difficulty="easy", description="d",
+            id="t",
+            domain="math",
+            difficulty="easy",
+            description="d",
             signature="(n: int) -> int",
-            test_cases=[{"args": (1,), "expected": 0},
-                        {"args": (2,), "expected": 1}])
-        fp1 = cur._functional_fingerprint(
-            "def solve(n):\n    return n * 2", task)
-        fp2 = cur._functional_fingerprint(
-            "def solve(n):\n    return n + 2", task)
+            test_cases=[{"args": (1,), "expected": 0}, {"args": (2,), "expected": 1}],
+        )
+        fp1 = cur._functional_fingerprint("def solve(n):\n    return n * 2", task)
+        fp2 = cur._functional_fingerprint("def solve(n):\n    return n + 2", task)
         assert fp1 != fp2
 
     def test_think_cap_safe_on_inference_tensors(self, tmp_path):
@@ -322,4 +329,4 @@ class TestCloneGuards:
             logits = torch.zeros(1, 600)
             out = proc(logits, [])
         assert out[0, 518].item() == float("-inf")  # im_start banned
-        assert out[0, 519].item() == 0.0            # eos NOT banned
+        assert out[0, 519].item() == 0.0  # eos NOT banned

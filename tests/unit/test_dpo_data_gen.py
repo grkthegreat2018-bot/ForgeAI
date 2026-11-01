@@ -1,4 +1,5 @@
 """Test DPO preference data generation: candidate scoring, doom-loop detection, pair construction."""
+
 import os
 import sys
 
@@ -45,10 +46,12 @@ def test_construct_pair_normal():
 def test_construct_pair_with_doom_loop():
     """Doom-loop candidate should always be rejected, even if judge score is high."""
     # The looping candidate has a high judge score but should still be rejected
-    loop_text = "the answer is the answer is the answer is the answer is the answer is " \
-                "the answer is the answer is the answer is the answer is the answer is " \
-                "the answer is the answer is the answer is the answer is the answer is " \
-                "the answer is the answer is the answer is the answer is the answer is"
+    loop_text = (
+        "the answer is the answer is the answer is the answer is the answer is "
+        "the answer is the answer is the answer is the answer is the answer is "
+        "the answer is the answer is the answer is the answer is the answer is "
+        "the answer is the answer is the answer is the answer is the answer is"
+    )
     candidates = [
         Candidate(text="Good non-looping answer.", temperature=0.8, judge_score=7.0),
         Candidate(text=loop_text, temperature=0.8, judge_score=9.0),  # high score but loops
@@ -67,10 +70,12 @@ def test_construct_pair_with_doom_loop():
 
 def test_construct_pair_all_loops():
     """If all candidates are doom-loops, return None (no valid pair)."""
-    loop_text = "the answer is the answer is the answer is the answer is the answer is " \
-                "the answer is the answer is the answer is the answer is the answer is " \
-                "the answer is the answer is the answer is the answer is the answer is " \
-                "the answer is the answer is the answer is the answer is the answer is"
+    loop_text = (
+        "the answer is the answer is the answer is the answer is the answer is "
+        "the answer is the answer is the answer is the answer is the answer is "
+        "the answer is the answer is the answer is the answer is the answer is "
+        "the answer is the answer is the answer is the answer is the answer is"
+    )
     candidates = [
         Candidate(text=loop_text, temperature=0.8, judge_score=5.0),
         Candidate(text=loop_text, temperature=0.8, judge_score=3.0),
@@ -107,6 +112,7 @@ def test_construct_pair_greedy_vs_temp():
 def test_load_prompts():
     """Load prompts from a JSONL file."""
     import tempfile
+
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
         f.write('{"prompt": "What is 2+2?", "response": "4"}\n')
         f.write('{"prompt": "What is 3+3?", "response": "6"}\n')

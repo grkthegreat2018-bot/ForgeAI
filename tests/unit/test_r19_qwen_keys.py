@@ -3,9 +3,11 @@
 QSA (Qwen Sparse Attention), Gated Residual, N-gram Embedding.
 All run on GPU (CUDA) with fp32. CPU fallback only if CUDA unavailable.
 """
-import sys
 
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch
 
@@ -14,6 +16,7 @@ _DTYPE = torch.float32
 
 
 # ── R19a: QSA (Qwen Sparse Attention) ───────────────────────────────────────
+
 
 def test_qsa_identity_warm_start():
     """QSA with budget=all blocks should match full attention at init."""
@@ -24,9 +27,14 @@ def test_qsa_identity_warm_start():
     B, T = 2, 64
 
     layer = QSALayer(
-        d_model=d_model, n_heads=n_heads, n_kv_heads=n_kv_heads,
-        head_dim=head_dim, block_size=4, budget_blocks=64,  # all blocks
-        n_indexer_heads=4, indexer_head_dim=64,
+        d_model=d_model,
+        n_heads=n_heads,
+        n_kv_heads=n_kv_heads,
+        head_dim=head_dim,
+        block_size=4,
+        budget_blocks=64,  # all blocks
+        n_indexer_heads=4,
+        indexer_head_dim=64,
     ).to(_DEV, _DTYPE)
 
     x = torch.randn(B, T, d_model, device=_DEV, dtype=_DTYPE)
@@ -49,14 +57,22 @@ def test_qsa_sparse_vs_full():
 
     # Full attention (budget = all blocks)
     layer_full = QSALayer(
-        d_model=d_model, n_heads=n_heads, n_kv_heads=n_kv_heads,
-        head_dim=head_dim, block_size=4, budget_blocks=32,  # all 32 blocks
+        d_model=d_model,
+        n_heads=n_heads,
+        n_kv_heads=n_kv_heads,
+        head_dim=head_dim,
+        block_size=4,
+        budget_blocks=32,  # all 32 blocks
     ).to(_DEV, _DTYPE)
 
     # Sparse attention (budget = 8 blocks out of 32)
     layer_sparse = QSALayer(
-        d_model=d_model, n_heads=n_heads, n_kv_heads=n_kv_heads,
-        head_dim=head_dim, block_size=4, budget_blocks=8,  # only 8/32 blocks
+        d_model=d_model,
+        n_heads=n_heads,
+        n_kv_heads=n_kv_heads,
+        head_dim=head_dim,
+        block_size=4,
+        budget_blocks=8,  # only 8/32 blocks
     ).to(_DEV, _DTYPE)
 
     # Copy weights so the only difference is the budget
@@ -78,9 +94,7 @@ def test_qsa_key_forward_reverse():
     from forge.keys.attention.qsa_key import QSAKey
 
     key = QSAKey(block_size=4, budget_blocks=512)
-    result = key.forward({
-        "d_model": 256, "n_heads": 8, "n_kv_heads": 2, "head_dim": 32
-    })
+    result = key.forward({"d_model": 256, "n_heads": 8, "n_kv_heads": 2, "head_dim": 32})
     assert result.success
     assert "indexer_q_weight" in result.weights
     assert "indexer_k_weight" in result.weights
@@ -96,6 +110,7 @@ def test_qsa_key_forward_reverse():
 
 # ── R19b: Gated Residual ────────────────────────────────────────────────────
 
+
 def test_gated_residual_identity_warm_start():
     """GR at init should be near-identity (branch 0 active, others disabled)."""
     from forge.keys.architecture.gated_residual_key import GatedResidualLayer
@@ -105,7 +120,9 @@ def test_gated_residual_identity_warm_start():
     B, T = 2, 32
 
     layer = GatedResidualLayer(
-        d_model=d_model, n_branches=n_branches, bottleneck_rank=rank,
+        d_model=d_model,
+        n_branches=n_branches,
+        bottleneck_rank=rank,
     ).to(_DEV, _DTYPE)
 
     x = torch.randn(B, T, d_model, device=_DEV, dtype=_DTYPE)
@@ -132,7 +149,9 @@ def test_gated_residual_branches_active():
     B, T = 2, 32
 
     layer = GatedResidualLayer(
-        d_model=d_model, n_branches=n_branches, bottleneck_rank=rank,
+        d_model=d_model,
+        n_branches=n_branches,
+        bottleneck_rank=rank,
     ).to(_DEV, _DTYPE)
 
     # Open all write gates
@@ -171,6 +190,7 @@ def test_gated_residual_key():
 
 # ── R19c: N-gram Embedding ──────────────────────────────────────────────────
 
+
 def test_ngram_embedding_identity_warm_start():
     """N-gram embedding at init (all zeros) should not change token embeddings."""
     from forge.keys.knowledge.ngram_embedding_key import NGramEmbeddingLayer
@@ -180,8 +200,12 @@ def test_ngram_embedding_identity_warm_start():
 
     # Use GPU table (not host) for test simplicity
     layer = NGramEmbeddingLayer(
-        vocab_size=vocab_size, d_model=d_model, n_gram=n_gram,
-        table_size=table_size, device=str(_DEV), host_table=False,
+        vocab_size=vocab_size,
+        d_model=d_model,
+        n_gram=n_gram,
+        table_size=table_size,
+        device=str(_DEV),
+        host_table=False,
     ).to(_DEV)
 
     input_ids = torch.randint(0, vocab_size, (B, T), device=_DEV)
@@ -204,8 +228,12 @@ def test_ngram_embedding_nonzero():
     B, T = 2, 32
 
     layer = NGramEmbeddingLayer(
-        vocab_size=vocab_size, d_model=d_model, n_gram=n_gram,
-        table_size=table_size, device=str(_DEV), host_table=False,
+        vocab_size=vocab_size,
+        d_model=d_model,
+        n_gram=n_gram,
+        table_size=table_size,
+        device=str(_DEV),
+        host_table=False,
     ).to(_DEV)
 
     # Fill table with random values
@@ -231,13 +259,16 @@ def test_ngram_embedding_host_offload():
     B, T = 2, 32
 
     layer = NGramEmbeddingLayer(
-        vocab_size=vocab_size, d_model=d_model, n_gram=n_gram,
-        table_size=table_size, device=str(_DEV), host_table=True,
+        vocab_size=vocab_size,
+        d_model=d_model,
+        n_gram=n_gram,
+        table_size=table_size,
+        device=str(_DEV),
+        host_table=True,
     )
 
     # Table should be on CPU
-    assert layer.ngram_table.data.device.type == "cpu", \
-        "Host table should be on CPU"
+    assert layer.ngram_table.data.device.type == "cpu", "Host table should be on CPU"
 
     # Fill with random values
     with torch.no_grad():
@@ -278,6 +309,7 @@ def test_ngram_embedding_key():
 
 # ── VRAM and parameter analysis ─────────────────────────────────────────────
 
+
 def test_r19_vram_analysis():
     """Analyze VRAM usage of each R19 key at LFM2.5-1.2B scale."""
     print("\n  R19 VRAM/param analysis (LFM2.5-1.2B scale, d_model=2048):")
@@ -292,8 +324,10 @@ def test_r19_vram_analysis():
     qsa_per_layer = d_model * (4 * 128) + d_model * 128
     qsa_total = qsa_per_layer * 6
     qsa_vram_mb = qsa_total * 2 / 1024 / 1024  # bf16
-    print(f"  QSA indexer:      {qsa_per_layer/1e6:.2f}M/layer × 6 = "
-          f"{qsa_total/1e6:.2f}M params ({qsa_vram_mb:.1f} MB bf16)")
+    print(
+        f"  QSA indexer:      {qsa_per_layer / 1e6:.2f}M/layer × 6 = "
+        f"{qsa_total / 1e6:.2f}M params ({qsa_vram_mb:.1f} MB bf16)"
+    )
 
     # Gated Residual: 4 branches, rank=256
     # Per layer: 4 × (read_gate_down + read_gate_up + write_gate +
@@ -303,8 +337,10 @@ def test_r19_vram_analysis():
     gr_per_layer = 4 * (4 * d_model * 256 + d_model)
     gr_total = gr_per_layer * 16  # all 16 layers
     gr_vram_mb = gr_total * 2 / 1024 / 1024
-    print(f"  Gated Residual:   {gr_per_layer/1e6:.2f}M/layer × 16 = "
-          f"{gr_total/1e6:.2f}M params ({gr_vram_mb:.1f} MB bf16)")
+    print(
+        f"  Gated Residual:   {gr_per_layer / 1e6:.2f}M/layer × 16 = "
+        f"{gr_total / 1e6:.2f}M params ({gr_vram_mb:.1f} MB bf16)"
+    )
 
     # N-gram Embedding: table_size=2M, d_model=2048
     # Total: 2M * 2048 = 4.1B params — but on HOST RAM, not GPU VRAM
@@ -312,15 +348,15 @@ def test_r19_vram_analysis():
     ngram_params = ngram_table_size * d_model
     ngram_host_gb = ngram_params * 4 / 1024**3  # fp32 on host
     ngram_gpu_mb = 0  # table is on host, only batch embeddings on GPU
-    print(f"  N-gram Embedding: {ngram_params/1e9:.2f}B params "
-          f"({ngram_host_gb:.1f} GB host RAM, {ngram_gpu_mb:.1f} MB GPU)")
+    print(
+        f"  N-gram Embedding: {ngram_params / 1e9:.2f}B params "
+        f"({ngram_host_gb:.1f} GB host RAM, {ngram_gpu_mb:.1f} MB GPU)"
+    )
 
-    print(f"\n  Total GPU VRAM overhead: "
-          f"{qsa_vram_mb + gr_vram_mb + ngram_gpu_mb:.1f} MB")
+    print(f"\n  Total GPU VRAM overhead: {qsa_vram_mb + gr_vram_mb + ngram_gpu_mb:.1f} MB")
     print(f"  Total host RAM:          {ngram_host_gb:.1f} GB")
     print("  Base model VRAM:         ~2340 MB (bf16)")
-    print(f"  With R19 keys:           ~{2340 + qsa_vram_mb + gr_vram_mb:.0f} MB "
-          f"(fits 12GB easily)")
+    print(f"  With R19 keys:           ~{2340 + qsa_vram_mb + gr_vram_mb:.0f} MB (fits 12GB easily)")
 
     # Verify it fits in 12GB
     total_vram = 2340 + qsa_vram_mb + gr_vram_mb + ngram_gpu_mb

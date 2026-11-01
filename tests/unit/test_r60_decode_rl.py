@@ -12,6 +12,7 @@ Part B — ExGRPO replay (forge/self_play):
   correctness_flag * mean-token-entropy; the self-play loop mixes
   top-valued entries into each GRPO update batch (opt-in, flag-gated).
 """
+
 import math
 import os
 import random
@@ -22,8 +23,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from forge.engine.decoding import SpecBoundDecoding, StandardDecoding, build_decoding
 from forge.self_play.grpo_trainer import ExGRPOReplayBuffer, GRPOConfig, GRPOTrainer
@@ -32,6 +32,7 @@ from forge.self_play.infinite_loop import InfiniteSelfPlayLoop, LoopConfig
 # ═══════════════════════════════════════════════════════════════════════════
 # Stubs
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class _BigramStub(nn.Module):
     """Deterministic next-token LM: logits[b, t, :] = TABLE[idx[b, t]].
@@ -45,8 +46,7 @@ class _BigramStub(nn.Module):
     slicing works exactly like the real model.
     """
 
-    def __init__(self, vocab=40, n_layers=4, kv_layer=2,
-                 draft_mismatches=None):
+    def __init__(self, vocab=40, n_layers=4, kv_layer=2, draft_mismatches=None):
         super().__init__()
         self.vocab = vocab
         self.n_layers = n_layers
@@ -71,11 +71,10 @@ class _BigramStub(nn.Module):
             d[i, nxt] = 10.0
         self.draft_table = d
 
-    def forward(self, idx, targets=None, past_key_values=None,
-                use_cache=False, layer_indices=None,
-                logits_last_only=False, **kw):
-        table = (self.draft_table if layer_indices is not None
-                 else self.full_table)
+    def forward(
+        self, idx, targets=None, past_key_values=None, use_cache=False, layer_indices=None, logits_last_only=False, **kw
+    ):
+        table = self.draft_table if layer_indices is not None else self.full_table
         logits = table[idx]
         if logits_last_only:
             logits = logits[:, -1:, :]
@@ -90,10 +89,9 @@ class _BigramStub(nn.Module):
             presents = []
             for i in range(self.n_layers):
                 if i == self.kv_layer:
-                    presents.append((torch.zeros(idx.shape[0], 1,
-                                                 new_len, 4),
-                                     torch.zeros(idx.shape[0], 1,
-                                                 new_len, 4)))
+                    presents.append(
+                        (torch.zeros(idx.shape[0], 1, new_len, 4), torch.zeros(idx.shape[0], 1, new_len, 4))
+                    )
                 else:
                     presents.append(None)
             return logits, None, presents
@@ -104,6 +102,7 @@ def _build_tiny(vocab=64):
     """forgelm_tiny on CPU, fp32 — real hybrid conv+attention model."""
     from forge.config import get_config
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = get_config("forgelm_tiny")
     cfg.vocab_size = vocab
     cfg.device = "cpu"
@@ -123,11 +122,11 @@ def _build_tiny(vocab=64):
 # SpecBound — registry + construction
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def test_build_decoding_specbound():
     d = build_decoding("specbound")
     assert isinstance(d, SpecBoundDecoding)
-    d2 = build_decoding("specbound", exit_layer=3, conf_threshold=0.5,
-                        draft_len=6, min_draft=1, max_draft=9)
+    d2 = build_decoding("specbound", exit_layer=3, conf_threshold=0.5, draft_len=6, min_draft=1, max_draft=9)
     assert d2.exit_layer == 3 and d2.conf_threshold == 0.5
     assert d2._cur_draft == 6 and d2.min_draft == 1 and d2.max_draft == 9
 
@@ -143,13 +142,13 @@ def test_specbound_draft_len_clamped_to_bounds():
 # SpecBound — greedy equivalence with StandardDecoding (THE guarantee)
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def test_specbound_greedy_equals_standard_stub():
     """Bit-exact greedy output on a deterministic stub, exercising the
     reject+correct path (draft table differs at token 19)."""
     stub = _BigramStub(vocab=40, draft_mismatches={19: 30})
     prompt = torch.tensor([[10]], dtype=torch.long)
-    kw = {"max_new_tokens": 15, "temperature": 0.0, "top_p": 1.0,
-              "top_k": 0, "repetition_penalty": 1.0}
+    kw = {"max_new_tokens": 15, "temperature": 0.0, "top_p": 1.0, "top_k": 0, "repetition_penalty": 1.0}
     std = StandardDecoding().generate(stub, prompt, **kw)
     d = SpecBoundDecoding(draft_len=4)
     spec = d.generate(stub, prompt, **kw)
@@ -165,8 +164,7 @@ def test_specbound_greedy_equals_standard_stub_all_accept():
     """draft == full → every draft accepted; still identical output."""
     stub = _BigramStub(vocab=40)  # no mismatches
     prompt = torch.tensor([[10]], dtype=torch.long)
-    kw = {"max_new_tokens": 12, "temperature": 0.0, "top_p": 1.0,
-              "top_k": 0, "repetition_penalty": 1.0}
+    kw = {"max_new_tokens": 12, "temperature": 0.0, "top_p": 1.0, "top_k": 0, "repetition_penalty": 1.0}
     std = StandardDecoding().generate(stub, prompt, **kw)
     d = SpecBoundDecoding(draft_len=3)
     spec = d.generate(stub, prompt, **kw)
@@ -183,8 +181,7 @@ def test_specbound_greedy_equals_standard_tiny_model():
     torch.manual_seed(0)
     model = _build_tiny(vocab=64)
     prompt = torch.tensor([[3, 5, 8]], dtype=torch.long)
-    kw = {"max_new_tokens": 14, "temperature": 0.0, "top_p": 1.0,
-              "top_k": 0, "repetition_penalty": 1.0}
+    kw = {"max_new_tokens": 14, "temperature": 0.0, "top_p": 1.0, "top_k": 0, "repetition_penalty": 1.0}
     std = StandardDecoding().generate(model, prompt, **kw)
     spec = SpecBoundDecoding(exit_layer=1, draft_len=4)
     out = spec.generate(model, prompt, **kw)
@@ -195,6 +192,7 @@ def test_specbound_greedy_equals_standard_tiny_model():
 # ═══════════════════════════════════════════════════════════════════════════
 # SpecBound — calibration + adaptive bound
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 def test_specbound_layer_selection_by_ema():
     d = SpecBoundDecoding(conf_threshold=0.6)
@@ -213,9 +211,9 @@ def test_specbound_layer_selection_by_ema():
 def test_specbound_draft_bound_grows_on_full_accept():
     stub = _BigramStub(vocab=40)  # draft == full → all accepted
     d = SpecBoundDecoding(draft_len=2, min_draft=1, max_draft=4)
-    d.generate(stub, torch.tensor([[10]]), max_new_tokens=8,
-               temperature=0.0, top_k=0, top_p=1.0,
-               repetition_penalty=1.0)
+    d.generate(
+        stub, torch.tensor([[10]]), max_new_tokens=8, temperature=0.0, top_k=0, top_p=1.0, repetition_penalty=1.0
+    )
     assert d._cur_draft > 2
     assert d._cur_draft <= 4
     # Per-layer EMA recorded for the used exit layer.
@@ -230,9 +228,9 @@ def test_specbound_draft_bound_shrinks_on_reject():
         bad[i] = 10 + ((i - 10 + 7) % 20)  # != full's +3 step
     stub = _BigramStub(vocab=40, draft_mismatches=bad)
     d = SpecBoundDecoding(draft_len=5, min_draft=1, max_draft=6)
-    d.generate(stub, torch.tensor([[10]]), max_new_tokens=8,
-               temperature=0.0, top_k=0, top_p=1.0,
-               repetition_penalty=1.0)
+    d.generate(
+        stub, torch.tensor([[10]]), max_new_tokens=8, temperature=0.0, top_k=0, top_p=1.0, repetition_penalty=1.0
+    )
     assert d._cur_draft < 5
     assert d._cur_draft >= 1
     assert d._total_drafts > 0
@@ -244,8 +242,8 @@ def test_specbound_sampling_path_runs():
     stub = _BigramStub(vocab=40, draft_mismatches={19: 30})
     torch.manual_seed(0)
     out = SpecBoundDecoding(draft_len=3).generate(
-        stub, torch.tensor([[10]]), max_new_tokens=8,
-        temperature=0.8, top_p=1.0, top_k=0, repetition_penalty=1.0)
+        stub, torch.tensor([[10]]), max_new_tokens=8, temperature=0.8, top_p=1.0, top_k=0, repetition_penalty=1.0
+    )
     assert out.shape[1] >= 1
     assert out[0, 0].item() == 10
 
@@ -254,12 +252,13 @@ def test_specbound_sampling_path_runs():
 # ExGRPO — replay buffer
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def test_exgrpo_buffer_priority_ordering():
     """value = correctness_flag * entropy — top() returns desc order."""
     buf = ExGRPOReplayBuffer(capacity=8)
-    buf.add("p1", ["a", "b"], [1.0, 0.0], entropy=0.5)   # value 0.5
-    buf.add("p2", ["a", "b"], [1.0, 0.0], entropy=0.9)   # value 0.9
-    buf.add("p3", ["a", "b"], [0.0, 0.0], entropy=9.9)   # incorrect → 0
+    buf.add("p1", ["a", "b"], [1.0, 0.0], entropy=0.5)  # value 0.5
+    buf.add("p2", ["a", "b"], [1.0, 0.0], entropy=0.9)  # value 0.9
+    buf.add("p3", ["a", "b"], [0.0, 0.0], entropy=9.9)  # incorrect → 0
     top = buf.top(2)
     assert [e["prompt"] for e in top] == ["p2", "p1"]
     assert top[0]["value"] == pytest.approx(0.9)
@@ -299,8 +298,7 @@ def test_exgrpo_sample_weighted_without_replacement():
     assert len(picks) == 2
     assert {e["prompt"] for e in picks} == {"a", "b"}
     # Value-weighted: 'b' should win the first slot most of the time.
-    firsts = [buf.sample(1, rng=random.Random(s))[0]["prompt"]
-              for s in range(50)]
+    firsts = [buf.sample(1, rng=random.Random(s))[0]["prompt"] for s in range(50)]
     assert firsts.count("b") > firsts.count("a")
     # sample(0) and oversampling are safe.
     assert buf.sample(0, rng=random.Random(0)) == []
@@ -327,12 +325,13 @@ def test_exgrpo_flag_off_defaults():
 # ExGRPO — mean-token-entropy scoring
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class _CharTokenizer:
     """Minimal HF-style tokenizer stub for the entropy helper."""
+
     pad_token_id = 0
 
-    def __call__(self, text, return_tensors=None, truncation=None,
-                 max_length=None, add_special_tokens=None):
+    def __call__(self, text, return_tensors=None, truncation=None, max_length=None, add_special_tokens=None):
         ids = [ord(c) % 32 for c in text] or [0]
         return SimpleNamespace(input_ids=torch.tensor([ids]))
 
@@ -361,8 +360,7 @@ def test_exgrpo_group_entropy_values():
     assert ent == pytest.approx(math.log(32), rel=1e-3)
 
     m_peak = _FixedLogitModel(vocab=32, peaked=True)
-    tr2 = GRPOTrainer(m_peak, tok, m_peak, device="cpu",
-                      config=GRPOConfig())
+    tr2 = GRPOTrainer(m_peak, tok, m_peak, device="cpu", config=GRPOConfig())
     ent2 = tr2.exgrpo_group_entropy("ab", ["cd"])
     assert ent2 < 0.01
 
@@ -371,6 +369,6 @@ def test_exgrpo_entropy_feeds_buffer_value():
     """End-to-end: entropy * correctness drives buffer ordering."""
     buf = ExGRPOReplayBuffer(capacity=8)
     buf.add("correct", ["a", "b"], [1.0, 0.0], entropy=2.0)  # value 2.0
-    buf.add("wrong", ["a", "b"], [0.0, 0.0], entropy=5.0)    # value 0.0
+    buf.add("wrong", ["a", "b"], [0.0, 0.0], entropy=5.0)  # value 0.0
     assert buf.top(1)[0]["prompt"] == "correct"
     assert buf.entries[1]["value"] == 0.0

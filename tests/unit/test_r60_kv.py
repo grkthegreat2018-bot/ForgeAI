@@ -10,13 +10,13 @@
 
 All CPU-runnable; tensors are small and deterministic.
 """
+
 import os
 import sys
 
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from forge.engine.kv.anchor_kv import AnchorKVCache
 from forge.engine.kv.beacon_kv import BeaconKVCache
@@ -25,14 +25,12 @@ from forge.engine.kv_backend import KVCacheStrategy, build_kv_cache
 
 
 def _kv(B=1, n_kv=2, T=1, d=4, start=0.0):
-    k = torch.arange(start, start + B * n_kv * T * d,
-                     dtype=torch.float32).reshape(B, n_kv, T, d)
+    k = torch.arange(start, start + B * n_kv * T * d, dtype=torch.float32).reshape(B, n_kv, T, d)
     return k, k.clone()
 
 
 def _init(cache, max_seq=64, n_kv=2, d=4):
-    cache.init(n_heads=4, head_dim=d, n_kv_heads=n_kv,
-               max_seq_len=max_seq, device="cpu", dtype=torch.float32)
+    cache.init(n_heads=4, head_dim=d, n_kv_heads=n_kv, max_seq_len=max_seq, device="cpu", dtype=torch.float32)
     return cache
 
 
@@ -40,9 +38,9 @@ def _init(cache, max_seq=64, n_kv=2, d=4):
 # BeaconKV
 # ═══════════════════════════════════════════════════════════════════════
 
+
 def test_beacon_eviction_respects_budget_and_keeps_sinks_recent():
-    cache = _init(BeaconKVCache(budget=16, sink=2, window=4,
-                                n_beacons=4, slack=8))
+    cache = _init(BeaconKVCache(budget=16, sink=2, window=4, n_beacons=4, slack=8))
     k, v = _kv(T=40)
     cache.append(k, v, 0)  # 40 > compact_over=24 → evict to ~budget
     assert cache.seq_len == 16
@@ -100,12 +98,16 @@ def test_beacon_beacons_update_per_layer():
 # AnchorKV
 # ═══════════════════════════════════════════════════════════════════════
 
+
 def _clustered_keys(T=24, d=8, seed=0):
     """near-dup clusters on e1/e2 + one unique vector at position 12."""
     g = torch.Generator().manual_seed(seed)
-    e1 = torch.zeros(d); e1[0] = 1.0
-    e2 = torch.zeros(d); e2[1] = 1.0
-    uni = torch.zeros(d); uni[3] = 1.0
+    e1 = torch.zeros(d)
+    e1[0] = 1.0
+    e2 = torch.zeros(d)
+    e2[1] = 1.0
+    uni = torch.zeros(d)
+    uni[3] = 1.0
     keys = []
     for t in range(T):
         if t < 12:
@@ -125,8 +127,7 @@ def test_anchor_low_error_evicted_first():
     evicted before unique keys — the paper's core ordering."""
     T, d = 24, 8
     k, v = _clustered_keys(T=T, d=d)
-    cache = _init(AnchorKVCache(budget=12, sink=2, window=4,
-                                n_anchors=4), max_seq=64, n_kv=1, d=d)
+    cache = _init(AnchorKVCache(budget=12, sink=2, window=4, n_anchors=4), max_seq=64, n_kv=1, d=d)
     cache.append(k, v, 0)
     assert cache.seq_len <= 12
     kept = cache._kept_orig.tolist()
@@ -149,8 +150,7 @@ def test_anchor_low_error_evicted_first():
 def test_anchor_get_full_reconstructs_length():
     T, d = 24, 8
     k, v = _clustered_keys(T=T, d=d)
-    cache = _init(AnchorKVCache(budget=12, sink=2, window=4,
-                                n_anchors=4), max_seq=64, n_kv=1, d=d)
+    cache = _init(AnchorKVCache(budget=12, sink=2, window=4, n_anchors=4), max_seq=64, n_kv=1, d=d)
     cache.append(k, v, 0)
     k_full, _v_full = cache.get_full()
     assert k_full.shape == (1, 1, cache.orig_len, d)
@@ -165,8 +165,7 @@ def test_anchor_get_full_reconstructs_length():
 
 
 def test_anchor_compact_past_kv_slices_only_tuples():
-    cache = _init(AnchorKVCache(budget=12, sink=2, window=4,
-                                n_anchors=4), max_seq=64)
+    cache = _init(AnchorKVCache(budget=12, sink=2, window=4, n_anchors=4), max_seq=64)
     k30, v30 = _kv(T=30)
     k10, v10 = _kv(T=10, start=10000.0)
     past = [(k30, v30), None, {"ssm": torch.zeros(2)}, (k10, v10)]
@@ -180,19 +179,16 @@ def test_anchor_compact_past_kv_slices_only_tuples():
 # MetaKV
 # ═══════════════════════════════════════════════════════════════════════
 
+
 def test_metakv_select_table():
     mk = MetaKVCache()
     # long context + memory pressure → anchor
-    assert mk.select({"seq_len": 8192,
-                      "free_vram_bytes": 2 * 1024**3}) == "anchor"
-    assert mk.select({"max_seq_len": 8192,
-                      "free_vram_bytes": 2 * 1024**3}) == "anchor"
+    assert mk.select({"seq_len": 8192, "free_vram_bytes": 2 * 1024**3}) == "anchor"
+    assert mk.select({"max_seq_len": 8192, "free_vram_bytes": 2 * 1024**3}) == "anchor"
     # short context under pressure → beacon (default row)
-    assert mk.select({"seq_len": 2048,
-                      "free_vram_bytes": 2 * 1024**3}) == "beacon"
+    assert mk.select({"seq_len": 2048, "free_vram_bytes": 2 * 1024**3}) == "beacon"
     # long context with plenty of VRAM → beacon
-    assert mk.select({"seq_len": 8192,
-                      "free_vram_bytes": 32 * 1024**3}) == "beacon"
+    assert mk.select({"seq_len": 8192, "free_vram_bytes": 32 * 1024**3}) == "beacon"
     # CPU (no VRAM probe) → beacon regardless of length
     assert mk.select({"seq_len": 8192, "free_vram_bytes": None}) == "beacon"
 
@@ -214,8 +210,7 @@ def test_metakv_init_picks_inner_and_delegates():
 
 def test_metakv_compact_past_kv_passthrough():
     # shrink the inner budget so the passthrough provably compacts
-    mk = _init(MetaKVCache(inner_overrides={"budget": 8, "window": 2,
-                                          "sink": 2}), max_seq=64)
+    mk = _init(MetaKVCache(inner_overrides={"budget": 8, "window": 2, "sink": 2}), max_seq=64)
     k30, v30 = _kv(T=30)
     out = mk.compact_past_kv([(k30, v30)])
     assert 0 < out[0][0].shape[-2] <= 8
@@ -231,10 +226,9 @@ def test_metakv_force_inner():
 # Registry + fallback chain
 # ═══════════════════════════════════════════════════════════════════════
 
+
 def test_registry_builds_all_three():
-    for name, cls in (("beacon", BeaconKVCache),
-                      ("anchor", AnchorKVCache),
-                      ("metakv", MetaKVCache)):
+    for name, cls in (("beacon", BeaconKVCache), ("anchor", AnchorKVCache), ("metakv", MetaKVCache)):
         cache = build_kv_cache(name)
         assert isinstance(cache, cls), name
         assert isinstance(cache, KVCacheStrategy)
@@ -244,6 +238,7 @@ def test_registry_builds_all_three():
 
 def test_fallback_chain_has_new_strategies():
     from forge.engine.engine_activation import _ActivationMixin
+
     chain = _ActivationMixin._KV_FALLBACK_CHAIN
     for name in ("beacon", "anchor", "metakv"):
         assert name in chain, f"{name} missing from _KV_FALLBACK_CHAIN"
@@ -254,9 +249,11 @@ def test_fallback_chain_has_new_strategies():
 # Live decode-time bridge
 # ═══════════════════════════════════════════════════════════════════════
 
+
 def _stub_engine(kv_cache):
     """Bare _GenerationMixin instance — just the attrs the bridge needs."""
     from forge.engine.engine_generation import _GenerationMixin
+
     eng = _GenerationMixin.__new__(_GenerationMixin)
     eng.kv_cache = kv_cache
     eng._log = lambda *a, **k: None
@@ -276,8 +273,7 @@ def test_bridge_noop_without_compact_hook():
 
 
 def test_bridge_watermark_trigger_and_throttle():
-    cache = _init(BeaconKVCache(budget=8, sink=2, window=2,
-                                n_beacons=4, slack=4), max_seq=32)
+    cache = _init(BeaconKVCache(budget=8, sink=2, window=2, n_beacons=4, slack=4), max_seq=32)
     assert cache.compact_over == 12
     eng = _stub_engine(cache)
     k10, v10 = _kv(T=10)
@@ -292,8 +288,8 @@ def test_bridge_watermark_trigger_and_throttle():
 
 def test_bridge_periodic_due_and_force():
     from forge.engine.engine_generation import _KV_COMPACT_EVERY
-    cache = _init(BeaconKVCache(budget=8, sink=2, window=2,
-                                n_beacons=4, slack=4), max_seq=32)
+
+    cache = _init(BeaconKVCache(budget=8, sink=2, window=2, n_beacons=4, slack=4), max_seq=32)
     eng = _stub_engine(cache)
     k6, v6 = _kv(T=6)
     past = [(k6, v6)]
@@ -314,8 +310,10 @@ def test_bridge_periodic_due_and_force():
 def test_bridge_exception_guard_returns_input():
     class _Boom:
         compact_over = 4
+
         def compact_past_kv(self, past_kv, **kw):
             raise RuntimeError("boom")
+
     eng = _stub_engine(_Boom())
     k, v = _kv(T=10)
     past = [(k, v)]
@@ -333,6 +331,7 @@ def test_decode_loop_invokes_bridge():
     import inspect
 
     from forge.engine import engine_generation as gen
+
     src = inspect.getsource(gen._GenerationMixin._decode_tokens)
     assert "_maybe_compact_past_kv(past_kv)" in src
     src_prefill = inspect.getsource(gen._GenerationMixin._prefill)

@@ -2,22 +2,25 @@
 
 CPU-only: no torch, no real checkpoint. Engine internals are stubbed.
 """
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
 import threading
 import time
+from typing import ClassVar
 
 import pytest
 
 from forge_gui_server.hub import EventHub
 from forge_gui_server.services.engine_rt import EngineService
 from forge_gui_server.services.procs import ProcessService
-import contextlib
 
 # â”€â”€ EventHub â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
 
 def test_hub_publish_replay():
     hub = EventHub()
@@ -43,6 +46,7 @@ def test_hub_fanout_and_drops_slow():
         assert hub.subscriber_count == 0
         hub.publish("still", {"ok": True})  # must not raise
         await asyncio.sleep(0)
+
     asyncio.run(_run())
 
 
@@ -55,6 +59,7 @@ def test_hub_unsubscribe():
 
 
 # â”€â”€ EngineService lease semantics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
 
 class _FakeEngine:
     def sleep(self):
@@ -102,23 +107,21 @@ def test_lease_concurrent_threads():
     t1.start()
     time.sleep(0.03)  # ensure t1 wins the lock
     t2.start()
-    t1.join(); t2.join()
+    t1.join()
+    t2.join()
     assert order == ["a-in", "a-out", "b-in", "b-out"]
 
 
 def test_engine_load_unload_cycle(monkeypatch):
     svc = EngineService(EventHub())
-    monkeypatch.setattr(
-        svc, "_load_blocking",
-        lambda *a, **k: (_FakeEngine(), {"config_name": "fake", "load_s": 0.01}))
+    monkeypatch.setattr(svc, "_load_blocking", lambda *a, **k: (_FakeEngine(), {"config_name": "fake", "load_s": 0.01}))
 
     async def run():
         loop = asyncio.get_running_loop()
         svc.bind_loop(loop)
         svc._set_state("loading")
         svc._load_seq += 1
-        await svc._load_async(svc._load_seq, loop, "ckpt", "fake",
-                              None, None, None)
+        await svc._load_async(svc._load_seq, loop, "ckpt", "fake", None, None, None)
         assert svc.is_ready()
         assert svc.info["config_name"] == "fake"
         assert svc.snapshot()["state"] == "ready"
@@ -142,8 +145,7 @@ def test_engine_load_failure_sets_error(monkeypatch):
         svc.bind_loop(loop)
         svc._set_state("loading")
         svc._load_seq += 1
-        await svc._load_async(svc._load_seq, loop, "ckpt", "fake",
-                              None, None, None)
+        await svc._load_async(svc._load_seq, loop, "ckpt", "fake", None, None, None)
         assert svc.state == "error"
         assert "checkpoint not found" in svc.error
 
@@ -162,8 +164,7 @@ def test_engine_load_queues_different_model(monkeypatch):
         calls.append(config_name)
         started.set()
         release.wait(timeout=10)
-        return _FakeEngine(), {"config_name": config_name,
-                               "checkpoint": ckpt}
+        return _FakeEngine(), {"config_name": config_name, "checkpoint": ckpt}
 
     monkeypatch.setattr(svc, "_load_blocking", slow_load)
 
@@ -198,8 +199,7 @@ def test_engine_load_same_model_inflight_dedup(monkeypatch):
     def slow_load(ckpt, config_name, *a, **k):
         calls.append(config_name)
         release.wait(timeout=10)
-        return _FakeEngine(), {"config_name": config_name,
-                               "checkpoint": ckpt}
+        return _FakeEngine(), {"config_name": config_name, "checkpoint": ckpt}
 
     monkeypatch.setattr(svc, "_load_blocking", slow_load)
 
@@ -256,8 +256,7 @@ def test_engine_reload_same_model_noop(monkeypatch):
     ckpt = svc._resolve_ckpt("a.safetensors")
     svc._info = {"checkpoint": ckpt, "config_name": "test"}
     calls: list = []
-    monkeypatch.setattr(svc, "_load_blocking",
-                        lambda *a, **k: calls.append(1) or (_FakeEngine(), {}))
+    monkeypatch.setattr(svc, "_load_blocking", lambda *a, **k: calls.append(1) or (_FakeEngine(), {}))
     svc.load("a.safetensors", "test")
     assert calls == []
     assert svc.state == "ready"
@@ -271,14 +270,14 @@ def test_reactivate_requires_ready():
 
 # â”€â”€ ProcessService â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+
 def test_process_lifecycle():
     svc = ProcessService(EventHub())
 
     async def run():
         loop = asyncio.get_running_loop()
         svc.bind_loop(loop)
-        tid = svc.launch("echo-test",
-                         [sys.executable, "-c", "print('hello');print('bye')"])
+        tid = svc.launch("echo-test", [sys.executable, "-c", "print('hello');print('bye')"])
         assert tid in svc.tasks
         # wait for the subprocess to finish
         for _ in range(100):
@@ -302,8 +301,7 @@ def test_process_crash_status():
     async def run():
         loop = asyncio.get_running_loop()
         svc.bind_loop(loop)
-        tid = svc.launch("crash-test",
-                         [sys.executable, "-c", "import sys;sys.exit(3)"])
+        tid = svc.launch("crash-test", [sys.executable, "-c", "import sys;sys.exit(3)"])
         for _ in range(100):
             if svc.tasks[tid].status == "crashed":
                 break
@@ -320,16 +318,20 @@ def test_process_cannot_remove_live():
     del info_type
     # inject a live task directly
     from forge_gui_server.services.procs import TaskInfo
+
     svc.tasks["t1"] = TaskInfo(id="t1", name="x", command=[], status="running")
     assert not svc.remove("t1")
 
+
 # â”€â”€ AgentService loop binding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
 
 def test_agent_bind_loop_keeps_loop_method():
     """bind_loop must not shadow the _loop drive method (regression:
     self._loop was used for both the asyncio loop and the agent loop,
     causing 'ProactorEventLoop object is not callable')."""
     from forge_gui_server.services.agent_loop import AgentService
+
     svc = AgentService(EventHub(), runtime=object())
     loop = asyncio.new_event_loop()
     try:
@@ -343,9 +345,9 @@ def test_agent_bind_loop_keeps_loop_method():
 
 def test_agent_drive_completes_stubbed():
     from forge_gui_server.services.agent_loop import AgentRun, AgentService
+
     svc = AgentService(EventHub(), runtime=object())
-    svc._loop = lambda r: {"content": "ok", "rounds": 1, "tool_calls": [],
-                           "sandbox": {}, "cancelled": False}
+    svc._loop = lambda r: {"content": "ok", "rounds": 1, "tool_calls": [], "sandbox": {}, "cancelled": False}
     run = AgentRun("a1", object(), "task", ".")
     svc._drive(run)
     assert run.status == "done"
@@ -355,8 +357,9 @@ def test_agent_drive_completes_stubbed():
 
 # â”€â”€ Agent auto-stop / steering / workspace â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+
 class _StubRT:
-    info: dict = {}
+    info: ClassVar[dict] = {}
 
 
 class _StubStrikes:
@@ -367,11 +370,13 @@ class _StubStrikes:
 class _StubHarness:
     def tool_defs(self):
         return []
+
     def execute_calls(self, calls):
-        return [{"ok": True, "result": {"text": "ok"}, "name": "x",
-                 "elapsed_s": 0.0} for _ in calls]
+        return [{"ok": True, "result": {"text": "ok"}, "name": "x", "elapsed_s": 0.0} for _ in calls]
+
     def summary(self):
         return {}
+
     @property
     def strikes(self):
         return _StubStrikes()
@@ -381,10 +386,10 @@ def test_agent_auto_mode_stops_when_model_done():
     """max_rounds=None â†’ run ends on the first no-tool-call round instead
     of burning a fixed round budget."""
     from forge_gui_server.services.agent_loop import AgentRun, AgentService
+
     svc = AgentService(EventHub(), runtime=_StubRT())
     svc._generate = lambda r, p: "all done - no more tools needed"
-    run = AgentRun("a1", object(), "task", ".", max_rounds=None,
-                   tool_harness=_StubHarness())
+    run = AgentRun("a1", object(), "task", ".", max_rounds=None, tool_harness=_StubHarness())
     out = svc._loop(run)
     assert out["rounds"] == 1
     assert out["content"] == "all done - no more tools needed"
@@ -392,11 +397,10 @@ def test_agent_auto_mode_stops_when_model_done():
 
 def test_agent_fixed_rounds_caps():
     from forge_gui_server.services.agent_loop import AgentRun, AgentService
+
     svc = AgentService(EventHub(), runtime=_StubRT())
-    svc._generate = lambda r, p: (
-        '<tool_call>\n{"name": "x", "arguments": {}}\n</tool_call>')
-    run = AgentRun("a2", object(), "task", ".", max_rounds=3,
-                   tool_harness=_StubHarness())
+    svc._generate = lambda r, p: '<tool_call>\n{"name": "x", "arguments": {}}\n</tool_call>'
+    run = AgentRun("a2", object(), "task", ".", max_rounds=3, tool_harness=_StubHarness())
     out = svc._loop(run)
     assert out["rounds"] == 3
     assert len(out["tool_calls"]) == 3
@@ -404,6 +408,7 @@ def test_agent_fixed_rounds_caps():
 
 def test_agent_steer_and_detail():
     from forge_gui_server.services.agent_loop import AgentRun, AgentService
+
     svc = AgentService(EventHub(), runtime=object())
     run = AgentRun("a3", object(), "task", ".", tool_harness=_StubHarness())
     svc.runs["a3"] = run
@@ -419,20 +424,20 @@ def test_agent_steer_and_detail():
 def test_agent_workspace_projects_dir(tmp_path, monkeypatch):
     from forge_gui.api import status_reader
     from forge_gui_server.routes import chat as chat_routes
+
     monkeypatch.setattr(status_reader, "project_root", lambda: tmp_path)
     body = chat_routes.AgentStartRequest(task="Build a Todo CLI App")
     ws, project = chat_routes._agent_workspace(body)
     assert project == "build-a-todo-cli-app"
-    assert ws.endswith("ForgeAI_Projects" + "\\" + project) or \
-        ws.endswith("ForgeAI_Projects/" + project)
+    assert ws.endswith("ForgeAI_Projects" + "\\" + project) or ws.endswith("ForgeAI_Projects/" + project)
     assert (tmp_path / "ForgeAI_Projects" / project).is_dir()
     # explicit workspace escape hatch wins
-    body2 = chat_routes.AgentStartRequest(
-        task="x", workspace=str(tmp_path), project="named")
+    body2 = chat_routes.AgentStartRequest(task="x", workspace=str(tmp_path), project="named")
     assert chat_routes._agent_workspace(body2) == (str(tmp_path), "named")
 
 
 # ── Self-play live bridge (events.jsonl → hub → /ws) ────────────────
+
 
 def _watch_fixture(tmp_path):
     """Services stand-in wired to a tmp-dir EventsReader + real hub."""
@@ -440,11 +445,14 @@ def _watch_fixture(tmp_path):
 
     from forge_gui.api.events_reader import EventsReader
     from forge_gui_server.deps import Services
+
     sp = tmp_path / "self_play"
     sp.mkdir()
-    return (sp, SimpleNamespace(
-        events=EventsReader(search_dirs=[tmp_path], rescan_interval=0),
-        hub=EventHub()), Services._selfplay_watch)
+    return (
+        sp,
+        SimpleNamespace(events=EventsReader(search_dirs=[tmp_path], rescan_interval=0), hub=EventHub()),
+        Services._selfplay_watch,
+    )
 
 
 def _drain(q, timeout=4.0):
@@ -470,10 +478,8 @@ def test_selfplay_watch_publishes_events(tmp_path):
         await asyncio.sleep(0.6)  # let the watcher discover the file
         ev_file = sp / "events.jsonl"
         with open(ev_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": 1, "kind": "task_done",
-                                "success": True}) + "\n")
-            f.write(json.dumps({"ts": 2, "kind": "phase",
-                                "phase": "gen"}) + "\n")
+            f.write(json.dumps({"ts": 1, "kind": "task_done", "success": True}) + "\n")
+            f.write(json.dumps({"ts": 2, "kind": "phase", "phase": "gen"}) + "\n")
         for _ in range(40):
             if q.qsize() >= 2:
                 break
@@ -492,8 +498,7 @@ def test_selfplay_watch_status_push(tmp_path):
     """status.json changes publish selfplay_status with heartbeat fields."""
     sp, svc, watch = _watch_fixture(tmp_path)
     (sp / "heartbeat.json").write_text(json.dumps({"ts": time.time()}))
-    (sp / "status.json").write_text(json.dumps(
-        {"status": "running", "phase": "gen"}))
+    (sp / "status.json").write_text(json.dumps({"status": "running", "phase": "gen"}))
     q = svc.hub.subscribe(replay=False)
 
     async def run():
@@ -508,8 +513,7 @@ def test_selfplay_watch_status_push(tmp_path):
             await t
 
     asyncio.run(run())
-    got = [e for e in _drain(q, timeout=0.3)
-           if e["type"] == "selfplay_status"]
+    got = [e for e in _drain(q, timeout=0.3) if e["type"] == "selfplay_status"]
     assert got
     p = got[-1]["payload"]
     assert p["status"]["phase"] == "gen"
@@ -531,15 +535,13 @@ def test_selfplay_watch_survives_truncation(tmp_path):
         # simulate run start: file wiped, then fresh events — each write
         # gets its own watcher tick (0.4s poll) so Windows stat caching
         # can't merge them into one read window
-        ev_file.write_text(json.dumps({"ts": 5, "kind": "phase",
-                                       "phase": "startup"}) + "\n")
+        ev_file.write_text(json.dumps({"ts": 5, "kind": "phase", "phase": "startup"}) + "\n")
         for _ in range(40):
             if q.qsize() >= 2:  # backfill "old" + post-truncation "phase"
                 break
             await asyncio.sleep(0.05)
         with open(ev_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": 6, "kind": "task_start",
-                                "idx": 0}) + "\n")
+            f.write(json.dumps({"ts": 6, "kind": "task_start", "idx": 0}) + "\n")
         for _ in range(40):
             if q.qsize() >= 3:
                 break
@@ -549,8 +551,7 @@ def test_selfplay_watch_survives_truncation(tmp_path):
             await t
 
     asyncio.run(run())
-    kinds = [e["payload"]["kind"] for e in _drain(q, timeout=0.3)
-             if e["type"] == "selfplay_event"]
+    kinds = [e["payload"]["kind"] for e in _drain(q, timeout=0.3) if e["type"] == "selfplay_event"]
     # backfill "old" + the two fresh records — no crash, no stalls
     assert "task_start" in kinds and "phase" in kinds
 
@@ -560,15 +561,15 @@ def test_pipe_reset_filter_swallows_10054():
     ConnectionResetError via the loop's default exception handler —
     the filter must swallow it and pass real errors through."""
     from forge_gui_server.deps import Services
+
     loop = asyncio.new_event_loop()
     seen = []
-    loop.set_exception_handler(lambda l, ctx: seen.append(ctx))
+    loop.set_exception_handler(lambda _loop, ctx: seen.append(ctx))
     Services._install_pipe_reset_filter(loop)
     handler = loop.get_exception_handler()
     if sys.platform == "win32":
         # pipe-reset noise: swallowed (debug-logged, not forwarded)
-        handler(loop, {"exception": ConnectionResetError(10054),
-                       "message": "pipe lost"})
+        handler(loop, {"exception": ConnectionResetError(10054), "message": "pipe lost"})
         assert seen == []
         # real errors still reach the previous handler
         handler(loop, {"exception": RuntimeError("boom")})
@@ -578,5 +579,3 @@ def test_pipe_reset_filter_swallows_10054():
         handler(loop, {"exception": ConnectionResetError(10054)})
         assert len(seen) == 1
     loop.close()
-
-

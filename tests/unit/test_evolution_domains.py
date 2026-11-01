@@ -8,8 +8,9 @@ that round-trips through json.dumps.
 """
 
 import sys
+from pathlib import Path
 
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import json
 
@@ -17,6 +18,9 @@ import pytest
 import torch
 
 from forge.evolution.domains import DOMAINS
+
+# Domains that hard-require CUDA are skipped on CPU CI.
+_CUDA_REQUIRED_DOMAINS: set[str] = set()
 
 
 def _sample_config(name: str) -> dict:
@@ -30,9 +34,7 @@ def _sample_config(name: str) -> dict:
 @pytest.mark.parametrize("name", sorted(DOMAINS.keys()))
 def test_metadata_is_json_serializable(name):
     """evaluate() metadata must be JSON-serializable (regression: OptimizerConfig)."""
-    if not torch.cuda.is_available() and name in {
-        # Domains that hard-require CUDA are skipped on CPU CI.
-    }:
+    if not torch.cuda.is_available() and name in _CUDA_REQUIRED_DOMAINS:
         pytest.skip("CUDA required")
     domain = DOMAINS[name]()
     config = _sample_config(name)
@@ -66,6 +68,7 @@ def test_optimizer_config_metadata_final_loss_is_float():
 
 # ── CrossLayerKV recon_err regression ──────────────────────────────────
 
+
 @pytest.mark.parametrize("mode", ["avg", "max", "learned"])
 @pytest.mark.parametrize("ratio", [0.0, 0.25, 0.5, 0.75, 1.0])
 @pytest.mark.parametrize("n_groups", [1, 2, 4, 8])
@@ -84,6 +87,7 @@ def test_cross_layer_kv_recon_err_non_negative(mode, ratio, n_groups):
 
 # ── XQuantKV config/metadata consistency regression ────────────────────
 
+
 @pytest.mark.parametrize("ratio", [0.0, 0.25, 0.5, 0.75, 1.0])
 @pytest.mark.parametrize("bits", [4, 8])
 @pytest.mark.parametrize("interval", [2, 4, 8, 16])
@@ -91,8 +95,7 @@ def test_xquant_kv_metadata_matches_config(ratio, bits, interval):
     """metadata must reflect the config that was actually evaluated
     (regression: engine saved last result's metadata for all discoveries)."""
     domain = DOMAINS["XQuantKV"]()
-    cfg = {"recomputation_ratio": ratio, "quant_bits": bits,
-           "checkpoint_interval": interval}
+    cfg = {"recomputation_ratio": ratio, "quant_bits": bits, "checkpoint_interval": interval}
     result = domain.evaluate(cfg)
     md = result["metadata"]
     assert md["recomputation_ratio"] == ratio
@@ -101,6 +104,7 @@ def test_xquant_kv_metadata_matches_config(ratio, bits, interval):
 
 
 # ── Engine discovery metadata matching regression ──────────────────────
+
 
 def test_engine_discovery_metadata_matches_config():
     """When multiple configs enter the archive in one generation, each
@@ -128,7 +132,7 @@ def test_engine_discovery_metadata_matches_config():
     # identical metadata if they have different configs (which would indicate
     # the all_results[-1] bug).
     if len(engine.discoveries) >= 2:
-        for d in engine.discoveries:
+        for _d in engine.discoveries:
             # The discovery dict itself doesn't carry metadata; check the
             # pending list or all_results for consistency instead.
             pass
@@ -220,6 +224,7 @@ def test_engine_config_key_normalization():
 
     # Numpy array and list should match
     import numpy as np
+
     k7 = ForgeEvolve._config_key({"x": np.array([0.5, 0.3, 0.8])})
     k8 = ForgeEvolve._config_key({"x": [0.5, 0.3, 0.8]})
     assert k7 == k8, "numpy array and list should normalize to same key"

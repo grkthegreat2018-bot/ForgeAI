@@ -18,19 +18,24 @@ from forge.exp.cxlmem import (
 
 
 def _mk(seq_cap=4096, window=64, page=16, n_layers=3, burst_pages=2):
-    tier = TieredKV(n_layers=n_layers, gpu_window_tokens=window,
-                    page_tokens=page, cxl_capacity_tokens=seq_cap,
-                    burst_pages=burst_pages, device="cpu")
+    tier = TieredKV(
+        n_layers=n_layers,
+        gpu_window_tokens=window,
+        page_tokens=page,
+        cxl_capacity_tokens=seq_cap,
+        burst_pages=burst_pages,
+        device="cpu",
+    )
     return tier
 
 
 def _gen_kv(B=1, H=2, T=8, hd=8, seed=0):
     g = torch.Generator().manual_seed(seed)
-    return (torch.randn(B, H, T, hd, generator=g),
-            torch.randn(B, H, T, hd, generator=g))
+    return (torch.randn(B, H, T, hd, generator=g), torch.randn(B, H, T, hd, generator=g))
 
 
 # ── spill / materialize round-trip ────────────────────────────────────
+
 
 def test_append_materialize_roundtrip_order():
     """Values recoverable in exact token order after spilling to 'CXL'."""
@@ -72,7 +77,7 @@ def test_spill_page_granular():
         st = tier._st[0]
         assert st.hot_len <= 16
         assert st.cold_len + st.hot_len == t + 1
-        assert st.cold_len % 4 == 0          # cold grows page-wise
+        assert st.cold_len % 4 == 0  # cold grows page-wise
     kk, _vv = tier.materialize(0)
     assert kk.shape[2] == 40
 
@@ -106,16 +111,17 @@ def test_reset_clears_state():
 
 # ── stats counters ────────────────────────────────────────────────────
 
+
 def test_stats_counters():
     tier = _mk(window=8, page=4, n_layers=2)
     k, v = _gen_kv(T=8)
     k2, v2 = _gen_kv(T=8, seed=1)
     for li in range(2):
-        tier.append(li, k, v)          # hot=8
-        tier.append(li, k2, v2)        # ovf=8 -> spill 8 (one event)
-        tier.append(li, k, v)          # spill 8 again
+        tier.append(li, k, v)  # hot=8
+        tier.append(li, k2, v2)  # ovf=8 -> spill 8 (one event)
+        tier.append(li, k, v)  # spill 8 again
     st = tier.link.stats
-    tok_bytes = 2 * 2 * 8 * 4          # (k,v) * heads * hd * fp32
+    tok_bytes = 2 * 2 * 8 * 4  # (k,v) * heads * hd * fp32
     # per layer: 2 spills * 8 tok; 2 layers total
     assert st["d2h_bytes"] == 2 * 2 * 8 * tok_bytes
     assert st["spill_events"] == 4
@@ -147,6 +153,7 @@ def test_capacity_math():
 
 # ── streamed attention vs SDPA reference ──────────────────────────────
 
+
 def _ref_attn(q, k, v, causal):
     _B, H, T, _hd = q.shape
     G = k.shape[1]
@@ -163,14 +170,13 @@ def test_attend_stream_matches_sdpa_decode():
     B, H, G, hd = 1, 4, 2, 8
     tier = _mk(window=16, page=4, n_layers=1)
     k, v = _gen_kv(B, G, 37, hd)
-    tier.append(0, k, v)                       # 24 cold + 13 hot... wait W=16
+    tier.append(0, k, v)  # 24 cold + 13 hot... wait W=16
     q = torch.randn(B, H, 1, hd)
     kn, vn = _gen_kv(B, G, 1, hd, seed=7)
     out = tier.attend(0, q, kn, vn)
-    ref = _ref_attn(q, torch.cat([k, kn], 2), torch.cat([v, vn], 2),
-                    causal=False)
+    ref = _ref_attn(q, torch.cat([k, kn], 2), torch.cat([v, vn], 2), causal=False)
     assert torch.allclose(out, ref, atol=1e-5)
-    assert tier.seq_len(0) == 38               # appended inside attend
+    assert tier.seq_len(0) == 38  # appended inside attend
 
 
 def test_attend_stream_matches_sdpa_chunk():
@@ -191,8 +197,7 @@ def test_attend_stream_matches_sdpa_chunk():
     # query row i (abs pos 20+i) may see all 20 past + new j<=i
     j = torch.arange(20 + T)
     i = torch.arange(T).unsqueeze(1)
-    mask = torch.zeros(T, 20 + T).masked_fill(
-        j.unsqueeze(0) > 20 + i, float("-inf"))
+    mask = torch.zeros(T, 20 + T).masked_fill(j.unsqueeze(0) > 20 + i, float("-inf"))
     ref = F.scaled_dot_product_attention(q, kf, vf, attn_mask=mask)
     assert torch.allclose(out, ref, atol=1e-5)
 
@@ -209,11 +214,11 @@ def test_attend_no_past():
 
 # ── GQA wrapper ───────────────────────────────────────────────────────
 
+
 def _mk_gqa(d_model=32, n_heads=4, n_kv=2, hd=8):
     from forge.model.layers import GroupedQueryAttention
-    attn = GroupedQueryAttention(d_model=d_model, n_heads=n_heads,
-                                 n_kv_heads=n_kv, max_seq_len=512,
-                                 head_dim=hd)
+
+    attn = GroupedQueryAttention(d_model=d_model, n_heads=n_heads, n_kv_heads=n_kv, max_seq_len=512, head_dim=hd)
     attn.eval()
     return attn
 
@@ -246,17 +251,17 @@ def test_attach_stream_matches_plain_decode():
     model = _FakeBlocks([attn])
     attach_tiered_kv(model, tier, mode="stream")
     with torch.no_grad():
-        attn(x_seq, use_cache=True)            # prefill -> tier
+        attn(x_seq, use_cache=True)  # prefill -> tier
         outs = []
         for xt in xs:
             o, present = attn(xt, use_cache=True)
             assert present is None
             outs.append(o)
-    for a, b in zip(outs, outs_ref):
+    for a, b in zip(outs, outs_ref, strict=False):
         assert torch.allclose(a, b, atol=1e-4)
     detach_tiered_kv(model)
     _o2, p2 = attn(torch.randn(1, 1, 32), use_cache=True)
-    assert p2 is not None                      # orig path restored
+    assert p2 is not None  # orig path restored
 
 
 def test_attach_fetch_mode_matches():
@@ -273,7 +278,7 @@ def test_attach_fetch_mode_matches():
     with torch.no_grad():
         attn(x_seq, use_cache=True)
         outs = [attn(xt, use_cache=True)[0] for xt in xs]
-    for a, b in zip(outs, outs_ref):
+    for a, b in zip(outs, outs_ref, strict=False):
         assert torch.allclose(a, b, atol=1e-4)
 
 
@@ -299,8 +304,10 @@ def test_tiered_prefill_chunked_continuation():
 
 # ── weight tier ───────────────────────────────────────────────────────
 
+
 def test_tiered_ffn_matches_and_hides_params():
     from forge.model.layers import SwiGLUFFN
+
     torch.manual_seed(0)
     ffn = SwiGLUFFN(32, 96)
     x = torch.randn(1, 5, 32)
@@ -309,7 +316,7 @@ def test_tiered_ffn_matches_and_hides_params():
     tf = TieredFFN(ffn, link)
     out = tf(x)
     assert torch.allclose(out, ref, atol=1e-6)
-    assert len(list(tf.parameters())) == 0     # weights not VRAM-resident
+    assert len(list(tf.parameters())) == 0  # weights not VRAM-resident
     assert link.stats["w_fetch_ops"] == 1
     assert tf.ffn_bytes == (32 * 96 * 3) * 4
     assert link.stats["w_h2d_bytes"] == tf.ffn_bytes
@@ -318,6 +325,7 @@ def test_tiered_ffn_matches_and_hides_params():
 def test_wrap_unwrap_ffn_tiered():
     from forge.config import get_config
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = get_config("forgelm_tiny", layer_types=["attention"] * 2)
     cfg.vocab_size = 128
     cfg.device = "cpu"

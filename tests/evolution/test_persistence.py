@@ -6,18 +6,21 @@ Validates:
 3. Second run finds better score faster (fewer evaluations to match first run)
 4. Database can be queried for past discoveries
 """
-import os, sys, time, json
-os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
 
-import torch
+import json
+import os
+import sys
+import time
 from pathlib import Path
 
-DB_PATH = str(Path(__file__).resolve().parents[2] /
-              "research" / "results" / "forge_evolve_test.db")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-def main():
-    from forge.evolution import ForgeEvolve, ForgeEvolveConfig, FindingsDB
+DB_PATH = str(Path(__file__).resolve().parents[2] / "research" / "results" / "forge_evolve_test.db")
+
+
+def main(out_dir=None):
+    from forge.evolution import FindingsDB, ForgeEvolve, ForgeEvolveConfig
     from forge.evolution.domains.quant import QuantDomain
 
     # Clean start
@@ -52,9 +55,11 @@ def main():
     r1 = engine1.run()
     t1 = time.perf_counter() - t0
 
-    print(f"\n  Run 1: best={r1['best_score']:.4f}, "
-          f"{r1['total_evaluations']} evals, {r1['discoveries']} discoveries, "
-          f"{t1:.1f}s, warm_started={r1['warm_started']}")
+    print(
+        f"\n  Run 1: best={r1['best_score']:.4f}, "
+        f"{r1['total_evaluations']} evals, {r1['discoveries']} discoveries, "
+        f"{t1:.1f}s, warm_started={r1['warm_started']}"
+    )
 
     # ── Verify database has findings ──
     print("\n  [Database check] Querying past findings...")
@@ -62,8 +67,10 @@ def main():
     runs = db.list_runs("quant")
     print(f"  Runs in DB: {len(runs)}")
     for run in runs:
-        print(f"    {run['run_id']}: gen={run['generations']}, "
-              f"discoveries={run['discoveries']}, best={run['best_score']:.4f}")
+        print(
+            f"    {run['run_id']}: gen={run['generations']}, "
+            f"discoveries={run['discoveries']}, best={run['best_score']:.4f}"
+        )
 
     past_disc = db.query_discoveries("quant", limit=5)
     print(f"  Top discoveries in DB: {len(past_disc)}")
@@ -90,9 +97,11 @@ def main():
     r2 = engine2.run()
     t2 = time.perf_counter() - t0
 
-    print(f"\n  Run 2: best={r2['best_score']:.4f}, "
-          f"{r2['total_evaluations']} evals, {r2['discoveries']} discoveries, "
-          f"{t2:.1f}s, warm_started={r2['warm_started']}")
+    print(
+        f"\n  Run 2: best={r2['best_score']:.4f}, "
+        f"{r2['total_evaluations']} evals, {r2['discoveries']} discoveries, "
+        f"{t2:.1f}s, warm_started={r2['warm_started']}"
+    )
 
     db.close()
 
@@ -100,11 +109,9 @@ def main():
     print()
     print("  " + "=" * 60)
     print(f"  {'Run':<12} {'Best Score':>12} {'Evals':>8} {'Time':>8} {'Warm':>6}")
-    print(f"  {'-'*12} {'-'*12} {'-'*8} {'-'*8} {'-'*6}")
-    print(f"  {'Run 1':<12} {r1['best_score']:>12.4f} "
-          f"{r1['total_evaluations']:>8} {t1:>7.1f}s {'No':>6}")
-    print(f"  {'Run 2':<12} {r2['best_score']:>12.4f} "
-          f"{r2['total_evaluations']:>8} {t2:>7.1f}s {'Yes':>6}")
+    print(f"  {'-' * 12} {'-' * 12} {'-' * 8} {'-' * 8} {'-' * 6}")
+    print(f"  {'Run 1':<12} {r1['best_score']:>12.4f} {r1['total_evaluations']:>8} {t1:>7.1f}s {'No':>6}")
+    print(f"  {'Run 2':<12} {r2['best_score']:>12.4f} {r2['total_evaluations']:>8} {t2:>7.1f}s {'Yes':>6}")
 
     # ── Validation ──
     print()
@@ -116,39 +123,44 @@ def main():
     if disc_count > 0:
         print(f"  PASS: Database has {disc_count} discoveries")
     else:
-        print(f"  FAIL: Database has no discoveries")
+        print("  FAIL: Database has no discoveries")
         all_pass = False
 
     # Check 2: Run 2 was warm-started
-    if r2['warm_started']:
-        print(f"  PASS: Run 2 was warm-started from Run 1")
+    if r2["warm_started"]:
+        print("  PASS: Run 2 was warm-started from Run 1")
     else:
-        print(f"  FAIL: Run 2 was not warm-started")
+        print("  FAIL: Run 2 was not warm-started")
         all_pass = False
 
     # Check 3: Run 2 archive was pre-seeded
     # Run 2 should start with some archive entries from Run 1
-    if r2['best_score'] >= r1['best_score']:
+    if r2["best_score"] >= r1["best_score"]:
         print(f"  PASS: Run 2 ({r2['best_score']:.4f}) >= Run 1 ({r1['best_score']:.4f})")
     else:
         print(f"  WARN: Run 2 ({r2['best_score']:.4f}) < Run 1 ({r1['best_score']:.4f})")
-        print(f"         (may happen if exploration dominates — not a hard failure)")
+        print("         (may happen if exploration dominates — not a hard failure)")
 
     # Check 4: Run 2 found discoveries faster (per eval)
-    rate1 = r1['discoveries'] / r1['total_evaluations']
-    rate2 = r2['discoveries'] / r2['total_evaluations']
+    # A warm-started run may evaluate 0 fresh configs (all past discoveries
+    # were loaded into the archive) — treat that as a pass, not a crash.
+    rate1 = r1["discoveries"] / max(r1["total_evaluations"], 1)
+    if r2["total_evaluations"] == 0:
+        print("  PASS: Run 2 evaluated 0 fresh configs (all cached from archive)")
+        rate2 = rate1
+    else:
+        rate2 = r2["discoveries"] / r2["total_evaluations"]
     if rate2 >= rate1 * 0.5:  # at least half as efficient (new cells get scarce)
-        print(f"  PASS: Run 2 discovery rate ({rate2:.3f}/eval) reasonable "
-              f"vs Run 1 ({rate1:.3f}/eval)")
+        print(f"  PASS: Run 2 discovery rate ({rate2:.3f}/eval) reasonable vs Run 1 ({rate1:.3f}/eval)")
     else:
         print(f"  WARN: Run 2 discovery rate ({rate2:.3f}) much lower than Run 1 ({rate1:.3f})")
 
     # Check 5: Can query database for best configs
     best = db.query_best_configs("quant", limit=1)
-    if best and best[0]['score'] >= r1['best_score']:
+    if best and best[0]["score"] >= r1["best_score"]:
         print(f"  PASS: DB query returns best config (score={best[0]['score']:.4f})")
     else:
-        print(f"  FAIL: DB query doesn't return best config")
+        print("  FAIL: DB query doesn't return best config")
         all_pass = False
 
     db.close()
@@ -160,16 +172,29 @@ def main():
         print("  SOME CHECKS FAILED — review above")
 
     # Save summary
-    out = Path(r"D:\windsurf\ForgeAI\research\results\persistence_test.json")
+    out_dir = Path(out_dir) if out_dir is not None else Path(__file__).resolve().parents[2] / "research" / "results"
+    out = out_dir / "persistence_test.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as f:
-        json.dump({
-            "run1": {"best": r1["best_score"], "evals": r1["total_evaluations"],
-                     "discoveries": r1["discoveries"], "time": t1},
-            "run2": {"best": r2["best_score"], "evals": r2["total_evaluations"],
-                     "discoveries": r2["discoveries"], "time": t2,
-                     "warm_started": r2["warm_started"]},
-        }, f, indent=2)
+        json.dump(
+            {
+                "run1": {
+                    "best": r1["best_score"],
+                    "evals": r1["total_evaluations"],
+                    "discoveries": r1["discoveries"],
+                    "time": t1,
+                },
+                "run2": {
+                    "best": r2["best_score"],
+                    "evals": r2["total_evaluations"],
+                    "discoveries": r2["discoveries"],
+                    "time": t2,
+                    "warm_started": r2["warm_started"],
+                },
+            },
+            f,
+            indent=2,
+        )
     print(f"\n  Summary saved to {out}")
 
     # Under pytest, the script's own FAIL checks must fail the test
@@ -177,8 +202,8 @@ def main():
     assert all_pass, "SOME CHECKS FAILED — review above"
 
 
-def test_persistence():
-    main()
+def test_persistence(tmp_path):
+    main(tmp_path)
 
 
 if __name__ == "__main__":

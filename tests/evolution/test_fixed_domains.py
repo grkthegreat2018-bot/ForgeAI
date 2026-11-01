@@ -1,9 +1,14 @@
 """Quick test of the 5 fixed domains."""
-import sys, os, json
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 os.environ["PYTHONUTF8"] = "1"
 
 import torch
+
 from forge.evolution.domain_spec import JSONSpecDomain
 
 domains_to_test = [
@@ -19,7 +24,7 @@ for name in domains_to_test:
 
     print(f"\n=== {name} ===")
     seeds = domain.seed_configs()
-    for i, config in enumerate(seeds[:3]):
+    for _i, config in enumerate(seeds[:3]):
         result = domain.evaluate(config)
         score = result["score"]
         print(f"  config={config}")
@@ -28,6 +33,7 @@ for name in domains_to_test:
 
     # Also test a random config
     import random
+
     params = torch.tensor([random.random() for _ in range(domain.output_dim())])
     config = domain.decode(params)
     result = domain.evaluate(config)

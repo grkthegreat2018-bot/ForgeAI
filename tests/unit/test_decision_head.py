@@ -6,6 +6,7 @@ rule).  Tests cover the module mechanics (score/probs/temperature/
 persistence), the ECE helper, and decide() integration — a loaded
 scorer routes through _head_scores instead of raw LM probabilities.
 """
+
 import sys
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from forge.engine.decision_head import (
 def _tiny_model():
     from forge.config import get_config
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = get_config("gen_model_tiny")
     cfg.device = "cpu"
     cfg.dtype = "float32"
@@ -43,12 +45,14 @@ def _tiny_model():
 def tokenizer():
     try:
         from research.tokenizer_cache import get_tokenizer
+
         return get_tokenizer()
     except Exception as e:
         pytest.skip(f"tokenizer unavailable: {e}")
 
 
 # ── DecisionScorer module ──────────────────────────────────────────────
+
 
 class TestScorerModule:
     def test_score_shape(self):
@@ -96,6 +100,7 @@ class TestScorerModule:
 
 # ── ECE ────────────────────────────────────────────────────────────────
 
+
 class TestECE:
     def test_perfect_is_zero(self):
         p = torch.tensor([0.95, 0.95, 0.05, 0.05])
@@ -111,6 +116,7 @@ class TestECE:
 
 # ── linear separability (module-level learning) ───────────────────────
 
+
 class TestLinearLearning:
     def test_learns_separable_direction(self):
         """A planted direction in hidden space must be learnable."""
@@ -118,25 +124,23 @@ class TestLinearLearning:
         d = 256
         w_true = torch.randn(d)
         X = torch.randn(400, d)
-        y = (X @ w_true + 0.5 * torch.randn(400) > 0).long()
+        (X @ w_true + 0.5 * torch.randn(400) > 0).long()
         # group into fake questions of 2 candidates (pos/neg style):
         # build pairs where exactly one row satisfies y=1 — approximate
         # by grouping consecutive rows and marking argmax of true logit
         groups, labels = [], []
         for i in range(0, 400, 2):
-            groups.append(X[i:i+2])
-            labels.append(int((X[i:i+2] @ w_true).argmax()))
+            groups.append(X[i : i + 2])
+            labels.append(int((X[i : i + 2] @ w_true).argmax()))
         scorer = DecisionScorer(d)
         opt = torch.optim.AdamW(scorer.parameters(), lr=3e-3)
         for _ in range(5):
-            for g, lab in zip(groups, labels):
+            for g, lab in zip(groups, labels, strict=False):
                 opt.zero_grad()
-                loss = F.cross_entropy(scorer.score(g).unsqueeze(0),
-                                       torch.tensor([lab]))
+                loss = F.cross_entropy(scorer.score(g).unsqueeze(0), torch.tensor([lab]))
                 loss.backward()
                 opt.step()
-        correct = sum(int(scorer.score(g).argmax() == lab)
-                      for g, lab in zip(groups, labels))
+        correct = sum(int(scorer.score(g).argmax() == lab) for g, lab in zip(groups, labels, strict=False))
         assert correct / len(groups) > 0.8
 
 
@@ -152,7 +156,6 @@ def evaluator(tokenizer):
 
 
 class TestScorerIntegration:
-
     @staticmethod
     def _zero(scorer):
         with torch.no_grad():
@@ -168,8 +171,7 @@ class TestScorerIntegration:
         scorer.net.bias.data.fill_(0.5)
         evaluator.scorer = scorer
         try:
-            out = evaluator.evaluate(
-                _STATE, {"q": {"type": "noul", "instructions": "x?"}})
+            out = evaluator.evaluate(_STATE, {"q": {"type": "noul", "instructions": "x?"}})
             p = out["answers"]["q"]["noul"]
             # both candidates score 0.5 → uniform 0.5
             assert p == pytest.approx(0.5)
@@ -178,8 +180,7 @@ class TestScorerIntegration:
 
     def test_decide_falls_back_without_scorer(self, evaluator):
         evaluator.scorer = None
-        out = evaluator.evaluate(
-            _STATE, {"q": {"type": "noul", "instructions": "x?"}})
+        out = evaluator.evaluate(_STATE, {"q": {"type": "noul", "instructions": "x?"}})
         assert 0.0 <= out["answers"]["q"]["noul"] <= 1.0
 
     def test_head_path_all_types(self, evaluator):
@@ -188,10 +189,12 @@ class TestScorerIntegration:
         try:
             out = evaluator.evaluate(
                 _STATE,
-                {"n": {"type": "noul", "instructions": "ok?"},
-                 "c": {"type": "choice",
-                       "criteria": {"a": None, "b": None}},
-                 "s": {"type": "score", "criteria": ["lo", "hi"]}})
+                {
+                    "n": {"type": "noul", "instructions": "ok?"},
+                    "c": {"type": "choice", "criteria": {"a": None, "b": None}},
+                    "s": {"type": "score", "criteria": ["lo", "hi"]},
+                },
+            )
             assert out["answers"]["n"]["type"] == "noul"
             assert out["answers"]["c"]["type"] == "choice"
             assert out["answers"]["s"]["type"] == "score"
@@ -203,14 +206,10 @@ class TestScorerIntegration:
             evaluator.scorer = None
 
     def test_scorer_temperature_applies(self, evaluator):
-        scorer = self._zero(DecisionScorer(evaluator.model.config.d_model,
-                                           temperature=3.0))
+        scorer = self._zero(DecisionScorer(evaluator.model.config.d_model, temperature=3.0))
         evaluator.scorer = scorer
         try:
-            out = evaluator.evaluate(
-                _STATE,
-                {"c": {"type": "choice",
-                       "criteria": {"a": None, "b": None}}})
+            out = evaluator.evaluate(_STATE, {"c": {"type": "choice", "criteria": {"a": None, "b": None}}})
             probs = out["answers"]["c"]["probabilities"]
             # zero-init scorer → logits 0 → uniform regardless
             assert probs["a"] == pytest.approx(probs["b"])
@@ -219,6 +218,7 @@ class TestScorerIntegration:
 
 
 # ── fit_decision_scorer smoke ─────────────────────────────────────────
+
 
 class TestFit:
     def test_fit_runs_and_returns_metrics(self, tokenizer):
@@ -232,9 +232,7 @@ class TestFit:
             ("state d", {"type": "noul", "instructions": "q4?"}, 1),
             ("state e", {"type": "noul", "instructions": "q5?"}, 0),
         ]
-        scorer, metrics = fit_decision_scorer(
-            model, tokenizer, "cpu", dataset, epochs=2, val_frac=0.2,
-            progress=False)
+        scorer, metrics = fit_decision_scorer(model, tokenizer, "cpu", dataset, epochs=2, val_frac=0.2, progress=False)
         assert isinstance(scorer, DecisionScorer)
         assert metrics["n_examples"] == 5
         assert metrics["forwards"] == 10  # 5 questions x 2 candidates

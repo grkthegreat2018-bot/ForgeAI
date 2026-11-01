@@ -1,13 +1,13 @@
 """LLMDomainGenerator contracts — ChatML wrap, primed-continuation
 prompt, prime-splice extraction, validation gate, DOMAINS registration,
 and the GenericDomain fallback path."""
+
 from __future__ import annotations
 
 import pytest
 
-from forge.evolution.llm_domain_gen import (
-    GeneratedDomain, GenericDomain, LLMDomainGenerator)
 from forge.evolution.domains import DOMAINS
+from forge.evolution.llm_domain_gen import GeneratedDomain, LLMDomainGenerator
 from forge.evolution.topic_scanner import OptimizationTopic
 
 
@@ -18,7 +18,8 @@ def _topic(name: str = "use_fused_rope", **kw) -> OptimizationTopic:
         source_file=kw.pop("source_file", "forge/engine/x.py"),
         description=kw.pop("description", "fuse rope into qk norm"),
         parameters=kw.pop("parameters", ["enabled"]),
-        **kw)
+        **kw,
+    )
 
 
 class _FakeEngine:
@@ -86,8 +87,8 @@ def test_generate_with_llm_splices_prime_back():
     # Body continuations start indented — without the splice the class
     # header is lost and the required-name preference can't fire.
     eng = _FakeEngine(
-        "    def name(self):\n        return 'use_fused_rope'\n"
-        "    def output_dim(self):\n        return 1\n")
+        "    def name(self):\n        return 'use_fused_rope'\n    def output_dim(self):\n        return 1\n"
+    )
     gen = LLMDomainGenerator(engine=eng)
     code = gen._generate_with_llm(_topic())
     assert code is not None
@@ -101,7 +102,8 @@ def test_generate_with_llm_restart_block_still_wins():
     eng = _FakeEngine(
         "Sure! Here you go:\n```python\n"
         "class UseFusedRopeDomain(BaseDomain):\n"
-        "    def name(self):\n        return 'x'\n```\nDone.")
+        "    def name(self):\n        return 'x'\n```\nDone."
+    )
     gen = LLMDomainGenerator(engine=eng)
     code = gen._generate_with_llm(_topic())
     assert code is not None
@@ -110,8 +112,7 @@ def test_generate_with_llm_restart_block_still_wins():
 
 def test_extract_code_rejects_non_class_output():
     gen = LLMDomainGenerator()
-    assert gen._extract_code("```python\ndef f():\n    return 1\n```",
-                             required=["X"]) is None
+    assert gen._extract_code("```python\ndef f():\n    return 1\n```", required=["X"]) is None
 
 
 def test_extract_code_bare_class_fallback():
@@ -122,11 +123,9 @@ def test_extract_code_bare_class_fallback():
 
 def test_validate_code_gates():
     gen = LLMDomainGenerator()
-    good = ("from forge.evolution.domains import BaseDomain\n"
-            "class D(BaseDomain):\n    pass\n")
+    good = "from forge.evolution.domains import BaseDomain\nclass D(BaseDomain):\n    pass\n"
     assert gen._validate_code(good)
-    assert not gen._validate_code("class D(BaseDomain):\n    pass\n"
-                                  "import os\nos.system('x')\n")
+    assert not gen._validate_code("class D(BaseDomain):\n    pass\nimport os\nos.system('x')\n")
     assert not gen._validate_code("class D(BaseDomain):\n    x = eval('1')\n")
     assert not gen._validate_code("class D(NotBase):\n    pass\n")
     assert not gen._validate_code("def broken(:\n")
@@ -161,18 +160,17 @@ _VALID_DOMAIN = (
     "    def decode(self, p): return {}\n"
     "    def encode(self, c): return torch.zeros(1)\n"
     "    def evaluate(self, c): return {'score': 1.0, 'behavioral': (0.0, 0.0), 'metadata': {}}\n"
-    "    def behavioral_dims(self): return [('b', 10, 0.0, 1.0)]\n")
+    "    def behavioral_dims(self): return [('b', 10, 0.0, 1.0)]\n"
+)
 
 
 def test_register_domains_real_and_fallback(_restore_domains):
     gen = LLMDomainGenerator()
-    good = GeneratedDomain(name="t1", code=_VALID_DOMAIN,
-                           topic=_topic(), validated=True)
+    good = GeneratedDomain(name="t1", code=_VALID_DOMAIN, topic=_topic(), validated=True)
     # exec-able-AST but runtime-broken code -> GenericDomain fallback
-    bad = GeneratedDomain(name="t2",
-                          code="class BrokenDomain(BaseDomain):\n"
-                               "    x = undefined_name\n",
-                          topic=_topic("t2"), validated=True)
+    bad = GeneratedDomain(
+        name="t2", code="class BrokenDomain(BaseDomain):\n    x = undefined_name\n", topic=_topic("t2"), validated=True
+    )
     names = gen.register_domains([good, bad])
     assert "WiredDomain" in names
     assert DOMAINS["WiredDomain"].__name__ == "WiredDomain"

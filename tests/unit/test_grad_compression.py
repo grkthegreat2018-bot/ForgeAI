@@ -10,6 +10,7 @@ Verifies:
 
 All tests run on GPU (CUDA) with CPU fallback.
 """
+
 import os
 import sys
 
@@ -162,12 +163,8 @@ class TestEF21Convergence:
 
         # Both should have converged significantly
         loss_init = 0.5 * ((w_init - target) ** 2).sum().item()
-        assert loss_unc < loss_init * 0.01, (
-            f"Uncompressed didn't converge: {loss_unc:.6f} vs init {loss_init:.6f}"
-        )
-        assert loss_comp < loss_init * 0.01, (
-            f"Compressed didn't converge: {loss_comp:.6f} vs init {loss_init:.6f}"
-        )
+        assert loss_unc < loss_init * 0.01, f"Uncompressed didn't converge: {loss_unc:.6f} vs init {loss_init:.6f}"
+        assert loss_comp < loss_init * 0.01, f"Compressed didn't converge: {loss_comp:.6f} vs init {loss_init:.6f}"
 
         # Compressed should be within 1% of uncompressed final loss
         if loss_unc > 1e-10:
@@ -175,10 +172,7 @@ class TestEF21Convergence:
         else:
             rel_diff = abs(loss_comp - loss_unc) / (loss_init + 1e-12)
 
-        assert rel_diff < 0.01, (
-            f"EF21 final loss diff {rel_diff:.6f} >= 1% "
-            f"(unc={loss_unc:.8f}, comp={loss_comp:.8f})"
-        )
+        assert rel_diff < 0.01, f"EF21 final loss diff {rel_diff:.6f} >= 1% (unc={loss_unc:.8f}, comp={loss_comp:.8f})"
 
     def test_ef21_1d_convergence(self):
         """EF21 on a 1D quadratic (per-tensor quantization)."""
@@ -209,9 +203,7 @@ class TestEF21Convergence:
         loss_comp = 0.5 * ((w_comp - target) ** 2).sum().item()
 
         loss_init = 0.5 * ((w_init - target) ** 2).sum().item()
-        assert loss_comp < loss_init * 0.01, (
-            f"1D EF21 didn't converge: {loss_comp:.6f} vs init {loss_init:.6f}"
-        )
+        assert loss_comp < loss_init * 0.01, f"1D EF21 didn't converge: {loss_comp:.6f} vs init {loss_init:.6f}"
 
         if loss_unc > 1e-10:
             rel_diff = abs(loss_comp - loss_unc) / loss_unc
@@ -219,8 +211,7 @@ class TestEF21Convergence:
             rel_diff = abs(loss_comp - loss_unc) / (loss_init + 1e-12)
 
         assert rel_diff < 0.02, (
-            f"1D EF21 final loss diff {rel_diff:.6f} >= 2% "
-            f"(unc={loss_unc:.8f}, comp={loss_comp:.8f})"
+            f"1D EF21 final loss diff {rel_diff:.6f} >= 2% (unc={loss_unc:.8f}, comp={loss_comp:.8f})"
         )
 
     def test_ef21_without_error_feedback_diverges_more(self):
@@ -254,9 +245,7 @@ class TestEF21Convergence:
         loss_ef = 0.5 * ((w_ef - target) ** 2).sum().item()
 
         # EF21 should be at least as good as naive (usually better)
-        assert loss_ef <= loss_no_ef * 1.05, (
-            f"EF21 ({loss_ef:.8f}) should be <= naive ({loss_no_ef:.8f}) * 1.05"
-        )
+        assert loss_ef <= loss_no_ef * 1.05, f"EF21 ({loss_ef:.8f}) should be <= naive ({loss_no_ef:.8f}) * 1.05"
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +315,7 @@ class TestEdgeCases:
 
         # The outliers should be well-preserved (they set the scale)
         assert abs(decompressed[0, 0].item() - 10.0) < 1.0, (
-            f"Outlier not preserved: {decompressed[0,0].item():.4f} vs 10.0"
+            f"Outlier not preserved: {decompressed[0, 0].item():.4f} vs 10.0"
         )
         # Overall error may be higher due to scale being dominated by outliers
         # but should still be reasonable

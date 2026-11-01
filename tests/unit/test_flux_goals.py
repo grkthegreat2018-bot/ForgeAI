@@ -2,6 +2,7 @@
 
 All web access is faked — tests are CPU-only and hermetic.
 """
+
 from unittest.mock import MagicMock
 
 from forge.self_play.flux_goals import (
@@ -18,28 +19,39 @@ from forge.self_play.infinite_loop import InfiniteSelfPlayLoop, LoopConfig
 
 # ── canned source documents ────────────────────────────────────────────
 
-WIKI_DOC = {"source": "wiki", "key": "photosynthesis",
-            "title": "Photosynthesis",
-            "extract": ("Photosynthesis is a system of biological "
-                        "processes by which plants convert light "
-                        "energy into chemical energy. It was first "
-                        "described in 1779 by Jan Ingenhousz."),
-            "url": "https://en.wikipedia.org/wiki/Photosynthesis"}
+WIKI_DOC = {
+    "source": "wiki",
+    "key": "photosynthesis",
+    "title": "Photosynthesis",
+    "extract": (
+        "Photosynthesis is a system of biological "
+        "processes by which plants convert light "
+        "energy into chemical energy. It was first "
+        "described in 1779 by Jan Ingenhousz."
+    ),
+    "url": "https://en.wikipedia.org/wiki/Photosynthesis",
+}
 
-DICT_DOC = {"source": "dict", "key": "ephemeral", "word": "ephemeral",
-            "pos": "adjective",
-            "glosses": ["lasting a very short time",
-                        "a short-lived thing"],
-            "synonyms": ["fleeting", "transient", "momentary"],
-            "antonyms": ["permanent", "eternal"]}
+DICT_DOC = {
+    "source": "dict",
+    "key": "ephemeral",
+    "word": "ephemeral",
+    "pos": "adjective",
+    "glosses": ["lasting a very short time", "a short-lived thing"],
+    "synonyms": ["fleeting", "transient", "momentary"],
+    "antonyms": ["permanent", "eternal"],
+}
 
-ARXIV_DOC = {"source": "arxiv", "key": "1706.03762",
-             "title": "Attention Is All You Need",
-             "summary": "The dominant sequence transduction models.",
-             "url": "http://arxiv.org/abs/1706.03762",
-             "published": "2017-06-12",
-             "authors": ["Ashish Vaswani", "Noam Shazeer"],
-             "arxiv_id": "1706.03762"}
+ARXIV_DOC = {
+    "source": "arxiv",
+    "key": "1706.03762",
+    "title": "Attention Is All You Need",
+    "summary": "The dominant sequence transduction models.",
+    "url": "http://arxiv.org/abs/1706.03762",
+    "published": "2017-06-12",
+    "authors": ["Ashish Vaswani", "Noam Shazeer"],
+    "arxiv_id": "1706.03762",
+}
 
 
 class FakeTools:
@@ -71,26 +83,29 @@ class FakeTools:
 
 # ── tool-call parsing ──────────────────────────────────────────────────
 
+
 class TestParseToolCall:
     def test_canonical_forms(self):
-        assert parse_tool_call("wiki Photosynthesis") == \
-            ("wiki", "Photosynthesis")
+        assert parse_tool_call("wiki Photosynthesis") == ("wiki", "Photosynthesis")
         assert parse_tool_call("dict: ephemeral") == ("dict", "ephemeral")
-        assert parse_tool_call("[paper] quantization") == \
-            ("paper", "quantization")
+        assert parse_tool_call("[paper] quantization") == ("paper", "quantization")
         assert parse_tool_call("arxiv attention") == ("paper", "attention")
         assert parse_tool_call("search cats") == ("web", "cats")
 
     def test_rejects_garbage(self):
         assert parse_tool_call("") is None
         assert parse_tool_call("42") is None
-        assert parse_tool_call("hello world this is not a call") is None \
-            or parse_tool_call("x y")[0] in ("wiki", "dict",
-                                             "paper", "web")
+        assert parse_tool_call("hello world this is not a call") is None or parse_tool_call("x y")[0] in (
+            "wiki",
+            "dict",
+            "paper",
+            "web",
+        )
         assert parse_tool_call("wiki " + "x" * 200) is None
 
 
 # ── doc -> goal builders ───────────────────────────────────────────────
+
 
 class TestGoalBuilders:
     def test_wiki_goals_extractive(self):
@@ -100,10 +115,9 @@ class TestGoalBuilders:
             assert g["source"] == "wiki" and g["context"]
             assert g["tool"] == "wiki" and g["query"] == "Photosynthesis"
             # every answer is verbatim-extractive from the source
-            assert g["response"].lower() in \
-                (WIKI_DOC["extract"] + WIKI_DOC["title"]).lower()
+            assert g["response"].lower() in (WIKI_DOC["extract"] + WIKI_DOC["title"]).lower()
         kinds = {g["response"] for g in goals}
-        assert "1779" in kinds           # year cloze
+        assert "1779" in kinds  # year cloze
         assert "Photosynthesis" in kinds  # masked-subject recall
 
     def test_dict_goals(self):
@@ -130,32 +144,30 @@ class TestGoalBuilders:
 
 # ── FluxTools ──────────────────────────────────────────────────────────
 
+
 class TestFluxTools:
     def test_offline_probe(self, monkeypatch):
-        monkeypatch.setattr(
-            "forge.web_primitives.http_get",
-            MagicMock(side_effect=OSError("no net")))
+        monkeypatch.setattr("forge.web_primitives.http_get", MagicMock(side_effect=OSError("no net")))
         t = FluxTools()
         assert t.online() is False
         assert t.call("wiki", "x") == "offline"
         assert t.fetch_doc("wiki") is None
 
     def test_budget_exhaustion(self, monkeypatch):
-        monkeypatch.setattr("forge.web_primitives.http_get",
-                            MagicMock(return_value="{}"))
+        monkeypatch.setattr("forge.web_primitives.http_get", MagicMock(return_value="{}"))
         t = FluxTools(fetch_budget=1)
         t._online = True
         assert t._get("http://x") == "{}"
-        assert t._get("http://x") == ""   # budget spent
+        assert t._get("http://x") == ""  # budget spent
 
     def test_file_tool_reads_offline(self, tmp_path):
         f = tmp_path / "src.py"
         f.write_text("def hello():\n    return 42\n")
         t = FluxTools(file_root=str(tmp_path))
-        t._online = False               # file works with no network
+        t._online = False  # file works with no network
         obs = t.call("file", "src.py")
         assert "def hello" in obs
-        obs = t.call("file", str(f))    # absolute paths too
+        obs = t.call("file", str(f))  # absolute paths too
         assert "return 42" in obs
 
     def test_file_tool_denies_secrets(self, tmp_path):
@@ -189,16 +201,14 @@ class TestFluxTools:
 
     def test_write_tool_jailed_to_sandbox(self, tmp_path):
         box = tmp_path / "sandbox"
-        t = FluxTools(file_root=str(tmp_path),
-                      sandbox_dir=str(box))
+        t = FluxTools(file_root=str(tmp_path), sandbox_dir=str(box))
         t._online = False
         assert t.call("write", "code.py::x = 1") == "wrote code.py"
         assert (box / "code.py").read_text() == "x = 1\n"
         t.call("write", "sub/notes.md::line2")
         assert (box / "sub" / "notes.md").exists()
         # escapes denied: absolute, .. traversal, missing ::
-        assert "path" in t.call("write", "../evil.txt::x") or \
-            "denied" in t.call("write", "../evil.txt::x")
+        assert "path" in t.call("write", "../evil.txt::x") or "denied" in t.call("write", "../evil.txt::x")
         assert "path" in t.call("write", "/tmp/x::x")
         assert "need" in t.call("write", "noseparator")
         assert not (tmp_path / "evil.txt").exists()
@@ -211,25 +221,26 @@ class TestFluxTools:
 
 # ── FluxKB persistence ─────────────────────────────────────────────────
 
+
 class TestFluxKB:
     def test_roundtrip_and_dedup(self, tmp_path):
         p = str(tmp_path / "kb.jsonl")
         kb = FluxKB(p)
         assert kb.add(WIKI_DOC) is True
-        assert kb.add(WIKI_DOC) is False     # same (source,key)
-        kb2 = FluxKB(p)                      # reload
+        assert kb.add(WIKI_DOC) is False  # same (source,key)
+        kb2 = FluxKB(p)  # reload
         assert len(kb2.docs) == 1
         assert kb2.docs[0]["title"] == "Photosynthesis"
 
 
 # ── FluxGoalSampler ────────────────────────────────────────────────────
 
+
 class TestFluxGoalSampler:
     def test_sample_web_dedupes(self, tmp_path):
         tools = FakeTools(docs=[WIKI_DOC, DICT_DOC, ARXIV_DOC])
         kb = FluxKB(str(tmp_path / "kb.jsonl"))
-        s = FluxGoalSampler(tools, kb=kb, sources=("wiki", "dict",
-                                                   "arxiv"))
+        s = FluxGoalSampler(tools, kb=kb, sources=("wiki", "dict", "arxiv"))
         seen = set()
         goals = s.sample_web(10, seen, set(), epoch=0)
         assert goals
@@ -252,12 +263,13 @@ class TestFluxGoalSampler:
         s = FluxGoalSampler(tools, sources=("wiki", "arxiv"))
         ep = str(tmp_path / "eval.json")
         rows1 = s.build_eval(4, ep, set())
-        rows2 = s.build_eval(4, ep, set())   # loads frozen file
+        rows2 = s.build_eval(4, ep, set())  # loads frozen file
         assert rows1 == rows2
         assert all(r["prompt"] for r in rows2)
 
 
 # ── loop integration ───────────────────────────────────────────────────
+
 
 def _mock_flux_engine(gen_outputs: list):
     """Engine mock: generate_batch serves queued outputs in order."""
@@ -270,7 +282,8 @@ def _mock_flux_engine(gen_outputs: list):
 
     def _gb(prompts, **kw):
         batch = queue.pop(0) if queue else ["wrong"]
-        return (batch * (len(prompts) // len(batch) + 1))[:len(prompts)]
+        return (batch * (len(prompts) // len(batch) + 1))[: len(prompts)]
+
     engine.generate_batch = MagicMock(side_effect=_gb)
     return engine
 
@@ -278,42 +291,45 @@ def _mock_flux_engine(gen_outputs: list):
 class TestFluxLoopWeb:
     def test_fresh_pairs_mixed_sources(self):
         """With web on, sampler goals mix into the batch with kinds."""
-        cfg = LoopConfig(training_mode="flux", tasks_per_epoch=10,
-                         flux_eval_n=4, flux_eval_web_n=0,
-                         flux_web_frac=0.5)
+        cfg = LoopConfig(training_mode="flux", tasks_per_epoch=10, flux_eval_n=4, flux_eval_web_n=0, flux_web_frac=0.5)
         loop = InfiniteSelfPlayLoop("fake.flux", cfg)
-        fake_goal = {"prompt": "What is Photosynthesis? "
-                               "Answer with a short phrase.",
-                     "response": "a system", "source": "wiki",
-                     "context": "ctx", "tool": "wiki", "query": "Photo"}
+        fake_goal = {
+            "prompt": "What is Photosynthesis? Answer with a short phrase.",
+            "response": "a system",
+            "source": "wiki",
+            "context": "ctx",
+            "tool": "wiki",
+            "query": "Photo",
+        }
         sampler = MagicMock()
-        sampler.sample_web = lambda n, seen, ev, epoch=0: \
-            [dict(fake_goal) for _ in range(n)]
+        sampler.sample_web = lambda n, seen, ev, epoch=0: [dict(fake_goal) for _ in range(n)]
         loop._flux_sampler_obj = sampler
         loop._flux_tools_obj = FakeTools()
         pairs = loop._flux_fresh_pairs(10)
         assert len(pairs) == 10
         web = [p for p in pairs if p.get("source") == "wiki"]
-        assert web and all(p["kind"] in ("qa", "rag", "tool")
-                           for p in web)
-        assert all(p["kind"] == "qa" for p in pairs
-                   if p.get("source") == "procedural")
+        assert web and all(p["kind"] in ("qa", "rag", "tool") for p in web)
+        assert all(p["kind"] == "qa" for p in pairs if p.get("source") == "procedural")
 
     def test_tool_mode_two_phase(self):
         """Tool tasks run phase A (T:) then phase B (A:) and pass
         per-prompt newline stops to phase A."""
-        cfg = LoopConfig(training_mode="flux", tasks_per_epoch=2,
-                         flux_eval_n=4, flux_eval_web_n=0,
-                         flux_group_size=2, flux_workers=2)
+        cfg = LoopConfig(
+            training_mode="flux", tasks_per_epoch=2, flux_eval_n=4, flux_eval_web_n=0, flux_group_size=2, flux_workers=2
+        )
         loop = InfiniteSelfPlayLoop("fake.flux", cfg)
-        goal = {"prompt": "What does ephemeral mean?",
-                "response": "short-lived", "kind": "tool",
-                "source": "dict", "context": "ephemeral: short-lived",
-                "tool": "dict", "query": "ephemeral"}
+        goal = {
+            "prompt": "What does ephemeral mean?",
+            "response": "short-lived",
+            "kind": "tool",
+            "source": "dict",
+            "context": "ephemeral: short-lived",
+            "tool": "dict",
+            "query": "ephemeral",
+        }
         loop._flux_fresh_pairs = MagicMock(return_value=[goal, goal])
         # phase A emits a parseable call; phase B answers correctly
-        engine = _mock_flux_engine([["dict ephemeral"] * 4,
-                                    ["short-lived"] * 4])
+        engine = _mock_flux_engine([["dict ephemeral"] * 4, ["short-lived"] * 4])
         loop._flux_engine = MagicMock(return_value=engine)
         loop._flux_eval_acc = MagicMock(return_value=0.0)
         loop._flux_tools_obj = FakeTools()
@@ -333,8 +349,7 @@ class TestFluxLoopWeb:
     def test_tool_fail_teaches_both_steps(self):
         """Failed tool task: context ingest + T-step demo + A-step demo
         + full-trajectory ingest."""
-        cfg = LoopConfig(training_mode="flux", flux_eval_n=4,
-                         flux_eval_web_n=0)
+        cfg = LoopConfig(training_mode="flux", flux_eval_n=4, flux_eval_web_n=0)
         loop = InfiniteSelfPlayLoop("fake.flux", cfg)
         engine = _mock_flux_engine([])
         model = engine.model
@@ -345,12 +360,20 @@ class TestFluxLoopWeb:
         loop._flux_eval_acc = MagicMock(return_value=0.0)
         loop._maybe_promote = MagicMock(return_value=True)
         loop._flux_tools_obj = FakeTools()
-        loop._flux_attempts = [{
-            "prompt": "What does ephemeral mean?", "response": "fleeting",
-            "accepts": None, "kind": "tool", "source": "dict",
-            "context": "ephemeral (adj): lasting a very short time",
-            "tool": "dict", "query": "ephemeral",
-            "ok": False, "obs": ["obs for ephemeral"]}]
+        loop._flux_attempts = [
+            {
+                "prompt": "What does ephemeral mean?",
+                "response": "fleeting",
+                "accepts": None,
+                "kind": "tool",
+                "source": "dict",
+                "context": "ephemeral (adj): lasting a very short time",
+                "tool": "dict",
+                "query": "ephemeral",
+                "ok": False,
+                "obs": ["obs for ephemeral"],
+            }
+        ]
         loop.epoch = 1
 
         loop._flux_finish({})
@@ -366,16 +389,15 @@ class TestFluxLoopWeb:
         assert model.soft_reset.called
 
     def test_eval_combines_procedural_and_web(self, tmp_path):
-        cfg = LoopConfig(training_mode="flux", flux_eval_n=6,
-                         flux_eval_web_n=2,
-                         status_dir=str(tmp_path))
+        cfg = LoopConfig(training_mode="flux", flux_eval_n=6, flux_eval_web_n=2, status_dir=str(tmp_path))
         loop = InfiniteSelfPlayLoop("fake.flux", cfg)
         sampler = MagicMock()
-        sampler.build_eval = MagicMock(return_value=[
-            {"prompt": "web q1", "response": "a1", "accepts": [],
-             "source": "wiki"},
-            {"prompt": "web q2", "response": "a2", "accepts": [],
-             "source": "arxiv"}])
+        sampler.build_eval = MagicMock(
+            return_value=[
+                {"prompt": "web q1", "response": "a1", "accepts": [], "source": "wiki"},
+                {"prompt": "web q2", "response": "a2", "accepts": [], "source": "arxiv"},
+            ]
+        )
         loop._flux_sampler_obj = sampler
         loop._flux_tools_obj = FakeTools()
         pairs = loop._flux_eval_pairs()

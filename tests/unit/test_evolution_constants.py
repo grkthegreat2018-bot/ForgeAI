@@ -16,10 +16,10 @@ References
 - forge/evolution/domains/memory_domains.py â€” evolution domain bounds
 - AGENTS.md "Evolution-Discovered Promotions" section
 """
+
 from __future__ import annotations
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # ft_grad_accum = 5
@@ -109,6 +109,7 @@ PREFETCH_DEPTH = 7
 # Tests
 # ---------------------------------------------------------------------------
 
+
 class TestFtGradAccum:
     """Validate ft_grad_accum = 5 (evolution-discovered)."""
 
@@ -127,6 +128,7 @@ class TestFtGradAccum:
     def test_documented_in_loop_config(self):
         """Verify the production default matches the documented value."""
         from forge.self_play.infinite_loop import LoopConfig
+
         cfg = LoopConfig()
         assert cfg.ft_grad_accum == FT_GRAD_ACCUM
 
@@ -149,6 +151,7 @@ class TestFtSyncFreq:
     def test_documented_in_loop_config(self):
         """Verify the production default matches the documented value."""
         from forge.self_play.infinite_loop import LoopConfig
+
         cfg = LoopConfig()
         assert cfg.ft_sync_freq == FT_SYNC_FREQ
 
@@ -170,6 +173,7 @@ class TestFtFocalGamma:
     def test_documented_in_loop_config(self):
         """Verify the production default matches the documented value."""
         from forge.self_play.infinite_loop import LoopConfig
+
         cfg = LoopConfig()
         assert cfg.ft_focal_gamma == FT_FOCAL_GAMMA
 
@@ -188,6 +192,7 @@ class TestFtGradCompression:
     def test_documented_in_loop_config(self):
         """Verify the production default matches the documented value."""
         from forge.self_play.infinite_loop import LoopConfig
+
         cfg = LoopConfig()
         assert cfg.ft_grad_compression == FT_GRAD_COMPRESSION
 
@@ -210,7 +215,9 @@ class TestPrefetchDepth:
     def test_documented_in_hybrid_offload(self):
         """Verify the production default matches the documented value."""
         import inspect
+
         from forge.training.optim.hybrid_offload import CPUAdamW
+
         sig = inspect.signature(CPUAdamW.__init__)
         param = sig.parameters.get("prefetch_depth")
         assert param is not None
@@ -221,12 +228,14 @@ class TestPrefetchDepth:
 # Cross-cutting: verify all constants are wired into production code
 # ---------------------------------------------------------------------------
 
+
 class TestEvolutionConstantsWired:
     """Ensure all evolution-discovered constants are actually used in production."""
 
     def test_ft_grad_accum_passed_to_sft_train(self):
         """ft_grad_accum is passed as --grad-accum in the SFT command."""
         from forge.self_play.infinite_loop import LoopConfig
+
         cfg = LoopConfig()
         # The command builder references c.ft_grad_accum at line 596
         assert hasattr(cfg, "ft_grad_accum")
@@ -234,25 +243,30 @@ class TestEvolutionConstantsWired:
     def test_ft_sync_freq_passed_to_sft_train(self):
         """ft_sync_freq is passed as --sync-freq in the SFT command."""
         from forge.self_play.infinite_loop import LoopConfig
+
         cfg = LoopConfig()
         assert hasattr(cfg, "ft_sync_freq")
 
     def test_ft_focal_gamma_passed_to_sft_train(self):
         """ft_focal_gamma is passed as --focal-gamma in the SFT command."""
         from forge.self_play.infinite_loop import LoopConfig
+
         cfg = LoopConfig()
         assert hasattr(cfg, "ft_focal_gamma")
 
     def test_ft_grad_compression_passed_to_sft_train(self):
         """ft_grad_compression is passed as --grad-compression in the SFT command."""
         from forge.self_play.infinite_loop import LoopConfig
+
         cfg = LoopConfig()
         assert hasattr(cfg, "ft_grad_compression")
 
     def test_prefetch_depth_used_in_cpuadamw(self):
         """prefetch_depth is a parameter of CPUAdamW.__init__."""
         import inspect
+
         from forge.training.optim.hybrid_offload import CPUAdamW
+
         sig = inspect.signature(CPUAdamW.__init__)
         assert "prefetch_depth" in sig.parameters
 
@@ -260,6 +274,7 @@ class TestEvolutionConstantsWired:
 # ---------------------------------------------------------------------------
 # Documentation: evolution DB provenance
 # ---------------------------------------------------------------------------
+
 
 class TestEvolutionProvenance:
     """Document the evolution provenance of each constant.
@@ -281,14 +296,17 @@ class TestEvolutionProvenance:
     def findings_db(self):
         """Try to open the evolution DB; skip if not found."""
         from pathlib import Path
+
+        repo = Path(__file__).resolve().parents[2]
         db_candidates = [
             Path("forge_evolve.db"),
-            Path("D:/windsurf/ForgeAI/forge_evolve.db"),
-            Path("D:/windsurf/ForgeAI/data/forge_evolve.db"),
+            repo / "forge_evolve.db",
+            repo / "data" / "forge_evolve.db",
         ]
         for p in db_candidates:
             if p.exists():
                 from forge.evolution.database import FindingsDB
+
                 return FindingsDB(str(p))
         pytest.skip("forge_evolve.db not found â€” evolution DB provenance check skipped")
 
@@ -305,10 +323,9 @@ class TestEvolutionProvenance:
         found = False
         for row in rows:
             config = row.get("config", {})
-            if isinstance(config, dict):
-                if config.get("accum_steps") == FT_GRAD_ACCUM:
-                    found = True
-                    break
+            if isinstance(config, dict) and config.get("accum_steps") == FT_GRAD_ACCUM:
+                found = True
+                break
         if not found:
             # Not necessarily an error â€” the DB may have been rescored/migrated
             # or the discovery may be stored under a different domain name.
@@ -327,10 +344,9 @@ class TestEvolutionProvenance:
         found = False
         for row in rows:
             config = row.get("config", {})
-            if isinstance(config, dict):
-                if config.get("sync_freq") == FT_SYNC_FREQ:
-                    found = True
-                    break
+            if isinstance(config, dict) and config.get("sync_freq") == FT_SYNC_FREQ:
+                found = True
+                break
         if not found:
             pass  # CONCERN: sync_freq=15 not found in 'grad_accum_config' discoveries
 
@@ -366,10 +382,9 @@ class TestEvolutionProvenance:
         found = False
         for row in rows:
             config = row.get("config", {})
-            if isinstance(config, dict):
-                if config.get("compression") == FT_GRAD_COMPRESSION:
-                    found = True
-                    break
+            if isinstance(config, dict) and config.get("compression") == FT_GRAD_COMPRESSION:
+                found = True
+                break
         if not found:
             pass  # CONCERN: compression='int4' not found in 'cpu_adamw_config' discoveries
 
@@ -387,10 +402,9 @@ class TestEvolutionProvenance:
                 continue
             for row in rows:
                 config = row.get("config", {})
-                if isinstance(config, dict):
-                    if config.get("prefetch_depth") == PREFETCH_DEPTH:
-                        found = True
-                        break
+                if isinstance(config, dict) and config.get("prefetch_depth") == PREFETCH_DEPTH:
+                    found = True
+                    break
             if found:
                 break
         if not found:
@@ -440,22 +454,27 @@ class TestEvolutionProvenance:
 # best_configs.json — the live evolution -> production link (Critique NC8)
 # ---------------------------------------------------------------------------
 
+
 class TestBestConfigsApply:
     """Validate apply_to_namespace() — the mechanism sft_train.py uses to
     override argparse defaults with evolution-best values."""
 
     def _args(self, **kw):
         import argparse
+
         return argparse.Namespace(**kw)
 
     def test_overrides_defaults_only(self, tmp_path, monkeypatch):
         import json
+
         from forge.evolution import best_configs
-        payload = {"domains": {
-            "grad_accum_config": {"config": {"accum_steps": 8, "sync_freq": 9},
-                                   "score": 42.0},
-            "loss_config": {"config": {"focal_gamma": 3.0}, "score": 7.0},
-        }}
+
+        payload = {
+            "domains": {
+                "grad_accum_config": {"config": {"accum_steps": 8, "sync_freq": 9}, "score": 42.0},
+                "loss_config": {"config": {"focal_gamma": 3.0}, "score": 7.0},
+            }
+        }
         cfg_file = tmp_path / "best_configs.json"
         cfg_file.write_text(json.dumps(payload), encoding="utf-8")
         monkeypatch.setattr(best_configs, "BEST_CONFIGS_PATH", cfg_file)
@@ -465,24 +484,28 @@ class TestBestConfigsApply:
         defaults = {"grad_accum": 5, "sync_freq": 15, "focal_gamma": 4.93}
         applied = best_configs.apply_to_namespace(args, defaults)
         assert args.grad_accum == 8
-        assert args.sync_freq == 3        # user-passed value wins
+        assert args.sync_freq == 3  # user-passed value wins
         assert args.focal_gamma == 3.0
         assert len(applied) == 2
 
     def test_missing_file_is_noop(self, tmp_path, monkeypatch):
         from forge.evolution import best_configs
-        monkeypatch.setattr(best_configs, "BEST_CONFIGS_PATH",
-                            tmp_path / "absent.json")
+
+        monkeypatch.setattr(best_configs, "BEST_CONFIGS_PATH", tmp_path / "absent.json")
         args = self._args(grad_accum=5)
         assert best_configs.apply_to_namespace(args, {"grad_accum": 5}) == []
         assert args.grad_accum == 5
 
     def test_reverted_guard_refuses_value(self, tmp_path, monkeypatch):
         import json
+
         from forge.evolution import best_configs
-        payload = {"domains": {
-            "loss_config": {"config": {"label_smoothing": 0.29}, "score": 9.0},
-        }}
+
+        payload = {
+            "domains": {
+                "loss_config": {"config": {"label_smoothing": 0.29}, "score": 9.0},
+            }
+        }
         cfg_file = tmp_path / "best_configs.json"
         cfg_file.write_text(json.dumps(payload), encoding="utf-8")
         monkeypatch.setattr(best_configs, "BEST_CONFIGS_PATH", cfg_file)
@@ -491,5 +514,5 @@ class TestBestConfigsApply:
         defaults = {"label_smoothing_eps": 0.1}
         param_map = {"label_smoothing_eps": ("loss_config", "label_smoothing", float)}
         applied = best_configs.apply_to_namespace(args, defaults, param_map)
-        assert applied == []                    # 0.29 was a reverted promotion
+        assert applied == []  # 0.29 was a reverted promotion
         assert args.label_smoothing_eps == 0.1

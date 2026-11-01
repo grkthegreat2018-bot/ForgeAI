@@ -1,4 +1,5 @@
 """Test RLVR pipeline: math answer extraction, verification, reward computation."""
+
 import os
 import sys
 
@@ -73,10 +74,12 @@ def test_math_verify_no_answer():
 
 def test_math_verify_doom_loop():
     """A doom-loop completion should fail verification (no valid answer)."""
-    loop = "the answer is the answer is the answer is the answer is the answer is " \
-           "the answer is the answer is the answer is the answer is the answer is " \
-           "the answer is the answer is the answer is the answer is the answer is " \
-           "the answer is the answer is the answer is the answer is the answer is"
+    loop = (
+        "the answer is the answer is the answer is the answer is the answer is "
+        "the answer is the answer is the answer is the answer is the answer is "
+        "the answer is the answer is the answer is the answer is the answer is "
+        "the answer is the answer is the answer is the answer is the answer is"
+    )
     gold = "4"
     # The doom-loop text has "the answer is" repeated, extract_math_answer
     # might extract a number from it. Let's check what happens.
@@ -98,6 +101,7 @@ def test_extract_gold_answer():
 def test_load_math_tasks():
     """Load math tasks from a JSONL file."""
     import tempfile
+
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
         f.write('{"prompt": "What is 2+2?", "solution": "2+2=4.\\n#### 4"}\n')
         f.write('{"prompt": "What is 3*3?", "solution": "3*3=9.\\n#### 9"}\n')
@@ -132,6 +136,7 @@ def test_verifiable_task_dataclass():
 def test_repetition_penalty_integration():
     """Verify that the GRPO config has repetition penalty fields."""
     from forge.self_play.grpo_trainer import GRPOConfig
+
     config = GRPOConfig()
     assert hasattr(config, "use_repetition_penalty")
     assert hasattr(config, "repetition_n")

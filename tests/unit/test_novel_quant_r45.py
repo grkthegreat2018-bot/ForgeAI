@@ -1,4 +1,5 @@
 """Unit tests for R45 novel quantization algorithms."""
+
 import copy
 
 import pytest
@@ -22,26 +23,27 @@ from forge.engine.quant.novel_quant_r45 import (
 # Haar wavelet matrix tests
 # ──────────────────────────────────────────────────────────────────────────
 
+
 class TestHaarMatrix:
     def test_orthonormal_8(self):
-        H = _haar_matrix(8, torch.device('cpu'), torch.float32)
-        I = H @ H.T
-        assert torch.allclose(I, torch.eye(8), atol=1e-5)
+        H = _haar_matrix(8, torch.device("cpu"), torch.float32)
+        prod = H @ H.T
+        assert torch.allclose(prod, torch.eye(8), atol=1e-5)
 
     def test_orthonormal_16(self):
-        H = _haar_matrix(16, torch.device('cpu'), torch.float32)
-        I = H @ H.T
-        assert torch.allclose(I, torch.eye(16), atol=1e-5)
+        H = _haar_matrix(16, torch.device("cpu"), torch.float32)
+        prod = H @ H.T
+        assert torch.allclose(prod, torch.eye(16), atol=1e-5)
 
     def test_orthonormal_4(self):
-        H = _haar_matrix(4, torch.device('cpu'), torch.float32)
-        I = H @ H.T
-        assert torch.allclose(I, torch.eye(4), atol=1e-5)
+        H = _haar_matrix(4, torch.device("cpu"), torch.float32)
+        prod = H @ H.T
+        assert torch.allclose(prod, torch.eye(4), atol=1e-5)
 
     def test_constant_signal_only_dc(self):
         """Constant signal should only have DC (first) coefficient."""
         x = torch.ones(1, 8) * 5.0
-        H = _haar_matrix(8, torch.device('cpu'), torch.float32)
+        H = _haar_matrix(8, torch.device("cpu"), torch.float32)
         coeffs = x @ H.T
         assert coeffs[0, 0].abs() > 1.0
         assert coeffs[0, 1:].abs().max() < 1e-5
@@ -50,19 +52,20 @@ class TestHaarMatrix:
         """Forward then inverse should reconstruct original."""
         torch.manual_seed(42)
         x = torch.randn(3, 8)
-        H = _haar_matrix(8, torch.device('cpu'), torch.float32)
+        H = _haar_matrix(8, torch.device("cpu"), torch.float32)
         coeffs = x @ H.T  # forward
         recon = coeffs @ H  # inverse (H is orthonormal)
         assert torch.allclose(recon, x, atol=1e-5)
 
     def test_power_of_2_required(self):
         with pytest.raises(AssertionError):
-            _haar_matrix(7, torch.device('cpu'), torch.float32)
+            _haar_matrix(7, torch.device("cpu"), torch.float32)
 
 
 # ──────────────────────────────────────────────────────────────────────────
 # WaveletLift tests
 # ──────────────────────────────────────────────────────────────────────────
+
 
 class TestWaveletLift:
     def test_shape_preservation(self):
@@ -110,17 +113,18 @@ class TestWaveletLift:
         lin = nn.Linear(128, 64, bias=True)
         layer = WaveletLiftLinear.from_linear(lin, rank=32)
         sd = layer.state_dict()
-        assert 'u_binary' in sd and sd['u_binary'].shape == (64, 32)
-        assert 'v_binary' in sd and sd['v_binary'].shape == (128, 32)
-        assert 'row_scales' in sd and sd['row_scales'].shape == (64,)
-        assert 'col_scales' in sd and sd['col_scales'].shape == (128,)
-        assert 'rank_scales' in sd and sd['rank_scales'].shape == (32,)
-        assert 'bias' in sd
+        assert "u_binary" in sd and sd["u_binary"].shape == (64, 32)
+        assert "v_binary" in sd and sd["v_binary"].shape == (128, 32)
+        assert "row_scales" in sd and sd["row_scales"].shape == (64,)
+        assert "col_scales" in sd and sd["col_scales"].shape == (128,)
+        assert "rank_scales" in sd and sd["rank_scales"].shape == (32,)
+        assert "bias" in sd
 
 
 # ──────────────────────────────────────────────────────────────────────────
 # SchurAB-FP4 tests
 # ──────────────────────────────────────────────────────────────────────────
+
 
 class TestSchurABFP4:
     def test_shape_preservation(self):
@@ -172,16 +176,17 @@ class TestSchurABFP4:
         lin = nn.Linear(128, 64, bias=True)
         layer = SchurABFP4Linear.from_linear(lin, block_size=32)
         sd = layer.state_dict()
-        assert 'weight_packed' in sd
-        assert 'weight_scales' in sd
-        assert 'weight_global_scale' in sd
-        assert 'bit_alloc' in sd
-        assert 'bias' in sd
+        assert "weight_packed" in sd
+        assert "weight_scales" in sd
+        assert "weight_global_scale" in sd
+        assert "bit_alloc" in sd
+        assert "bias" in sd
 
 
 # ──────────────────────────────────────────────────────────────────────────
 # SVDLiftBinary tests
 # ──────────────────────────────────────────────────────────────────────────
+
 
 class TestSVDLiftBinary:
     def test_shape_preservation(self):
@@ -230,17 +235,18 @@ class TestSVDLiftBinary:
         lin = nn.Linear(128, 64, bias=True)
         layer = SVDLiftBinaryLinear.from_linear(lin, rank=32)
         sd = layer.state_dict()
-        assert 'a_binary' in sd and sd['a_binary'].shape == (64, 32)
-        assert 'b_binary' in sd and sd['b_binary'].shape == (128, 32)
-        assert 'row_scales' in sd and sd['row_scales'].shape == (64,)
-        assert 'col_scales' in sd and sd['col_scales'].shape == (128,)
-        assert 'rank_scales' in sd and sd['rank_scales'].shape == (32,)
-        assert 'bias' in sd
+        assert "a_binary" in sd and sd["a_binary"].shape == (64, 32)
+        assert "b_binary" in sd and sd["b_binary"].shape == (128, 32)
+        assert "row_scales" in sd and sd["row_scales"].shape == (64,)
+        assert "col_scales" in sd and sd["col_scales"].shape == (128,)
+        assert "rank_scales" in sd and sd["rank_scales"].shape == (32,)
+        assert "bias" in sd
 
 
 # ──────────────────────────────────────────────────────────────────────────
 # LloydMaxRotatedKV tests
 # ──────────────────────────────────────────────────────────────────────────
+
 
 class TestLloydMaxKV:
     def test_2bit_shape_preservation(self):
@@ -306,7 +312,7 @@ class TestLloydMaxKV:
         q = LloydMaxRotatedKVQuantizer(bits=2, head_dim=128, use_qjl=False)
         kv = torch.randn(1, 2, 16, 128)
         packed = q.quantize(kv)
-        assert packed['qjl_packed'] is None
+        assert packed["qjl_packed"] is None
         recon = q.dequantize(packed)
         assert recon.shape == kv.shape
 
@@ -323,6 +329,7 @@ class TestLloydMaxKV:
 # ──────────────────────────────────────────────────────────────────────────
 # Model conversion tests
 # ──────────────────────────────────────────────────────────────────────────
+
 
 class TestModelConversion:
     def _make_model(self):
@@ -373,9 +380,9 @@ class TestModelConversion:
         model = self._make_model()
         quantize_model_schur_ab_fp4(model, verbose=False)
         mem = estimate_r45_memory(model)
-        assert mem['total_bytes'] > 0
-        assert mem['total_mb'] > 0
-        assert 'SchurABFP4Linear' in mem['breakdown']
+        assert mem["total_bytes"] > 0
+        assert mem["total_mb"] > 0
+        assert "SchurABFP4Linear" in mem["breakdown"]
 
     def test_double_conversion_skips_existing(self):
         """Converting twice should not replace already-quantized layers."""
@@ -390,11 +397,13 @@ class TestModelConversion:
 # ReQuant refinement tests
 # ──────────────────────────────────────────────────────────────────────────
 
+
 class TestReQuantRefine:
     def test_requant_runs_without_error(self):
         from forge.engine.quant.novel_quant_r44 import (
             quantize_model_adaptive_block_fp4,
         )
+
         model = nn.Sequential(nn.Linear(64, 128), nn.ReLU(), nn.Linear(128, 64))
         orig = copy.deepcopy(model)
         quantize_model_adaptive_block_fp4(model, verbose=False)
@@ -408,8 +417,8 @@ class TestReQuantRefine:
 
         def compute_err(m1, m2):
             errs = []
-            for (_n1, mod1), (_n2, mod2) in zip(m1.named_modules(), m2.named_modules()):
-                if isinstance(mod1, nn.Linear) and hasattr(mod2, '_dequantize_weight'):
+            for (_n1, mod1), (_n2, mod2) in zip(m1.named_modules(), m2.named_modules(), strict=False):
+                if isinstance(mod1, nn.Linear) and hasattr(mod2, "_dequantize_weight"):
                     w1 = mod1.weight.data.float()
                     w2 = mod2._dequantize_weight(torch.float32)
                     if w1.shape == w2.shape:

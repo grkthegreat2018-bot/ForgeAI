@@ -1,17 +1,19 @@
 """Quick import + smoke test for DB provenance columns + CurriculumFineTuner.
 
 Run:
-  set PYTHONPATH=D:\\windsurf\\ForgeAI
-  D:\\windsurf\\ForgeAI\\venv\\Scripts\\python.exe tests\\evolution\\test_provenance_import.py
+  set PYTHONPATH=<repo-root>
+  python tests\\evolution\\test_provenance_import.py
 """
-import sys
+
 import os
+import sys
 import tempfile
+from pathlib import Path
 
-sys.path.insert(0, "D:/windsurf/ForgeAI")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from forge.evolution.database import FindingsDB
 from forge.evolution.curriculum_finetuner import CurriculumFineTuner
+from forge.evolution.database import FindingsDB
 
 
 def test_schema_migration():
@@ -25,25 +27,39 @@ def test_schema_migration():
         assert "key" in cols and "value" in cols, "schema_meta missing cols"
         # Check discoveries provenance columns
         dcols = db._table_columns("discoveries")
-        for expected in ["script_text", "input_text", "output_text",
-                         "expected_text", "gen_model_size",
-                         "gen_model_version", "scoring_hash"]:
+        for expected in [
+            "script_text",
+            "input_text",
+            "output_text",
+            "expected_text",
+            "gen_model_size",
+            "gen_model_version",
+            "scoring_hash",
+            "content_sha256",
+        ]:
             assert expected in dcols, f"discoveries missing {expected}"
         # Check gen_models table
         gmcols = db._table_columns("gen_models")
-        for expected in ["id", "version", "config_json", "weights_blob",
-                         "param_count", "performance_score", "timestamp"]:
+        for expected in [
+            "id",
+            "version",
+            "config_json",
+            "weights_blob",
+            "param_count",
+            "performance_score",
+            "timestamp",
+        ]:
             assert expected in gmcols, f"gen_models missing {expected}"
         # Check gen_model_performance table
         gmpcols = db._table_columns("gen_model_performance")
-        for expected in ["id", "version", "domain", "round", "score",
-                         "param_count", "timestamp"]:
+        for expected in ["id", "version", "domain", "round", "score", "param_count", "timestamp"]:
             assert expected in gmpcols, f"gen_model_performance missing {expected}"
         # Check schema_version recorded
         c = db.conn.cursor()
         c.execute("SELECT value FROM schema_meta WHERE key='schema_version'")
         row = c.fetchone()
-        assert row and row[0] == "2", f"schema_version wrong: {row}"
+        assert row and row[0] == db.SCHEMA_VERSION, \
+            f"schema_version wrong: {row}"
         db.close()
         print("[PASS] schema_migration")
     finally:
@@ -72,21 +88,22 @@ def test_save_discoveries_with_provenance():
         db_path = f.name
     try:
         db = FindingsDB(db_path)
-        db.save_run("run1", "test_domain", {"foo": 1},
-                    {"best_score": 5.0}, 0.0)
-        discoveries = [{
-            "config": {"x": 0.5},
-            "score": 5.0,
-            "generation": 1,
-            "input_text": "What is 2+2?",
-            "output_text": "4",
-            "expected_text": "4",
-            "script_text": "assert ans == 4",
-            "gen_model_size": 1200000000,
-            "gen_model_version": "forgelm_v2",
-            "scoring_hash": "abc123def456",
-        }]
-        n_saved, n_upd = db.save_discoveries("run1", "test_domain", discoveries)
+        db.save_run("run1", "test_domain", {"foo": 1}, {"best_score": 5.0}, 0.0)
+        discoveries = [
+            {
+                "config": {"x": 0.5},
+                "score": 5.0,
+                "generation": 1,
+                "input_text": "What is 2+2?",
+                "output_text": "4",
+                "expected_text": "4",
+                "script_text": "assert ans == 4",
+                "gen_model_size": 1200000000,
+                "gen_model_version": "forgelm_v2",
+                "scoring_hash": "abc123def456",
+            }
+        ]
+        n_saved, _n_upd = db.save_discoveries("run1", "test_domain", discoveries)
         assert n_saved == 1, f"expected 1 saved, got {n_saved}"
         # Query back
         results = db.query_discoveries("test_domain", min_score=0.0)
@@ -127,12 +144,9 @@ def test_curriculum_data():
         db = FindingsDB(db_path)
         db.save_run("run1", "d", {}, {"best_score": 10}, 0.0)
         disc = [
-            {"config": {"x": 0.1}, "score": 10.0, "input_text": "q1",
-             "output_text": "a1"},
-            {"config": {"x": 0.2}, "score": 2.0, "input_text": "q2",
-             "output_text": "a2"},
-            {"config": {"x": 0.3}, "score": 5.0, "input_text": "q3",
-             "output_text": "a3"},
+            {"config": {"x": 0.1}, "score": 10.0, "input_text": "q1", "output_text": "a1"},
+            {"config": {"x": 0.2}, "score": 2.0, "input_text": "q2", "output_text": "a2"},
+            {"config": {"x": 0.3}, "score": 5.0, "input_text": "q3", "output_text": "a3"},
             {"config": {"x": 0.4}, "score": 1.0},  # no provenance
         ]
         db.save_discoveries("run1", "d", disc)
@@ -171,14 +185,14 @@ def test_scoring_hash_guard():
 def test_gen_model_storage():
     """Test save/load gen model + performance history."""
     import torch
+
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
     try:
         db = FindingsDB(db_path)
         # Save a gen model (fake state_dict)
         sd = {"layer.weight": torch.zeros(4, 4)}
-        db.save_gen_model("v1", {"arch": "test"}, sd,
-                          1200000, -0.5)
+        db.save_gen_model("v1", {"arch": "test"}, sd, 1200000, -0.5)
         # Load it back
         loaded = db.load_gen_model("v1")
         assert loaded is not None
@@ -203,6 +217,7 @@ def test_gen_model_storage():
 def test_curriculum_finetuner_init():
     """Test CurriculumFineTuner can resolve a plain nn.Module."""
     import torch.nn as nn
+
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
     try:
@@ -223,6 +238,7 @@ def test_curriculum_finetuner_init():
 
 class _FakeTok:
     """Minimal tokenizer stub for testing (avoids HF dependency)."""
+
     pad_token_id = 0
     eos_token_id = 1
 

@@ -1,4 +1,5 @@
 """CPU tests for forge/exp/abshead.py."""
+
 import torch
 
 from forge.exp.abshead import LatentThoughtHead, collect_pairs, future_pairs, hint_logits, hint_nll, train_latent
@@ -7,6 +8,7 @@ from forge.exp.abshead import LatentThoughtHead, collect_pairs, future_pairs, hi
 def _tiny_attn_model():
     from forge.config import get_config
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = get_config("forgelm_tiny", layer_types=["attention"] * 4)
     cfg.vocab_size = 256
     cfg.device = "cpu"
@@ -26,14 +28,14 @@ def test_head_shapes_and_zero_init():
     h = torch.randn(2, 8, 32)
     pred = head(h)
     assert pred.shape == h.shape
-    assert torch.all(pred == 0)          # zero-init output layer
+    assert torch.all(pred == 0)  # zero-init output layer
     assert torch.all(head.hint(h) == 0)  # gate=0
 
 
 def test_forward_deterministic():
     head = LatentThoughtHead(32, hidden=16, k=4).eval()
     with torch.no_grad():
-        head.out.weight.normal_(0, 0.1)   # nonzero output
+        head.out.weight.normal_(0, 0.1)  # nonzero output
         h = torch.randn(2, 8, 32)
         assert torch.equal(head(h), head(h))
 
@@ -72,7 +74,7 @@ def test_hint_readout_lossless_at_gate_zero():
     model = _tiny_attn_model()
     head = LatentThoughtHead(model.config.d_model, hidden=32, k=2)
     with torch.no_grad():
-        head.out.weight.normal_(0, 0.1)   # nonzero pred, gate still 0
+        head.out.weight.normal_(0, 0.1)  # nonzero pred, gate still 0
     ids = torch.randint(0, 256, (1, 24))
     ref = model(ids)[0]
     out = model(ids, return_hidden=True)

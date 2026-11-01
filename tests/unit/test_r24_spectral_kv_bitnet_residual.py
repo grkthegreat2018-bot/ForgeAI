@@ -2,6 +2,7 @@
 
 Runs on CPU with small dimensions for fast, GPU-independent testing.
 """
+
 import torch
 import torch.nn.functional as F
 
@@ -43,8 +44,9 @@ class TestFourierBasis:
 class TestSpectralKVCache:
     def _make_cache(self, n_kv=4, head_dim=32, max_seq=256, max_freq=16, sink_size=4):
         cache = SpectralKVCache(max_freq=max_freq, sink_size=sink_size)
-        cache.init(n_heads=8, head_dim=head_dim, n_kv_heads=n_kv,
-                   max_seq_len=max_seq, device="cpu", dtype=torch.float32)
+        cache.init(
+            n_heads=8, head_dim=head_dim, n_kv_heads=n_kv, max_seq_len=max_seq, device="cpu", dtype=torch.float32
+        )
         return cache
 
     def test_init(self):
@@ -124,10 +126,15 @@ class TestSpectralPreAllocatedCache:
         head_dim = 32
         max_seq = 256
         cache = SpectralPreAllocatedCache(
-            n_layers=n_layers, batch=1, n_kv_heads=n_kv,
-            max_seq_len=max_seq, head_dim=head_dim,
-            dtype=torch.float32, device="cpu",
-            max_freq=16, sink_size=4,
+            n_layers=n_layers,
+            batch=1,
+            n_kv_heads=n_kv,
+            max_seq_len=max_seq,
+            head_dim=head_dim,
+            dtype=torch.float32,
+            device="cpu",
+            max_freq=16,
+            sink_size=4,
         )
 
         # Simulate prefill: append 64 tokens to each layer
@@ -146,9 +153,13 @@ class TestSpectralPreAllocatedCache:
 
     def test_reset(self):
         cache = SpectralPreAllocatedCache(
-            n_layers=2, batch=1, n_kv_heads=4,
-            max_seq_len=128, head_dim=32,
-            dtype=torch.float32, device="cpu",
+            n_layers=2,
+            batch=1,
+            n_kv_heads=4,
+            max_seq_len=128,
+            head_dim=32,
+            dtype=torch.float32,
+            device="cpu",
         )
         cache.append(0, torch.randn(1, 4, 32, 32), torch.randn(1, 4, 32, 32))
         cache.advance(32)
@@ -159,9 +170,13 @@ class TestSpectralPreAllocatedCache:
     def test_conv_layers_skipped(self):
         """Layers with 0 KV heads (conv) should be skipped."""
         cache = SpectralPreAllocatedCache(
-            n_layers=3, batch=1, n_kv_heads=4,
-            max_seq_len=128, head_dim=32,
-            dtype=torch.float32, device="cpu",
+            n_layers=3,
+            batch=1,
+            n_kv_heads=4,
+            max_seq_len=128,
+            head_dim=32,
+            dtype=torch.float32,
+            device="cpu",
             n_kv_heads_per_layer=[4, 0, 4],  # layer 1 is conv
         )
         cache.append(1, torch.randn(1, 4, 16, 32), torch.randn(1, 4, 16, 32))
@@ -321,4 +336,3 @@ class TestApplyBitnetResidual:
         out = apply_bitnet_residual(state, residual_frac=0.10)
         assert "layer1.residual_mask" in out
         assert "layer1.norm.residual_mask" not in out  # 1D skipped
-

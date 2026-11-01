@@ -14,6 +14,7 @@ handles 8B-specific issues that train_8b_all.py already solves:
 All tests run on CPU with tiny models — no GPU needed. This mirrors the
 user's constraint: "my system cannot test a full run, not enough mem."
 """
+
 import math
 import sys
 from pathlib import Path
@@ -28,6 +29,7 @@ from forge.training.optim.badam import BAdam
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
+
 def _tiny_v7_8b_config(config_name="forgelm_v2", **extra_overrides):
     """Create a tiny V7-8B-like config that builds on CPU in <1s.
 
@@ -38,22 +40,43 @@ def _tiny_v7_8b_config(config_name="forgelm_v2", **extra_overrides):
     training) or need many layers (hyperloop, lisa).
     """
     from forge.config import get_config
+
     overrides = {
-        "vocab_size": 256, "d_model": 64, "n_layers": 4, "n_heads": 4, "n_kv_heads": 2,
-        "intermediate_size": 128, "max_seq_len": 128, "titan_memory_rank": 16,
-        "embed_factorized_rank": 32, "mtp_n_heads": 2,
-        "use_triton_kernels": False, "use_varlen": False,
-        "bitnet_int8_training": False, "use_gradient_checkpointing": False,
-        "use_hyperloop": False, "use_lisa": False,
+        "vocab_size": 256,
+        "d_model": 64,
+        "n_layers": 4,
+        "n_heads": 4,
+        "n_kv_heads": 2,
+        "intermediate_size": 128,
+        "max_seq_len": 128,
+        "titan_memory_rank": 16,
+        "embed_factorized_rank": 32,
+        "mtp_n_heads": 2,
+        "use_triton_kernels": False,
+        "use_varlen": False,
+        "bitnet_int8_training": False,
+        "use_gradient_checkpointing": False,
+        "use_hyperloop": False,
+        "use_lisa": False,
         # Explicitly enable V7-8B features (not on by default in V10)
-        "use_mtp": True, "use_bitnet": True, "attn_type": "gta",
-        "use_titan_memory": True, "use_mod": True, "use_mhc": True,
-        "use_attn_residual": True, "use_value_residual": True,
-        "use_sandwich_norm": True, "use_learned_sink": True,
-        "use_pit": True, "use_factorized_embeddings": True,
-        "ffn_compression": "nlrq", "nlrq_rank": 32,
+        "use_mtp": True,
+        "use_bitnet": True,
+        "attn_type": "gta",
+        "use_titan_memory": True,
+        "use_mod": True,
+        "use_mhc": True,
+        "use_attn_residual": True,
+        "use_value_residual": True,
+        "use_sandwich_norm": True,
+        "use_learned_sink": True,
+        "use_pit": True,
+        "use_factorized_embeddings": True,
+        "ffn_compression": "nlrq",
+        "nlrq_rank": 32,
         # Disable V10's IRI-FP4 + SpectralKV + BitNetResidual (not compatible with V7-8B feature tests)
-        "use_iri_fp4": False, "use_spectral_kv": False, "use_bitnet_residual": False,
+        "use_iri_fp4": False,
+        "use_spectral_kv": False,
+        "use_bitnet_residual": False,
     }
     overrides.update(extra_overrides)
     cfg = get_config(config_name, **overrides)
@@ -64,6 +87,7 @@ def _tiny_v7_8b_config(config_name="forgelm_v2", **extra_overrides):
 
 def _build_tiny_model(config_name="forgelm_v2", **extra_overrides):
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = _tiny_v7_8b_config(config_name, **extra_overrides)
     model = ConfigurableResearchLLM(cfg)
     return model, cfg
@@ -79,6 +103,7 @@ def _manual_ce_loss(model, ids, vocab_size):
 
 
 # ── Test 1: Dead-param crash without freeze_dead_params_ ──────────────────
+
 
 class _TinyLayer(nn.Module):
     def __init__(self, d=8):
@@ -99,8 +124,7 @@ class _ModelWithDeadModule(nn.Module):
         self.blocks = nn.ModuleList([_TinyLayer(d) for _ in range(n_layers)])
         self.head = nn.Linear(d, 16)
         # Large dead module — never called in forward, like MTP with no loss
-        self.dead_module = nn.Sequential(
-            nn.Linear(d, 256), nn.Linear(256, 256), nn.Linear(256, d))
+        self.dead_module = nn.Sequential(nn.Linear(d, 256), nn.Linear(256, 256), nn.Linear(256, d))
 
     def forward(self, ids):
         x = self.embed(ids)
@@ -159,6 +183,7 @@ def test_freeze_dead_params_prevents_badam_crash():
 
 # ── Test 2: Tiny V7-8B model build + forward + backward ───────────────────
 
+
 def test_tiny_v7_8b_b_builds_and_forwards():
     """8B-B config (dense, BitNet, no NLRQ) builds and forwards on CPU."""
     model, cfg = _build_tiny_model("forgelm_v2", ffn_compression="none")
@@ -180,6 +205,7 @@ def test_tiny_v7_8b_d_builds_and_forwards():
     assert cfg.nlrq_rank == 16
 
     from forge.keys.compression.nlrq_ffn_key import NLRQLinear
+
     nlrq_count = sum(1 for m in model.modules() if isinstance(m, NLRQLinear))
     assert nlrq_count > 0, "8B-D should have NLRQ layers"
 
@@ -194,6 +220,7 @@ def test_tiny_v7_8b_b_backward_and_badam_step():
     """8B-B: forward + backward + BAdam step works on CPU."""
     model, cfg = _build_tiny_model("forgelm_v2")
     from forge.training.runners.train_8b_all import freeze_dead_params_
+
     freeze_dead_params_(model, torch.device("cpu"), use_flce=False)
 
     opt = BAdam(model, lr=1e-3, switch_every=1, verbose=False)
@@ -207,13 +234,14 @@ def test_tiny_v7_8b_b_backward_and_badam_step():
         opt.step()
         losses.append(loss.item())
         del loss
-    assert all(math.isfinite(l) for l in losses), "All losses should be finite"
+    assert all(math.isfinite(x) for x in losses), "All losses should be finite"
 
 
 def test_tiny_v7_8b_d_backward_and_badam_step():
     """8B-D (NLRQ): forward + backward + BAdam step works on CPU."""
     model, cfg = _build_tiny_model("forgelm_v2", nlrq_rank=16)
     from forge.training.runners.train_8b_all import freeze_dead_params_
+
     freeze_dead_params_(model, torch.device("cpu"), use_flce=False)
 
     opt = BAdam(model, lr=1e-3, switch_every=1, verbose=False)
@@ -228,6 +256,7 @@ def test_tiny_v7_8b_d_backward_and_badam_step():
 
 
 # ── Test 3: NLRQ factor training (STE) for 8B-D ───────────────────────────
+
 
 def test_nlrq_factor_training_enables_on_8b_d():
     """enable_factor_training_all_ creates STE masters on NLRQ layers."""
@@ -257,6 +286,7 @@ def test_nlrq_factor_training_grads_reach_masters():
     loss.backward()
 
     from forge.keys.compression.nlrq_ffn_key import NLRQLinear
+
     has_grad = False
     for m in model.modules():
         if isinstance(m, NLRQLinear) and m.U_m is not None and m.U_m.grad is not None:
@@ -267,6 +297,7 @@ def test_nlrq_factor_training_grads_reach_masters():
 
 # ── Test 4: Checkpoint save/load with NLRQ ────────────────────────────────
 
+
 def test_snapshot_state_strips_nlrq_masters():
     """snapshot_state exports INT8 buffers and strips STE masters."""
     from forge.training.runners.train_8b_all import enable_factor_training_all_, snapshot_state
@@ -275,8 +306,7 @@ def test_snapshot_state_strips_nlrq_masters():
     enable_factor_training_all_(model)
 
     state = snapshot_state(model, step=42)
-    assert not any(k.endswith((".U_m", ".V_m")) for k in state), \
-        "STE masters should be stripped from checkpoint"
+    assert not any(k.endswith((".U_m", ".V_m")) for k in state), "STE masters should be stripped from checkpoint"
     assert any(k.endswith("U_q") for k in state), "INT8 buffers should be kept"
     assert state["step"] == 42
 
@@ -308,11 +338,13 @@ def test_checkpoint_roundtrip_preserves_forward_output():
         logits_after = out_after[0] if isinstance(out_after, tuple) else out_after
 
     # INT8 quantization has small tolerance
-    assert torch.allclose(logits_before, logits_after, atol=2.0), \
+    assert torch.allclose(logits_before, logits_after, atol=2.0), (
         f"Forward mismatch: max diff {(logits_before - logits_after).abs().max():.4f}"
+    )
 
 
 # ── Test 5: sft_train 8B setup integration ────────────────────────────────
+
 
 def test_sft_train_freezes_dead_params_for_8b():
     """sft_train.py should call freeze_dead_params_ when using BAdam with 8B.
@@ -336,8 +368,7 @@ def test_sft_train_freezes_dead_params_for_8b():
 
     # MTP params should now be frozen (no CE pathway to MTP)
     mtp_frozen = sum(1 for p in mtp_params if not p.requires_grad)
-    assert mtp_frozen == len(mtp_params), \
-        f"All MTP params should be frozen, got {mtp_frozen}/{len(mtp_params)}"
+    assert mtp_frozen == len(mtp_params), f"All MTP params should be frozen, got {mtp_frozen}/{len(mtp_params)}"
 
     # BAdam should exclude frozen params
     opt = BAdam(model, lr=1e-3, switch_every=1, verbose=False)
@@ -374,6 +405,7 @@ def test_sft_train_nlrq_factor_training_for_8b_d():
 
 # ── Test 6: From-scratch init for 8B ──────────────────────────────────────
 
+
 def test_from_scratch_init_normalizes_logit_scale():
     """normalize_logit_scale_ brings logit std toward 1.0.
 
@@ -400,16 +432,16 @@ def test_from_scratch_init_normalizes_logit_scale():
         logits = forward_model(model, ids)
     std_before = float(logits.float().std())
 
-    scale = normalize_logit_scale_(model, torch.device("cpu"),
-                                   SimpleNamespace(vocab_size=cfg.vocab_size))
+    scale = normalize_logit_scale_(model, torch.device("cpu"), SimpleNamespace(vocab_size=cfg.vocab_size))
     assert scale != 1.0, "Should apply a non-trivial scale"
 
     with torch.no_grad():
         logits_after = forward_model(model, ids)
     std_after = float(logits_after.float().std())
     # The function scales toward std=1.0: |after - 1| should be < |before - 1|
-    assert abs(std_after - 1.0) < abs(std_before - 1.0), \
+    assert abs(std_after - 1.0) < abs(std_before - 1.0), (
         f"std should move toward 1.0: {std_before:.3f} → {std_after:.3f} (scale={scale:.3f})"
+    )
 
 
 def test_from_scratch_init_disables_bitnet_qat():
@@ -433,6 +465,7 @@ def test_from_scratch_init_disables_bitnet_qat():
 
 
 # ── Test 7: Full training cycle (forward + backward + BAdam + checkpoint) ─
+
 
 def test_full_8b_training_cycle_on_cpu():
     """End-to-end: build → freeze dead → enable NLRQ → train 3 steps → save → load.
@@ -469,7 +502,7 @@ def test_full_8b_training_cycle_on_cpu():
         opt.step()
         losses.append(loss.item())
         del loss
-    assert all(math.isfinite(l) for l in losses)
+    assert all(math.isfinite(x) for x in losses)
 
     # 5. Save checkpoint (strips NLRQ masters)
     state = snapshot_state(model, step=3)
@@ -477,6 +510,7 @@ def test_full_8b_training_cycle_on_cpu():
 
     # 6. Load into fresh model
     from forge.model_loader import ConfigurableResearchLLM
+
     model2 = ConfigurableResearchLLM(cfg)
     sd = {k: v for k, v in state.items() if "." in k}
     _missing, unexpected = model2.load_state_dict(sd, strict=False)

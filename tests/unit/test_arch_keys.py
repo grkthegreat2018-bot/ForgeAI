@@ -3,6 +3,7 @@
 BitNet b1.58 QAT, Differential Attention, TITAN neural memory, MoD routing.
 All run on GPU (CUDA) with bf16. CPU fallback only if CUDA unavailable.
 """
+
 import pytest
 import torch
 
@@ -68,8 +69,7 @@ class TestBitNet:
         assert set(lin_no_scale.state_dict().keys()) == {"weight"}
 
     def test_apply_bitnet_offline(self):
-        state = {"blocks.0.ffn.w_gate.weight": torch.randn(8, 8),
-                 "step": 5}
+        state = {"blocks.0.ffn.w_gate.weight": torch.randn(8, 8), "step": 5}
         out = apply_bitnet_b158(state)
         vals = torch.unique(out["blocks.0.ffn.w_gate.weight"])
         assert set(vals.tolist()) <= {-1.0, 0.0, 1.0}
@@ -113,7 +113,7 @@ class TestBitNet:
         model.train()
         ffn = model.blocks[0].ffn
         assert ffn.w_gate.qscale is not None  # learned scale param
-        x = torch.randn(1, 2, 128)
+        torch.randn(1, 2, 128)
         q, _ = ternary_quantize(ffn.w_gate.weight, ffn.w_gate.qscale)
         vals = set(q.unique().tolist())
         assert vals <= {-1.0, 0.0, 1.0}
@@ -132,6 +132,7 @@ class TestBitNet:
         from forge.keys.quantization.bitnet_b158_key import (
             _int8_ternary_linear,
         )
+
         torch.manual_seed(0)
         x = torch.randn(2, 8, 64, device="cuda", dtype=torch.bfloat16)
         w = torch.randn(128, 64, device="cuda") * 0.1
@@ -150,6 +151,7 @@ class TestBitNet:
             _HAS_TRITON,
             _triton_ternary_linear,
         )
+
         if not _HAS_TRITON:
             pytest.skip("triton not installed")
         torch.manual_seed(0)
@@ -164,9 +166,11 @@ class TestBitNet:
     def test_triton_path_trains(self):
         """FORGE_BITNET_KERNEL=triton: end-to-end QAT step on the kernel."""
         from forge.keys.quantization.bitnet_b158_key import _HAS_TRITON
+
         if not _HAS_TRITON:
             pytest.skip("triton not installed")
         import os
+
         os.environ["FORGE_BITNET_KERNEL"] = "triton"
         try:
             cfg = _tiny()
@@ -224,8 +228,7 @@ class TestDiffAttn:
 
     def test_key_dup_avg_roundtrip(self):
         q = torch.randn(8, 32)  # 2 heads * hd(4) * 2? just rows
-        state = {"blocks.0.attn.q_proj.weight": q,
-                 "blocks.0.attn.k_proj.weight": q.clone()}
+        state = {"blocks.0.attn.q_proj.weight": q, "blocks.0.attn.k_proj.weight": q.clone()}
         key = DifferentialAttentionKey(n_layers=1, n_heads=2)
         res = key.forward(state)
         assert res.success
@@ -249,12 +252,10 @@ class TestDiffAttn:
         cfg_diff.attn_type = "diff"
         diff = ConfigurableResearchLLM(cfg_diff).to(dev).eval()
 
-        key = DifferentialAttentionKey(
-            n_layers=cfg.n_layers, n_heads=cfg.n_heads, identity=True)
+        key = DifferentialAttentionKey(n_layers=cfg.n_layers, n_heads=cfg.n_heads, identity=True)
         res = key.forward(gqa.state_dict())
         assert res.success
-        diff.load_state_dict(
-            {k: v.to(dev) for k, v in res.weights.items()}, strict=False)
+        diff.load_state_dict({k: v.to(dev) for k, v in res.weights.items()}, strict=False)
         # sync identity + qk-norm flags like ModelLoader does
         for b in diff.blocks:
             attn = b.attn
@@ -273,8 +274,8 @@ class TestDiffAttn:
             assert torch.allclose(l_gqa, l_diff, atol=1e-6)
 
     def test_paper_lambda_in_range(self):
-        for l in range(16):
-            v = paper_lambda_init(16, l)
+        for layer_i in range(16):
+            v = paper_lambda_init(16, layer_i)
             assert 0.0 < v < 0.8
 
 
@@ -313,8 +314,7 @@ class TestTitan:
 
     def test_key_add_remove(self):
         key = TitanMemoryKey(d_model=128)
-        state = {"blocks.0.ln1.weight": torch.ones(128),
-                 "blocks.1.ln1.weight": torch.ones(128)}
+        state = {"blocks.0.ln1.weight": torch.ones(128), "blocks.1.ln1.weight": torch.ones(128)}
         res = key.forward(state)
         assert res.success
         assert "blocks.0.memory.memory" in res.weights
@@ -361,8 +361,7 @@ class TestMod:
         gated = router.apply(x, update)  # returns the gated update
         mask = router.token_mask(x)
         # skipped tokens: zero update; kept tokens: full update
-        assert torch.allclose(gated[~mask], torch.zeros_like(gated[~mask]),
-                              atol=1e-6)
+        assert torch.allclose(gated[~mask], torch.zeros_like(gated[~mask]), atol=1e-6)
         assert torch.allclose(gated[mask], update[mask], atol=1e-6)
         # new residual = x + gated update
         out = x + gated
@@ -381,8 +380,7 @@ class TestMod:
 
     def test_key_add_remove(self):
         key = ModRouterKey()
-        state = {"blocks.0.ln1.weight": torch.ones(128),
-                 "blocks.1.ln1.weight": torch.ones(128)}
+        state = {"blocks.0.ln1.weight": torch.ones(128), "blocks.1.ln1.weight": torch.ones(128)}
         res = key.forward(state)
         assert res.success
         assert res.weights["blocks.0.mod.router.weight"].shape == (1, 128)
@@ -417,8 +415,7 @@ class TestMod:
         # skipped tokens pass through unchanged (residual bypass)
         with torch.inference_mode():
             x_in = torch.randn(1, 8, 128)
-            out = model.blocks[2]._forward_mod_skip(
-                x_in, 2, None, None)
+            out = model.blocks[2]._forward_mod_skip(x_in, 2, None, None)
             mask = model.blocks[2]._mod.token_mask(x_in)
             assert torch.equal(out[0][~mask[0]], x_in[0][~mask[0]])
 
@@ -462,5 +459,4 @@ class TestMainModel:
         with torch.no_grad():
             logits, _ = model(x)
         assert logits.shape == (1, 4, 256)
-        print(f"Tiny + TITAN/MoD forward OK on {_DEV} "
-              f"({sum(p.numel() for p in model.parameters())/1e6:.0f}M params)")
+        print(f"Tiny + TITAN/MoD forward OK on {_DEV} ({sum(p.numel() for p in model.parameters()) / 1e6:.0f}M params)")

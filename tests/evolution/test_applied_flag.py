@@ -1,7 +1,11 @@
 """Test the applied-flag + train-first flow."""
-import sys, os, json
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
-os.environ['PYTHONUTF8'] = '1'
+
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+os.environ["PYTHONUTF8"] = "1"
 
 from forge.evolution.database import FindingsDB
 
@@ -12,10 +16,20 @@ def test_applied_flag(tmp_path):
     db = FindingsDB(tmp)
     try:
         # Save a run first (needed for FK)
-        db.save_run("test_run", "test_domain", {"foo": 1},
-                    {"generations": 1, "total_evaluations": 1, "discoveries": 1,
-                     "best_score": 10.0, "best_config": {"a": 1}, "device": "cpu"},
-                    0.0)
+        db.save_run(
+            "test_run",
+            "test_domain",
+            {"foo": 1},
+            {
+                "generations": 1,
+                "total_evaluations": 1,
+                "discoveries": 1,
+                "best_score": 10.0,
+                "best_config": {"a": 1},
+                "device": "cpu",
+            },
+            0.0,
+        )
 
         # Save some discoveries
         discs = [
@@ -23,7 +37,7 @@ def test_applied_flag(tmp_path):
             {"config": {"x": 2}, "score": 8.0, "metadata": {"problem": "3+3", "model_answer": "6"}},
             {"config": {"x": 3}, "score": 5.0, "metadata": {}},
         ]
-        n_saved, n_dup = db.save_discoveries("test_run", "test_domain", discs)
+        n_saved, _n_dup = db.save_discoveries("test_run", "test_domain", discs)
         print(f"Saved {n_saved} discoveries")
 
         # Check unapplied count

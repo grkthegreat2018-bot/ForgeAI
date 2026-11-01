@@ -8,9 +8,11 @@ The checkpoint tester loads a checkpoint and runs a 50-question probe:
   - 10 format (proper tool-use format, JSON, markdown)
 Plus a val-loss delta vs prior checkpoint for regression detection.
 """
-import sys
 
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch
 
@@ -19,16 +21,29 @@ _DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
+
 def _tiny_v8_config(**extra):
     """Create a tiny V8-8B config that builds on CPU in <1s."""
     from forge.config import get_config
+
     overrides = {
-        "vocab_size": 256, "d_model": 64, "n_layers": 4, "n_heads": 4, "n_kv_heads": 2,
-        "intermediate_size": 128, "max_seq_len": 128, "titan_memory_rank": 16,
-        "embed_factorized_rank": 32, "mtp_n_heads": 2,
-        "use_triton_kernels": False, "use_varlen": False,
-        "bitnet_int8_training": False, "use_gradient_checkpointing": False,
-        "use_hyperloop": False, "use_lisa": False, "ngram_host": False,
+        "vocab_size": 256,
+        "d_model": 64,
+        "n_layers": 4,
+        "n_heads": 4,
+        "n_kv_heads": 2,
+        "intermediate_size": 128,
+        "max_seq_len": 128,
+        "titan_memory_rank": 16,
+        "embed_factorized_rank": 32,
+        "mtp_n_heads": 2,
+        "use_triton_kernels": False,
+        "use_varlen": False,
+        "bitnet_int8_training": False,
+        "use_gradient_checkpointing": False,
+        "use_hyperloop": False,
+        "use_lisa": False,
+        "ngram_host": False,
     }
     overrides.update(extra)
     cfg = get_config("forgelm_v2", **overrides)
@@ -40,6 +55,7 @@ def _tiny_v8_config(**extra):
 def _build_tiny_v8(**extra):
     """Build a tiny V8 model + config."""
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = _tiny_v8_config(**extra)
     model = ConfigurableResearchLLM(cfg)
     return model, cfg
@@ -47,14 +63,14 @@ def _build_tiny_v8(**extra):
 
 # ── Test 1: Imports ───────────────────────────────────────────────────────
 
+
 def test_ckpt_tester_imports():
     """ckpt_tester module should expose CheckpointTester class or run_test()."""
     import forge.evaluation.ckpt_tester as mod
 
     has_class = hasattr(mod, "CheckpointTester")
     has_func = hasattr(mod, "run_test")
-    assert has_class or has_func, \
-        "ckpt_tester should have CheckpointTester class or run_test() function"
+    assert has_class or has_func, "ckpt_tester should have CheckpointTester class or run_test() function"
     if has_class:
         assert callable(mod.CheckpointTester), "CheckpointTester should be a class"
     if has_func:
@@ -64,12 +80,12 @@ def test_ckpt_tester_imports():
 
 # ── Test 2: Question count ────────────────────────────────────────────────
 
+
 def test_ckpt_tester_question_count():
     """The question bank should have exactly 50 questions (10 per category)."""
     from forge.evaluation.ckpt_tester import QUESTION_BANK
 
-    assert isinstance(QUESTION_BANK, (list, dict)), \
-        "QUESTION_BANK should be a list or dict"
+    assert isinstance(QUESTION_BANK, (list, dict)), "QUESTION_BANK should be a list or dict"
     if isinstance(QUESTION_BANK, dict):
         total = sum(len(v) for v in QUESTION_BANK.values())
     else:
@@ -81,6 +97,7 @@ def test_ckpt_tester_question_count():
 
 # ── Test 3: Categories ────────────────────────────────────────────────────
 
+
 def test_ckpt_tester_categories():
     """The 5 categories (math, logic, code, recall, format) should each have 10."""
     from forge.evaluation.ckpt_tester import QUESTION_BANK
@@ -90,16 +107,14 @@ def test_ckpt_tester_categories():
         cats = set(QUESTION_BANK.keys())
         assert cats == expected_cats, f"Categories {cats} != {expected_cats}"
         for cat, questions in QUESTION_BANK.items():
-            assert len(questions) == 10, \
-                f"Category '{cat}' should have 10 questions, got {len(questions)}"
+            assert len(questions) == 10, f"Category '{cat}' should have 10 questions, got {len(questions)}"
     else:
         # If list, each question should have a 'category' field
         cat_counts = {}
         for q in QUESTION_BANK:
             cat = q.get("category", q.get("type", ""))
             cat_counts[cat] = cat_counts.get(cat, 0) + 1
-        assert set(cat_counts.keys()) == expected_cats, \
-            f"Categories {set(cat_counts.keys())} != {expected_cats}"
+        assert set(cat_counts.keys()) == expected_cats, f"Categories {set(cat_counts.keys())} != {expected_cats}"
         for cat, count in cat_counts.items():
             assert count == 10, f"Category '{cat}' should have 10, got {count}"
     print(f"  Categories: {sorted(expected_cats)}, 10 each")
@@ -107,6 +122,7 @@ def test_ckpt_tester_categories():
 
 
 # ── Test 4: Runs with model ───────────────────────────────────────────────
+
 
 def test_ckpt_tester_runs_with_model():
     """Tester should run on a tiny V8 model and return per-category scores."""
@@ -122,13 +138,13 @@ def test_ckpt_tester_runs_with_model():
     assert isinstance(cats, dict), "category_scores should be a dict"
     assert len(cats) == 5, f"Should have 5 category scores, got {len(cats)}"
     for cat, score in cats.items():
-        assert 0.0 <= score <= 1.0, \
-            f"Category '{cat}' score {score} should be in [0, 1]"
+        assert 0.0 <= score <= 1.0, f"Category '{cat}' score {score} should be in [0, 1]"
     print(f"  Scores: {cats}")
     print("  ckpt_tester_runs_with_model: PASS")
 
 
 # ── Test 5: Regression detection ──────────────────────────────────────────
+
 
 def test_ckpt_tester_regression_detection():
     """Degrading model weights should produce val_loss_delta > 0 (regression)."""
@@ -146,19 +162,18 @@ def test_ckpt_tester_regression_detection():
                 p.data += torch.randn_like(p) * 0.5
 
     # Re-run with prior val_loss for delta computation
-    tester2 = CheckpointTester(model, cfg, device=torch.device("cpu"),
-                               prior_val_loss=val_loss_a)
+    tester2 = CheckpointTester(model, cfg, device=torch.device("cpu"), prior_val_loss=val_loss_a)
     report_b = tester2.run()
 
     assert "val_loss_delta" in report_b, "Should have val_loss_delta"
     delta = report_b["val_loss_delta"]
-    print(f"  Regression: val_loss {val_loss_a:.3f} → {report_b['val_loss']:.3f}, "
-          f"delta={delta:.3f}")
+    print(f"  Regression: val_loss {val_loss_a:.3f} → {report_b['val_loss']:.3f}, delta={delta:.3f}")
     assert delta > 0, f"Degrading weights should increase val_loss (delta > 0), got {delta}"
     print("  ckpt_tester_regression_detection: PASS")
 
 
 # ── Test 6: No false regression ───────────────────────────────────────────
+
 
 def test_ckpt_tester_no_regression():
     """Running tester twice on same model should give val_loss_delta ≈ 0."""
@@ -168,19 +183,18 @@ def test_ckpt_tester_no_regression():
     tester = CheckpointTester(model, cfg, device=torch.device("cpu"))
     report_a = tester.run()
 
-    tester2 = CheckpointTester(model, cfg, device=torch.device("cpu"),
-                               prior_val_loss=report_a["val_loss"])
+    tester2 = CheckpointTester(model, cfg, device=torch.device("cpu"), prior_val_loss=report_a["val_loss"])
     report_b = tester2.run()
 
     delta = report_b["val_loss_delta"]
     print(f"  No-regression: delta={delta:.4f} (should be ≈ 0)")
-    assert abs(delta) < 0.1, \
-        f"Same model should have delta ≈ 0, got {delta:.4f}"
+    assert abs(delta) < 0.1, f"Same model should have delta ≈ 0, got {delta:.4f}"
     assert not report_b["regression_flag"], "Should not flag regression on same model"
     print("  ckpt_tester_no_regression: PASS")
 
 
 # ── Test 7: Report format ─────────────────────────────────────────────────
+
 
 def test_ckpt_tester_report_format():
     """Report dict should have all required keys."""
@@ -191,8 +205,13 @@ def test_ckpt_tester_report_format():
     report = tester.run()
 
     required_keys = {
-        "total_score", "category_scores", "val_loss",
-        "val_loss_delta", "regression_flag", "questions_passed", "questions_total",
+        "total_score",
+        "category_scores",
+        "val_loss",
+        "val_loss_delta",
+        "regression_flag",
+        "questions_passed",
+        "questions_total",
     }
     missing = required_keys - set(report.keys())
     assert not missing, f"Report missing keys: {missing}"
@@ -200,17 +219,18 @@ def test_ckpt_tester_report_format():
     assert isinstance(report["total_score"], float), "total_score should be float"
     assert 0.0 <= report["total_score"] <= 1.0, "total_score should be in [0, 1]"
     assert isinstance(report["regression_flag"], bool), "regression_flag should be bool"
-    assert report["questions_total"] == 50, \
-        f"questions_total should be 50, got {report['questions_total']}"
-    assert 0 <= report["questions_passed"] <= 50, \
-        f"questions_passed should be 0-50, got {report['questions_passed']}"
-    print(f"  Report: total={report['total_score']:.2f}, "
-          f"passed={report['questions_passed']}/{report['questions_total']}, "
-          f"regression={report['regression_flag']}")
+    assert report["questions_total"] == 50, f"questions_total should be 50, got {report['questions_total']}"
+    assert 0 <= report["questions_passed"] <= 50, f"questions_passed should be 0-50, got {report['questions_passed']}"
+    print(
+        f"  Report: total={report['total_score']:.2f}, "
+        f"passed={report['questions_passed']}/{report['questions_total']}, "
+        f"regression={report['regression_flag']}"
+    )
     print("  ckpt_tester_report_format: PASS")
 
 
 # ── Test 8: Math questions ────────────────────────────────────────────────
+
 
 def test_ckpt_tester_math_questions():
     """Math questions should test arithmetic and evaluate model output correctly."""
@@ -242,13 +262,13 @@ def test_ckpt_tester_math_questions():
         result_correct = evaluate_answer(q0, str(expected))
         # Wrong answer should fail
         result_wrong = evaluate_answer(q0, "definitely_wrong_answer_12345")
-        assert result_correct or not result_wrong, \
-            "evaluate_answer should distinguish correct from wrong"
+        assert result_correct or not result_wrong, "evaluate_answer should distinguish correct from wrong"
     print(f"  Math: {len(math_qs)} questions, arithmetic detected")
     print("  ckpt_tester_math_questions: PASS")
 
 
 # ── Test 9: Format questions ──────────────────────────────────────────────
+
 
 def test_ckpt_tester_format_questions():
     """Format questions should test JSON validity, markdown structure, tool-use."""
@@ -281,18 +301,20 @@ def test_ckpt_tester_format_questions():
                 break
         if json_q:
             valid_json = '{"key": "value"}'
-            invalid_json = 'not valid json {{{'
+            invalid_json = "not valid json {{{"
             result_valid = evaluate_answer(json_q, valid_json)
             result_invalid = evaluate_answer(json_q, invalid_json)
             # At least one should distinguish valid from invalid
             if result_valid is not None and result_invalid is not None:
-                assert result_valid or not result_invalid, \
+                assert result_valid or not result_invalid, (
                     "Format evaluation should distinguish valid from invalid JSON"
+                )
     print(f"  Format: {len(format_qs)} questions, format testing detected")
     print("  ckpt_tester_format_questions: PASS")
 
 
 # ── Test 10: Blocking on critical regression ──────────────────────────────
+
 
 def test_ckpt_tester_blocking_on_critical():
     """When regression_flag=True AND val_loss_delta > 0.05, tester should block."""
@@ -309,33 +331,32 @@ def test_ckpt_tester_blocking_on_critical():
             if p.requires_grad:
                 p.data += torch.randn_like(p) * 2.0
 
-    tester2 = CheckpointTester(model, cfg, device=torch.device("cpu"),
-                               prior_val_loss=val_loss_a,
-                               critical_threshold=0.05)
+    tester2 = CheckpointTester(
+        model, cfg, device=torch.device("cpu"), prior_val_loss=val_loss_a, critical_threshold=0.05
+    )
     report_b = tester2.run()
 
     delta = report_b["val_loss_delta"]
-    print(f"  Critical: delta={delta:.3f}, regression={report_b['regression_flag']}, "
-          f"block={report_b.get('block', 'N/A')}")
+    print(
+        f"  Critical: delta={delta:.3f}, regression={report_b['regression_flag']}, block={report_b.get('block', 'N/A')}"
+    )
 
     # If delta exceeds critical threshold, should signal block
     if delta > 0.05:
-        assert report_b["regression_flag"], \
-            "Should flag regression when delta > critical threshold"
+        assert report_b["regression_flag"], "Should flag regression when delta > critical threshold"
         # The tester should have a 'block' or 'should_block' key
         block_key = report_b.get("block", report_b.get("should_block", None))
         if block_key is not None:
-            assert block_key is True, \
-                "Should signal block when critical regression detected"
+            assert block_key is True, "Should signal block when critical regression detected"
     else:
         # If delta didn't exceed threshold (tiny model variance), just verify
         # the mechanism exists — the regression_flag should match delta > threshold
-        assert report_b["regression_flag"] == (delta > 0.05), \
-            "regression_flag should match delta > critical_threshold"
+        assert report_b["regression_flag"] == (delta > 0.05), "regression_flag should match delta > critical_threshold"
     print("  ckpt_tester_blocking_on_critical: PASS")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────
+
 
 def main_r23_ckpt():
     print("=" * 70)

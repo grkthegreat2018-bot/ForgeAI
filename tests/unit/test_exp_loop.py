@@ -1,4 +1,5 @@
 """CPU tests for forge/exp/loopdepth.py (E-loop recurrent depth)."""
+
 import torch
 
 from forge.exp.loopdepth import LoopGates, looped_decode_step, looped_prefill
@@ -7,6 +8,7 @@ from forge.exp.loopdepth import LoopGates, looped_decode_step, looped_prefill
 def _tiny_attn_model():
     from forge.config import get_config
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = get_config("forgelm_tiny", layer_types=["attention"] * 4)
     cfg.vocab_size = 256
     cfg.device = "cpu"
@@ -36,8 +38,7 @@ def test_gates_zero_make_loop_lossless():
     ids = torch.randint(0, 256, (1, 32))
     logits0, _, _ = looped_prefill(model, ids, 1, 3, max_iters=0)
     g = torch.zeros(2)
-    logits_g, _, st = looped_prefill(model, ids, 1, 3, max_iters=3,
-                                   gates=g)
+    logits_g, _, st = looped_prefill(model, ids, 1, 3, max_iters=3, gates=g)
     assert st["iters_run"] == 3
     assert torch.allclose(logits_g, logits0, atol=1e-5)
 
@@ -47,8 +48,7 @@ def test_decode_step_runs_and_updates_cache():
     ids = torch.randint(0, 256, (1, 16))
     _, pasts, _ = looped_prefill(model, ids, 1, 3, max_iters=1)
     tok = torch.randint(0, 256, (1, 1))
-    logits, pasts = looped_decode_step(model, tok, pasts, 1, 3,
-                                       max_iters=2)
+    logits, pasts = looped_decode_step(model, tok, pasts, 1, 3, max_iters=2)
     assert logits.shape[-1] == 256
     # looped layers must have committed KV for the new token
     assert pasts[1] is not None and pasts[1][0].shape[-2] == 17

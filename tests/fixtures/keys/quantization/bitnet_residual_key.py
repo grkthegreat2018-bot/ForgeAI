@@ -17,6 +17,7 @@ Two components:
   1. BitNetResidualLinear: nn.Module with ternary weight + element residual
   2. BitNetResidualKey: Key class for the key system
 """
+
 from __future__ import annotations
 
 import math
@@ -30,8 +31,7 @@ from forge.keys.misc.base import Key, KeyClass, KeyResult
 _TERNARY_EPS = 1e-8
 
 
-def ternary_quantize(w: torch.Tensor, scale: float | None = None
-                     ) -> tuple[torch.Tensor, torch.Tensor]:
+def ternary_quantize(w: torch.Tensor, scale: float | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """BitNet b1.58 ternary quantize: W → {-1, 0, +1}."""
     w_abs = w.abs()
     if scale is None:
@@ -42,8 +42,7 @@ def ternary_quantize(w: torch.Tensor, scale: float | None = None
     return q, scale
 
 
-def compute_residual(w: torch.Tensor, residual_frac: float
-                     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def compute_residual(w: torch.Tensor, residual_frac: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute ternary weight + element-level residual.
 
     Args:
@@ -94,10 +93,16 @@ class BitNetResidualLinear(nn.Module):
         learned_scale: learn a per-layer scale (param ``qscale``).
     """
 
-    def __init__(self, in_features: int, out_features: int,
-                 bias: bool = False, residual_frac: float = 0.10,
-                 quantize: bool = False, force_quant: bool = False,
-                 learned_scale: bool = True):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        residual_frac: float = 0.10,
+        quantize: bool = False,
+        force_quant: bool = False,
+        learned_scale: bool = True,
+    ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -124,8 +129,7 @@ class BitNetResidualLinear(nn.Module):
             self.qscale = nn.Parameter(scale)
 
         # Residual mask (computed at conversion time, not init)
-        self.register_buffer("residual_mask",
-                             torch.zeros(out_features, in_features, dtype=torch.bool))
+        self.register_buffer("residual_mask", torch.zeros(out_features, in_features, dtype=torch.bool))
 
     def _compute_residual_mask(self):
         """Compute the element-level residual mask from current weights."""
@@ -190,16 +194,16 @@ class BitNetResidualLinear(nn.Module):
             if isinstance(s, torch.Tensor):
                 self.register_buffer("qscale_buf", s.to(device).to(dtype))
             else:
-                self.register_buffer("qscale_buf",
-                                     torch.tensor(s, device=device, dtype=dtype))
+                self.register_buffer("qscale_buf", torch.tensor(s, device=device, dtype=dtype))
             self.register_buffer("residual_values", residual_values)
             if self.qscale is not None:
                 del self.qscale
                 self.qscale = None
             self._prequantized = True
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-                              missing_keys, unexpected_keys, error_msgs):
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
         """Custom load: handle both pre-quantized and full-precision checkpoints."""
         if self._prequantized:
             # Pre-quantized: load int8 + residual buffers
@@ -227,8 +231,7 @@ class BitNetResidualLinear(nn.Module):
                 self.bias.data.copy_(state_dict[bias_key])
 
 
-def apply_bitnet_residual(state: dict[str, torch.Tensor],
-                          residual_frac: float = 0.10) -> dict[str, torch.Tensor]:
+def apply_bitnet_residual(state: dict[str, torch.Tensor], residual_frac: float = 0.10) -> dict[str, torch.Tensor]:
     """Apply ternary+residual quantization to all .weight tensors in state.
 
     For each weight, computes ternary quantization + element-level residual mask.
@@ -240,6 +243,7 @@ def apply_bitnet_residual(state: dict[str, torch.Tensor],
             w_t, mask, res_vals = compute_residual(v.float(), residual_frac)
             # Save ternary weights as int8 (1 byte/param) + qscale
             from forge.keys.quantization.bitnet_b158_key import ternary_quantize
+
             q, s = ternary_quantize(w_t.float())
             out[k] = q.to(torch.int8)
             out[k.replace(".weight", ".qscale")] = torch.tensor([s], dtype=torch.float32)
@@ -266,7 +270,7 @@ class BitNetResidualKey(Key):
 
     @property
     def description(self) -> str:
-        return f"Ternary QAT + {self.residual_frac*100:.0f}% element residual"
+        return f"Ternary QAT + {self.residual_frac * 100:.0f}% element residual"
 
     def key_class(self) -> KeyClass:
         return KeyClass.PARTIAL
@@ -275,23 +279,24 @@ class BitNetResidualKey(Key):
         try:
             weights = apply_bitnet_residual(dict(data), self.residual_frac)
             n = sum(1 for k in weights if k.endswith(".weight"))
-            return KeyResult(success=True, weights=weights,
-                             metadata={"n_quantized": n,
-                                       "residual_frac": self.residual_frac})
+            return KeyResult(
+                success=True, weights=weights, metadata={"n_quantized": n, "residual_frac": self.residual_frac}
+            )
         except Exception as e:
             return KeyResult(success=False, error=str(e))
 
     def reverse(self, weights: dict[str, torch.Tensor]) -> KeyResult:
         return KeyResult(
-            success=True, data=weights,
-            metadata={"note": "Ternary+residual weights cannot be un-quantized"})
+            success=True, data=weights, metadata={"note": "Ternary+residual weights cannot be un-quantized"}
+        )
 
 
-def build_bitnet_residual_linear(config, in_features: int, out_features: int,
-                                  bias: bool = False) -> nn.Module:
+def build_bitnet_residual_linear(config, in_features: int, out_features: int, bias: bool = False) -> nn.Module:
     """Build a BitNetResidualLinear honoring the model config."""
     return BitNetResidualLinear(
-        in_features, out_features, bias=bias,
+        in_features,
+        out_features,
+        bias=bias,
         residual_frac=getattr(config, "bitnet_residual_frac", 0.10),
         quantize=bool(getattr(config, "use_bitnet", False)),
         force_quant=bool(getattr(config, "bitnet_force_quant", False)),

@@ -1,4 +1,5 @@
 """Tests for Medusa speculative decoding heads."""
+
 import pytest
 import torch
 import torch.nn as nn
@@ -8,6 +9,7 @@ from forge.decoding.medusa import MedusaHeads, MedusaTrainer, medusa_generate
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class TinyModel(nn.Module):
     """Minimal model returning hidden states (d_model) with an lm_head."""
@@ -39,6 +41,7 @@ def medusa_heads():
 # ──────────────────────────────────────────────────────────────────────────────
 # Tests
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class TestMedusaHeadsShape:
     def test_forward_shape(self, medusa_heads):
@@ -76,8 +79,7 @@ class TestMedusaHeadsParams:
 
     def test_share_embedding(self):
         emb = nn.Linear(32, 100, bias=False)
-        heads = MedusaHeads(d_model=32, vocab_size=100, n_heads=2,
-                            share_embedding=emb)
+        heads = MedusaHeads(d_model=32, vocab_size=100, n_heads=2, share_embedding=emb)
         # All heads should share the same weight as emb
         for head in heads.heads:
             assert head[-1].weight is emb.weight
@@ -116,24 +118,19 @@ class TestMedusaTrainer:
 class TestMedusaGenerate:
     def test_generate_greedy(self, tiny_model, medusa_heads):
         input_ids = torch.randint(0, 100, (1, 8))
-        out = medusa_generate(tiny_model, medusa_heads, input_ids,
-                              max_new_tokens=10, temperature=0.0,
-                              device="cpu")
+        out = medusa_generate(tiny_model, medusa_heads, input_ids, max_new_tokens=10, temperature=0.0, device="cpu")
         assert out.shape[0] == 1
         assert out.shape[1] >= 8  # at least the prompt
         assert out.shape[1] <= 18  # prompt + max_new_tokens
 
     def test_generate_sampling(self, tiny_model, medusa_heads):
         input_ids = torch.randint(0, 100, (1, 8))
-        out = medusa_generate(tiny_model, medusa_heads, input_ids,
-                              max_new_tokens=10, temperature=0.8,
-                              device="cpu")
+        out = medusa_generate(tiny_model, medusa_heads, input_ids, max_new_tokens=10, temperature=0.8, device="cpu")
         assert out.shape[0] == 1
         assert out.shape[1] >= 8
 
     def test_generate_no_new_tokens(self, tiny_model, medusa_heads):
         input_ids = torch.randint(0, 100, (1, 8))
-        out = medusa_generate(tiny_model, medusa_heads, input_ids,
-                              max_new_tokens=0, device="cpu")
+        out = medusa_generate(tiny_model, medusa_heads, input_ids, max_new_tokens=0, device="cpu")
         # Should return just the prompt (or prompt + 1 from first step)
         assert out.shape[1] >= 8

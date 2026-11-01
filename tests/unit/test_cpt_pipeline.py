@@ -1,4 +1,5 @@
 """Test CPT data pipeline: loading, tokenization, packing, mixed sampling."""
+
 import os
 import sys
 import tempfile
@@ -42,9 +43,10 @@ def test_render_cpt_text():
     print("PASS: render_cpt_text produces correct format")
 
 
-def test_tokenize_and_pack():
+def test_tokenize_and_pack(v2_assets):
     """Tokenize and pack examples into fixed-length sequences."""
     from research.tokenizer_cache import get_tokenizer
+
     tokenizer = get_tokenizer()
 
     examples = [

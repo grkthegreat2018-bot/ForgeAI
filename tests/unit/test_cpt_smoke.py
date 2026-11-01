@@ -1,4 +1,5 @@
 """Smoke test: CPT training loop with tiny model + CPUAdamW."""
+
 import os
 import sys
 import tempfile
@@ -19,7 +20,7 @@ from forge.training.runners.cpt_train import (
 from research.tokenizer_cache import get_tokenizer
 
 
-def test_cpt_training_smoke():
+def test_cpt_training_smoke(v2_assets, gpu_available):
     """Run 3 CPT steps with tiny model + CPUAdamW."""
     # Create temp data
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:

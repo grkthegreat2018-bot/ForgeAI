@@ -1,4 +1,5 @@
 """CPU tests for forge/exp/ndp.py."""
+
 import math
 
 import torch
@@ -28,8 +29,7 @@ def test_partial_single_tier_matches_softmax():
     q = torch.randn(4, 16)
     K, V = torch.randn(4, 128, 16), torch.randn(4, 128, 16)
     _m, s, acc = attn_partial(q, K, V)
-    assert torch.allclose(acc / s.unsqueeze(-1), _ref_attention(q, K, V),
-                          atol=1e-5)
+    assert torch.allclose(acc / s.unsqueeze(-1), _ref_attention(q, K, V), atol=1e-5)
 
 
 def test_transfer_bytes_ratio():

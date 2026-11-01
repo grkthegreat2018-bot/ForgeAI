@@ -1,4 +1,4 @@
-﻿"""Unit tests for forge_gui.api.web_tools (keyless web search/fetch).
+"""Unit tests for forge_gui.api.web_tools (keyless web search/fetch).
 
 No real network calls: ``urllib.request.urlopen`` is monkeypatched to
 return canned HTML / JSON / raise errors. Tests cover:
@@ -10,6 +10,7 @@ return canned HTML / JSON / raise errors. Tests cover:
 - WebTools.execute dispatch + n clamping
 - ToolHarness integration (defs include web tools, dispatch works)
 """
+
 import json
 from unittest.mock import patch
 
@@ -44,14 +45,12 @@ from forge_gui.api.web_tools import (
 class _FakeResp:
     """Minimal context-manager response object mimicking urlopen's return."""
 
-    def __init__(self, data: bytes, content_type: str = "",
-                 final_url: str = ""):
+    def __init__(self, data: bytes, content_type: str = "", final_url: str = ""):
         self._data = data
         self._ctype = content_type
         self._final = final_url
         # dict satisfies headers.get("Content-Type") in http_get_full
-        self.headers = ({"Content-Type": content_type}
-                        if content_type else {})
+        self.headers = {"Content-Type": content_type} if content_type else {}
 
     def read(self) -> bytes:
         return self._data
@@ -66,8 +65,7 @@ class _FakeResp:
         return False
 
 
-def _fake_urlopen(data: bytes | str, content_type: str = "",
-                  final_url: str = ""):
+def _fake_urlopen(data: bytes | str, content_type: str = "", final_url: str = ""):
     """Return a callable that yields a _FakeResp wrapping `data`."""
     if isinstance(data, str):
         data = data.encode("utf-8")
@@ -83,8 +81,7 @@ def _unwrap(res: dict) -> dict:
 def test_web_tool_defs_shape():
     defs = web_tool_defs()
     names = {d["function"]["name"] for d in defs}
-    assert {"web_search", "news_search", "web_fetch",
-            "wikipedia_search", "arxiv_search"} == names
+    assert {"web_search", "news_search", "web_fetch", "wikipedia_search", "arxiv_search"} == names
     for d in defs:
         assert d["type"] == "function"
         params = d["function"]["parameters"]
@@ -98,16 +95,19 @@ def test_web_tools_names_matches_defs():
 
 
 # â”€â”€ URL safety â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-@pytest.mark.parametrize("url,ok", [
-    ("https://example.com", True),
-    ("http://example.com/path?q=1", True),
-    ("HTTPS://Example.com", True),
-    ("javascript:alert(1)", False),
-    ("file:///etc/passwd", False),
-    ("data:text/html,<script>", False),
-    ("ftp://example.com", False),
-    ("", False),
-])
+@pytest.mark.parametrize(
+    "url,ok",
+    [
+        ("https://example.com", True),
+        ("http://example.com/path?q=1", True),
+        ("HTTPS://Example.com", True),
+        ("javascript:alert(1)", False),
+        ("file:///etc/passwd", False),
+        ("data:text/html,<script>", False),
+        ("ftp://example.com", False),
+        ("", False),
+    ],
+)
 def test_is_safe_url(url, ok):
     assert _is_safe_url(url) is ok
 
@@ -129,8 +129,7 @@ _DDG_HTML = """
 
 
 def test_web_search_parses_results():
-    with patch("forge.web_primitives._OPENER.open",
-               _fake_urlopen(_DDG_HTML)):
+    with patch("forge.web_primitives._OPENER.open", _fake_urlopen(_DDG_HTML)):
         res = _web_search("urllib", n=5)
     assert res["error"] is None
     assert len(res["results"]) == 2
@@ -151,6 +150,7 @@ def test_web_search_empty_query():
 def test_web_search_network_error():
     def boom(*a, **kw):
         raise OSError("connection refused")
+
     with patch("forge.web_primitives._OPENER.open", boom):
         res = _web_search("anything")
     assert res["results"] == []
@@ -158,8 +158,7 @@ def test_web_search_network_error():
 
 
 def test_web_search_no_results():
-    with patch("forge.web_primitives._OPENER.open",
-               _fake_urlopen("<html><body>no results here</body></html>")):
+    with patch("forge.web_primitives._OPENER.open", _fake_urlopen("<html><body>no results here</body></html>")):
         res = _web_search("zzz")
     assert res["results"] == []
     assert "no results" in res["error"]
@@ -204,6 +203,7 @@ _GNEWS_XML = """<?xml version="1.0"?>
 
 def test_news_search_parses_rss():
     from forge.web_primitives import google_news_search
+
     with patch("forge.web_primitives._OPENER.open", _fake_urlopen(_GNEWS_XML)):
         res = google_news_search("top news", n=5)
     assert res["error"] is None
@@ -221,6 +221,7 @@ def test_news_search_network_error():
 
     def boom(*a, **kw):
         raise OSError("timeout")
+
     with patch("forge.web_primitives._OPENER.open", boom):
         res = google_news_search("x")
     assert res["results"] == []
@@ -229,15 +230,14 @@ def test_news_search_network_error():
 
 # â”€â”€ web_fetch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def test_web_fetch_strips_html():
-    html = ("<html><head><script>evil()</script><style>x{}</style></head>"
-            "<body><p>Hello   world</p></body></html>")
+    html = "<html><head><script>evil()</script><style>x{}</style></head><body><p>Hello   world</p></body></html>"
     with patch("forge.web_primitives._OPENER.open", _fake_urlopen(html)):
         res = _web_fetch("https://example.com")
     assert res["error"] is None
     assert res["url"] == "https://example.com"
     assert "Hello world" in res["text"]
-    assert "evil" not in res["text"]      # script stripped
-    assert "<" not in res["text"]         # tags stripped
+    assert "evil" not in res["text"]  # script stripped
+    assert "<" not in res["text"]  # tags stripped
 
 
 def test_web_fetch_rejects_unsafe_scheme():
@@ -255,6 +255,7 @@ def test_web_fetch_rejects_file_scheme():
 def test_web_fetch_network_error():
     def boom(*a, **kw):
         raise OSError("404")
+
     with patch("forge.web_primitives._OPENER.open", boom):
         res = _web_fetch("https://example.com/missing")
     assert res["text"] == ""
@@ -270,12 +271,16 @@ def test_web_fetch_truncates():
 
 
 # â”€â”€ wikipedia_search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-_WIKI_JSON = json.dumps({
-    "query": {"search": [
-        {"title": "Python (programming language)", "snippet": "a <i>high-level</i> language"},
-        {"title": "Python (genus)", "snippet": "a genus of snakes"},
-    ]}
-})
+_WIKI_JSON = json.dumps(
+    {
+        "query": {
+            "search": [
+                {"title": "Python (programming language)", "snippet": "a <i>high-level</i> language"},
+                {"title": "Python (genus)", "snippet": "a genus of snakes"},
+            ]
+        }
+    }
+)
 
 
 def test_wikipedia_search_parses():
@@ -291,6 +296,7 @@ def test_wikipedia_search_parses():
 def test_wikipedia_search_network_error():
     def boom(*a, **kw):
         raise OSError("dns fail")
+
     with patch("forge.web_primitives._OPENER.open", boom):
         res = _wikipedia_search("x")
     assert res["results"] == []
@@ -324,6 +330,7 @@ def test_arxiv_search_parses():
 def test_arxiv_search_network_error():
     def boom(*a, **kw):
         raise OSError("timeout")
+
     with patch("forge.web_primitives._OPENER.open", boom):
         res = _arxiv_search("x")
     assert res["results"] == []
@@ -379,8 +386,7 @@ def test_webtools_execute_clamps_max_chars():
 def test_harness_includes_web_tools_when_provided(tmp_path):
     h = ToolHarness(workspace=str(tmp_path), web_tools=WebTools())
     names = {d["function"]["name"] for d in h.tool_defs()}
-    assert {"web_search", "news_search", "web_fetch",
-            "wikipedia_search", "arxiv_search"} <= names
+    assert {"web_search", "news_search", "web_fetch", "wikipedia_search", "arxiv_search"} <= names
 
 
 def test_harness_no_web_tools_when_none(tmp_path):
@@ -421,8 +427,7 @@ def test_webtools_execute_news_dispatch(tmp_path):
 
 def test_harness_read_only_keeps_web_tools(tmp_path):
     # web tools are read-only GET â†’ must survive read-only mode
-    h = ToolHarness(workspace=str(tmp_path), web_tools=WebTools(),
-                    read_only=True)
+    h = ToolHarness(workspace=str(tmp_path), web_tools=WebTools(), read_only=True)
     names = {d["function"]["name"] for d in h.tool_defs()}
     assert "web_search" in names
     assert "web_fetch" in names
@@ -444,36 +449,37 @@ def test_fetch_url_bare_domain_upgrades_https():
 
 
 def test_fetch_url_extracts_links_and_titles():
-    html = ("<html><head><title>Doc Page</title></head><body>"
-            "<h1>Guide</h1><p>Intro text.</p>"
-            "<a href=\"/deep/dive\">Read the deep dive</a>"
-            "<a href=\"https://other.com/x\">External</a>"
-            "<a href=\"javascript:void(0)\">dead</a>"
-            "<ul><li>one</li><li>two</li></ul></body></html>")
-    with patch("forge.web_primitives._OPENER.open",
-               _fake_urlopen(html, content_type="text/html")):
+    html = (
+        "<html><head><title>Doc Page</title></head><body>"
+        "<h1>Guide</h1><p>Intro text.</p>"
+        '<a href="/deep/dive">Read the deep dive</a>'
+        '<a href="https://other.com/x">External</a>'
+        '<a href="javascript:void(0)">dead</a>'
+        "<ul><li>one</li><li>two</li></ul></body></html>"
+    )
+    with patch("forge.web_primitives._OPENER.open", _fake_urlopen(html, content_type="text/html")):
         res = _web_fetch("https://example.com/docs")
     assert res["error"] is None
     assert res["title"] == "Doc Page"
     assert "# Guide" in res["text"]
     # inline markdown links â€” link names stay visible to the model
-    assert "[Read the deep dive](https://example.com/deep/dive)" \
-        in res["text"]
+    assert "[Read the deep dive](https://example.com/deep/dive)" in res["text"]
     assert "[External](https://other.com/x)" in res["text"]
     assert "javascript" not in res["text"]
     assert "- one" in res["text"] and "- two" in res["text"]
-    urls = {l["url"] for l in res["links"]}
+    urls = {link["url"] for link in res["links"]}
     assert "https://example.com/deep/dive" in urls
     assert "https://other.com/x" in urls
-    texts = {l["text"] for l in res["links"]}
+    texts = {link["text"] for link in res["links"]}
     assert "Read the deep dive" in texts
 
 
 def test_fetch_url_reports_final_url_after_redirect():
     html = "<html><body><p>article</p></body></html>"
-    with patch("forge.web_primitives._OPENER.open",
-               _fake_urlopen(html, content_type="text/html",
-                             final_url="https://real.example/article")):
+    with patch(
+        "forge.web_primitives._OPENER.open",
+        _fake_urlopen(html, content_type="text/html", final_url="https://real.example/article"),
+    ):
         res = _web_fetch("https://news.google.com/rss/articles/AAAA")
     assert res["final_url"] == "https://real.example/article"
     assert res["url"] == "https://news.google.com/rss/articles/AAAA"
@@ -481,30 +487,25 @@ def test_fetch_url_reports_final_url_after_redirect():
 
 def test_fetch_url_json_passthrough():
     payload = '{"ok": true, "items": [1, 2, 3]}'
-    with patch("forge.web_primitives._OPENER.open",
-               _fake_urlopen(payload,
-                             content_type="application/json")):
+    with patch("forge.web_primitives._OPENER.open", _fake_urlopen(payload, content_type="application/json")):
         res = _web_fetch("https://api.example.com/data")
     assert res["error"] is None
-    assert res["text"] == payload          # raw, not HTML-stripped
+    assert res["text"] == payload  # raw, not HTML-stripped
     assert res["content_type"] == "application/json"
     assert "links" not in res
 
 
 def test_fetch_url_offset_paging():
-    html = ("<body><p>"
-            + "".join(f"token{i} " for i in range(3000)) + "</p></body>")
+    html = "<body><p>" + "".join(f"token{i} " for i in range(3000)) + "</p></body>"
     with patch("forge.web_primitives._OPENER.open", _fake_urlopen(html)):
         res1 = _web_fetch("https://example.com/long", max_chars=2000)
-        res2 = _web_fetch("https://example.com/long", max_chars=2000,
-                          offset=res1["next_offset"])
-        resN = _web_fetch("https://example.com/long", max_chars=2000,
-                          offset=res1["chars"] - 500)
+        res2 = _web_fetch("https://example.com/long", max_chars=2000, offset=res1["next_offset"])
+        resN = _web_fetch("https://example.com/long", max_chars=2000, offset=res1["chars"] - 500)
     assert res1["truncated"] is True
     assert res1["next_offset"] == 2000
     assert res2["text"] != res1["text"]
     assert res2["next_offset"] == 4000
-    assert resN["truncated"] is False      # last page has no next_offset
+    assert resN["truncated"] is False  # last page has no next_offset
     assert "next_offset" not in resN
     assert res1["chars"] == res2["chars"] > 2000
 
@@ -513,8 +514,7 @@ def test_webtools_execute_passes_offset():
     wt = WebTools()
     html = "<body><p>" + ("z " * 5000) + "</p></body>"
     with patch("forge.web_primitives._OPENER.open", _fake_urlopen(html)):
-        res = wt.execute("web_fetch", {"url": "https://x.com",
-                                       "max_chars": 500, "offset": 400})
+        res = wt.execute("web_fetch", {"url": "https://x.com", "max_chars": 500, "offset": 400})
     data = _unwrap(res)
     assert data["chars"] > 400
     assert len(data["text"]) == 500
@@ -576,6 +576,7 @@ def test_search_falls_back_to_bing():
 def test_search_all_engines_dead_reports_error():
     def boom(*a, **kw):
         raise OSError("all down")
+
     with patch("forge.web_primitives._OPENER.open", boom):
         res = _web_search("anything")
     assert res["results"] == []

@@ -65,10 +65,12 @@ worker, generate on main) to document the contract and catch regressions.
 The CUDA path is left as a documented risk — a full CUDA cross-thread test
 would need a GPU and careful stream management.
 """
+
 import sys
 import threading
+from pathlib import Path
 
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
 import torch
@@ -100,12 +102,14 @@ def _build_engine_cpu(preset="forgelm_tiny", vocab=65536):
     model.eval()
 
     from research.tokenizer_cache import get_tokenizer
+
     tok = get_tokenizer("research/checkpoints/forgelm_v2_tokenizer")
     engine = ForgeEngine(model, tok, device="cpu")
     return engine, model
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("v2_assets")
 class TestCrossThreadEngineHandoff:
     """Validate that a ForgeEngine constructed on a worker thread can be
     used for generation on the main thread (the GUI's actual pattern).
@@ -144,10 +148,7 @@ class TestCrossThreadEngineHandoff:
         t.join(timeout=120)  # generous for CPU model init
 
         assert not t.is_alive(), "Worker thread did not finish within 120s"
-        assert "error" not in error_holder, (
-            f"Engine construction failed on worker thread: "
-            f"{error_holder.get('error')}"
-        )
+        assert "error" not in error_holder, f"Engine construction failed on worker thread: {error_holder.get('error')}"
         assert "engine" in engine_holder, "Engine was not stored by worker"
 
         engine = engine_holder["engine"]
@@ -156,12 +157,12 @@ class TestCrossThreadEngineHandoff:
         # usage after the engine is handed off via Qt signal).
         try:
             result = engine.generate(
-                "Hello", max_new_tokens=10,
-                finish_sentence=False, temperature=0.0,
+                "Hello",
+                max_new_tokens=10,
+                finish_sentence=False,
+                temperature=0.0,
             )
-            assert isinstance(result, str), (
-                f"Expected str from generate(), got {type(result)}"
-            )
+            assert isinstance(result, str), f"Expected str from generate(), got {type(result)}"
             assert len(result) > 0, "generate() returned empty string"
         finally:
             del engine_holder["engine"]
@@ -192,27 +193,23 @@ class TestCrossThreadEngineHandoff:
         t.join(timeout=120)
 
         assert not t.is_alive(), "Worker thread did not finish"
-        assert "error" not in error_holder, (
-            f"Construction failed: {error_holder.get('error')}"
-        )
+        assert "error" not in error_holder, f"Construction failed: {error_holder.get('error')}"
 
         engine = engine_holder["engine"]
         try:
             results = []
             for i in range(3):
                 r = engine.generate(
-                    f"Test prompt number {i}", max_new_tokens=5,
-                    finish_sentence=False, temperature=0.0,
+                    f"Test prompt number {i}",
+                    max_new_tokens=5,
+                    finish_sentence=False,
+                    temperature=0.0,
                 )
-                assert isinstance(r, str), (
-                    f"Call {i}: expected str, got {type(r)}"
-                )
+                assert isinstance(r, str), f"Call {i}: expected str, got {type(r)}"
                 results.append(r)
 
             # All calls should produce non-empty output
-            assert all(len(r) > 0 for r in results), (
-                f"Some generate() calls returned empty: {results!r}"
-            )
+            assert all(len(r) > 0 for r in results), f"Some generate() calls returned empty: {results!r}"
         finally:
             del engine_holder["engine"]
             del engine_holder["model"]
@@ -240,19 +237,19 @@ class TestCrossThreadEngineHandoff:
         t.join(timeout=120)
 
         assert not t.is_alive(), "Worker thread did not finish"
-        assert "error" not in error_holder, (
-            f"Construction failed: {error_holder.get('error')}"
-        )
+        assert "error" not in error_holder, f"Construction failed: {error_holder.get('error')}"
 
         engine = engine_holder["engine"]
         try:
-            chunks = list(engine.generate_stream(
-                "Hello world", max_new_tokens=10, temperature=0.0,
-            ))
-            assert len(chunks) > 0, "Stream produced no chunks"
-            assert all(isinstance(c, str) for c in chunks), (
-                f"Non-string chunk: {[type(c) for c in chunks]}"
+            chunks = list(
+                engine.generate_stream(
+                    "Hello world",
+                    max_new_tokens=10,
+                    temperature=0.0,
+                )
             )
+            assert len(chunks) > 0, "Stream produced no chunks"
+            assert all(isinstance(c, str) for c in chunks), f"Non-string chunk: {[type(c) for c in chunks]}"
         finally:
             del engine_holder["engine"]
             del engine_holder["model"]
@@ -281,14 +278,10 @@ class TestCrossThreadEngineHandoff:
 
         engine = engine_holder["engine"]
         try:
-            assert engine.device.type == "cpu", (
-                f"Expected CPU device, got {engine.device}"
-            )
+            assert engine.device.type == "cpu", f"Expected CPU device, got {engine.device}"
             # All model parameters should be on CPU
             for name, param in engine.model.named_parameters():
-                assert param.device.type == "cpu", (
-                    f"Parameter {name} on {param.device}, expected CPU"
-                )
+                assert param.device.type == "cpu", f"Parameter {name} on {param.device}, expected CPU"
         finally:
             del engine_holder["engine"]
             del engine_holder["model"]

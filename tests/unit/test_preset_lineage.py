@@ -8,6 +8,7 @@ Validates that every preset with a ``parent`` field:
 This is the machine-enforced version of AGENTS.md directive A:
 "Build On The Prior, Never Beside It".
 """
+
 import pytest
 
 from forge.config import MODEL_CONFIGS, ModelConfig, validate_preset_lineage
@@ -24,9 +25,7 @@ def test_lineage_validator_runs_clean():
 def test_v12_jamba_has_parent():
     """V12-Jamba is derived from V2 and must declare its parent."""
     cfg = MODEL_CONFIGS["forgelm_v12_jamba"]
-    assert cfg.parent == "forgelm_v2", (
-        f"V12-Jamba should have parent='forgelm_v2', got {cfg.parent!r}"
-    )
+    assert cfg.parent == "forgelm_v2", f"V12-Jamba should have parent='forgelm_v2', got {cfg.parent!r}"
 
 
 def test_v12_jamba_documents_divergences():
@@ -34,14 +33,9 @@ def test_v12_jamba_documents_divergences():
     v2 = MODEL_CONFIGS["forgelm_v2"]
     jamba = MODEL_CONFIGS["forgelm_v12_jamba"]
     skip = {"parent", "dropped_keys"}
-    divergent = [
-        k for k in v2.__dict__
-        if k not in skip and v2.__dict__[k] != jamba.__dict__.get(k)
-    ]
+    divergent = [k for k in v2.__dict__ if k not in skip and v2.__dict__[k] != jamba.__dict__.get(k)]
     undocumented = set(divergent) - set(jamba.dropped_keys)
-    assert not undocumented, (
-        f"V12-Jamba has undocumented divergences from V2: {sorted(undocumented)}"
-    )
+    assert not undocumented, f"V12-Jamba has undocumented divergences from V2: {sorted(undocumented)}"
 
 
 def test_parent_must_exist():
@@ -64,9 +58,9 @@ def test_undocumented_divergence_is_flagged():
     MODEL_CONFIGS["__test_child__"] = child
     try:
         errors = validate_preset_lineage()
-        assert any(
-            "__test_child__" in e and "vocab_size" in e for e in errors
-        ), f"Expected vocab_size in errors: {errors}"
+        assert any("__test_child__" in e and "vocab_size" in e for e in errors), (
+            f"Expected vocab_size in errors: {errors}"
+        )
     finally:
         del MODEL_CONFIGS["__test_parent__"]
         del MODEL_CONFIGS["__test_child__"]
@@ -101,10 +95,7 @@ def test_invalid_dropped_key_is_flagged():
     MODEL_CONFIGS["__test_child3__"] = child
     try:
         errors = validate_preset_lineage()
-        assert any(
-            "__test_child3__" in e and "nonexistent_field" in e
-            for e in errors
-        )
+        assert any("__test_child3__" in e and "nonexistent_field" in e for e in errors)
     finally:
         del MODEL_CONFIGS["__test_parent3__"]
         del MODEL_CONFIGS["__test_child3__"]

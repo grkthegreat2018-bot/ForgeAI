@@ -9,6 +9,7 @@ Verifies:
   - speculative decode scenario (generate, verify, reject, rollback, re-gen)
   - replay gives the same result as saving/restoring state directly
 """
+
 import pytest
 import torch
 import torch.nn as nn
@@ -16,6 +17,7 @@ import torch.nn as nn
 from forge.engine.kv.replay_ssm import ReplaySSMCache
 
 # ── Test fixtures ──────────────────────────────────────────────────────────
+
 
 class DummySSM(nn.Module):
     """Minimal SSM-like module for testing reconstruct_state.
@@ -50,8 +52,7 @@ class DummySSM(nn.Module):
         if initial_state is not None:
             state = initial_state.clone()
         else:
-            state = torch.zeros(bsz, self.d_state, dtype=inputs.dtype,
-                                device=inputs.device)
+            state = torch.zeros(bsz, self.d_state, dtype=inputs.dtype, device=inputs.device)
         # Accumulate projected inputs over the time dimension.
         proj = self.proj(inputs)  # (batch, T, d_state)
         state = state + proj.sum(dim=1)
@@ -74,6 +75,7 @@ def cache():
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────
+
 
 class TestCacheInputs:
     """Verify inputs are stored correctly."""
@@ -124,7 +126,7 @@ class TestReconstructState:
 
         # Replay: cache inputs one-by-one, then reconstruct.
         for t in range(10):
-            cache.cache_inputs(0, inputs[:, t:t+1, :])
+            cache.cache_inputs(0, inputs[:, t : t + 1, :])
         replayed_state = cache.reconstruct_state(0, ssm)
 
         torch.testing.assert_close(replayed_state, direct_state)
@@ -139,9 +141,8 @@ class TestReconstructState:
 
         # Replay.
         for t in range(5):
-            cache.cache_inputs(0, inputs[:, t:t+1, :])
-        replayed_state = cache.reconstruct_state(0, ssm,
-                                                  initial_state=init_state)
+            cache.cache_inputs(0, inputs[:, t : t + 1, :])
+        replayed_state = cache.reconstruct_state(0, ssm, initial_state=init_state)
 
         torch.testing.assert_close(replayed_state, direct_state)
 
@@ -169,7 +170,7 @@ class TestCheckpointRollback:
         # Cache 10 tokens.
         inputs = torch.randn(1, 10, 8)
         for t in range(10):
-            cache.cache_inputs(0, inputs[:, t:t+1, :])
+            cache.cache_inputs(0, inputs[:, t : t + 1, :])
         assert cache.position == 10
 
         # Checkpoint at position 5, cache 5 more.
@@ -179,7 +180,7 @@ class TestCheckpointRollback:
         # Cache 5 more.
         more = torch.randn(1, 5, 8)
         for t in range(5):
-            cache.cache_inputs(0, more[:, t:t+1, :])
+            cache.cache_inputs(0, more[:, t : t + 1, :])
         assert cache.position == 15
         assert cache._n_valid[0] == 15
 
@@ -197,7 +198,7 @@ class TestCheckpointRollback:
         """Rollback to a position in the middle of cached inputs."""
         inputs = torch.randn(1, 10, 8)
         for t in range(10):
-            cache.cache_inputs(0, inputs[:, t:t+1, :])
+            cache.cache_inputs(0, inputs[:, t : t + 1, :])
 
         # Rollback to position 4 (discard last 6).
         cache.rollback(4)
@@ -250,20 +251,19 @@ class TestCircularBuffer:
         assert ordered.shape == (1, cap, 8)
 
         # First cap-5 entries should be first_batch[5:].
-        torch.testing.assert_close(ordered[:, :cap-5, :], first_batch[:, 5:, :])
+        torch.testing.assert_close(ordered[:, : cap - 5, :], first_batch[:, 5:, :])
         # Last 5 entries should be second_batch.
-        torch.testing.assert_close(ordered[:, cap-5:, :], second_batch)
+        torch.testing.assert_close(ordered[:, cap - 5 :, :], second_batch)
 
     def test_wrap_reconstruct(self, cache, ssm):
         """After wrap-around, reconstruct_state should give the state
         from the last `cap` inputs (not all inputs ever seen)."""
-        cap = cache.max_replay_tokens  # 16
         d_model = 8
 
         # Cache 20 tokens (wraps, last 16 are kept).
         all_inputs = torch.randn(1, 20, d_model)
         for t in range(20):
-            cache.cache_inputs(0, all_inputs[:, t:t+1, :])
+            cache.cache_inputs(0, all_inputs[:, t : t + 1, :])
 
         # Reconstruct — should match processing only the last 16 inputs.
         replayed = cache.reconstruct_state(0, ssm)
@@ -279,14 +279,14 @@ class TestCircularBuffer:
         total = 3 * cap
         all_inputs = torch.randn(1, total, d_model)
         for t in range(total):
-            cache.cache_inputs(0, all_inputs[:, t:t+1, :])
+            cache.cache_inputs(0, all_inputs[:, t : t + 1, :])
 
         assert cache._n_valid[0] == cap
         ordered = cache._get_ordered_inputs(0)
         assert ordered.shape == (1, cap, d_model)
 
         # Should be the last `cap` inputs.
-        torch.testing.assert_close(ordered, all_inputs[:, total - cap:, :])
+        torch.testing.assert_close(ordered, all_inputs[:, total - cap :, :])
 
     def test_rollback_after_wrap(self, cache, ssm):
         """Rollback from a wrapped state must return the correct
@@ -298,7 +298,7 @@ class TestCircularBuffer:
         # Cache 20 tokens (wraps, last 16 kept).
         all_inputs = torch.randn(1, 20, d_model)
         for t in range(20):
-            cache.cache_inputs(0, all_inputs[:, t:t+1, :])
+            cache.cache_inputs(0, all_inputs[:, t : t + 1, :])
         assert cache._n_valid[0] == cap  # 16
 
         # Rollback by 5 → nv=11, position=15.
@@ -345,12 +345,12 @@ class TestClear:
         """After clear, the cache should work correctly again."""
         inp1 = torch.randn(1, 3, 8)
         for t in range(3):
-            cache.cache_inputs(0, inp1[:, t:t+1, :])
+            cache.cache_inputs(0, inp1[:, t : t + 1, :])
         cache.clear()
 
         inp2 = torch.randn(1, 5, 8)
         for t in range(5):
-            cache.cache_inputs(0, inp2[:, t:t+1, :])
+            cache.cache_inputs(0, inp2[:, t : t + 1, :])
         assert cache.position == 5
         assert cache._n_valid[0] == 5
 
@@ -376,7 +376,7 @@ class TestSpeculativeScenario:
         # Prefill: cache 10 inputs.
         prefill = torch.randn(1, 10, 8)
         for t in range(10):
-            cache.cache_inputs(0, prefill[:, t:t+1, :])
+            cache.cache_inputs(0, prefill[:, t : t + 1, :])
 
         cp = cache.checkpoint()
         assert cp == 10
@@ -384,7 +384,7 @@ class TestSpeculativeScenario:
         # Draft 4 tokens (all accepted).
         draft = torch.randn(1, 4, 8)
         for t in range(4):
-            cache.cache_inputs(0, draft[:, t:t+1, :])
+            cache.cache_inputs(0, draft[:, t : t + 1, :])
 
         # All accepted (n_accepted = 4 = n_draft) → no rollback.
         # State should match prefill + draft.
@@ -397,7 +397,7 @@ class TestSpeculativeScenario:
         # Prefill: cache 10 inputs.
         prefill = torch.randn(1, 10, 8)
         for t in range(10):
-            cache.cache_inputs(0, prefill[:, t:t+1, :])
+            cache.cache_inputs(0, prefill[:, t : t + 1, :])
 
         cp = cache.checkpoint()
         assert cp == 10
@@ -405,7 +405,7 @@ class TestSpeculativeScenario:
         # Draft 4 tokens.
         draft = torch.randn(1, 4, 8)
         for t in range(4):
-            cache.cache_inputs(0, draft[:, t:t+1, :])
+            cache.cache_inputs(0, draft[:, t : t + 1, :])
         assert cache.position == 14
 
         # Reject at position 2 (n_accepted = 2).
@@ -426,13 +426,13 @@ class TestSpeculativeScenario:
         """All drafts rejected — rollback to checkpoint + 1 (main only)."""
         prefill = torch.randn(1, 10, 8)
         for t in range(10):
-            cache.cache_inputs(0, prefill[:, t:t+1, :])
+            cache.cache_inputs(0, prefill[:, t : t + 1, :])
 
         cp = cache.checkpoint()
 
         draft = torch.randn(1, 4, 8)
         for t in range(4):
-            cache.cache_inputs(0, draft[:, t:t+1, :])
+            cache.cache_inputs(0, draft[:, t : t + 1, :])
 
         # All rejected (n_accepted = 0).
         n_accepted = 0
@@ -453,14 +453,14 @@ class TestSpeculativeScenario:
         all_accepted_inputs = []
         prefill = torch.randn(1, 5, 8)
         for t in range(5):
-            cache.cache_inputs(0, prefill[:, t:t+1, :])
+            cache.cache_inputs(0, prefill[:, t : t + 1, :])
         all_accepted_inputs.append(prefill)
 
         for _round_idx in range(3):
             cp = cache.checkpoint()
             draft = torch.randn(1, 4, 8)
             for t in range(4):
-                cache.cache_inputs(0, draft[:, t:t+1, :])
+                cache.cache_inputs(0, draft[:, t : t + 1, :])
 
             # Accept 2 out of 4 each round.
             n_accepted = 2
@@ -468,7 +468,7 @@ class TestSpeculativeScenario:
             if n_accepted < n_draft:
                 cache.rollback(cp + n_accepted + 1)
 
-            all_accepted_inputs.append(draft[:, :n_accepted + 1, :])
+            all_accepted_inputs.append(draft[:, : n_accepted + 1, :])
 
         # Final state should match all accepted inputs.
         replayed = cache.reconstruct_state(0, ssm)
@@ -494,7 +494,7 @@ class TestReplayVsStateSave:
 
         # Method 2: Replay inputs.
         for t in range(20):
-            cache.cache_inputs(0, inputs[:, t:t+1, :])
+            cache.cache_inputs(0, inputs[:, t : t + 1, :])
         replayed_state = cache.reconstruct_state(0, ssm)
 
         torch.testing.assert_close(replayed_state, saved_state)
@@ -507,7 +507,7 @@ class TestReplayVsStateSave:
 
         # Cache all 20.
         for t in range(20):
-            cache.cache_inputs(0, inputs[:, t:t+1, :])
+            cache.cache_inputs(0, inputs[:, t : t + 1, :])
 
         # Rollback to 15.
         cache.rollback(15)
@@ -538,7 +538,7 @@ class TestReplayVsStateSave:
         # Replay: cache + reconstruct per layer.
         for t in range(15):
             for layer_idx in range(n_layers):
-                cache.cache_inputs(layer_idx, inputs[:, t:t+1, :])
+                cache.cache_inputs(layer_idx, inputs[:, t : t + 1, :])
 
         for layer_idx in range(n_layers):
             replayed = cache.reconstruct_state(layer_idx, ssms[layer_idx])

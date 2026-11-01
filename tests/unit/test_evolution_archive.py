@@ -3,22 +3,25 @@
 Tests grid binning, add/replace logic, Pareto front, UCB sampling,
 history capping, and edge cases (empty archive, boundary values).
 """
+
 import sys
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+from pathlib import Path
 
-import pytest
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import numpy as np
-from forge.evolution.archive import MapElitesArchive, ArchiveEntry
+import pytest
 
+from forge.evolution.archive import ArchiveEntry, MapElitesArchive
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def small_archive():
     """2D archive: (compression, error) with 5x4 grid."""
     return MapElitesArchive(
-        dims=[("compression", 5, 0.0, 10.0),
-              ("error", 4, 0.0, 1.0)],
+        dims=[("compression", 5, 0.0, 10.0), ("error", 4, 0.0, 1.0)],
         max_history=100,
     )
 
@@ -39,6 +42,7 @@ def filled_archive(small_archive):
 
 # ── Grid initialization ───────────────────────────────────────────────────
 
+
 class TestArchiveInit:
     def test_grid_has_correct_shape(self, small_archive):
         assert len(small_archive.grid) == 5 * 4  # 20 cells
@@ -57,11 +61,13 @@ class TestArchiveInit:
 
     def test_history_is_deque(self, small_archive):
         import collections
+
         assert isinstance(small_archive.history, collections.deque)
         assert small_archive.history.maxlen == 100
 
 
 # ── Binning logic ─────────────────────────────────────────────────────────
+
 
 class TestArchiveBinning:
     def test_bin_clamps_low(self, small_archive):
@@ -79,6 +85,7 @@ class TestArchiveBinning:
 
 
 # ── Add logic ─────────────────────────────────────────────────────────────
+
 
 class TestArchiveAdd:
     def test_add_to_empty_cell_accepted(self, small_archive):
@@ -124,7 +131,7 @@ class TestArchiveAdd:
 
     def test_add_invalidates_pareto_cache(self, filled_archive):
         # Force cache build
-        pareto1 = filled_archive.get_pareto_front()
+        filled_archive.get_pareto_front()
         assert filled_archive._pareto_cache is not None
         # Add new entry → cache should be invalidated
         filled_archive.add({"new": True}, 9.0, (9.0, 0.02), 4)
@@ -142,6 +149,7 @@ class TestArchiveAdd:
 
 
 # ── Sampling ──────────────────────────────────────────────────────────────
+
 
 class TestArchiveSampling:
     def test_sample_elite_empty_returns_none(self, small_archive):
@@ -167,6 +175,7 @@ class TestArchiveSampling:
 
 
 # ── Pareto front ──────────────────────────────────────────────────────────
+
 
 class TestArchivePareto:
     def test_pareto_empty_returns_empty(self, small_archive):
@@ -201,6 +210,7 @@ class TestArchivePareto:
 
 
 # ── Coverage and summary ──────────────────────────────────────────────────
+
 
 class TestArchiveCoverage:
     def test_coverage_filled(self, filled_archive):

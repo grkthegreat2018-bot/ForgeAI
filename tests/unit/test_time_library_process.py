@@ -1,4 +1,5 @@
 """Tests for time manager, library install, and process protection."""
+
 import json
 import time
 
@@ -6,13 +7,16 @@ from forge_gui.api.safety_checker import check_command, check_process_kill
 
 # ── Time Manager ────────────────────────────────────────────────────────
 
+
 class TestTimeManager:
     def test_get_time(self):
         import sys
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         from forge_gui.api.time_manager import TimeManager
+
         tm = TimeManager()
         info = tm.get_time()
         assert "time" in info
@@ -27,8 +31,10 @@ class TestTimeManager:
         import sys
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         from forge_gui.api.time_manager import TimeManager
+
         tm = TimeManager()
         tid = tm.set_timer(60, label="test timer")
         assert tid.startswith("timer_")
@@ -42,8 +48,10 @@ class TestTimeManager:
         import sys
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         from forge_gui.api.time_manager import TimeManager
+
         tm = TimeManager()
         tid = tm.set_timer(60, label="cancel me")
         ok = tm.cancel_timer(tid)
@@ -56,8 +64,10 @@ class TestTimeManager:
         import sys
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         from forge_gui.api.time_manager import TimeManager
+
         tm = TimeManager()
         tm.set_timer(60, label="t1")
         tm.set_timer(120, label="t2")
@@ -72,8 +82,10 @@ class TestTimeManager:
         import sys
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         from forge_gui.api.time_manager import TimeManager
+
         tm = TimeManager()
         # set alarm for 23 hours from now (should be tomorrow)
         tid = tm.set_alarm("23:59", label="late alarm")
@@ -87,8 +99,10 @@ class TestTimeManager:
         import sys
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         from forge_gui.api.time_manager import TimeManager
+
         tm = TimeManager()
         tid = tm.set_alarm("11:30 PM", label="night alarm")
         assert tid != ""
@@ -100,8 +114,10 @@ class TestTimeManager:
         import sys
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         from forge_gui.api.time_manager import TimeManager
+
         tm = TimeManager()
         tid = tm.set_alarm("not a time", label="bad")
         assert tid == ""
@@ -111,8 +127,10 @@ class TestTimeManager:
         import sys
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         from forge_gui.api.time_manager import TimeManager
+
         tm = TimeManager()
         tid = tm.set_timer(60, on_process_exit="my_training_job")
         # simulate process exit
@@ -126,8 +144,10 @@ class TestTimeManager:
         import sys
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         from forge_gui.api.time_manager import TimeManager
+
         tm = TimeManager()
         tid = tm.set_timer(60, on_user_prompt=True)
         cancelled = tm.check_conditions(active_processes=None, user_prompted=True)
@@ -138,8 +158,10 @@ class TestTimeManager:
         import sys
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         from forge_gui.api.time_manager import TimeManager
+
         tm = TimeManager()
         tid = tm.set_timer(60, on_process_exit="my_job")
         cancelled = tm.check_conditions(active_processes=["my_job", "other"])
@@ -150,13 +172,15 @@ class TestTimeManager:
         import sys
 
         from PySide6.QtWidgets import QApplication
+
         app = QApplication.instance() or QApplication(sys.argv)
         from forge_gui.api.time_manager import TimeManager
+
         tm = TimeManager()
         fired_signals = []
         tm.timer_fired.connect(lambda tid, label, msg: fired_signals.append((tid, label, msg)))
         # 0.1 second timer
-        tid = tm.set_timer(0.1, label="quick", message="fired!")
+        tm.set_timer(0.1, label="quick", message="fired!")
         # process events to let the QTimer fire
         app.processEvents()
         time.sleep(0.3)
@@ -168,6 +192,7 @@ class TestTimeManager:
         import datetime
 
         from forge_gui.api.time_manager import _parse_time
+
         t = _parse_time("17:30")
         assert t == datetime.time(17, 30)
 
@@ -175,6 +200,7 @@ class TestTimeManager:
         import datetime
 
         from forge_gui.api.time_manager import _parse_time
+
         t = _parse_time("5:00 PM")
         assert t == datetime.time(17, 0)
 
@@ -182,6 +208,7 @@ class TestTimeManager:
         import datetime
 
         from forge_gui.api.time_manager import _parse_time
+
         t = _parse_time("5:00 AM")
         assert t == datetime.time(5, 0)
 
@@ -189,6 +216,7 @@ class TestTimeManager:
         import datetime
 
         from forge_gui.api.time_manager import _parse_time
+
         t = _parse_time("12:00 AM")
         assert t == datetime.time(0, 0)
 
@@ -196,26 +224,31 @@ class TestTimeManager:
         import datetime
 
         from forge_gui.api.time_manager import _parse_time
+
         t = _parse_time("12:00 PM")
         assert t == datetime.time(12, 0)
 
     def test_parse_time_invalid(self):
         from forge_gui.api.time_manager import _parse_time
+
         assert _parse_time("25:00") is None
         assert _parse_time("abc") is None
 
 
 # ── Library Install Manager ─────────────────────────────────────────────
 
+
 class TestLibraryInstallManager:
     def test_default_allowlist(self, tmp_path, monkeypatch):
         import sys
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         # patch project_root to use tmp_path
         import forge_gui.api.library_install as li_mod
         from forge_gui.api.library_install import LibraryInstallManager
+
         monkeypatch.setattr(li_mod, "project_root", lambda: tmp_path)
         mgr = LibraryInstallManager()
         allowed = mgr.get_allowlist()
@@ -227,10 +260,13 @@ class TestLibraryInstallManager:
         import sys
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         import forge_gui.api.library_install as li_mod
+
         monkeypatch.setattr(li_mod, "project_root", lambda: tmp_path)
         from forge_gui.api.library_install import LibraryInstallManager
+
         mgr = LibraryInstallManager()
         assert mgr.is_allowed("numpy")
         assert mgr.is_allowed("numpy>=1.20")
@@ -240,10 +276,13 @@ class TestLibraryInstallManager:
         import sys
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         import forge_gui.api.library_install as li_mod
+
         monkeypatch.setattr(li_mod, "project_root", lambda: tmp_path)
         from forge_gui.api.library_install import LibraryInstallManager
+
         mgr = LibraryInstallManager()
         mgr.add_to_allowlist("my_custom_lib")
         assert mgr.is_allowed("my_custom_lib")
@@ -257,10 +296,13 @@ class TestLibraryInstallManager:
         import sys
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         import forge_gui.api.library_install as li_mod
+
         monkeypatch.setattr(li_mod, "project_root", lambda: tmp_path)
         from forge_gui.api.library_install import LibraryInstallManager
+
         mgr1 = LibraryInstallManager()
         mgr1.add_to_allowlist("persisted_lib")
         # create new manager — should load from disk
@@ -269,6 +311,7 @@ class TestLibraryInstallManager:
 
     def test_tool_defs(self):
         from forge_gui.api.library_install import library_tool_defs
+
         defs = library_tool_defs()
         names = {d["function"]["name"] for d in defs}
         assert "install_library" in names
@@ -277,6 +320,7 @@ class TestLibraryInstallManager:
 
 
 # ── Process Protection ──────────────────────────────────────────────────
+
 
 class TestProcessProtection:
     def test_block_kill_python(self):
@@ -325,15 +369,18 @@ class TestProcessProtection:
 
 # ── Tool Harness Integration ────────────────────────────────────────────
 
+
 class TestToolHarnessTimeLibrary:
     def test_time_tools_in_defs(self):
         import sys
         import tempfile
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         from forge_gui.api.time_manager import TimeManager
         from forge_gui.api.tool_harness import ToolHarness
+
         tm = TimeManager()
         with tempfile.TemporaryDirectory() as td:
             harness = ToolHarness(td, time_manager=tm)
@@ -352,9 +399,11 @@ class TestToolHarnessTimeLibrary:
         import tempfile
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         from forge_gui.api.library_install import LibraryInstallManager
         from forge_gui.api.tool_harness import ToolHarness
+
         with tempfile.TemporaryDirectory() as td:
             mgr = LibraryInstallManager()
             harness = ToolHarness(td, library_manager=mgr)
@@ -370,9 +419,11 @@ class TestToolHarnessTimeLibrary:
         import tempfile
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         from forge_gui.api.time_manager import TimeManager
         from forge_gui.api.tool_harness import ToolHarness
+
         tm = TimeManager()
         with tempfile.TemporaryDirectory() as td:
             harness = ToolHarness(td, time_manager=tm, read_only=True)
@@ -388,9 +439,11 @@ class TestToolHarnessTimeLibrary:
         import tempfile
 
         from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication(sys.argv)
+
+        QApplication.instance() or QApplication(sys.argv)
         from forge_gui.api.library_install import LibraryInstallManager
         from forge_gui.api.tool_harness import ToolHarness
+
         with tempfile.TemporaryDirectory() as td:
             mgr = LibraryInstallManager()
             harness = ToolHarness(td, library_manager=mgr, read_only=True)

@@ -8,6 +8,7 @@ Covers:
 
 All tests use mock models (CPU only, no CUDA).
 """
+
 from __future__ import annotations
 
 import math
@@ -25,6 +26,7 @@ from forge.engine.test_time_scaling import (
 
 # ─── Mock models ──────────────────────────────────────────────────────────
 
+
 class MockModel:
     """Deterministic mock model: echoes prompt + a fixed suffix.
 
@@ -32,9 +34,9 @@ class MockModel:
     ``next_token_logprobs`` hook for beam-search log-prob tests.
     """
 
-    def __init__(self, suffix: str = " answer.", vocab_size: int = 16,
-                 use_logprobs: bool = False,
-                 vary_by_seed: bool = False):
+    def __init__(
+        self, suffix: str = " answer.", vocab_size: int = 16, use_logprobs: bool = False, vary_by_seed: bool = False
+    ):
         self.suffix = suffix
         self.vocab_size = vocab_size
         self.use_logprobs = use_logprobs
@@ -98,8 +100,8 @@ class FinishingModel:
 
 # ─── FirstFinishSearch ────────────────────────────────────────────────────
 
-class TestFirstFinishSearch:
 
+class TestFirstFinishSearch:
     def test_single_sample_fallback(self):
         """n_samples=1 should just call the model once."""
         model = MockModel(suffix="hello world.")
@@ -146,8 +148,8 @@ class TestFirstFinishSearch:
 
 # ─── BeamSearch ───────────────────────────────────────────────────────────
 
-class TestBeamSearch:
 
+class TestBeamSearch:
     def test_basic_beam_search_returns_string(self):
         """Beam search produces a non-empty string."""
         model = MockModel(suffix="the answer is 42.", use_logprobs=True)
@@ -204,8 +206,8 @@ class TestBeamSearch:
 
 # ─── MCTSDecoder ──────────────────────────────────────────────────────────
 
-class TestMCTSDecoder:
 
+class TestMCTSDecoder:
     def test_basic_mcts_returns_string(self):
         """MCTS produces a non-empty string."""
         model = MockModel(suffix="solution.", vary_by_seed=True)
@@ -225,8 +227,7 @@ class TestMCTSDecoder:
     def test_ucb_selection_exploration(self):
         """UCB should explore unvisited children (infinite UCB)."""
         model = MockModel(suffix="a.", vary_by_seed=True)
-        mcts = MCTSDecoder(n_iterations=8, n_children=3, c=1.414,
-                           max_tokens=6)
+        mcts = MCTSDecoder(n_iterations=8, n_children=3, c=1.414, max_tokens=6)
         out = mcts.generate(model, "q")
         assert isinstance(out, str)
         # With 8 iterations and 3 children, multiple nodes visited.
@@ -252,8 +253,7 @@ class TestMCTSDecoder:
         """Different exploration constants should still produce output."""
         model = MockModel(suffix="r.", vary_by_seed=True)
         for c in (0.5, 1.414, 3.0):
-            mcts = MCTSDecoder(n_iterations=3, n_children=2, c=c,
-                               max_tokens=6)
+            mcts = MCTSDecoder(n_iterations=3, n_children=2, c=c, max_tokens=6)
             out = mcts.generate(model, "q")
             assert isinstance(out, str)
             assert len(out) > 0
@@ -261,14 +261,13 @@ class TestMCTSDecoder:
 
 # ─── ModelCascade: difficulty estimation ──────────────────────────────────
 
-class TestCascadeDifficulty:
 
+class TestCascadeDifficulty:
     @pytest.fixture
     def cascade(self):
         return ModelCascade(
-            small_model=CountingModel("small"),
-            large_model=CountingModel("large"),
-            difficulty_threshold=0.5)
+            small_model=CountingModel("small"), large_model=CountingModel("large"), difficulty_threshold=0.5
+        )
 
     def test_short_prompt_easy(self, cascade):
         """Short prompt (< 50 chars) → 0.2."""
@@ -315,7 +314,9 @@ class TestCascadeDifficulty:
     def test_difficulty_in_range(self, cascade):
         """Difficulty is always in [0, 1]."""
         prompts = [
-            "hi", "a", "x" * 1000,
+            "hi",
+            "a",
+            "x" * 1000,
             "def f(x): return x**2",
             "Prove that the integral converges.",
             "What is the meaning of life? " * 50,
@@ -334,14 +335,13 @@ class TestCascadeDifficulty:
 
 # ─── ModelCascade: routing ────────────────────────────────────────────────
 
-class TestCascadeRouting:
 
+class TestCascadeRouting:
     @pytest.fixture
     def cascade(self):
         return ModelCascade(
-            small_model=CountingModel("small"),
-            large_model=CountingModel("large"),
-            difficulty_threshold=0.5)
+            small_model=CountingModel("small"), large_model=CountingModel("large"), difficulty_threshold=0.5
+        )
 
     def test_easy_routes_to_small(self, cascade):
         """Easy prompt routes to 'small'."""
@@ -388,14 +388,13 @@ class TestCascadeRouting:
 
 # ─── ModelCascade: generate + stats ───────────────────────────────────────
 
-class TestCascadeGenerate:
 
+class TestCascadeGenerate:
     @pytest.fixture
     def cascade(self):
         return ModelCascade(
-            small_model=CountingModel("small"),
-            large_model=CountingModel("large"),
-            difficulty_threshold=0.5)
+            small_model=CountingModel("small"), large_model=CountingModel("large"), difficulty_threshold=0.5
+        )
 
     def test_generate_easy_uses_small(self, cascade):
         """Easy prompt → small model generates."""
@@ -420,16 +419,15 @@ class TestCascadeGenerate:
                 received.update(kwargs)
                 return "ok"
 
-        cascade = ModelCascade(
-            KwargModel(), KwargModel(), difficulty_threshold=0.5)
+        cascade = ModelCascade(KwargModel(), KwargModel(), difficulty_threshold=0.5)
         cascade.generate("Hi!", max_new_tokens=99, temperature=0.3)
         assert received.get("max_new_tokens") == 99
         assert received.get("temperature") == 0.3
 
     def test_stats_tracking_multiple_calls(self, cascade):
         """Stats accumulate across multiple calls."""
-        cascade.generate("Hi!")                         # small
-        cascade.generate("ok")                          # small
+        cascade.generate("Hi!")  # small
+        cascade.generate("ok")  # small
         cascade.generate("def solve(equation): " + "x " * 300)  # large
         s = cascade.stats()
         assert s["n_small"] == 2
@@ -439,15 +437,14 @@ class TestCascadeGenerate:
 
     def test_stats_avg_difficulty(self, cascade):
         """avg_difficulty is the mean of all difficulties."""
-        cascade.generate("Hi!")   # 0.1
-        cascade.generate("ok")    # 0.05
+        cascade.generate("Hi!")  # 0.1
+        cascade.generate("ok")  # 0.05
         s = cascade.stats()
         assert s["avg_difficulty"] == pytest.approx(0.075, abs=0.01)
 
     def test_stats_empty(self):
         """Stats on a fresh cascade are zeroed."""
-        cascade = ModelCascade(
-            CountingModel("s"), CountingModel("l"))
+        cascade = ModelCascade(CountingModel("s"), CountingModel("l"))
         s = cascade.stats()
         assert s["n_small"] == 0
         assert s["n_large"] == 0
@@ -475,6 +472,7 @@ class TestCascadeGenerate:
 
 
 # ─── ForgeEngine integration (R39 wiring) ──────────────────────────────────
+
 
 class _MockEngine:
     """Minimal stand-in for ForgeEngine with a string generate().
@@ -508,6 +506,7 @@ class TestEngineScalingIntegration:
     def test_generate_with_scaling_ffs_returns_string(self):
         """generate_with_scaling(strategy='ffs') returns a string."""
         from forge.engine.forge_engine import _ScalingModelAdapter
+
         engine = _MockEngine(name="ffs", suffix=" done.")
         # Simulate the method logic using the adapter directly (avoids
         # needing a full ForgeEngine instance).
@@ -520,6 +519,7 @@ class TestEngineScalingIntegration:
     def test_generate_with_scaling_beam_returns_string(self):
         """generate_with_scaling(strategy='beam') returns a string."""
         from forge.engine.forge_engine import _ScalingModelAdapter
+
         engine = _MockEngine(name="beam", suffix=" beam answer.")
         adapter = _ScalingModelAdapter(engine)
         bs = BeamSearch(beam_width=3, max_tokens=6)
@@ -530,6 +530,7 @@ class TestEngineScalingIntegration:
     def test_generate_with_scaling_mcts_returns_string(self):
         """generate_with_scaling(strategy='mcts') returns a string."""
         from forge.engine.forge_engine import _ScalingModelAdapter
+
         engine = _MockEngine(name="mcts", suffix=" mcts solution.")
         adapter = _ScalingModelAdapter(engine)
         mcts = MCTSDecoder(n_iterations=4, n_children=2, max_tokens=8)
@@ -540,14 +541,12 @@ class TestEngineScalingIntegration:
     def test_generate_cascade_routes_easy_to_small(self):
         """generate_cascade routes easy prompts to the small model."""
         from forge.engine.forge_engine import _ScalingModelAdapter
+
         small = _MockEngine(name="small", suffix=" small reply.")
         large = _MockEngine(name="large", suffix=" large reply.")
         small_adapter = _ScalingModelAdapter(small)
         large_adapter = _ScalingModelAdapter(large)
-        cascade = ModelCascade(
-            small_model=small_adapter,
-            large_model=large_adapter,
-            difficulty_threshold=0.5)
+        cascade = ModelCascade(small_model=small_adapter, large_model=large_adapter, difficulty_threshold=0.5)
         out = cascade.generate("Hi!")
         assert "small" in out
         assert len(small.calls) == 1
@@ -556,14 +555,12 @@ class TestEngineScalingIntegration:
     def test_generate_cascade_routes_hard_to_large(self):
         """generate_cascade routes hard prompts to the large model."""
         from forge.engine.forge_engine import _ScalingModelAdapter
+
         small = _MockEngine(name="small", suffix=" small reply.")
         large = _MockEngine(name="large", suffix=" large reply.")
         small_adapter = _ScalingModelAdapter(small)
         large_adapter = _ScalingModelAdapter(large)
-        cascade = ModelCascade(
-            small_model=small_adapter,
-            large_model=large_adapter,
-            difficulty_threshold=0.5)
+        cascade = ModelCascade(small_model=small_adapter, large_model=large_adapter, difficulty_threshold=0.5)
         hard_prompt = "def solve(equation): " + "x " * 300
         out = cascade.generate(hard_prompt)
         assert "large" in out
@@ -573,6 +570,7 @@ class TestEngineScalingIntegration:
     def test_scaling_adapter_forwards_kwargs(self):
         """The adapter merges default kwargs with per-call kwargs."""
         from forge.engine.forge_engine import _ScalingModelAdapter
+
         engine = _MockEngine(name="kw", suffix=" x.")
         adapter = _ScalingModelAdapter(engine, temperature=0.5)
         adapter.generate("p", max_new_tokens=5)

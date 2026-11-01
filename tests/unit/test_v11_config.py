@@ -4,6 +4,7 @@ The V2-Pro (LFM2.5-VL) preset was removed when ForgeLM V2 Jamba became the
 sole base; these tests exercise the generic vision stack on a CPU-only
 small config.
 """
+
 import pytest
 import torch
 
@@ -11,12 +12,17 @@ from forge.config import ModelConfig
 
 # ── Vision module (small config for CPU testing) ────────────────────────
 
+
 class TestVisionModules:
     @pytest.fixture()
     def small_vision_config(self):
         return ModelConfig(
-            vocab_size=256, d_model=128, n_layers=4, n_heads=4,
-            n_kv_heads=2, intermediate_size=256,
+            vocab_size=256,
+            d_model=128,
+            n_layers=4,
+            n_heads=4,
+            n_kv_heads=2,
+            intermediate_size=256,
             use_vision=True,
             vision_encoder="siglip2",
             vision_hidden_size=64,
@@ -32,9 +38,9 @@ class TestVisionModules:
 
     def test_patch_embed(self, small_vision_config):
         from research.vision import PatchEmbed
+
         c = small_vision_config
-        pe = PatchEmbed(c.vision_image_size, c.vision_patch_size,
-                        3, c.vision_hidden_size)
+        pe = PatchEmbed(c.vision_image_size, c.vision_patch_size, 3, c.vision_hidden_size)
         images = torch.randn(2, 3, c.vision_image_size, c.vision_image_size)
         out = pe(images)
         n_patches = (c.vision_image_size // c.vision_patch_size) ** 2
@@ -42,6 +48,7 @@ class TestVisionModules:
 
     def test_siglip2_tower(self, small_vision_config):
         from research.vision import SigLIP2VisionTower
+
         c = small_vision_config
         tower = SigLIP2VisionTower(
             hidden_size=c.vision_hidden_size,
@@ -58,6 +65,7 @@ class TestVisionModules:
 
     def test_vision_projector_mlp(self, small_vision_config):
         from research.vision import VisionProjector
+
         c = small_vision_config
         proj = VisionProjector(
             vision_hidden_size=c.vision_hidden_size,
@@ -70,6 +78,7 @@ class TestVisionModules:
 
     def test_vision_projector_linear(self, small_vision_config):
         from research.vision import VisionProjector
+
         c = small_vision_config
         proj = VisionProjector(
             vision_hidden_size=c.vision_hidden_size,
@@ -82,6 +91,7 @@ class TestVisionModules:
 
     def test_query_pooler(self, small_vision_config):
         from research.vision import QueryPooler
+
         c = small_vision_config
         pooler = QueryPooler(
             hidden_size=c.vision_hidden_size,
@@ -94,6 +104,7 @@ class TestVisionModules:
 
     def test_vision_language_connector(self, small_vision_config):
         from research.vision import VisionLanguageConnector
+
         c = small_vision_config
         connector = VisionLanguageConnector(c)
         images = torch.randn(1, 3, c.vision_image_size, c.vision_image_size)
@@ -102,6 +113,7 @@ class TestVisionModules:
 
     def test_freeze_tower(self, small_vision_config):
         from research.vision import VisionLanguageConnector
+
         c = small_vision_config
         connector = VisionLanguageConnector(c)
         connector.freeze_tower()
@@ -110,6 +122,7 @@ class TestVisionModules:
 
     def test_param_count(self, small_vision_config):
         from research.vision import VisionLanguageConnector
+
         c = small_vision_config
         connector = VisionLanguageConnector(c)
         counts = connector.param_count()
@@ -120,6 +133,7 @@ class TestVisionModules:
 
     def test_preprocess_image(self):
         from research.vision import preprocess_image
+
         # uint8 image
         img = torch.randint(0, 256, (3, 100, 100), dtype=torch.uint8)
         out = preprocess_image(img, image_size=384)
@@ -128,6 +142,7 @@ class TestVisionModules:
 
     def test_preprocess_image_batch(self):
         from research.vision import preprocess_image
+
         img = torch.randn(2, 3, 50, 50)
         out = preprocess_image(img, image_size=28)
         assert out.shape == (2, 3, 28, 28)
@@ -135,9 +150,11 @@ class TestVisionModules:
 
 # ── Port script helpers ─────────────────────────────────────────────────
 
+
 class TestPortHelpers:
     def test_expand_embedding(self):
         from research.vision.port_v10_to_v11 import expand_embedding
+
         old = torch.randn(100, 64)
         new = expand_embedding(old, 200, 100)
         assert new.shape == (200, 64)
@@ -148,6 +165,7 @@ class TestPortHelpers:
 
     def test_expand_d_model_1d(self):
         from research.vision.port_v10_to_v11 import expand_d_model
+
         old = torch.randn(128)
         new = expand_d_model(old, 256, 128)
         assert new.shape == (256,)
@@ -156,6 +174,7 @@ class TestPortHelpers:
 
     def test_expand_d_model_2d_square(self):
         from research.vision.port_v10_to_v11 import expand_d_model
+
         old = torch.randn(128, 128)
         new = expand_d_model(old, 256, 128)
         assert new.shape == (256, 256)
@@ -163,6 +182,7 @@ class TestPortHelpers:
 
     def test_expand_d_model_2d_input(self):
         from research.vision.port_v10_to_v11 import expand_d_model
+
         old = torch.randn(512, 128)  # (out, in=d_model)
         new = expand_d_model(old, 256, 128)
         assert new.shape == (512, 256)
@@ -170,6 +190,7 @@ class TestPortHelpers:
 
     def test_expand_d_model_2d_output(self):
         from research.vision.port_v10_to_v11 import expand_d_model
+
         old = torch.randn(128, 512)  # (out=d_model, in)
         new = expand_d_model(old, 256, 128)
         assert new.shape == (256, 512)

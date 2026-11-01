@@ -6,6 +6,7 @@ DecisionController decode loop on a tiny attention-only
 ConfigurableResearchLLM — including the THINK last-block re-entry
 (no KV mutation) and STOP suppression.
 """
+
 import sys
 import types
 from pathlib import Path
@@ -34,14 +35,25 @@ from forge.exp.decision import (
 
 # ── fixtures ───────────────────────────────────────────────────────────
 
+
 def _tiny_attn_model():
     from forge.config import ModelConfig
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = ModelConfig(
-        vocab_size=64, d_model=64, n_layers=2, n_heads=2, n_kv_heads=1,
-        head_dim=32, intermediate_size=128, attn_type="gqa",
-        ffn_type="swiglu", norm_type="rmsnorm", max_seq_len=64,
-        use_qk_norm=False)
+        vocab_size=64,
+        d_model=64,
+        n_layers=2,
+        n_heads=2,
+        n_kv_heads=1,
+        head_dim=32,
+        intermediate_size=128,
+        attn_type="gqa",
+        ffn_type="swiglu",
+        norm_type="rmsnorm",
+        max_seq_len=64,
+        use_qk_norm=False,
+    )
     cfg.device = "cpu"
     old = torch.get_default_dtype()
     torch.set_default_dtype(torch.float32)
@@ -74,6 +86,7 @@ def tiny():
 
 # ── head mechanics ─────────────────────────────────────────────────────
 
+
 class TestHead:
     def test_shape(self):
         h = DecisionHead(896)
@@ -96,12 +109,12 @@ class TestHeuristics:
     def test_is_sentence_end(self):
         assert is_sentence_end(".", 1)
         assert is_sentence_end("end?", 2)
-        assert is_sentence_end(",", 3)          # punct-only
+        assert is_sentence_end(",", 3)  # punct-only
         assert is_sentence_end(")", 4)
         assert is_sentence_end("x", 5, eos_id=5)
         assert not is_sentence_end("the", 6)
         assert not is_sentence_end("  ", 7)
-        assert not is_sentence_end("a.b", 8)    # ends with alpha
+        assert not is_sentence_end("a.b", 8)  # ends with alpha
 
     def test_label_priority(self):
         # p1: row0 confident, row1 low (<thresh), row2 contested margin,
@@ -109,14 +122,15 @@ class TestHeuristics:
         p1 = torch.tensor([0.9, 0.10, 0.40, 0.10])
         margin = torch.tensor([0.8, 0.50, 0.01, 0.30])
         se = torch.tensor([False, False, False, True])
-        lab = label_positions(p1, margin, se, think_thresh=0.25,
-                              verify_delta=0.05)
+        lab = label_positions(p1, margin, se, think_thresh=0.25, verify_delta=0.05)
         assert lab.tolist() == [CONTINUE, THINK, VERIFY, STOP]
 
     def test_relabel_uses_fixed_threshold(self):
-        tr = {"top1": torch.tensor([0.9, 0.1]),
-              "margin": torch.tensor([0.9, 0.9]),
-              "sent_end": torch.tensor([False, False])}
+        tr = {
+            "top1": torch.tensor([0.9, 0.1]),
+            "margin": torch.tensor([0.9, 0.9]),
+            "sent_end": torch.tensor([False, False]),
+        }
         lab = relabel(tr, think_thresh=0.5, verify_delta=0.05)
         assert lab.tolist() == [CONTINUE, THINK]
 
@@ -126,18 +140,17 @@ class TestTrainEval:
         # 4 clusters in 16-d space, one per action.
         g = torch.Generator().manual_seed(0)
         centers = torch.randn(4, 16, generator=g) * 4
-        X = centers.repeat_interleave(64, 0) + \
-            torch.randn(256, 16, generator=g) * 0.1
+        X = centers.repeat_interleave(64, 0) + torch.randn(256, 16, generator=g) * 0.1
         Y = torch.arange(4).repeat_interleave(64)
         head = DecisionHead(d_model=16, hidden=32)
-        train_head(head, X, Y, steps=120, batch=64, lr=5e-3,
-                   device="cpu", seed=0)
+        train_head(head, X, Y, steps=120, batch=64, lr=5e-3, device="cpu", seed=0)
         ev = eval_head(head, X, Y, device="cpu")
         assert ev["acc"] > 0.9
         assert len(ev["confusion"]) == N_ACTIONS
 
 
 # ── controller on tiny model ───────────────────────────────────────────
+
 
 class TestController:
     def test_continue_matches_greedy(self, tiny):
@@ -178,8 +191,7 @@ class TestController:
         eng = _fake_eng(tiny)
         ids = torch.randint(0, 64, (1, 5))
         head = _force_head(64, VERIFY)
-        ctrl = DecisionController(eng, head, verify_temp=1e-6,
-                                  min_new_tokens=0, seed=0)
+        ctrl = DecisionController(eng, head, verify_temp=1e-6, min_new_tokens=0, seed=0)
         c = ctrl.generate(ids, max_new_tokens=8)
         g = greedy_generate(eng, ids, max_new_tokens=8)
         assert c.tokens == g.tokens

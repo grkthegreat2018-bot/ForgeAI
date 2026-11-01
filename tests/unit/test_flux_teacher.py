@@ -30,8 +30,7 @@ class _StubTeacher:
 
     def bulk_logprobs(self, ids, chunk=8192):
         self.pos += len(ids)
-        return torch.full((len(ids),), self.p_hit,
-                          dtype=torch.float32)
+        return torch.full((len(ids),), self.p_hit, dtype=torch.float32)
 
     def logp_row(self):
         return torch.log_softmax(self._next, -1)
@@ -41,11 +40,18 @@ class _StubTeacher:
 
 
 def _cfg(**kw):
-    base = {"vocab_size": 64, "orders": (1, 2), "use_knn": False,
-                "sparse_taps": (), "class_orders": (), "word_orders": (),
-                "hybrid_taps": (), "teacher_channel": True,
-                "teacher_bulk_rewards": True,
-                "bulk_channel_rewards": True}
+    base = {
+        "vocab_size": 64,
+        "orders": (1, 2),
+        "use_knn": False,
+        "sparse_taps": (),
+        "class_orders": (),
+        "word_orders": (),
+        "hybrid_taps": (),
+        "teacher_channel": True,
+        "teacher_bulk_rewards": True,
+        "bulk_channel_rewards": True,
+    }
     base.update(kw)
     return FluxConfig(**base)
 
@@ -139,7 +145,7 @@ def test_truncate_keeps_tail_not_prefix():
     t = TeacherChannel.__new__(TeacherChannel)
     t.window = 8
     t.sink = 0
-    t._has_sink = False          # mid-stream cache: no pinned sinks
+    t._has_sink = False  # mid-stream cache: no pinned sinks
     t.past = _Past()
     t.past.layers = [_Layer(20)]
     TeacherChannel._truncate(t)
@@ -155,7 +161,7 @@ def test_truncate_keeps_tail_not_prefix():
     t2.past.layers = [_Layer(20)]
     TeacherChannel._truncate(t2)
     k2 = t2.past.layers[0].keys.flatten().tolist()
-    assert k2 == [0, 1, 2] + list(range(15, 20))
+    assert k2 == [0, 1, 2, *list(range(15, 20))]
 
 
 def test_teacher_w0_is_persistent_floor():
@@ -188,8 +194,6 @@ def test_teacher_excluded_from_snapshot():
     m.ingest([1, 2, 3] * 10, tag="t")
     st = m._snapshot_state()
     assert "_tch_obj" not in st
-    assert not any("teacher" in k and "teacher_channel" not in k
-                   for k in st)
-    bad = [k for k, v in st.items()
-           if isinstance(v, torch.nn.Module)]
+    assert not any("teacher" in k and "teacher_channel" not in k for k in st)
+    bad = [k for k, v in st.items() if isinstance(v, torch.nn.Module)]
     assert not bad

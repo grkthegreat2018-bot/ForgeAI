@@ -8,6 +8,7 @@ Verifies:
   5. Forward pass: HINT4 output within 10% of dense
   6. from_dense_hadamard_int4 classmethod
 """
+
 import pytest
 import torch
 
@@ -25,15 +26,16 @@ DEVICE = torch.device("cuda" if CUDA_AVAILABLE else "cpu")
 
 # ── 1. Hadamard orthogonality ──────────────────────────────────────────────
 
+
 @pytest.mark.parametrize("n", [1, 2, 4, 8, 16, 64, 256, 768])
 def test_hadamard_orthogonality(n):
     """H @ H^T should be identity (orthogonal matrix)."""
     H = _hadamard_matrix(n, device=torch.device("cpu"), dtype=torch.float32)
     assert H.shape == (n, n)
-    I = H @ H.t()
+    prod = H @ H.t()
     eye = torch.eye(n, dtype=torch.float32)
-    assert torch.allclose(I, eye, atol=1e-5), (
-        f"Hadamard {n}x{n} not orthogonal: max diff {(I - eye).abs().max():.6e}"
+    assert torch.allclose(prod, eye, atol=1e-5), (
+        f"Hadamard {n}x{n} not orthogonal: max diff {(prod - eye).abs().max():.6e}"
     )
 
 
@@ -42,15 +44,16 @@ def test_hadamard_non_power_of_2():
     H = _hadamard_matrix(768, device=torch.device("cpu"), dtype=torch.float32)
     assert H.shape == (768, 768)
     # After QR re-orthogonalization, should be exactly orthogonal
-    I = H @ H.t()
+    prod = H @ H.t()
     eye = torch.eye(768, dtype=torch.float32)
-    assert torch.allclose(I, eye, atol=1e-4), (
-        f"Hadamard 768x768 not orthogonal after QR: max diff {(I - eye).abs().max():.6e}"
+    assert torch.allclose(prod, eye, atol=1e-4), (
+        f"Hadamard 768x768 not orthogonal after QR: max diff {(prod - eye).abs().max():.6e}"
     )
     assert torch.isfinite(H).all()
 
 
 # ── 2. INT4 packing/unpacking ──────────────────────────────────────────────
+
 
 def test_int4_pack_unpack_roundtrip():
     """Pack then unpack int4 values — should recover original."""
@@ -66,6 +69,7 @@ def test_int4_pack_unpack_roundtrip():
 
 # ── 3. Compression ratio ───────────────────────────────────────────────────
 
+
 def test_compression_ratio_int4_vs_int8():
     """INT4 NLRQ should use approximately half the factor storage of INT8.
 
@@ -75,8 +79,7 @@ def test_compression_ratio_int4_vs_int8():
     out_features, in_features, rank = 2048, 8192, 512
 
     layer_int8 = NLRQLinear(in_features, out_features, rank=rank, factor_bits=8)
-    layer_hint4 = NLRQLinear(in_features, out_features, rank=rank,
-                             factor_bits=4, use_hadamard=True)
+    layer_hint4 = NLRQLinear(in_features, out_features, rank=rank, factor_bits=4, use_hadamard=True)
 
     bytes_int8 = layer_int8.compressed_storage_bytes()
     bytes_hint4 = layer_hint4.compressed_storage_bytes()
@@ -91,6 +94,7 @@ def test_compression_ratio_int4_vs_int8():
 
 
 # ── 4. Reconstruction error ────────────────────────────────────────────────
+
 
 def test_reconstruction_error():
     """Compare HINT4 vs INT8 reconstruction error.
@@ -124,22 +128,19 @@ def test_reconstruction_error():
     err_hint4 = (W - W_hint4).norm() / W.norm()
     cr_hint4 = layer_hint4.compression_ratio()
 
-    print(f"\nINT8:  error={err_int8:.4f} ({err_int8*100:.2f}%), CR={cr_int8:.1f}x")
-    print(f"HINT4: error={err_hint4:.4f} ({err_hint4*100:.2f}%), CR={cr_hint4:.1f}x")
-    print(f"Error ratio (HINT4/INT8): {err_hint4/err_int8:.2f}x")
-    print(f"Storage ratio (INT8/HINT4): {cr_hint4/cr_int8:.2f}x")
+    print(f"\nINT8:  error={err_int8:.4f} ({err_int8 * 100:.2f}%), CR={cr_int8:.1f}x")
+    print(f"HINT4: error={err_hint4:.4f} ({err_hint4 * 100:.2f}%), CR={cr_hint4:.1f}x")
+    print(f"Error ratio (HINT4/INT8): {err_hint4 / err_int8:.2f}x")
+    print(f"Storage ratio (INT8/HINT4): {cr_hint4 / cr_int8:.2f}x")
 
     # HINT4 error should be < 25% (INT4 quantization floor ~15-20%)
-    assert err_hint4 < 0.25, (
-        f"HINT4 error {err_hint4:.4f} >= 25% — too high even for INT4"
-    )
+    assert err_hint4 < 0.25, f"HINT4 error {err_hint4:.4f} >= 25% — too high even for INT4"
     # HINT4 should have better compression (even with Hadamard overhead)
-    assert cr_hint4 > cr_int8, (
-        f"HINT4 CR {cr_hint4:.1f} not better than INT8 CR {cr_int8:.1f}"
-    )
+    assert cr_hint4 > cr_int8, f"HINT4 CR {cr_hint4:.1f} not better than INT8 CR {cr_int8:.1f}"
 
 
 # ── 5. Forward pass ────────────────────────────────────────────────────────
+
 
 def test_forward_pass_accuracy():
     """HINT4 NLRQ forward output should be within 20% of dense linear output.
@@ -167,13 +168,12 @@ def test_forward_pass_accuracy():
         y_hint4 = layer(x)
 
     rel_err = (y_dense - y_hint4).norm() / y_dense.norm()
-    print(f"Forward pass relative error: {rel_err:.4f} ({rel_err*100:.2f}%)")
-    assert rel_err < 0.20, (
-        f"Forward pass error {rel_err:.4f} >= 20%"
-    )
+    print(f"Forward pass relative error: {rel_err:.4f} ({rel_err * 100:.2f}%)")
+    assert rel_err < 0.20, f"Forward pass error {rel_err:.4f} >= 20%"
 
 
 # ── 6. from_dense_hadamard_int4 classmethod ────────────────────────────────
+
 
 def test_from_dense_hadamard_int4_basic():
     """Verify from_dense_hadamard_int4 creates a valid layer with Hadamard buffers."""
@@ -229,6 +229,7 @@ def test_from_dense_hadamard_int4_with_bias():
 
 # ── 7. Backward compatibility: INT8 still works ────────────────────────────
 
+
 def test_int8_backward_compatibility():
     """Existing INT8 NLRQ must work unchanged."""
     torch.manual_seed(42)
@@ -266,6 +267,7 @@ def test_int8_backward_compatibility():
 
 # ── 8. Hadamard apply/inverse round-trip ───────────────────────────────────
 
+
 def test_apply_hadamard_inverse():
     """Applying Hadamard then its inverse should recover the original."""
     torch.manual_seed(42)
@@ -297,6 +299,7 @@ def test_apply_hadamard_inverse():
 
 
 # ── 9. Adaptive rank ────────────────────────────────────────────────────────
+
 
 class TestAdaptiveRank:
     def test_adaptive_rank_low_rank_matrix(self):
@@ -349,8 +352,7 @@ class TestAdaptiveRank:
         """min_rank and max_rank should clamp the selected rank."""
         torch.manual_seed(42)
         W = torch.randn(256, 512, dtype=torch.float32, device=DEVICE) * 0.02
-        _, r_clamped = NLRQLinear.from_dense_adaptive(
-            W, energy_threshold=0.99, min_rank=200, max_rank=250)
+        _, r_clamped = NLRQLinear.from_dense_adaptive(W, energy_threshold=0.99, min_rank=200, max_rank=250)
         assert r_clamped >= 200, "Should respect min_rank"
         assert r_clamped <= 250, "Should respect max_rank"
 
@@ -366,8 +368,7 @@ class TestAdaptiveRank:
         bytes_fixed = layer_fixed.compressed_storage_bytes()
 
         # Adaptive rank (should select ~64)
-        layer_adaptive, r = NLRQLinear.from_dense_adaptive(
-            W, energy_threshold=0.99, min_rank=32)
+        layer_adaptive, r = NLRQLinear.from_dense_adaptive(W, energy_threshold=0.99, min_rank=32)
         bytes_adaptive = layer_adaptive.compressed_storage_bytes()
 
         print(f"Fixed rank=256: {bytes_fixed} bytes")
@@ -378,6 +379,7 @@ class TestAdaptiveRank:
 
 
 # ── 10. HINT4 + INT4 residual ───────────────────────────────────────────────
+
 
 def test_hint4_with_residual_error():
     """HINT4 + INT4 residual should have much lower error than pure HINT4."""
@@ -398,9 +400,9 @@ def test_hint4_with_residual_error():
     W_res = layer_res._dequantize_weight().float()
     err_res = (W - W_res).norm() / W.norm()
 
-    print(f"\nPure HINT4: error={err_pure:.4f} ({err_pure*100:.2f}%)")
-    print(f"HINT4+residual: error={err_res:.4f} ({err_res*100:.2f}%)")
-    print(f"Error improvement: {err_pure/err_res:.2f}x")
+    print(f"\nPure HINT4: error={err_pure:.4f} ({err_pure * 100:.2f}%)")
+    print(f"HINT4+residual: error={err_res:.4f} ({err_res * 100:.2f}%)")
+    print(f"Error improvement: {err_pure / err_res:.2f}x")
 
     # Residual should significantly reduce error
     assert err_res < err_pure, "Residual should reduce error"
@@ -436,9 +438,9 @@ def test_hint4_residual_compression_ratio():
     dense_bytes = layer_int8.dense_storage_bytes()
 
     print(f"Dense:       {dense_bytes}")
-    print(f"INT8:        {bytes_int8}  (CR={dense_bytes/bytes_int8:.2f}x)")
-    print(f"HINT4 pure:  {bytes_pure}  (CR={dense_bytes/bytes_pure:.2f}x)")
-    print(f"HINT4+res:   {bytes_res}  (CR={dense_bytes/bytes_res:.2f}x)")
+    print(f"INT8:        {bytes_int8}  (CR={dense_bytes / bytes_int8:.2f}x)")
+    print(f"HINT4 pure:  {bytes_pure}  (CR={dense_bytes / bytes_pure:.2f}x)")
+    print(f"HINT4+res:   {bytes_res}  (CR={dense_bytes / bytes_res:.2f}x)")
 
     # 1. Pure HINT4 beats INT8 on compression (the whole point of INT4 factors)
     assert bytes_pure < bytes_int8, "Pure HINT4 should be smaller than INT8"

@@ -1,4 +1,5 @@
 """R49 Uno decoder tests: Psi-Spec lossless block decoding (arXiv:2609.04010)."""
+
 import torch
 
 from forge.decoding.uno import NgramProposer, UnoDecoding

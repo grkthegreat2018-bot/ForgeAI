@@ -1,4 +1,5 @@
 """CPU tests for BAdam and FiraNLRQ optimizers (V7-8B training stack)."""
+
 import sys
 from pathlib import Path
 
@@ -60,19 +61,15 @@ def test_badam_chunks_oversized_head_block():
     # many small extras → embeddings_head >> layer blocks
     model.extras = nn.ModuleList([nn.Linear(8, 8) for _ in range(50)])
     opt = BAdam(model, lr=1e-3, switch_every=1, verbose=False)
-    layer_sizes = [sum(p.numel() for p in b["params"])
-                   for b in opt._blocks if b["name"].startswith("blocks.")]
-    head_sizes = [sum(p.numel() for p in b["params"])
-                  for b in opt._blocks if not b["name"].startswith("blocks.")]
+    layer_sizes = [sum(p.numel() for p in b["params"]) for b in opt._blocks if b["name"].startswith("blocks.")]
+    head_sizes = [sum(p.numel() for p in b["params"]) for b in opt._blocks if not b["name"].startswith("blocks.")]
     target = sorted(layer_sizes)[len(layer_sizes) // 2]
-    assert max(head_sizes) <= target * 3, (
-        f"head chunks {head_sizes} vs layer target {target} — chunking failed")
+    assert max(head_sizes) <= target * 3, f"head chunks {head_sizes} vs layer target {target} — chunking failed"
 
 
 def test_badam_descending_order():
     model = TinyModel()
-    opt = BAdam(model, lr=1e-3, switch_every=1, switch_mode="descending",
-                verbose=False)
+    opt = BAdam(model, lr=1e-3, switch_every=1, switch_mode="descending", verbose=False)
     assert opt._blocks[0]["name"] == "blocks.2"  # output layer first
 
 
@@ -151,12 +148,11 @@ def test_badam_fp32_states_and_no_decay():
     # Weight (2D) in active block gets decayed; bias (1D) must not be.
     block = opt._blocks[opt._block_idx]
     w = next(p for p in block["params"] if p.ndim == 2)
-    b = [p for p in block["params"] if p.ndim == 1 and p.dim() != 0
-         and p.numel() == w.shape[0]]
+    b = [p for p in block["params"] if p.ndim == 1 and p.dim() != 0 and p.numel() == w.shape[0]]
     assert w.requires_grad
-    w_before = w.detach().clone()
+    w.detach().clone()
     if b:
-        b_before = b[0].detach().clone()
+        b[0].detach().clone()
     opt.step()
     # decay: p *= (1 - lr*wd) plus adam update; both change w.
     # bias: only adam update, no decay — verify via state dtype instead:
@@ -174,11 +170,9 @@ def test_badam_no_decay_actually_skips_1d():
     _loss(model).backward()
     # embed block: contains only 2D embedding weight; find a block with a bias.
     # Activate block 0 (embeddings_head) then a layer block with bias.
-    opt._activate_block(opt._blocks.index(
-        next(b for b in opt._blocks if any(p.ndim == 1 for p in b["params"]))))
+    opt._activate_block(opt._blocks.index(next(b for b in opt._blocks if any(p.ndim == 1 for p in b["params"]))))
     _loss(model).backward()
-    bias = next(p for b in opt._blocks for p in b["params"]
-                if p.ndim == 1 and p.requires_grad)
+    bias = next(p for b in opt._blocks for p in b["params"] if p.ndim == 1 and p.requires_grad)
     before = bias.detach().clone()
     opt.step()
     after = bias.detach()
@@ -195,17 +189,16 @@ def test_badam_slim_state_roundtrip():
         _loss(model).backward()
         opt.step()
     from forge.training.runners.train_8b_all import slim_badam_state
+
     slim = slim_badam_state(opt)
     keep_blocks = {opt._block_idx, (opt._block_idx - 1) % opt._n_blocks}
     keep_ids = {id(p) for i in keep_blocks for p in opt._blocks[i]["params"]}
-    keep_pos = {i for i, p in enumerate(opt.param_groups[0]["params"])
-                if id(p) in keep_ids}
+    keep_pos = {i for i, p in enumerate(opt.param_groups[0]["params"]) if id(p) in keep_ids}
     saved_pos = {int(k) for k in slim["optimizer_state"]["state"]}
     assert saved_pos <= keep_pos, "slim state must only cover kept blocks"
     assert saved_pos, "slim state must include the just-updated block"
     # param_groups stay FULL-size so torch load validation passes
-    assert len(slim["optimizer_state"]["param_groups"][0]["params"]) == \
-        len(opt.param_groups[0]["params"])
+    assert len(slim["optimizer_state"]["param_groups"][0]["params"]) == len(opt.param_groups[0]["params"])
 
     opt2 = BAdam(model, lr=1e-3, switch_every=1, verbose=False)
     opt2.load_state_dict(slim)
@@ -215,8 +208,10 @@ def test_badam_slim_state_roundtrip():
 
 # ── NLRQ factor training (STE) ───────────────────────────────────────────
 
+
 def _tiny_nlrq():
     from forge.keys.compression.nlrq_ffn_key import NLRQLinear
+
     torch.manual_seed(3)
     return NLRQLinear(12, 10, rank=4)
 
@@ -248,10 +243,9 @@ def test_nlrq_export_roundtrip():
         layer.U_m += 0.01  # perturb masters
     layer.export_quantized_()
     # export is idempotent: quantize(dequant(buffers)) == buffers
-    assert torch.equal(layer.U_q,
-                       torch.round(layer.U_m.float().cpu()
-                                   / layer.U_scale.float()).clamp(-127, 127)
-                       .to(torch.int8))
+    assert torch.equal(
+        layer.U_q, torch.round(layer.U_m.float().cpu() / layer.U_scale.float()).clamp(-127, 127).to(torch.int8)
+    )
     # disabling drops masters but keeps progress in buffers
     layer.disable_factor_training_(export=False)
     assert layer.U_m is None
@@ -259,6 +253,7 @@ def test_nlrq_export_roundtrip():
 
 def test_nlrq_state_dict_strips_masters_via_snapshot():
     from forge.training.runners.train_8b_all import snapshot_state
+
     model = nn.Sequential(_tiny_nlrq(), nn.Linear(10, 4))
     model[0].enable_factor_training_()
     state = snapshot_state(model, step=7)
@@ -269,15 +264,17 @@ def test_nlrq_state_dict_strips_masters_via_snapshot():
 
 # ── trainer utilities ────────────────────────────────────────────────────
 
+
 def test_lr_schedules():
     from forge.training.runners.train_8b_all import lr_at
+
     assert lr_at(0, 1.0, 10, 100) == 0.0
     assert abs(lr_at(5, 1.0, 10, 100) - 0.5) < 1e-9
     assert lr_at(10, 1.0, 10, 100) == 1.0
     assert lr_at(100, 1.0, 10, 100) == 0.0
     # wsd: stable until decay_frac, then linear to zero
     assert lr_at(50, 1.0, 10, 100, "wsd", 0.3) == 1.0
-    assert lr_at(73, 1.0, 10, 100, "wsd", 0.3) == 1.0   # decay starts at prog=0.7
+    assert lr_at(73, 1.0, 10, 100, "wsd", 0.3) == 1.0  # decay starts at prog=0.7
     assert lr_at(100, 1.0, 10, 100, "wsd", 0.3) == 0.0
     # cosine: midpoint of decay → half lr
     assert abs(lr_at(55, 1.0, 10, 100, "cosine") - 0.5) < 1e-9
@@ -285,6 +282,7 @@ def test_lr_schedules():
 
 def test_chunked_ce_matches_full_ce():
     from forge.training.runners.train_8b_all import chunked_next_token_ce
+
     torch.manual_seed(1)
 
     class M(nn.Module):
@@ -305,18 +303,18 @@ def test_chunked_ce_matches_full_ce():
         logits = m(ids)
         shift = logits[:, :-1, :].contiguous()
         tgt = ids[:, 1:].contiguous()
-        ref = torch.nn.functional.cross_entropy(
-            shift.view(-1, 50), tgt.view(-1))
+        ref = torch.nn.functional.cross_entropy(shift.view(-1, 50), tgt.view(-1))
     got = chunked_next_token_ce(m, ids, chunk=5)
     assert torch.allclose(ref, got, atol=1e-5), f"{ref} vs {got}"
 
 
 def test_epoch_sampler_uniform_covers_all():
     from forge.training.runners.train_8b_all import EpochBatchSampler, PackedDataset
-    ds = [PackedDataset("a", torch.zeros(10, 4, dtype=torch.long),
-                        torch.zeros(1, 4, dtype=torch.long)),
-          PackedDataset("b", torch.zeros(6, 4, dtype=torch.long),
-                        torch.zeros(1, 4, dtype=torch.long))]
+
+    ds = [
+        PackedDataset("a", torch.zeros(10, 4, dtype=torch.long), torch.zeros(1, 4, dtype=torch.long)),
+        PackedDataset("b", torch.zeros(6, 4, dtype=torch.long), torch.zeros(1, 4, dtype=torch.long)),
+    ]
     s = EpochBatchSampler(ds, batch_size=4, weights=None, seed=0)
     seen = []
     for _ in range(4):  # 4 batches × 4 = 16 = exactly one epoch
@@ -326,10 +324,11 @@ def test_epoch_sampler_uniform_covers_all():
 
 def test_epoch_sampler_stratified_upweights():
     from forge.training.runners.train_8b_all import EpochBatchSampler, PackedDataset
-    ds = [PackedDataset("v7", torch.zeros(10, 4, dtype=torch.long),
-                        torch.zeros(1, 4, dtype=torch.long)),
-          PackedDataset("lfm", torch.zeros(30, 4, dtype=torch.long),
-                        torch.zeros(1, 4, dtype=torch.long))]
+
+    ds = [
+        PackedDataset("v7", torch.zeros(10, 4, dtype=torch.long), torch.zeros(1, 4, dtype=torch.long)),
+        PackedDataset("lfm", torch.zeros(30, 4, dtype=torch.long), torch.zeros(1, 4, dtype=torch.long)),
+    ]
     s = EpochBatchSampler(ds, batch_size=8, weights={"v7": 3.0}, seed=0)
     seen = []
     for _ in range(5):  # 5 batches × 8 = exactly one 40-seq epoch
@@ -398,13 +397,11 @@ def test_normalize_logit_scale_fixes_confidently_wrong_init():
 
     with torch.no_grad():
         logits = forward_model(m, ids)
-        ce_before = F.cross_entropy(
-            logits[:, :-1].reshape(-1, 64), ids[:, 1:].reshape(-1)).item()
+        ce_before = F.cross_entropy(logits[:, :-1].reshape(-1, 64), ids[:, 1:].reshape(-1)).item()
     scale = normalize_logit_scale_(m, torch.device("cpu"), cfg)
     with torch.no_grad():
         logits = forward_model(m, ids)
-        ce_after = F.cross_entropy(
-            logits[:, :-1].reshape(-1, 64), ids[:, 1:].reshape(-1)).item()
+        ce_after = F.cross_entropy(logits[:, :-1].reshape(-1, 64), ids[:, 1:].reshape(-1)).item()
     assert ce_before > _math.log(64) + 4, f"setup failed: {ce_before}"
     # std=1 logits ⇒ CE ≈ ln(V) + ½ (Gaussian entropy of the logit spread)
     assert _math.log(64) < ce_after < _math.log(64) + 0.8, f"CE {ce_after}"

@@ -16,6 +16,7 @@ This test verifies:
 2. The forward pass produces correct output shape
 3. The output is numerically close to the HF reference (within fp tolerance)
 """
+
 import json
 import sys
 from pathlib import Path
@@ -24,6 +25,10 @@ import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+# The ForgeLM V2 checkpoint + tokenizer are gitignored assets — skip the
+# whole module when they aren't present (e.g. CI runners).
+pytestmark = pytest.mark.usefixtures("v2_assets")
 
 
 @pytest.fixture(scope="module")
@@ -43,6 +48,7 @@ def forgelm_v2_state():
     if not ckpt_path.exists():
         pytest.skip("ForgeLM V2 checkpoint not found.")
     from safetensors.torch import load_file
+
     return load_file(str(ckpt_path))
 
 
@@ -81,9 +87,17 @@ class TestForgeLMV2Checkpoint:
             ltype = layer_types[i]
             if ltype == "mamba":
                 # Mamba layer weights
-                for name in ["in_proj.weight", "conv1d.weight", "conv1d.bias",
-                            "x_proj.weight", "dt_proj.weight", "dt_proj.bias",
-                            "A_log", "D", "out_proj.weight"]:
+                for name in [
+                    "in_proj.weight",
+                    "conv1d.weight",
+                    "conv1d.bias",
+                    "x_proj.weight",
+                    "dt_proj.weight",
+                    "dt_proj.bias",
+                    "A_log",
+                    "D",
+                    "out_proj.weight",
+                ]:
                     key = f"blocks.{i}.attn.{name}"
                     assert key in forgelm_v2_state, f"Missing: {key}"
                 # Mamba norms (Jamba has dt/b/c layernorm — bare params, no .weight)
@@ -92,8 +106,7 @@ class TestForgeLMV2Checkpoint:
                     assert key in forgelm_v2_state, f"Missing: {key}"
             elif ltype == "attention":
                 # Attention layer weights
-                for name in ["q_proj.weight", "k_proj.weight",
-                            "v_proj.weight", "out_proj.weight"]:
+                for name in ["q_proj.weight", "k_proj.weight", "v_proj.weight", "out_proj.weight"]:
                     key = f"blocks.{i}.attn.{name}"
                     assert key in forgelm_v2_state, f"Missing: {key}"
 
@@ -137,17 +150,16 @@ class TestForgeLMV2Checkpoint:
         n_params = sum(t.numel() for t in forgelm_v2_state.values())
         # Jamba Reasoning 3B has ~3.2B params (with tied embeddings)
         # Allow some tolerance for tied vs untied
-        assert 2.5e9 < n_params < 4.0e9, f"Expected ~3.2B params, got {n_params/1e9:.2f}B"
+        assert 2.5e9 < n_params < 4.0e9, f"Expected ~3.2B params, got {n_params / 1e9:.2f}B"
 
     def test_tied_embeddings(self, forgelm_v2_state, forgelm_v2_config):
         """Embedding and head weights are tied (same tensor)."""
-        if forgelm_v2_config.get("tie_word_embeddings", True):
+        if forgelm_v2_config.get("tie_word_embeddings", True) and "head.weight" in forgelm_v2_state:
             # In ForgeAI format, tied weights mean head.weight == embed.weight
             # (they may be the same key or different keys with same data)
-            if "head.weight" in forgelm_v2_state:
-                assert torch.equal(forgelm_v2_state["embed.weight"],
-                                  forgelm_v2_state["head.weight"]), \
-                    "Tied embeddings: embed.weight != head.weight"
+            assert torch.equal(forgelm_v2_state["embed.weight"], forgelm_v2_state["head.weight"]), (
+                "Tied embeddings: embed.weight != head.weight"
+            )
 
     def test_no_nan_or_inf(self, forgelm_v2_state):
         """No NaN or Inf values in any weight."""
@@ -243,8 +255,9 @@ class TestForgeLMV2ForwardPass:
         else:
             logits = output.logits if hasattr(output, "logits") else output
 
-        assert logits.shape == (1, 5, forgelm_v2_config["vocab_size"]), \
+        assert logits.shape == (1, 5, forgelm_v2_config["vocab_size"]), (
             f"Expected (1, 5, {forgelm_v2_config['vocab_size']}), got {logits.shape}"
+        )
 
     def test_forward_pass_no_nan(self, forgelm_v2_state, forgelm_v2_config):
         """Forward pass output has no NaN values."""
@@ -305,6 +318,7 @@ class TestJambaEOSAndRoPE:
     def test_preset_use_rope_false(self):
         """forgelm_v2 must not apply RoPE — Jamba attention is RoPE-free."""
         from forge.config import MODEL_CONFIGS
+
         cfg = MODEL_CONFIGS["forgelm_v2"]
         assert cfg.use_rope is False
 
@@ -319,8 +333,7 @@ class TestJambaEOSAndRoPE:
                 self.config = type("C", (), {"eos_token_id": eos_token_id})()
                 self.eos_token_id = eos_token_id
 
-            def forward(self, input_ids, past_key_values=None,
-                    use_cache=False, **kw):
+            def forward(self, input_ids, past_key_values=None, use_cache=False, **kw):
                 b, t = input_ids.shape
                 logits = torch.full((b, t, vocab), -10.0)
                 logits[..., token] = 10.0
@@ -332,20 +345,20 @@ class TestJambaEOSAndRoPE:
     def test_standard_decoding_stops_on_jamba_im_end(self):
         """519 (<|im_end|>) must stop generation even without model eos."""
         from forge.engine.decoding import StandardDecoding
+
         model = self._mock_model(token=519, eos_token_id=None)
         ids = torch.tensor([[1, 100, 200]])
-        out = StandardDecoding().generate(
-            model, ids, max_new_tokens=50, temperature=0.0)
+        out = StandardDecoding().generate(model, ids, max_new_tokens=50, temperature=0.0)
         # 519 emitted → loop stops immediately (EOS is not appended).
         assert out.shape[1] - ids.shape[1] == 0
 
     def test_standard_decoding_list_eos(self):
         """List-valued eos_token_id (HF Jamba uses [2, 519]) must not crash."""
         from forge.engine.decoding import StandardDecoding
+
         model = self._mock_model(token=5, eos_token_id=[2, 519])
         ids = torch.tensor([[1, 100, 200]])
-        out = StandardDecoding().generate(
-            model, ids, max_new_tokens=4, temperature=0.0)
+        out = StandardDecoding().generate(model, ids, max_new_tokens=4, temperature=0.0)
         assert out.shape[1] - ids.shape[1] == 4  # ran full budget, no crash
 
     def test_optimal_for_routes_mamba_hybrid(self):
@@ -356,18 +369,18 @@ class TestJambaEOSAndRoPE:
         from forge.engine.activation import ActivationConfig
 
         cfg = ActivationConfig.optimal_for(MODEL_CONFIGS["forgelm_v2"])
-        assert cfg.use_compile is False          # unsafe on python-loop scan
+        assert cfg.use_compile is False  # unsafe on python-loop scan
         assert cfg.use_quamba2 is True
         assert cfg.use_replay_ssm is True
         assert cfg.use_avmp is True
         assert cfg.use_virtual_tensor is True
         assert cfg.use_prefix_cache is True
         assert cfg.use_chunked_prefix_cache is False  # KV slicing = (k,v) tuples
-        assert cfg.kv_cache == "rotorquant"
-        assert cfg.kv_bits == 4
+        assert cfg.kv_cache == "standard"  # honest label (A19): mamba KV
+                                           # is dict-state, never 4-bit
 
         pure = ActivationConfig.optimal_for(MODEL_CONFIGS["forgelm_tiny"])
-        assert pure.use_compile is True          # attention-only keeps it
+        assert pure.use_compile is True  # attention-only keeps it
 
     def test_auto_activate_skips_attn_only_overrides_on_hybrid(self):
         """_auto_activate_optimal (the from_checkpoint auto_activate=True
@@ -385,12 +398,12 @@ class TestJambaEOSAndRoPE:
         def _stub_engine(config, vram_ratio):
             eng = types.SimpleNamespace(
                 config=config,
+                model=types.SimpleNamespace(),  # no _forgequant_prequant attr
                 keystack_features=set(),
                 device=torch.device("cuda"),
                 _needs_streaming=False,
                 _log=lambda *a, **k: None,
-                _memory_info=lambda dev: (vram_ratio * 12.0,
-                                         12.0),  # GB → returns free,total
+                _memory_info=lambda dev: (vram_ratio * 12.0, 12.0),  # GB → returns free,total
                 _auto_select_quantization=lambda: "nvfp4",
                 activate_optimal=lambda **kw: captured.update(kw),
             )
@@ -403,8 +416,9 @@ class TestJambaEOSAndRoPE:
         assert "use_block_fusion" not in captured
         assert "use_breakable_cuda_graph" not in captured
         assert captured.get("quantize") is None
-        assert captured.get("kv_cache") == "rotorquant"
-        assert captured.get("kv_bits") == 4
+        assert captured.get("kv_cache") == "standard"  # A19: rotorquant
+        # only assigned to wire QuaRot-KV on quarot checkpoints
+        assert captured.get("kv_bits") is None
 
         # Pure-attention on ample VRAM keeps the aggressive overrides
         captured.clear()

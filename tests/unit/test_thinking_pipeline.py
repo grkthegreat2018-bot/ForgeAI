@@ -1,4 +1,5 @@
 """Test the LFM2.5-Thinking pipeline orchestration."""
+
 import os
 import sys
 import tempfile
@@ -64,7 +65,7 @@ def test_pipeline_resumability():
 def test_pipeline_stage_disabled():
     """Disabled stages should be skipped, returning the input checkpoint."""
     config = ThinkingPipelineConfig(cpt_enabled=False)
-    pipeline = ThinkingPipeline("base.safetensors", config)
+    ThinkingPipeline("base.safetensors", config)
     # When CPT is disabled, run_cpt should return base_checkpoint
     # (We can't actually run it, but we can verify the logic)
     assert not config.cpt_enabled
@@ -80,6 +81,7 @@ def test_pipeline_history_tracking():
 
 
 # ── V10 self-play loop tests ────────────────────────────────────────────────
+
 
 def test_loop_config_v10_defaults():
     """LoopConfig should default to V10 config + ForgeEngine + training tricks."""

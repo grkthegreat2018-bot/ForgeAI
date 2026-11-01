@@ -8,6 +8,7 @@ batches appear to work; B>8 produced OOV garbage). The backing buffer is
 allocated once at the max batch and every batch's state is a [:B] view —
 never freed — while reset only re-points the alias.
 """
+
 import torch
 
 from forge.model.layers import DoubleGatedConvLayer
@@ -29,12 +30,12 @@ def test_backing_buffer_survives_reset_and_batch_switch():
     with torch.no_grad():
         m(x8, use_cache=True)
         buf = m._conv_state_buf
-        m._conv_state_reset = True          # model-level new-seq signal
+        m._conv_state_reset = True  # model-level new-seq signal
         m(x8, use_cache=True)
-        assert m._conv_state_buf is buf      # NEVER reallocated
+        assert m._conv_state_buf is buf  # NEVER reallocated
         m._conv_state_reset = True
         m(x1, use_cache=True)
-        assert m._conv_state_buf is buf      # B=1 slices the same buffer
+        assert m._conv_state_buf is buf  # B=1 slices the same buffer
         assert m._conv_state.shape[0] == 1
         m._conv_state_reset = True
         m(x8, use_cache=True)
@@ -49,10 +50,10 @@ def test_graph_pointer_survives_reset_realloc_cycle():
     x = torch.randn(4, 6, 32)
     with torch.no_grad():
         m(x, use_cache=True)
-        captured = m._conv_state            # what the graph holds
+        captured = m._conv_state  # what the graph holds
         for _ in range(3):
             m._conv_state_reset = True
-            m(x, use_cache=True)            # fresh prefill
+            m(x, use_cache=True)  # fresh prefill
             m(torch.randn(4, 1, 32), use_cache=True)  # decode step
             assert _same_storage(m._conv_state, captured)
 
@@ -79,7 +80,7 @@ def test_stale_cross_batch_ctx_ignored():
     with torch.no_grad():
         m(x8, use_cache=True)
         stale8 = m._conv_state_buf[:8].clone()
-        m._conv_state = stale8               # simulate missed reset
+        m._conv_state = stale8  # simulate missed reset
         out_guard, _ = m(x1, use_cache=True)
         m._conv_state = None
         out_fresh, _ = m(x1, use_cache=True)
@@ -91,7 +92,7 @@ def test_decode_step_matches_functional():
     m = _layer()
     x = torch.randn(1, 8, 32)
     with torch.no_grad():
-        out_full, _ = m(x, use_cache=True)
+        _out_full, _ = m(x, use_cache=True)
         # decode one more token — must equal causal conv on 9 tokens
         t9 = torch.randn(1, 1, 32)
         out_step, _ = m(t9, use_cache=True)

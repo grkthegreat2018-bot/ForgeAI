@@ -72,8 +72,7 @@ class TestMoELayer:
         assert torch.allclose(moe._last_aux_loss, aux_loss)
 
     def test_no_shared_expert(self):
-        moe = MoELayer(d_model=64, n_experts=4, top_k=2,
-                       shared_expert=False, noisy_gating=False)
+        moe = MoELayer(d_model=64, n_experts=4, top_k=2, shared_expert=False, noisy_gating=False)
         moe.eval()
         x = torch.randn(2, 4, 64)
         out, _ = moe(x)
@@ -81,8 +80,7 @@ class TestMoELayer:
         assert not hasattr(moe, "shared")
 
     def test_dense_bypass_shape_and_zero_aux(self):
-        moe = MoELayer(d_model=64, n_experts=4, top_k=2,
-                       dense_bypass=True, noisy_gating=False)
+        moe = MoELayer(d_model=64, n_experts=4, top_k=2, dense_bypass=True, noisy_gating=False)
         moe.eval()
         x = torch.randn(2, 8, 64)
         out, aux_loss = moe(x)
@@ -91,8 +89,7 @@ class TestMoELayer:
 
     def test_dense_bypass_equals_uniform_expert_mean(self):
         # dense_bypass runs ALL experts with equal weight 1/n (+ shared expert)
-        moe = MoELayer(d_model=64, n_experts=4, top_k=2,
-                       dense_bypass=True, noisy_gating=False)
+        moe = MoELayer(d_model=64, n_experts=4, top_k=2, dense_bypass=True, noisy_gating=False)
         moe.eval()
         x = torch.randn(2, 8, 64)
         out, _ = moe(x)
@@ -107,8 +104,7 @@ class TestMoELayer:
         # .weight — _get_weight returned None and the batched stack crashed.
         from forge.quant.inference_quant import QuantizedLinear
 
-        moe = MoELayer(d_model=64, n_experts=4, top_k=2,
-                       dense_bypass=True, noisy_gating=False)
+        moe = MoELayer(d_model=64, n_experts=4, top_k=2, dense_bypass=True, noisy_gating=False)
         moe.eval()
         x = torch.randn(2, 8, 64)
         x_flat = x.view(-1, 64)
@@ -130,16 +126,14 @@ class TestMoELayer:
         # Ported models carry N identical expert copies — mean of identical
         # outputs == a single expert's output.  The fast path must be
         # bit-exact vs the 4-expert mean.
-        moe = MoELayer(d_model=64, n_experts=4, top_k=2,
-                       dense_bypass=True, noisy_gating=False)
+        moe = MoELayer(d_model=64, n_experts=4, top_k=2, dense_bypass=True, noisy_gating=False)
         moe.eval()
         for e in moe.experts[1:]:
             e.load_state_dict(moe.experts[0].state_dict())
         x = torch.randn(2, 8, 64)
         x_flat = x.view(-1, 64)
         with torch.no_grad():
-            expected = torch.stack(
-                [e(x_flat) for e in moe.experts]).mean(0) + moe.shared(x_flat)
+            expected = torch.stack([e(x_flat) for e in moe.experts]).mean(0) + moe.shared(x_flat)
         out, aux = moe(x)
         assert moe._experts_identical is True
         assert torch.equal(out.view(-1, 64), expected)
@@ -147,21 +141,18 @@ class TestMoELayer:
 
     def test_dense_bypass_divergent_experts_uses_mean(self):
         # Random-init experts differ → fast path must NOT trigger.
-        moe = MoELayer(d_model=64, n_experts=4, top_k=2,
-                       dense_bypass=True, noisy_gating=False)
+        moe = MoELayer(d_model=64, n_experts=4, top_k=2, dense_bypass=True, noisy_gating=False)
         moe.eval()
         x = torch.randn(2, 8, 64)
         out, _ = moe(x)
         assert moe._experts_identical is False
         x_flat = x.view(-1, 64)
         with torch.no_grad():
-            expected = torch.stack(
-                [e(x_flat) for e in moe.experts]).mean(0) + moe.shared(x_flat)
+            expected = torch.stack([e(x_flat) for e in moe.experts]).mean(0) + moe.shared(x_flat)
         assert torch.allclose(out.view(-1, 64), expected, atol=1e-5)
 
     def test_train_call_reinvalidates_identity_flag(self):
-        moe = MoELayer(d_model=64, n_experts=4, top_k=2,
-                       dense_bypass=True, noisy_gating=False)
+        moe = MoELayer(d_model=64, n_experts=4, top_k=2, dense_bypass=True, noisy_gating=False)
         moe.eval()
         for e in moe.experts[1:]:
             e.load_state_dict(moe.experts[0].state_dict())

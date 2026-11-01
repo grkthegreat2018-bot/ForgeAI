@@ -5,9 +5,11 @@ use_hashed_nlrq) are actually consumed by model_loader.py when building
 ConfigurableResearchLLM. The keys exist in config.py but were not previously
 checked by model_loader — R23 wires them in.
 """
-import sys
 
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch
 
@@ -21,20 +23,37 @@ def _tiny_v8_config(**extra_overrides):
     hashed NLRQ) must be explicitly enabled via overrides.
     """
     from forge.config import get_config
+
     overrides = {
-        "vocab_size": 256, "d_model": 64, "n_layers": 4, "n_heads": 4, "n_kv_heads": 2,
-        "intermediate_size": 128, "max_seq_len": 128, "titan_memory_rank": 16,
-        "embed_factorized_rank": 32, "mtp_n_heads": 2,
-        "use_triton_kernels": False, "use_varlen": False,
-        "bitnet_int8_training": False, "use_gradient_checkpointing": False,
-        "use_hyperloop": False, "use_lisa": False,
+        "vocab_size": 256,
+        "d_model": 64,
+        "n_layers": 4,
+        "n_heads": 4,
+        "n_kv_heads": 2,
+        "intermediate_size": 128,
+        "max_seq_len": 128,
+        "titan_memory_rank": 16,
+        "embed_factorized_rank": 32,
+        "mtp_n_heads": 2,
+        "use_triton_kernels": False,
+        "use_varlen": False,
+        "bitnet_int8_training": False,
+        "use_gradient_checkpointing": False,
+        "use_hyperloop": False,
+        "use_lisa": False,
         "ngram_host": False,  # disable host table for CPU tests
         # Explicitly enable V8 features (not on by default in V10)
-        "use_qsa": True, "use_gated_residual": True, "use_ngram_embedding": True,
-        "use_hashed_nlrq": True, "ffn_compression": "nlrq", "nlrq_rank": 32,
+        "use_qsa": True,
+        "use_gated_residual": True,
+        "use_ngram_embedding": True,
+        "use_hashed_nlrq": True,
+        "ffn_compression": "nlrq",
+        "nlrq_rank": 32,
         "use_bitnet": False,
         # Disable V10's IRI-FP4 + SpectralKV + BitNetResidual (not compatible with V8 feature tests)
-        "use_iri_fp4": False, "use_spectral_kv": False, "use_bitnet_residual": False,
+        "use_iri_fp4": False,
+        "use_spectral_kv": False,
+        "use_bitnet_residual": False,
     }
     overrides.update(extra_overrides)
     cfg = get_config("forgelm_v2", **overrides)
@@ -45,6 +64,7 @@ def _tiny_v8_config(**extra_overrides):
 
 # ── R23-V8-1: Config has V8 keys ────────────────────────────────────────────
 
+
 def test_v8_config_builds():
     """Tiny V8 config should have all R19+R21 keys enabled."""
     cfg = _tiny_v8_config()
@@ -52,30 +72,36 @@ def test_v8_config_builds():
     assert cfg.use_gated_residual is True, "use_gated_residual should be True for V8"
     assert cfg.use_ngram_embedding is True, "use_ngram_embedding should be True for V8"
     assert cfg.use_hashed_nlrq is True, "use_hashed_nlrq should be True for V8"
-    print(f"  V8 config: qsa={cfg.use_qsa}, gated_res={cfg.use_gated_residual}, "
-          f"ngram={cfg.use_ngram_embedding}, hashed_nlrq={cfg.use_hashed_nlrq}")
+    print(
+        f"  V8 config: qsa={cfg.use_qsa}, gated_res={cfg.use_gated_residual}, "
+        f"ngram={cfg.use_ngram_embedding}, hashed_nlrq={cfg.use_hashed_nlrq}"
+    )
     print("  v8_config_builds: PASS")
 
 
 # ── R23-V8-2: Model builds without error ────────────────────────────────────
 
+
 def test_v8_model_builds():
     """ConfigurableResearchLLM with tiny V8 config should build without raising."""
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = _tiny_v8_config()
     model = ConfigurableResearchLLM(cfg)
     assert model is not None, "Model should be created"
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"  V8 model: {n_params/1e6:.2f}M params, {cfg.n_layers} layers")
+    print(f"  V8 model: {n_params / 1e6:.2f}M params, {cfg.n_layers} layers")
     assert n_params > 0, "Model should have parameters"
     print("  v8_model_builds: PASS")
 
 
 # ── R23-V8-3: Forward pass ──────────────────────────────────────────────────
 
+
 def test_v8_model_forward():
     """Forward pass should produce correct shape and finite output."""
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = _tiny_v8_config()
     model = ConfigurableResearchLLM(cfg).to(_DEV)
     model.eval()
@@ -86,14 +112,14 @@ def test_v8_model_forward():
         logits, _loss = model(input_ids)
 
     assert logits is not None, "Should return logits"
-    assert logits.shape == (B, T, cfg.vocab_size), \
-        f"Expected ({B}, {T}, {cfg.vocab_size}), got {logits.shape}"
+    assert logits.shape == (B, T, cfg.vocab_size), f"Expected ({B}, {T}, {cfg.vocab_size}), got {logits.shape}"
     assert torch.isfinite(logits).all(), "Logits should be finite"
     print(f"  V8 forward: input {input_ids.shape} -> logits {logits.shape}")
     print("  v8_model_forward: PASS")
 
 
 # ── R23-V8-4: QSA wiring ────────────────────────────────────────────────────
+
 
 def test_v8_qsa_wired():
     """use_qsa=True should produce QSALayer modules; False should not."""
@@ -119,6 +145,7 @@ def test_v8_qsa_wired():
 
 # ── R23-V8-5: Gated Residual wiring ─────────────────────────────────────────
 
+
 def test_v8_gated_residual_wired():
     """use_gated_residual=True should produce GatedResidualLayer modules."""
     from forge.keys.architecture.gated_residual_key import GatedResidualLayer
@@ -143,6 +170,7 @@ def test_v8_gated_residual_wired():
 
 # ── R23-V8-6: N-gram Embedding wiring ───────────────────────────────────────
 
+
 def test_v8_ngram_embedding_wired():
     """use_ngram_embedding=True should produce NGramEmbeddingLayer modules."""
     from forge.keys.knowledge.ngram_embedding_key import NGramEmbeddingLayer
@@ -166,6 +194,7 @@ def test_v8_ngram_embedding_wired():
 
 
 # ── R23-V8-7: HashedNLRQ wiring ─────────────────────────────────────────────
+
 
 def test_v8_hashed_nlrq_wired():
     """use_hashed_nlrq=True should produce HashedNLRQ in FFN; False → NLRQLinear."""
@@ -194,9 +223,11 @@ def test_v8_hashed_nlrq_wired():
 
 # ── R23-V8-8: Backward pass ─────────────────────────────────────────────────
 
+
 def test_v8_backward():
     """Forward + backward should compute gradients (at least one non-None grad)."""
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = _tiny_v8_config()
     model = ConfigurableResearchLLM(cfg).to(_DEV)
     model.train()
@@ -210,8 +241,7 @@ def test_v8_backward():
     loss.backward()
 
     grads_ok = sum(1 for p in model.parameters() if p.grad is not None)
-    grads_nonzero = sum(1 for p in model.parameters()
-                        if p.grad is not None and p.grad.abs().sum().item() > 0)
+    grads_nonzero = sum(1 for p in model.parameters() if p.grad is not None and p.grad.abs().sum().item() > 0)
     print(f"  V8 backward: {grads_ok} params with grad, {grads_nonzero} non-zero")
     assert grads_ok > 0, "At least one parameter should have a gradient"
     assert grads_nonzero > 0, "At least one gradient should be non-zero"
@@ -220,6 +250,7 @@ def test_v8_backward():
 
 
 # ── R23-V8-9: Training loss decreases ───────────────────────────────────────
+
 
 def test_v8_loss_decreases():
     """10 steps of BAdam on tiny V8 should decrease loss."""
@@ -235,8 +266,7 @@ def test_v8_loss_decreases():
     input_ids = torch.randint(0, cfg.vocab_size, (B, T), device=_DEV)
     targets = torch.randint(0, cfg.vocab_size, (B, T), device=_DEV)
 
-    opt = configure_optimizer(model, max_lr=1e-3, weight_decay=0.01,
-                              optimizer_name="badam")
+    opt = configure_optimizer(model, max_lr=1e-3, weight_decay=0.01, optimizer_name="badam")
 
     initial_loss = None
     for step in range(10):
@@ -257,6 +287,7 @@ def test_v8_loss_decreases():
 
 # ── R23-V8-10: Lossless at init ─────────────────────────────────────────────
 
+
 def test_v8_keys_lossless_at_init():
     """R19 keys ON vs OFF should produce near-identical logits at init.
 
@@ -272,15 +303,13 @@ def test_v8_keys_lossless_at_init():
 
     # Build with all R19 keys ON
     cfg_on = _tiny_v8_config(
-        use_qsa=True, use_gated_residual=True,
-        use_ngram_embedding=True, use_hashed_nlrq=False)  # nlrq not lossless
+        use_qsa=True, use_gated_residual=True, use_ngram_embedding=True, use_hashed_nlrq=False
+    )  # nlrq not lossless
     model_on = ConfigurableResearchLLM(cfg_on).to(_DEV)
     model_on.eval()
 
     torch.manual_seed(42)  # same seed for identical weight init
-    cfg_off = _tiny_v8_config(
-        use_qsa=False, use_gated_residual=False,
-        use_ngram_embedding=False, use_hashed_nlrq=False)
+    cfg_off = _tiny_v8_config(use_qsa=False, use_gated_residual=False, use_ngram_embedding=False, use_hashed_nlrq=False)
     model_off = ConfigurableResearchLLM(cfg_off).to(_DEV)
     model_off.eval()
 
@@ -294,8 +323,7 @@ def test_v8_keys_lossless_at_init():
     print(f"  V8 lossless at init: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
     # R19 keys are lossless at init — difference should be near-zero
     # (small numerical differences from different code paths are OK)
-    assert max_diff < 1e-2, \
-        f"R19 keys should be lossless at init, max diff {max_diff:.6f}"
+    assert max_diff < 1e-2, f"R19 keys should be lossless at init, max diff {max_diff:.6f}"
 
     print("  v8_keys_lossless_at_init: PASS")
 

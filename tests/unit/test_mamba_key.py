@@ -11,14 +11,14 @@ Tests:
 8. Mamba2Key handles extra norm weights
 9. Cross-arch Mamba1To2Key converts A_log correctly
 """
+
 import os
 import sys
 
 import pytest
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from forge.keys.architecture.mamba_probe import MambaLayer
 from forge.keys.misc.base import KeyClass
@@ -37,13 +37,10 @@ class TestMambaLayerWeights:
         layer = MambaLayer(d_model=64, d_state=16, d_conv=4, expand=2)
         state = layer.state_dict()
 
-        assert tuple(state["in_proj.weight"].shape) == (256, 64), \
-            f"in_proj: {state['in_proj.weight'].shape}"
-        assert tuple(state["conv1d.weight"].shape) == (128, 1, 4), \
-            f"conv1d: {state['conv1d.weight'].shape}"
+        assert tuple(state["in_proj.weight"].shape) == (256, 64), f"in_proj: {state['in_proj.weight'].shape}"
+        assert tuple(state["conv1d.weight"].shape) == (128, 1, 4), f"conv1d: {state['conv1d.weight'].shape}"
         assert tuple(state["conv1d.bias"].shape) == (128,)
-        assert tuple(state["x_proj.weight"].shape) == (36, 128), \
-            f"x_proj: {state['x_proj.weight'].shape}"
+        assert tuple(state["x_proj.weight"].shape) == (36, 128), f"x_proj: {state['x_proj.weight'].shape}"
         assert tuple(state["dt_proj.weight"].shape) == (128, 4)
         assert tuple(state["dt_proj.bias"].shape) == (128,)
         assert tuple(state["A_log"].shape) == (128, 16)
@@ -142,8 +139,7 @@ class TestMambaKeyLossless:
             ("model.layers.0.mixer.D", "blocks.0.attn.D"),
             ("model.embed_tokens.weight", "embed.weight"),
         ]:
-            assert torch.equal(hf_state[hf_key], result.weights[forge_key]), \
-                f"Mismatch: {hf_key} -> {forge_key}"
+            assert torch.equal(hf_state[hf_key], result.weights[forge_key]), f"Mismatch: {hf_key} -> {forge_key}"
 
     def test_reverse_maps_keys(self):
         """Reverse (ForgeAI -> HF) maps all keys correctly."""
@@ -181,8 +177,7 @@ class TestMambaKeyLossless:
         # Check all original keys are preserved
         for hf_key, tensor in hf_state.items():
             assert hf_key in rev.data, f"Missing key: {hf_key}"
-            assert torch.equal(tensor, rev.data[hf_key]), \
-                f"Value mismatch: {hf_key}"
+            assert torch.equal(tensor, rev.data[hf_key]), f"Value mismatch: {hf_key}"
 
     def test_attention_layer_mapping(self):
         """MambaKey handles mixed mamba/attention layers."""
@@ -193,8 +188,7 @@ class TestMambaKeyLossless:
             "model.layers.1.self_attn.q_proj.weight": torch.randn(64, 64),
             "model.layers.1.self_attn.k_proj.weight": torch.randn(16, 64),
         }
-        key = MambaKey(n_layers=2, layer_types=layer_types,
-                       mamba_prefix="mamba", ffn_style="jamba")
+        key = MambaKey(n_layers=2, layer_types=layer_types, mamba_prefix="mamba", ffn_style="jamba")
         result = key.forward(hf_state)
 
         assert result.success
@@ -328,8 +322,7 @@ class TestMambaForwardPass:
         loss = y.sum()
         loss.backward()
         # Check that at least some parameters have gradients
-        has_grad = any(p.grad is not None and p.grad.abs().sum() > 0
-                       for p in layer.parameters())
+        has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in layer.parameters())
         assert has_grad, "No gradients found"
 
 
@@ -342,10 +335,16 @@ class TestMambaLayerIntegration:
         from forge.model_loader import ModularBlock
 
         config = ModelConfig(
-            d_model=64, n_layers=1, n_heads=8, n_kv_heads=4,
-            vocab_size=1000, max_seq_len=512,
+            d_model=64,
+            n_layers=1,
+            n_heads=8,
+            n_kv_heads=4,
+            vocab_size=1000,
+            max_seq_len=512,
             layer_types=["mamba"],
-            mamba_d_state=16, mamba_d_conv=4, mamba_expand=2,
+            mamba_d_state=16,
+            mamba_d_conv=4,
+            mamba_expand=2,
         )
         block = ModularBlock(config, layer_idx=0)
         assert block.layer_type == "mamba"
@@ -360,8 +359,12 @@ class TestMambaLayerIntegration:
         from forge.model_loader import ModularBlock
 
         config = ModelConfig(
-            d_model=64, n_layers=1, n_heads=8, n_kv_heads=4,
-            vocab_size=1000, max_seq_len=512,
+            d_model=64,
+            n_layers=1,
+            n_heads=8,
+            n_kv_heads=4,
+            vocab_size=1000,
+            max_seq_len=512,
             layer_types=["attention"],
         )
         block = ModularBlock(config, layer_idx=0)
@@ -374,10 +377,16 @@ class TestMambaLayerIntegration:
         from forge.model_loader import ModularBlock
 
         config = ModelConfig(
-            d_model=64, n_layers=4, n_heads=8, n_kv_heads=4,
-            vocab_size=1000, max_seq_len=512,
+            d_model=64,
+            n_layers=4,
+            n_heads=8,
+            n_kv_heads=4,
+            vocab_size=1000,
+            max_seq_len=512,
             layer_types=["mamba", "mamba", "attention", "mamba"],
-            mamba_d_state=16, mamba_d_conv=4, mamba_expand=2,
+            mamba_d_state=16,
+            mamba_d_conv=4,
+            mamba_expand=2,
         )
         blocks = [ModularBlock(config, layer_idx=i) for i in range(4)]
         assert blocks[0]._is_mamba

@@ -284,8 +284,13 @@ class TestPreAllocatedKVCache:
 
     def test_creation(self):
         cache = PreAllocatedKVCache(
-            n_layers=2, batch=1, n_kv_heads=4, max_seq_len=128,
-            head_dim=64, dtype=torch.float32, device=torch.device("cpu"),
+            n_layers=2,
+            batch=1,
+            n_kv_heads=4,
+            max_seq_len=128,
+            head_dim=64,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
         )
         assert cache.n_layers == 2
         assert cache.position == 0
@@ -373,8 +378,13 @@ class TestKVCacheEquivalence:
     def test_gqa_cache_equivalence(self):
         """GQA attention with pre-allocated cache should match torch.cat cache."""
         cfg = ModelConfig(
-            d_model=128, n_heads=4, n_kv_heads=2, attn_type="gqa",
-            max_seq_len=64, vocab_size=256, device="cpu",
+            d_model=128,
+            n_heads=4,
+            n_kv_heads=2,
+            attn_type="gqa",
+            max_seq_len=64,
+            vocab_size=256,
+            device="cpu",
         )
         model = ConfigurableResearchLLM(cfg)
         model.eval()
@@ -410,8 +420,13 @@ class TestKVCacheEquivalence:
         token-for-token identical output to the functional past_kv path —
         the contract CUDA-graph replay depends on."""
         cfg = ModelConfig(
-            d_model=128, n_heads=4, n_kv_heads=2, attn_type="gqa",
-            max_seq_len=64, vocab_size=256, device="cpu",
+            d_model=128,
+            n_heads=4,
+            n_kv_heads=2,
+            attn_type="gqa",
+            max_seq_len=64,
+            vocab_size=256,
+            device="cpu",
         )
         model = ConfigurableResearchLLM(cfg)
         model.eval()
@@ -432,16 +447,19 @@ class TestKVCacheEquivalence:
         # Static path: preallocated cache + pos_t + mask_buf, same protocol
         # as StandardDecoding._generate_static.
         cache = PreAllocatedKVCache(
-            n_layers=cfg.n_layers, batch=1, n_kv_heads=cfg.n_kv_heads,
-            max_seq_len=cfg.max_seq_len, head_dim=cfg.d_model // cfg.n_heads,
-            dtype=torch.float32, device=torch.device("cpu"),
+            n_layers=cfg.n_layers,
+            batch=1,
+            n_kv_heads=cfg.n_kv_heads,
+            max_seq_len=cfg.max_seq_len,
+            head_dim=cfg.d_model // cfg.n_heads,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
         )
         cache.enable_tensor_pos()
         mask_buf = torch.zeros(1, cache.max_seq_len, dtype=torch.long)
         with torch.no_grad():
             pmask = torch.ones(1, 5, dtype=torch.long)
-            logits2, _ = model(idx, attention_mask=pmask,
-                               preallocated_cache=cache, use_cache=False)
+            logits2, _ = model(idx, attention_mask=pmask, preallocated_cache=cache, use_cache=False)
             cache.position = 5
             mask_buf[:, :5] = 1
             static_tokens = []
@@ -452,16 +470,13 @@ class TestKVCacheEquivalence:
                 pos = cache.position
                 mask_buf[:, pos] = 1
                 cache.pos_t.fill_(pos)
-                logits2, _ = model(tok, attention_mask=mask_buf,
-                                   preallocated_cache=cache,
-                                   use_cache=False)
+                logits2, _ = model(tok, attention_mask=mask_buf, preallocated_cache=cache, use_cache=False)
                 cache.position += 1
                 static_logits.append(logits2[:, -1, :].clone())
 
         assert static_tokens == ref_tokens
-        for i, (a, b) in enumerate(zip(static_logits[:-1], ref_logits)):
-            assert torch.allclose(a, b, atol=1e-4), (
-                f"step {i}: static-KV logits diverge from functional KV")
+        for i, (a, b) in enumerate(zip(static_logits[:-1], ref_logits, strict=False)):
+            assert torch.allclose(a, b, atol=1e-4), f"step {i}: static-KV logits diverge from functional KV"
 
     def test_conv_pad_mask_reads_pos_t_column(self):
         """Conv layers' _pad_mask must read the CURRENT decode position's
@@ -476,9 +491,15 @@ class TestKVCacheEquivalence:
         op stays capturable inside the graph.
         """
         cfg = ModelConfig(
-            d_model=64, n_heads=4, n_kv_heads=2, attn_type="gqa",
-            n_layers=3, layer_types=["conv", "attention", "conv"],
-            conv_kernel_size=3, max_seq_len=64, vocab_size=256,
+            d_model=64,
+            n_heads=4,
+            n_kv_heads=2,
+            attn_type="gqa",
+            n_layers=3,
+            layer_types=["conv", "attention", "conv"],
+            conv_kernel_size=3,
+            max_seq_len=64,
+            vocab_size=256,
             device="cpu",
         )
         model = ConfigurableResearchLLM(cfg)
@@ -491,15 +512,21 @@ class TestKVCacheEquivalence:
         seen = []
         for b in conv_blocks:
             orig_fwd = b.attn.forward
+
             def _spy(*args, _orig=orig_fwd, **kw):
                 seen.append(kw.get("pad_mask"))
                 return _orig(*args, **kw)
+
             b.attn.forward = _spy
 
         cache = PreAllocatedKVCache(
-            n_layers=cfg.n_layers, batch=1, n_kv_heads=cfg.n_kv_heads,
-            max_seq_len=cfg.max_seq_len, head_dim=cfg.d_model // cfg.n_heads,
-            dtype=torch.float32, device=torch.device("cpu"),
+            n_layers=cfg.n_layers,
+            batch=1,
+            n_kv_heads=cfg.n_kv_heads,
+            max_seq_len=cfg.max_seq_len,
+            head_dim=cfg.d_model // cfg.n_heads,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
         )
         cache.enable_tensor_pos()
         # Bucket view: current position (5) is 1, the view's LAST column
@@ -507,16 +534,14 @@ class TestKVCacheEquivalence:
         mask_buf = torch.zeros(1, 32, dtype=torch.long)
         idx = torch.randint(0, 256, (1, 5))
         with torch.no_grad():
-            model(idx, attention_mask=torch.ones(1, 5, dtype=torch.long),
-                  preallocated_cache=cache, use_cache=False)
+            model(idx, attention_mask=torch.ones(1, 5, dtype=torch.long), preallocated_cache=cache, use_cache=False)
             cache.position = 5
-            cache.view_len = 32      # bucket width == mask view width
+            cache.view_len = 32  # bucket width == mask view width
             mask_buf[:, :5] = 1
             mask_buf[:, 5] = 1
             cache.pos_t.fill_(5)
             tok = torch.randint(0, 256, (1, 1))
-            model(tok, attention_mask=mask_buf,
-                  preallocated_cache=cache, use_cache=False)
+            model(tok, attention_mask=mask_buf, preallocated_cache=cache, use_cache=False)
 
         # [prefill_b0, prefill_b2, decode_b0, decode_b2] — the decode
         # step's masks are the last two.
@@ -526,7 +551,8 @@ class TestKVCacheEquivalence:
             assert int(m.sum()) == 1, (
                 "conv _pad_mask read the bucket-view tail (0) instead of "
                 "the live pos_t column (1) — the gated conv input would "
-                "be zeroed on every graph replay")
+                "be zeroed on every graph replay"
+            )
 
 
 # ── GPU tests (skipped if no CUDA) ───────────────────────────────────────────
@@ -591,14 +617,17 @@ class TestConfigurableResearchLLMGPU:
 
         # Pre-allocated cache — use n_kv_heads (conv layers have 0 KV heads)
         n_kv_heads_per_layer = [
-            cfg.n_kv_heads if lt == "attention" else 0
-            for lt in (cfg.layer_types or ["attention"] * cfg.n_layers)
+            cfg.n_kv_heads if lt == "attention" else 0 for lt in (cfg.layer_types or ["attention"] * cfg.n_layers)
         ]
         cache = PreAllocatedKVCache(
-            n_layers=cfg.n_layers, batch=1, n_kv_heads=cfg.n_kv_heads,
+            n_layers=cfg.n_layers,
+            batch=1,
+            n_kv_heads=cfg.n_kv_heads,
             n_kv_heads_per_layer=n_kv_heads_per_layer,
-            max_seq_len=cfg.max_seq_len, head_dim=cfg.d_model // cfg.n_heads,
-            dtype=torch.float32, device=torch.device("cuda"),
+            max_seq_len=cfg.max_seq_len,
+            head_dim=cfg.d_model // cfg.n_heads,
+            dtype=torch.float32,
+            device=torch.device("cuda"),
         )
 
         idx = torch.randint(0, cfg.vocab_size, (1, 4), device="cuda")

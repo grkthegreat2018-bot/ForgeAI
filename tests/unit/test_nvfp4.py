@@ -1,10 +1,12 @@
 """Test NVFP4 quantization correctness and speed."""
+
 import os
 import sys
 import time
+from pathlib import Path
 
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch
 import torch.nn as nn
@@ -22,8 +24,7 @@ def test_fp4_roundtrip():
     torch.manual_seed(42)
     W = torch.randn(128, 256) * 0.1  # small weights like in LLMs
     packed, scales, global_scale = _quantize_to_fp4(W, block_size=32)
-    W_dq = _dequantize_fp4(packed, scales, 128, 256, block_size=32, dtype=torch.float32,
-                           global_scale=global_scale)
+    W_dq = _dequantize_fp4(packed, scales, 128, 256, block_size=32, dtype=torch.float32, global_scale=global_scale)
 
     # Check shape
     assert W_dq.shape == W.shape, f"Shape mismatch: {W_dq.shape} vs {W.shape}"
@@ -89,8 +90,7 @@ def test_memory_compression():
     total_quant = packed_bytes + scale_bytes
     compression = orig_bytes / total_quant
 
-    print(f"Test 4 (compression): orig={orig_bytes/1024:.0f}KB, "
-          f"quant={total_quant/1024:.0f}KB, {compression:.1f}x")
+    print(f"Test 4 (compression): orig={orig_bytes / 1024:.0f}KB, quant={total_quant / 1024:.0f}KB, {compression:.1f}x")
     assert compression > 3.0, f"Compression too low: {compression:.1f}x"
     print("  PASS")
 
@@ -149,8 +149,7 @@ def test_speed_cuda():
     torch.cuda.synchronize()
     fp4_ms = (time.perf_counter() - t0) * 10
 
-    print(f"Test 6 (speed): bf16={bf16_ms:.2f}ms, NVFP4={fp4_ms:.2f}ms, "
-          f"ratio={fp4_ms/bf16_ms:.2f}x")
+    print(f"Test 6 (speed): bf16={bf16_ms:.2f}ms, NVFP4={fp4_ms:.2f}ms, ratio={fp4_ms / bf16_ms:.2f}x")
     # NVFP4 dequant path may be slower for small matrices (overhead)
     # but should be competitive or faster for large ones
     print("  PASS (informational)")

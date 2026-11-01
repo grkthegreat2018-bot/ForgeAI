@@ -8,12 +8,13 @@ Validates the specific bugs fixed in the refactor commit:
 5. _read_checkpoint_metadata handles missing/corrupt files gracefully
 6. continue_session doesn't use 'generated_ids' in dir() hack
 """
-import sys
 
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import threading
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,12 +26,14 @@ class TestCheckpointCacheThreadSafety:
 
     def test_lock_exists(self):
         from forge.engine import forge_engine
+
         assert hasattr(forge_engine, "_ckpt_cache_lock")
         assert isinstance(forge_engine._ckpt_cache_lock, type(threading.Lock()))
 
     def test_concurrent_cache_access_no_crash(self, tmp_path):
         """Multiple threads writing to _checkpoint_size_cache simultaneously."""
         from forge.engine import forge_engine
+
         # Clear cache for clean test
         with forge_engine._ckpt_cache_lock:
             forge_engine._checkpoint_size_cache.clear()
@@ -67,6 +70,7 @@ class TestClearCudaCache:
 
     def test_helper_exists(self):
         from forge.engine.forge_engine import ForgeEngine
+
         assert hasattr(ForgeEngine, "_clear_cuda_cache")
 
     def test_safe_on_cpu(self, forge_engine_fixture):
@@ -81,6 +85,7 @@ class TestReleaseAccelerationResources:
 
     def test_helper_exists(self):
         from forge.engine.forge_engine import ForgeEngine
+
         assert hasattr(ForgeEngine, "_release_acceleration_resources")
 
     def test_releases_all_slots(self, forge_engine_fixture):
@@ -133,6 +138,7 @@ class TestReadCheckpointMetadataGraceful:
 
     def test_missing_file_returns_empty(self):
         from forge.engine.forge_engine import ForgeEngine
+
         metadata = ForgeEngine._read_checkpoint_metadata("nonexistent_file.safetensors")
         assert isinstance(metadata, dict)
         assert len(metadata) == 0  # empty dict, not crash
@@ -147,29 +153,26 @@ class TestLogprobsAndStopRegressions:
 
     def _gen_engine(self, tiny_model):
         from forge.engine.forge_engine import ForgeEngine
+
         tok = MagicMock()
         tok.eos_token_id = 0
         tok.return_value.input_ids = torch.tensor([[1, 2, 3, 4]])
         tok.decode = MagicMock(return_value="x")
         eng = ForgeEngine(tiny_model, tok, device="cpu")
-        eng._library_enabled = False   # MagicMock tokenizer can't inject
+        eng._library_enabled = False  # MagicMock tokenizer can't inject
         return eng
 
     def test_logprobs_returns_dict_not_crash(self, tiny_model):
         eng = self._gen_engine(tiny_model)
-        out = eng.generate("hi", max_new_tokens=2, logprobs=2,
-                           finish_sentence=False)
+        out = eng.generate("hi", max_new_tokens=2, logprobs=2, finish_sentence=False)
         assert isinstance(out, dict), f"expected dict, got {type(out)}"
         assert "text" in out and "logprobs" in out
         assert "content" in out["logprobs"]
 
     def test_stop_truncates_at_earliest_match(self, tiny_model):
         eng = self._gen_engine(tiny_model)
-        eng.tokenizer.decode = MagicMock(
-            return_value="aa STOP_B bb STOP_A cc")
-        out = eng.generate("hi", max_new_tokens=2,
-                           stop=["STOP_A", "STOP_B"],
-                           finish_sentence=False)
+        eng.tokenizer.decode = MagicMock(return_value="aa STOP_B bb STOP_A cc")
+        out = eng.generate("hi", max_new_tokens=2, stop=["STOP_A", "STOP_B"], finish_sentence=False)
         assert out == "aa ", f"stop markers leaked into output: {out!r}"
 
 
@@ -195,12 +198,12 @@ class TestCrashRecoveryWeakref:
         import weakref
 
         from forge.engine.crash_recovery import CrashRecoveryManager
+
         old_term = signal.getsignal(signal.SIGTERM)
         old_int = signal.getsignal(signal.SIGINT)
         try:
             eng = MagicMock()
-            mgr = CrashRecoveryManager(eng, recovery_dir=str(tmp_path),
-                                       enabled=True)
+            mgr = CrashRecoveryManager(eng, recovery_dir=str(tmp_path), enabled=True)
             ref = weakref.ref(mgr)
             del mgr
             gc.collect()
@@ -214,17 +217,16 @@ class TestCrashRecoveryWeakref:
         import signal
 
         from forge.engine.crash_recovery import CrashRecoveryManager
+
         old_term = signal.getsignal(signal.SIGTERM)
         old_int = signal.getsignal(signal.SIGINT)
         try:
-            mgr = CrashRecoveryManager(MagicMock(),
-                                       recovery_dir=str(tmp_path),
-                                       enabled=True)
+            mgr = CrashRecoveryManager(MagicMock(), recovery_dir=str(tmp_path), enabled=True)
             assert mgr._installed and mgr.enabled
             mgr.close()
             assert not mgr._installed and not mgr.enabled
-            mgr._atexit_fn()              # dead callback must be a no-op
-            mgr._cleanup()                # disabled -> writes nothing
+            mgr._atexit_fn()  # dead callback must be a no-op
+            mgr._cleanup()  # disabled -> writes nothing
             assert not (tmp_path / "generation_final.zst").exists()
         finally:
             signal.signal(signal.SIGTERM, old_term)
@@ -243,8 +245,8 @@ class TestFluxSleepAndLogprobs:
     def _flux_engine(self, vocab=65536):
         from forge.engine.forge_engine import ForgeEngine
         from forge.model.flux import FluxConfig
-        cfg = FluxConfig(vocab_size=vocab, topic_dim=32,
-                         ring_capacity=1 << 14, journal_cap=50_000)
+
+        cfg = FluxConfig(vocab_size=vocab, topic_dim=32, ring_capacity=1 << 14, journal_cap=50_000)
         return ForgeEngine.from_flux(config=cfg)
 
     def test_sleep_level1_uses_to_device(self):
@@ -253,8 +255,7 @@ class TestFluxSleepAndLogprobs:
         calls = []
         orig = m.to_device
         m.to_device = lambda d: calls.append(d) or orig(d)
-        m.to = MagicMock(side_effect=AssertionError(
-            "nn.Module.to() is a no-op on FluxLM — must use to_device"))
+        m.to = MagicMock(side_effect=AssertionError("nn.Module.to() is a no-op on FluxLM — must use to_device"))
         eng.sleep(level=1)
         assert calls == ["cpu"]
         eng.wake()
@@ -264,13 +265,10 @@ class TestFluxSleepAndLogprobs:
     def test_logprobs_no_double_ingest(self):
         eng_a = self._flux_engine()
         eng_b = self._flux_engine()
-        out_a = eng_a.generate("hello world", max_new_tokens=4,
-                               temperature=0.0)
-        out_b = eng_b.generate("hello world", max_new_tokens=4,
-                               temperature=0.0, logprobs=3)
+        eng_a.generate("hello world", max_new_tokens=4, temperature=0.0)
+        out_b = eng_b.generate("hello world", max_new_tokens=4, temperature=0.0, logprobs=3)
         # identical learned state -> logprob path added no extra ingest
-        assert len(eng_a.model.journal.entries) == \
-            len(eng_b.model.journal.entries)
+        assert len(eng_a.model.journal.entries) == len(eng_b.model.journal.entries)
         assert eng_a.model._count == eng_b.model._count
         assert isinstance(out_b, dict) and "logprobs" in out_b
 
@@ -281,14 +279,14 @@ class TestStreamStopStrings:
 
     def test_stop_spanning_chunks(self, tiny_model):
         from forge.engine.forge_engine import ForgeEngine
+
         tok = MagicMock()
         tok.eos_token_id = 0
         tok.return_value.input_ids = torch.tensor([[1, 2, 3]])
         # generate_stream decodes the running id list cumulatively — the
         # mock returns the full decoded text at each step (a stop string
         # still materializes across token boundaries).
-        chunks = iter(["hel", "hello ", "hello ST", "hello STOP",
-                       "hello STOP trailing"])
+        chunks = iter(["hel", "hello ", "hello ST", "hello STOP", "hello STOP trailing"])
         tok.decode = MagicMock(side_effect=lambda *a, **k: next(chunks))
         eng = ForgeEngine(tiny_model, tok, device="cpu")
         eng._library_enabled = False
@@ -298,21 +296,26 @@ class TestStreamStopStrings:
         # force a non-EOS argmax every step so the loop runs 5 tokens
         force = torch.zeros(1, tiny_model.config.vocab_size)
         force[0, 5] = 1.0
+
         def proc(logits, ids):
             return force
-        out = "".join(eng.generate_stream(
-            "hi", max_new_tokens=5, temperature=0.0,
-            stop=["STOP"], logits_processor=proc,
-            eos_token_ids=[255]))
+
+        out = "".join(
+            eng.generate_stream(
+                "hi", max_new_tokens=5, temperature=0.0, stop=["STOP"], logits_processor=proc, eos_token_ids=[255]
+            )
+        )
         assert out == "hello "
 
 
 # ── Fixture ───────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def tiny_model():
     from forge.config import get_config
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = get_config("forgelm_tiny")
     cfg.vocab_size = 256
     cfg.device = "cpu"
@@ -365,22 +368,26 @@ def forge_engine_fixture():
     del engine
     del model
 
+
 class TestRadixPrefixCacheFixes:
     """RadixPrefixCache: mid-edge splits, no sentinel kv, no child clobber."""
 
     def _cache(self):
         from forge.engine.prefix_cache import RadixPrefixCache
+
         return RadixPrefixCache()
 
     def test_no_sentinel_kv_state(self):
         """New nodes have kv_state=None — the object() sentinel defeated
         every `is not None` check and returned a bare object as 'cached KV'."""
         from forge.engine.prefix_cache import RadixPrefixCache
+
         node = RadixPrefixCache._Node()
         assert node.kv_state is None
 
     def test_lookup_returns_none_on_empty(self):
         import torch
+
         cache = self._cache()
         ids = torch.tensor([list(range(32))])
         assert cache.lookup_longest_prefix(ids) is None
@@ -390,12 +397,13 @@ class TestRadixPrefixCacheFixes:
         must split the edge, not clobber it — both lookups must return
         their own kv. (lookup_longest_prefix ignores ids <= 16 tokens.)"""
         import torch
+
         cache = self._cache()
         p = list(range(20))
-        cache.insert(p + [100, 101, 102], "kv_x")
-        cache.insert(p + [200, 201, 202], "kv_y")
-        hit1 = cache.lookup_longest_prefix(torch.tensor([p + [100, 101, 102]]))
-        hit2 = cache.lookup_longest_prefix(torch.tensor([p + [200, 201, 202]]))
+        cache.insert([*p, 100, 101, 102], "kv_x")
+        cache.insert([*p, 200, 201, 202], "kv_y")
+        hit1 = cache.lookup_longest_prefix(torch.tensor([[*p, 100, 101, 102]]))
+        hit2 = cache.lookup_longest_prefix(torch.tensor([[*p, 200, 201, 202]]))
         assert hit1 is not None and hit1[1] == "kv_x"
         assert hit2 is not None and hit2[1] == "kv_y"
         assert hit1[0] == 23 and hit2[0] == 23
@@ -404,12 +412,12 @@ class TestRadixPrefixCacheFixes:
         """Insert long seq then a strict prefix of it: kv lands on a real
         node boundary (mid-edge split), not inside the edge."""
         import torch
+
         cache = self._cache()
         p = list(range(30))
         cache.insert(p, "kv_long")
         cache.insert(p[:20], "kv_short")
-        hit = cache.lookup_longest_prefix(
-            torch.tensor([p[:20] + [999]]))
+        hit = cache.lookup_longest_prefix(torch.tensor([[*p[:20], 999]]))
         assert hit is not None and hit == (20, "kv_short")
         hit_long = cache.lookup_longest_prefix(torch.tensor([p]))
         assert hit_long == (30, "kv_long")
@@ -417,9 +425,10 @@ class TestRadixPrefixCacheFixes:
     def test_eviction_runs(self):
         """ref_count stays 0 on insert — _evict_lru must be able to fire."""
         from forge.engine.prefix_cache import RadixPrefixCache
+
         cache = RadixPrefixCache(max_entries=2)
         for i in range(4):
-            cache.insert(list(range(20)) + [100 + i], f"kv{i}")
+            cache.insert([*list(range(20)), 100 + i], f"kv{i}")
         assert len(cache) <= 2
 
 
@@ -433,8 +442,8 @@ class TestRepetitionPenaltyOrdering:
         logits = torch.randn(1, 256)
         gen_ids = [5, 7, 9, 5, 7]
         out = eng._sample_next_token(
-            logits.clone(), temperature=2.0, top_k=0, top_p=1.0,
-            repetition_penalty=1.5, generated_ids=gen_ids)
+            logits.clone(), temperature=2.0, top_k=0, top_p=1.0, repetition_penalty=1.5, generated_ids=gen_ids
+        )
         # Reference: penalize raw logits at the generated ids, then divide
         ref = logits.clone()
         for tid in {5, 7, 9}:
@@ -446,8 +455,8 @@ class TestRepetitionPenaltyOrdering:
         assert out.shape == torch.Size([1, 1])
         # Deterministic path: temperature<=0 argmax uses penalized logits
         greedy = eng._sample_next_token(
-            logits.clone(), temperature=0.0, top_k=0, top_p=1.0,
-            repetition_penalty=1.5, generated_ids=gen_ids)
+            logits.clone(), temperature=0.0, top_k=0, top_p=1.0, repetition_penalty=1.5, generated_ids=gen_ids
+        )
         assert greedy.item() == ref.argmax(-1).item()
 
     def test_penalty_can_change_greedy_argmax(self, forge_engine_fixture):
@@ -455,11 +464,11 @@ class TestRepetitionPenaltyOrdering:
         temperature=0 (old code skipped it entirely on the greedy path)."""
         eng = forge_engine_fixture
         logits = torch.zeros(1, 256)
-        logits[0, 5] = 2.0   # top token, recently generated
-        logits[0, 6] = 1.9   # runner-up
+        logits[0, 5] = 2.0  # top token, recently generated
+        logits[0, 6] = 1.9  # runner-up
         greedy = eng._sample_next_token(
-            logits.clone(), temperature=0.0, top_k=0, top_p=1.0,
-            repetition_penalty=1.1, generated_ids=[5])
+            logits.clone(), temperature=0.0, top_k=0, top_p=1.0, repetition_penalty=1.1, generated_ids=[5]
+        )
         assert greedy.item() == 6
 
     def test_penalty_one_is_noop(self, forge_engine_fixture):
@@ -467,8 +476,8 @@ class TestRepetitionPenaltyOrdering:
         torch.manual_seed(0)
         logits = torch.randn(1, 256)
         a = eng._sample_next_token(
-            logits.clone(), temperature=0.0, top_k=0, top_p=1.0,
-            repetition_penalty=1.0, generated_ids=[1, 2, 3])
+            logits.clone(), temperature=0.0, top_k=0, top_p=1.0, repetition_penalty=1.0, generated_ids=[1, 2, 3]
+        )
         assert a.item() == logits.argmax(-1).item()
 
 
@@ -511,16 +520,14 @@ class TestContinuationForwardCausalMask:
     bottom-right causal mask when total_len > T.
     """
 
-    @pytest.mark.parametrize("device", ["cpu"] + (
-        ["cuda"] if torch.cuda.is_available() else []))
+    @pytest.mark.parametrize("device", ["cpu"] + (["cuda"] if torch.cuda.is_available() else []))
     def test_continuation_matches_full_prefill(self, tiny_model, device):
         model = tiny_model.to(device)
         ids = torch.randint(0, 256, (1, 12), device=device)
         with torch.no_grad():
             full = model(ids, use_cache=True)
             _, _, kv = model(ids[:, :5], use_cache=True)
-            cont = model(ids[:, 5:], past_key_values=kv,
-                         use_cache=True)
+            cont = model(ids[:, 5:], past_key_values=kv, use_cache=True)
         full_logits = full[0]
         cont_logits = cont[0]
         # Last-position logits (what decode actually samples) must match.
@@ -536,32 +543,31 @@ class TestPrefillLogitsLastOnly:
 
     def test_standard_decoding_prefill_last_only(self, tiny_model):
         from forge.engine.decoding import StandardDecoding
+
         calls = []
         orig = tiny_model.forward
+
         def spy(*a, **k):
             calls.append(k)
             return orig(*a, **k)
+
         tiny_model.forward = spy
         ids = torch.tensor([[1, 2, 3, 4]])
-        StandardDecoding().generate(tiny_model, ids, max_new_tokens=2,
-                                    temperature=0.0)
+        StandardDecoding().generate(tiny_model, ids, max_new_tokens=2, temperature=0.0)
         assert calls, "no model calls recorded"
-        assert calls[0].get("logits_last_only") is True, (
-            f"prefill missing logits_last_only: {calls[0]}")
+        assert calls[0].get("logits_last_only") is True, f"prefill missing logits_last_only: {calls[0]}"
 
     def test_prefill_kv_boundary_stored(self, tiny_model):
         """_forge_prefill_kv captures prompt-end state, not end-of-gen."""
         from forge.engine.decoding import StandardDecoding
+
         ids = torch.tensor([[1, 2, 3, 4]])
-        StandardDecoding().generate(tiny_model, ids, max_new_tokens=3,
-                                    temperature=0.0)
+        StandardDecoding().generate(tiny_model, ids, max_new_tokens=3, temperature=0.0)
         pk = tiny_model._forge_prefill_kv
         assert pk is not None
         # boundary KV covers exactly the prompt (4 tokens), while
         # _forge_last_kv covers prompt + generated
-        pk_len = next(
-            e[0].shape[-2] for e in pk
-            if isinstance(e, tuple) and e is not None)
+        pk_len = next(e[0].shape[-2] for e in pk if isinstance(e, tuple) and e is not None)
         assert pk_len == 4
 
 
@@ -573,6 +579,7 @@ class TestFinishToStopNoDoubleFeed:
         from forge.engine.engine_common import SamplingParams
         from forge.engine.forge_engine import ForgeEngine
         from forge.model_loader import unpack_output_with_kv
+
         tok = MagicMock()
         tok.eos_token_id = 0
         tok.return_value.input_ids = torch.tensor([[1, 2, 3, 4]])
@@ -584,29 +591,28 @@ class TestFinishToStopNoDoubleFeed:
         logits, past_kv = eng._prefill(ids)
         # Simulate a decode step already consuming token 7.
         with torch.no_grad():
-            out = tiny_model(torch.tensor([[7]]),
-                             past_key_values=past_kv, use_cache=True)
+            out = tiny_model(torch.tensor([[7]]), past_key_values=past_kv, use_cache=True)
             logits, past_kv = unpack_output_with_kv(out)
         output_ids = torch.cat([ids, torch.tensor([[7]])], dim=-1)
         tiny_model._forge_last_logits = logits
 
         fed = []
         orig = tiny_model.forward
+
         def spy(x, *a, **k):
             fed.append((x.clone(), k.get("past_key_values")))
             return orig(x, *a, **k)
+
         tiny_model.forward = spy
         # Zero decode steps � any model call here is the old re-feed bug.
         eng._decode_tokens = MagicMock(return_value=iter(()))
-        eng._finish_to_stop(output_ids, ids.shape[1],
-                            SamplingParams(), past_kv=past_kv)
-        assert fed == [], (
-            f"_finish_to_stop re-fed tokens: "
-            f"{[t.tolist() for t, _ in fed]}")
+        eng._finish_to_stop(output_ids, ids.shape[1], SamplingParams(), past_kv=past_kv)
+        assert fed == [], f"_finish_to_stop re-fed tokens: {[t.tolist() for t, _ in fed]}"
 
     def test_prefill_fallback_when_no_stored_logits(self, tiny_model):
         from forge.engine.engine_common import SamplingParams
         from forge.engine.forge_engine import ForgeEngine
+
         tok = MagicMock()
         tok.eos_token_id = 0
         tok.return_value.input_ids = torch.tensor([[1, 2, 3, 4]])
@@ -620,13 +626,14 @@ class TestFinishToStopNoDoubleFeed:
 
         fed = []
         orig = tiny_model.forward
+
         def spy(x, *a, **k):
             fed.append(x.clone())
             return orig(x, *a, **k)
+
         tiny_model.forward = spy
         eng._decode_tokens = MagicMock(return_value=iter(()))
-        eng._finish_to_stop(ids, ids.shape[1],
-                            SamplingParams(), past_kv=past_kv)
+        eng._finish_to_stop(ids, ids.shape[1], SamplingParams(), past_kv=past_kv)
         # Correct fallback: one full re-prefill of output_ids, no re-feed.
         assert len(fed) == 1 and fed[0].shape[1] == ids.shape[1]
 
@@ -637,6 +644,7 @@ class TestStaleDecodeCapturesCleared:
 
     def test_captures_cleared_on_request_start(self, tiny_model):
         from forge.engine.forge_engine import ForgeEngine
+
         tok = MagicMock()
         tok.eos_token_id = 0
         tok.return_value.input_ids = torch.tensor([[1, 2, 3, 4]])
@@ -647,8 +655,7 @@ class TestStaleDecodeCapturesCleared:
         eng.model._forge_last_kv = "stale"
         eng.model._forge_last_logits = "stale"
         eng.model._forge_prefill_kv = "stale"
-        eng.decoding.generate = MagicMock(
-            return_value=torch.tensor([[1, 2, 3, 4]]))
+        eng.decoding.generate = MagicMock(return_value=torch.tensor([[1, 2, 3, 4]]))
         eng.generate("hi", max_new_tokens=1, finish_sentence=False)
         assert eng.model._forge_last_kv is None
         assert eng.model._forge_prefill_kv is None
@@ -661,16 +668,15 @@ class TestCachePromptPrefixBoundary:
     def test_prefers_forge_prefill_kv(self, tiny_model):
         from forge.engine.forge_engine import ForgeEngine
         from forge.engine.prefix_cache import _PREFIX_CACHE_KEY_LENGTH, cache_key, cache_prompt_prefix
+
         tok = MagicMock()
         tok.eos_token_id = 0
         eng = ForgeEngine(tiny_model, tok, device="cpu")
         eng._prefix_cache = {}
 
         ids = torch.arange(40).unsqueeze(0)
-        boundary = [(torch.full((1, 1, 40, 4), 1.0),
-                     torch.full((1, 1, 40, 4), 1.0))]
-        end_of_gen = [(torch.full((1, 1, 50, 4), 2.0),
-                       torch.full((1, 1, 50, 4), 2.0))]
+        boundary = [(torch.full((1, 1, 40, 4), 1.0), torch.full((1, 1, 40, 4), 1.0))]
+        end_of_gen = [(torch.full((1, 1, 50, 4), 2.0), torch.full((1, 1, 50, 4), 2.0))]
         tiny_model._forge_prefill_kv = boundary
         cache_prompt_prefix(eng, ids, end_of_gen)
 
@@ -689,6 +695,7 @@ class TestSlicePastKvOwnsMemory:
 
     def test_slices_do_not_share_storage(self):
         from forge.engine.prefix_cache import _slice_past_kv
+
         k = torch.randn(1, 8, 512, 128)
         v = torch.randn(1, 8, 512, 128)
         sliced = _slice_past_kv([(k, v)], 32)
@@ -703,6 +710,7 @@ class TestSlicePastKvOwnsMemory:
 
     def test_dict_entries_cloned(self):
         from forge.engine.prefix_cache import _slice_past_kv
+
         state = {"conv_state": torch.ones(4, 4)}
         sliced = _slice_past_kv([state], 32)
         assert sliced[0]["conv_state"] is not state["conv_state"]
@@ -717,6 +725,7 @@ class TestCapturesClearedAtRequestEnd:
 
     def test_captures_cleared_after_generate(self, tiny_model):
         from forge.engine.forge_engine import ForgeEngine
+
         tok = MagicMock()
         tok.eos_token_id = 0
         tok.return_value.input_ids = torch.tensor([[1, 2, 3, 4]])
@@ -726,9 +735,8 @@ class TestCapturesClearedAtRequestEnd:
         eng._prefix_cache = None  # skip cache path; captures still set
         tiny_model._forge_last_kv = "leftover"
         eng.decoding.generate = MagicMock(
-            side_effect=lambda *a, **kw: (
-                setattr(tiny_model, "_forge_last_kv", "kv") or
-                torch.tensor([[1, 2, 3, 4]])))
+            side_effect=lambda *a, **kw: setattr(tiny_model, "_forge_last_kv", "kv") or torch.tensor([[1, 2, 3, 4]])
+        )
         eng.generate("hi", max_new_tokens=1, finish_sentence=False)
         assert eng.model._forge_last_kv is None
         assert eng.model._forge_prefill_kv is None

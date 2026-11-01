@@ -16,9 +16,11 @@ Covers:
 9.  BatchQueue: boot-config grouping, per-request loop capture, scoped
     seeding (no global RNG leak).
 """
-import sys
 
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import threading
 from unittest.mock import MagicMock
@@ -28,10 +30,12 @@ import torch
 
 # ── Shared tiny-model fixture ─────────────────────────────────────────────
 
+
 @pytest.fixture
 def tiny_model():
     from forge.config import get_config
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = get_config("forgelm_tiny")
     cfg.vocab_size = 256
     cfg.device = "cpu"
@@ -48,8 +52,10 @@ def tiny_model():
 
 # ── 1. Engine generation lock ─────────────────────────────────────────────
 
+
 def _make_engine(tiny_model):
     from forge.engine.forge_engine import ForgeEngine
+
     tok = MagicMock()
     tok.eos_token_id = 0
     tok.return_value.input_ids = torch.tensor([[1, 2, 3, 4]])
@@ -82,15 +88,18 @@ class TestGenerationLock:
         gen = eng.generate_stream("x", max_new_tokens=2)
         next(gen)  # lock now held by this thread for the iteration
         t = threading.Thread(target=try_acquire)
-        t.start(); t.join()
+        t.start()
+        t.join()
         assert acquired == [False], "lock was free during iteration"
         gen.close()
         t2 = threading.Thread(target=try_acquire)
-        t2.start(); t2.join()
+        t2.start()
+        t2.join()
         assert acquired == [False, True], "lock held after close()"
 
 
 # ── 2. BatchedDecoding mask + top_p ──────────────────────────────────────
+
 
 class _RecordingModel(torch.nn.Module):
     """Wrap a real model, recording every forward's kwargs."""
@@ -110,12 +119,12 @@ class TestBatchedDecoding:
         """Decode steps must pass a mask covering cached+new positions —
         otherwise pad-token KV pollutes attention for unequal prompts."""
         from forge.engine.batched_decoding import BatchedDecoding
+
         rec = _RecordingModel(tiny_model)
         dec = BatchedDecoding(eos_token_id=255)
-        p1 = torch.tensor([[5, 6, 7, 8]])           # len 4
-        p2 = torch.tensor([[9, 10]])                # len 2 (padded)
-        dec.generate_batch(rec, [p1, p2], [3, 3],
-                           [0.0, 0.0], [1.0, 1.0])
+        p1 = torch.tensor([[5, 6, 7, 8]])  # len 4
+        p2 = torch.tensor([[9, 10]])  # len 2 (padded)
+        dec.generate_batch(rec, [p1, p2], [3, 3], [0.0, 0.0], [1.0, 1.0])
         decode_calls = [c for c in rec.calls if c["T"] == 1]
         assert decode_calls, "no decode steps ran"
         for c in decode_calls:
@@ -135,6 +144,7 @@ class TestBatchedDecoding:
         class Fixed(torch.nn.Module):
             """Always emits the same logit profile: token 10 dominant, a
             long tail of near-equal tokens summing past any top_p < ~0.9."""
+
             def forward(self, idx, **kw):
                 B, T = idx.shape
                 logits = torch.zeros(B, T, 256)
@@ -147,9 +157,11 @@ class TestBatchedDecoding:
 
         dec = BatchedDecoding(eos_token_id=255)
         out = dec.generate_batch(
-            Fixed(), [torch.tensor([[1, 2]])], [5],
+            Fixed(),
+            [torch.tensor([[1, 2]])],
+            [5],
             [1.0],  # temperature > 0 → sampling
-            [0.05], # top_p keeps only token 10
+            [0.05],  # top_p keeps only token 10
             seed_list=[1234],
         )
         gen = out[0][0]
@@ -158,6 +170,7 @@ class TestBatchedDecoding:
 
 
 # ── 3. cache_prompt_prefix reuses captured KV ────────────────────────────
+
 
 class TestCachePromptPrefix:
     def test_no_second_prefill(self, tiny_model):
@@ -169,21 +182,22 @@ class TestCachePromptPrefix:
         engine.model = tiny_model
         engine._prefix_cache = ChunkedPrefixCache(max_entries=8)
 
-        ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
-                            13, 14, 15, 16, 17, 18]])
+        ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]])
 
         with torch.inference_mode():
-            _, past_kv = __import__(
-                "forge.model_loader", fromlist=["unpack_output_with_kv"]
-            ).unpack_output_with_kv(tiny_model(ids, use_cache=True))
+            _, past_kv = __import__("forge.model_loader", fromlist=["unpack_output_with_kv"]).unpack_output_with_kv(
+                tiny_model(ids, use_cache=True)
+            )
         # Model snapshot is produced automatically at prefill end.
         assert getattr(tiny_model, "_last_prefill_recurrent", None)
 
         calls = []
         orig = tiny_model.forward
+
         def counting(*a, **kw):
             calls.append(1)
             return orig(*a, **kw)
+
         tiny_model.forward = counting
         try:
             cache_prompt_prefix(engine, ids, past_kv)
@@ -200,6 +214,7 @@ class TestCachePromptPrefix:
     def test_skips_when_no_kv(self, tiny_model):
         """past_kv=None (streaming strategies) → skip, never re-prefill."""
         from forge.engine.prefix_cache import ChunkedPrefixCache, cache_prompt_prefix
+
         engine = MagicMock()
         engine.model = tiny_model
         engine._prefix_cache = ChunkedPrefixCache()
@@ -215,14 +230,14 @@ class TestCachePromptPrefix:
 
 # ── 4. Semantic anchor text verification ─────────────────────────────────
 
+
 class TestSemanticAnchors:
     def test_reuse_requires_matching_text(self):
         from forge.engine.prefix_cache import SemanticKVAnchors
+
         anchors = SemanticKVAnchors()
         src = "Hello, how are you? Tell me about X"
-        anchors.save_anchor(token_pos=6, text_pos=17,
-                            anchor_type="paragraph", kv_state=MagicMock(),
-                            source_text=src)
+        anchors.save_anchor(token_pos=6, text_pos=17, anchor_type="paragraph", kv_state=MagicMock(), source_text=src)
         # Same prefix → hit
         hit = anchors.find_reuse_point("Hello, how are you? And then Y")
         assert hit is not None
@@ -232,25 +247,26 @@ class TestSemanticAnchors:
 
     def test_legacy_anchor_without_hash_skipped(self):
         from forge.engine.prefix_cache import SemanticKVAnchors
+
         anchors = SemanticKVAnchors()
-        anchors.save_anchor(token_pos=6, text_pos=5,
-                            anchor_type="x", kv_state=MagicMock())
+        anchors.save_anchor(token_pos=6, text_pos=5, anchor_type="x", kv_state=MagicMock())
         assert anchors.find_reuse_point("12345_rest") is None
 
 
 # ── 5. Session KV-length verification ────────────────────────────────────
 
+
 class TestSessionKVVerification:
     def _engine(self):
         eng = MagicMock()
         eng.device = torch.device("cpu")
-        eng.tokenizer = MagicMock(
-            return_value=MagicMock(input_ids=torch.tensor([[9, 9, 9]])))
+        eng.tokenizer = MagicMock(return_value=MagicMock(input_ids=torch.tensor([[9, 9, 9]])))
         eng._log = MagicMock()
         return eng
 
     def test_kv_mismatch_falls_back(self):
         from forge.engine.session_cache import SessionCacheManager
+
         eng = self._engine()
         scm = SessionCacheManager(eng)
         scm.begin_session("s1")
@@ -267,6 +283,7 @@ class TestSessionKVVerification:
 
     def test_kv_match_prefills_delta(self):
         from forge.engine.session_cache import SessionCacheManager
+
         eng = self._engine()
         scm = SessionCacheManager(eng)
         scm.begin_session("s1")
@@ -281,9 +298,11 @@ class TestSessionKVVerification:
 
 # ── 6. Streaming marker filter ────────────────────────────────────────────
 
+
 class TestToolCallStreamFilter:
     def _filter(self):
         from forge.engine.forge_server import _ToolCallStreamFilter
+
         return _ToolCallStreamFilter()
 
     def test_plain_text_passthrough(self):
@@ -300,7 +319,7 @@ class TestToolCallStreamFilter:
 
     def test_split_markers_across_chunks(self):
         f = self._filter()
-        chunks = ['hel', 'lo <to', 'ol_ca', 'll>{"x":', '1}</tool', '_call>', 'tail']
+        chunks = ["hel", "lo <to", "ol_ca", 'll>{"x":', "1}</tool", "_call>", "tail"]
         visible = "".join(f.feed(c) for c in chunks) + f.flush()
         assert visible == "hello tail"
         assert f.tool_calls_seen == 1
@@ -308,22 +327,23 @@ class TestToolCallStreamFilter:
     def test_tail_after_end_marker_not_dropped(self):
         """The chunk containing </tool_call> previously lost trailing text."""
         f = self._filter()
-        out = f.feed('<tool_call>{}</tool_call>AND MORE')
+        out = f.feed("<tool_call>{}</tool_call>AND MORE")
         assert out == "AND MORE"
 
     def test_marker_lookalike_text(self):
         f = self._filter()
-        out = f.feed('a <tool_cally> b')
-        assert out == 'a <tool_cally> b'
+        out = f.feed("a <tool_cally> b")
+        assert out == "a <tool_cally> b"
 
     def test_unterminated_tool_call_hides_tail(self):
         f = self._filter()
         out = f.feed('ok <tool_call>{"x":1}')
         out += f.flush()
-        assert out == 'ok '
+        assert out == "ok "
 
 
 # ── 7. Conv-state boundary equivalence ───────────────────────────────────
+
 
 class TestConvStateBoundary:
     def test_prefix_hit_matches_full_prefill(self, tiny_model):
@@ -337,12 +357,10 @@ class TestConvStateBoundary:
         prompt, suffix = full[:, :8], full[:, 8:]
 
         with torch.inference_mode():
-            logits_full, _ = unpack_output_with_kv(
-                tiny_model(full, use_cache=True))
+            logits_full, _ = unpack_output_with_kv(tiny_model(full, use_cache=True))
 
         with torch.inference_mode():
-            _, past = unpack_output_with_kv(
-                tiny_model(prompt, use_cache=True))
+            _, past = unpack_output_with_kv(tiny_model(prompt, use_cache=True))
         snap = tiny_model._last_prefill_recurrent
         assert snap, "prefill did not record recurrent snapshot"
 
@@ -352,61 +370,60 @@ class TestConvStateBoundary:
 
         apply_recurrent_state_prefix(tiny_model, snap)
         with torch.inference_mode():
-            logits_cached, _ = unpack_output_with_kv(
-                tiny_model(suffix, past_key_values=past, use_cache=True))
+            logits_cached, _ = unpack_output_with_kv(tiny_model(suffix, past_key_values=past, use_cache=True))
 
-        torch.testing.assert_close(
-            logits_cached, logits_full[:, 8:], atol=1e-5, rtol=1e-4)
+        torch.testing.assert_close(logits_cached, logits_full[:, 8:], atol=1e-5, rtol=1e-4)
 
     def test_prefix_hit_without_snapshot_is_corrupt(self, tiny_model):
         """Control: WITHOUT the snapshot restore, cached-prefix logits must
         differ (zero-pad conv boundary) — proves the test above actually
         exercises the fix."""
         from forge.model_loader import unpack_output_with_kv
+
         torch.manual_seed(0)
         full = torch.randint(0, 256, (1, 12))
         prompt, suffix = full[:, :8], full[:, 8:]
         with torch.inference_mode():
-            logits_full, _ = unpack_output_with_kv(
-                tiny_model(full, use_cache=True))
-            _, past = unpack_output_with_kv(
-                tiny_model(prompt, use_cache=True))
+            logits_full, _ = unpack_output_with_kv(tiny_model(full, use_cache=True))
+            _, past = unpack_output_with_kv(tiny_model(prompt, use_cache=True))
             # clobber conv state with an unrelated sequence
             tiny_model(torch.randint(0, 256, (1, 5)), use_cache=True)
-            logits_stale, _ = unpack_output_with_kv(
-                tiny_model(suffix, past_key_values=past, use_cache=True))
-        assert not torch.allclose(
-            logits_stale, logits_full[:, 8:], atol=1e-5, rtol=1e-4)
+            logits_stale, _ = unpack_output_with_kv(tiny_model(suffix, past_key_values=past, use_cache=True))
+        assert not torch.allclose(logits_stale, logits_full[:, 8:], atol=1e-5, rtol=1e-4)
 
 
 # ── 8. CPU flash_attention delta-prefill mask ────────────────────────────
+
 
 class TestFlashAttentionFallback:
     def test_causal_mask_with_past(self):
         """T<S (query shorter than keys) must anchor the causal mask at the
         bottom-right so the delta sees all of the past."""
         from forge.model_loader import flash_attention
+
         torch.manual_seed(0)
-        q = torch.randn(1, 2, 3, 8)   # 3 new queries
-        k = torch.randn(1, 2, 7, 8)   # 7 keys (4 past + 3 new)
+        q = torch.randn(1, 2, 3, 8)  # 3 new queries
+        k = torch.randn(1, 2, 7, 8)  # 7 keys (4 past + 3 new)
         v = torch.randn(1, 2, 7, 8)
         out = flash_attention(q, k, v, is_causal=True)
         assert out.shape == (1, 2, 3, 8)
         # First query row attends to keys 0..4 (past 4 + itself) — verify by
         # brute-force reference.
-        scores = torch.matmul(q, k.transpose(-2, -1)) / (8 ** 0.5)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / (8**0.5)
         q_pos = torch.arange(7 - 3, 7)
         mask = torch.arange(7).unsqueeze(0) <= q_pos.unsqueeze(1)
-        ref = torch.softmax(scores.masked_fill(~mask, float('-inf')), -1) @ v
+        ref = torch.softmax(scores.masked_fill(~mask, float("-inf")), -1) @ v
         torch.testing.assert_close(out, ref)
 
 
 # ── 9. BatchQueue fixes ──────────────────────────────────────────────────
 
+
 class TestBatchQueue:
     def test_boot_key_groups_configs(self):
         """Requests with different boot configs must not share a batch."""
         from forge.engine.session_manager import BatchQueue, SessionManager, TaskBootConfig
+
         sm = SessionManager()
         bq = BatchQueue(registry=MagicMock(), session_manager=sm)
         t1 = sm.create_task("m", boot_config=TaskBootConfig(kv_cache="paged"))
@@ -421,12 +438,24 @@ class TestBatchQueue:
         from concurrent.futures import Future
 
         from forge.engine.session_manager import BatchQueue, PendingRequest, SessionManager
+
         bq = BatchQueue(registry=MagicMock(), session_manager=SessionManager())
-        req = PendingRequest(task_id=None, model_id="m", prompt="p",
-                             max_tokens=4, temperature=0.0, top_p=1.0,
-                             top_k=80, repetition_penalty=1.0, seed=None,
-                             stop=None, stream=True, future=Future(),
-                             stream_queue=MagicMock(), loop=None)
+        req = PendingRequest(
+            task_id=None,
+            model_id="m",
+            prompt="p",
+            max_tokens=4,
+            temperature=0.0,
+            top_p=1.0,
+            top_k=80,
+            repetition_penalty=1.0,
+            seed=None,
+            stop=None,
+            stream=True,
+            future=Future(),
+            stream_queue=MagicMock(),
+            loop=None,
+        )
         # No captured loop → returns False instead of crashing in thread
         assert bq._push_stream(req, "x") is False
 
@@ -434,6 +463,7 @@ class TestBatchQueue:
         import asyncio
 
         from forge.engine.session_manager import BatchQueue, SessionManager
+
         bq = BatchQueue(registry=MagicMock(), session_manager=SessionManager())
 
         async def _submit():

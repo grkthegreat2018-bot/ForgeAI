@@ -22,28 +22,30 @@ Usage:
     # Smoke test
     python run_evolve.py --profile smoke --domains SyntheticDomain
 """
-import sys
+
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-import time
-import json
 import argparse
+import json
 import threading
-import torch
-import numpy as np
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
+
+import numpy as np
+import torch
 
 from forge.evolution import ForgeEvolve, ForgeEvolveConfig
 from forge.evolution.domains import DOMAINS, list_domains
-from forge.evolution.database import FindingsDB
-from forge.evolution.domain_factory import DomainFactory
-from forge.evolution.topic_scanner import TopicScanner
+from forge.evolution.llm_domain_gen import LLMDomainGenerator
 from forge.evolution.revisit_scheduler import DomainRevisitScheduler
-from forge.evolution.llm_domain_gen import LLMDomainGenerator, GenericDomain
 
 # Pre-load simulators before any threading to avoid race conditions
 from forge.evolution.simulators import _ensure_loaded
+from forge.evolution.topic_scanner import TopicScanner
+
 _ensure_loaded()
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "forge" / "evolution" / "configs"
@@ -59,6 +61,7 @@ class GPUMonitor:
     Used by the adaptive parallelism controller to increase/decrease
     the number of concurrent domains to keep GPU at target utilization.
     """
+
     def __init__(self, target_util: float = 0.85, sample_interval: float = 0.5):
         self.target_util = target_util
         self.sample_interval = sample_interval
@@ -69,9 +72,11 @@ class GPUMonitor:
         self._nvml_ok = False
         try:
             import warnings
+
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 import pynvml
+
                 pynvml.nvmlInit()
                 self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
                 self._pynvml = pynvml
@@ -120,8 +125,7 @@ class GPUMonitor:
         except Exception:
             return 0.0
 
-    def recommend_parallelism(self, current_parallel: int, max_parallel: int = 12,
-                              min_parallel: int = 2) -> int:
+    def recommend_parallelism(self, current_parallel: int, max_parallel: int = 12, min_parallel: int = 2) -> int:
         """Recommend new parallelism level based on GPU util + VRAM.
 
         If GPU < 50%: increase parallelism (more domains needed)
@@ -142,6 +146,8 @@ class GPUMonitor:
         else:
             new_p = current_parallel
         return new_p
+
+
 DEFAULT_FOCUS_FILE = CONFIG_DIR / "default_focus.txt"
 
 
@@ -150,8 +156,7 @@ def load_json(name: str) -> dict:
         return json.load(f)
 
 
-def resolve_domains(category: str | None, domain_list: str | None,
-                    focus: str | None = None) -> list[str]:
+def resolve_domains(category: str | None, domain_list: str | None, focus: str | None = None) -> list[str]:
     """Resolve which domains to run from category, explicit list, or focus profile.
 
     Priority: domain_list > focus > category > all
@@ -219,8 +224,9 @@ def get_focus_weights(focus: str | None) -> dict:
     return profiles[focus].get("score_weights", {})
 
 
-def build_config(profile: str, overrides: dict, domain_name: str, db_path: str,
-                 domain_instance=None) -> ForgeEvolveConfig:
+def build_config(
+    profile: str, overrides: dict, domain_name: str, db_path: str, domain_instance=None
+) -> ForgeEvolveConfig:
     """Build ForgeEvolveConfig from a JSON profile + CLI overrides.
 
     If domain_instance is provided, use it directly (for refinement domains).
@@ -254,8 +260,7 @@ def build_config(profile: str, overrides: dict, domain_name: str, db_path: str,
     return ForgeEvolveConfig(**cfg_kwargs)
 
 
-def run_one_domain(name: str, profile: str, overrides: dict, db_path: str,
-                   domain_instance=None) -> tuple:
+def run_one_domain(name: str, profile: str, overrides: dict, db_path: str, domain_instance=None) -> tuple:
     """Run ForgeEvolve on one domain. Returns (results, time_s, error).
 
     If domain_instance is provided (a pre-instantiated domain, e.g. a
@@ -263,8 +268,7 @@ def run_one_domain(name: str, profile: str, overrides: dict, db_path: str,
     """
     try:
         if domain_instance is not None:
-            cfg = build_config(profile, overrides, name, db_path,
-                               domain_instance=domain_instance)
+            cfg = build_config(profile, overrides, name, db_path, domain_instance=domain_instance)
         else:
             cfg = build_config(profile, overrides, name, db_path)
     except Exception as e:
@@ -285,6 +289,7 @@ def run_one_domain(name: str, profile: str, overrides: dict, db_path: str,
 def extract_top_discoveries(db_path: str, top_n: int = 20) -> dict:
     """Extract top discoveries per domain from the DB."""
     import sqlite3
+
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute("""
@@ -299,24 +304,29 @@ def extract_top_discoveries(db_path: str, top_n: int = 20) -> dict:
         if domain not in by_domain:
             by_domain[domain] = []
         try:
-            by_domain[domain].append({
-                "config": json.loads(row[1]), "score": row[2],
-                "behavioral": json.loads(row[3]) if row[3] else [],
-                "metadata": json.loads(row[4]) if row[4] else {},
-                "run_id": row[5], "generation": row[6],
-            })
+            by_domain[domain].append(
+                {
+                    "config": json.loads(row[1]),
+                    "score": row[2],
+                    "behavioral": json.loads(row[3]) if row[3] else [],
+                    "metadata": json.loads(row[4]) if row[4] else {},
+                    "run_id": row[5],
+                    "generation": row[6],
+                }
+            )
         except (json.JSONDecodeError, TypeError):
             continue
     conn.close()
-    return {d: sorted(items, key=lambda x: x["score"], reverse=True)[:top_n]
-            for d, items in by_domain.items()}
+    return {d: sorted(items, key=lambda x: x["score"], reverse=True)[:top_n] for d, items in by_domain.items()}
 
 
 def generate_ideas_report(top: dict, profile: str) -> str:
     """Generate markdown report of best optimization ideas."""
-    L = [f"# ForgeEvolve '{profile}' Run: Top Optimization Ideas\n",
-         f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n",
-         f"Domains: {len(top)}\n\n"]
+    L = [
+        f"# ForgeEvolve '{profile}' Run: Top Optimization Ideas\n",
+        f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n",
+        f"Domains: {len(top)}\n\n",
+    ]
 
     # Tier 1: highest scores overall
     all_items = [(d, i) for d, items in top.items() for i in items]
@@ -326,14 +336,16 @@ def generate_ideas_report(top: dict, profile: str) -> str:
     L.append("| Rank | Domain | Score | Config |\n|------|--------|-------|--------|\n")
     for idx, (domain, item) in enumerate(all_items[:50]):
         cfg = json.dumps(item["config"], default=str)
-        if len(cfg) > 80: cfg = cfg[:77] + "..."
-        L.append(f"| {idx+1} | {domain} | {item['score']:.2f} | `{cfg}` |\n")
+        if len(cfg) > 80:
+            cfg = cfg[:77] + "..."
+        L.append(f"| {idx + 1} | {domain} | {item['score']:.2f} | `{cfg}` |\n")
 
     # Tier 2: best per domain
     L.append("\n## Tier 2: Best Per Domain\n\n")
     for domain in sorted(top.keys()):
         items = top[domain]
-        if not items: continue
+        if not items:
+            continue
         best = items[0]
         L.append(f"### {domain} (score={best['score']:.2f})\n")
         L.append(f"- **Config**: `{json.dumps(best['config'], default=str)}`\n")
@@ -348,16 +360,21 @@ def generate_ideas_report(top: dict, profile: str) -> str:
                 key_patterns.setdefault(key, []).append((domain, val, item["score"]))
     for key in sorted(key_patterns.keys()):
         entries = key_patterns[key]
-        if len(entries) < 3: continue
+        if len(entries) < 3:
+            continue
         L.append(f"### `{key}`\n")
         val_counts = {}
         for d, v, s in entries:
             vs = str(v)
             vc = val_counts.setdefault(vs, {"n": 0, "scores": [], "domains": set()})
-            vc["n"] += 1; vc["scores"].append(s); vc["domains"].add(d)
+            vc["n"] += 1
+            vc["scores"].append(s)
+            vc["domains"].add(d)
         for val, info in sorted(val_counts.items(), key=lambda x: -x[1]["n"])[:5]:
-            L.append(f"- `{val}`: {info['n']}x, avg={np.mean(info['scores']):.1f}, "
-                    f"domains={','.join(sorted(info['domains'])[:5])}\n")
+            L.append(
+                f"- `{val}`: {info['n']}x, avg={np.mean(info['scores']):.1f}, "
+                f"domains={','.join(sorted(info['domains'])[:5])}\n"
+            )
         L.append("")
 
     return "".join(L)
@@ -368,19 +385,21 @@ def print_summary(all_results: list, total_t: float, profile: str):
     valid = [(n, r, t, e) for n, r, t, e in all_results if r is not None]
     failed = [(n, r, t, e) for n, r, t, e in all_results if r is None]
 
-    print(f"\n{'='*70}")
-    print(f"  SUMMARY: {len(all_results)} domains in {total_t:.1f}s ({total_t/60:.1f}m) [{profile}]")
-    print(f"{'='*70}")
+    print(f"\n{'=' * 70}")
+    print(f"  SUMMARY: {len(all_results)} domains in {total_t:.1f}s ({total_t / 60:.1f}m) [{profile}]")
+    print(f"{'=' * 70}")
     print(f"  {'Domain':<30s} {'Best Score':>12s} {'Disc':>5s} {'Archive':>8s} {'Time':>7s}")
-    print(f"  {'-'*30} {'-'*12} {'-'*5} {'-'*8} {'-'*7}")
+    print(f"  {'-' * 30} {'-' * 12} {'-' * 5} {'-' * 8} {'-' * 7}")
 
     for name, results, t, _ in sorted(valid, key=lambda x: x[1]["best_score"], reverse=True):
-        print(f"  {name:<30s} {results['best_score']:12.4f} "
-              f"{results['discoveries']:5d} {results['archive_coverage']*100:7.0f}% {t:6.1f}s")
+        print(
+            f"  {name:<30s} {results['best_score']:12.4f} "
+            f"{results['discoveries']:5d} {results['archive_coverage'] * 100:7.0f}% {t:6.1f}s"
+        )
 
     if failed:
         print(f"\n  FAILED ({len(failed)}):")
-        for name, _, t, err in failed:
+        for name, _, _t, err in failed:
             print(f"    {name}: {err[:80]}")
 
     print(f"\n  Valid: {len(valid)}/{len(all_results)}")
@@ -390,56 +409,107 @@ def main():
     parser = argparse.ArgumentParser(description="ForgeEvolve runner")
     parser.add_argument("--profile", default="boot", help="Run profile from config (boot/deep/ultra/smoke)")
     parser.add_argument("--category", default=None, help="Domain category from config")
-    parser.add_argument("--focus", default=None,
-                        help="Focus profile: memory (minimize param/VRAM), speed, quality, training, all. "
-                             "Overrides category. Use --list-focus to see options. "
-                             "Set persistent default with --set-focus.")
-    parser.add_argument("--set-focus", default=None,
-                        help="Set persistent default focus profile (saved to configs/default_focus.txt). "
-                             "Use 'none' to clear. Example: --set-focus memory")
+    parser.add_argument(
+        "--focus",
+        default=None,
+        help="Focus profile: memory (minimize param/VRAM), speed, quality, training, all. "
+        "Overrides category. Use --list-focus to see options. "
+        "Set persistent default with --set-focus.",
+    )
+    parser.add_argument(
+        "--set-focus",
+        default=None,
+        help="Set persistent default focus profile (saved to configs/default_focus.txt). "
+        "Use 'none' to clear. Example: --set-focus memory",
+    )
     parser.add_argument("--domains", default=None, help="Comma-separated domain names (overrides focus+category)")
     parser.add_argument("--list-focus", action="store_true", help="List available focus profiles and exit")
     parser.add_argument("--gens", type=int, default=None, help="Override generations")
     parser.add_argument("--gen-pop", type=int, default=None, help="Override generator population")
     parser.add_argument("--no-ideas", action="store_true", help="Skip ideas report generation")
-    parser.add_argument("--parallel", type=int, default=4,
-                        help="Number of domains to run concurrently on GPU (default: 4)")
-    parser.add_argument("--adaptive-parallel", action="store_true", default=True,
-                        help="Adaptively tune parallelism based on GPU utilization (default: on). "
-                             "Monitors GPU via NVML and adjusts concurrent domain count to hit target.")
-    parser.add_argument("--no-adaptive-parallel", dest="adaptive_parallel", action="store_false",
-                        help="Disable adaptive parallelism (use fixed --parallel count)")
-    parser.add_argument("--gpu-target", type=float, default=0.85,
-                        help="Target GPU utilization (0-1) for adaptive parallelism (default: 0.85 = 85%%)")
-    parser.add_argument("--min-parallel", type=int, default=2,
-                        help="Minimum concurrent domains for adaptive parallelism (default: 2)")
-    parser.add_argument("--max-parallel", type=int, default=10,
-                        help="Maximum concurrent domains for adaptive parallelism (default: 10)")
-    parser.add_argument("--loops", type=int, default=1,
-                        help="Number of consecutive loops (each builds on canonical knowledge from the last)")
-    parser.add_argument("--auto-discover", action="store_true", default=True,
-                        help="Auto-discover new optimization topics + generate domains (default: on)")
-    parser.add_argument("--no-auto-discover", dest="auto_discover", action="store_false",
-                        help="Disable auto-discovery of new optimization topics")
-    parser.add_argument("--revisit-stale", action="store_true", default=True,
-                        help="Re-run stale domains whose code may have changed (default: on)")
-    parser.add_argument("--no-revisit", dest="revisit_stale", action="store_false",
-                        help="Disable stale domain revisiting")
-    parser.add_argument("--max-new-domains", type=int, default=10,
-                        help="Max new domains to auto-generate per run (default: 10)")
-    parser.add_argument("--max-gpu", action="store_true", default=False,
-                        help="Maximize GPU utilization: removes time budgets, increases eval batch sizes, "
-                             "sets high gen-pop. Equivalent to --gpu-target 0.95 --gen-pop 1000 "
-                             "--no-time-budget --max-eval 200")
-    parser.add_argument("--compute-split", action="store_true", default=False,
-                        help="Enable compute split: foreground gen model + background checker. "
-                             "Also enables train-first on unapplied DB discoveries.")
-    parser.add_argument("--fixate", action="store_true", default=False,
-                        help="Fixate on ONE topic: run only the first resolved domain "
-                             "(use --domains or --focus to pick it), disables "
-                             "auto-discover/revisit/parallel waves, and pins the "
-                             "engine: no cross-domain transfer, no refinement "
-                             "spawning, plateaus re-diversify in place.")
+    parser.add_argument(
+        "--parallel", type=int, default=4, help="Number of domains to run concurrently on GPU (default: 4)"
+    )
+    parser.add_argument(
+        "--adaptive-parallel",
+        action="store_true",
+        default=True,
+        help="Adaptively tune parallelism based on GPU utilization (default: on). "
+        "Monitors GPU via NVML and adjusts concurrent domain count to hit target.",
+    )
+    parser.add_argument(
+        "--no-adaptive-parallel",
+        dest="adaptive_parallel",
+        action="store_false",
+        help="Disable adaptive parallelism (use fixed --parallel count)",
+    )
+    parser.add_argument(
+        "--gpu-target",
+        type=float,
+        default=0.85,
+        help="Target GPU utilization (0-1) for adaptive parallelism (default: 0.85 = 85%%)",
+    )
+    parser.add_argument(
+        "--min-parallel", type=int, default=2, help="Minimum concurrent domains for adaptive parallelism (default: 2)"
+    )
+    parser.add_argument(
+        "--max-parallel", type=int, default=10, help="Maximum concurrent domains for adaptive parallelism (default: 10)"
+    )
+    parser.add_argument(
+        "--loops",
+        type=int,
+        default=1,
+        help="Number of consecutive loops (each builds on canonical knowledge from the last)",
+    )
+    parser.add_argument(
+        "--auto-discover",
+        action="store_true",
+        default=True,
+        help="Auto-discover new optimization topics + generate domains (default: on)",
+    )
+    parser.add_argument(
+        "--no-auto-discover",
+        dest="auto_discover",
+        action="store_false",
+        help="Disable auto-discovery of new optimization topics",
+    )
+    parser.add_argument(
+        "--revisit-stale",
+        action="store_true",
+        default=True,
+        help="Re-run stale domains whose code may have changed (default: on)",
+    )
+    parser.add_argument(
+        "--no-revisit", dest="revisit_stale", action="store_false", help="Disable stale domain revisiting"
+    )
+    parser.add_argument(
+        "--max-new-domains", type=int, default=10, help="Max new domains to auto-generate per run (default: 10)"
+    )
+    parser.add_argument(
+        "--max-gpu",
+        action="store_true",
+        default=False,
+        help="Maximize GPU utilization: removes time budgets, increases eval batch sizes, "
+        "sets high gen-pop. Equivalent to --gpu-target 0.95 --gen-pop 1000 "
+        "--no-time-budget --max-eval 200",
+    )
+    parser.add_argument(
+        "--compute-split",
+        action="store_true",
+        default=False,
+        help="Enable compute split: foreground gen model + background checker. "
+        "Also enables train-first on unapplied DB discoveries.",
+    )
+    parser.add_argument(
+        "--fixate",
+        action="store_true",
+        default=False,
+        help="Fixate on ONE topic: run only the first resolved domain "
+        "(use --domains or --focus to pick it), disables "
+        "auto-discover/revisit/parallel waves, and pins the "
+        "engine: no cross-domain transfer, no refinement "
+        "spawning, plateaus re-diversify in place.",
+    )
     args = parser.parse_args()
 
     # --set-focus: save persistent default and exit
@@ -450,13 +520,12 @@ def main():
         else:
             profiles = load_json("focus_profiles.json")["focus_profiles"]
             if args.set_focus not in profiles:
-                print(f"ERROR: Unknown focus '{args.set_focus}'. "
-                      f"Available: {list(profiles.keys())}")
+                print(f"ERROR: Unknown focus '{args.set_focus}'. Available: {list(profiles.keys())}")
                 sys.exit(1)
             DEFAULT_FOCUS_FILE.write_text(args.set_focus)
             print(f"Set default focus profile to '{args.set_focus}'.")
             print(f"Saved to: {DEFAULT_FOCUS_FILE}")
-            print(f"Future runs will use this focus unless --focus or --domains overrides.")
+            print("Future runs will use this focus unless --focus or --domains overrides.")
         sys.exit(0)
 
     # --list-focus: print available focus profiles and exit
@@ -473,7 +542,7 @@ def main():
         if DEFAULT_FOCUS_FILE.exists():
             print(f"\n  Current default: {DEFAULT_FOCUS_FILE.read_text().strip()}")
         else:
-            print(f"\n  No default set (use --set-focus to set one)")
+            print("\n  No default set (use --set-focus to set one)")
         sys.exit(0)
 
     # Load persistent default focus if --focus not specified
@@ -486,8 +555,10 @@ def main():
     names = resolve_domains(args.category, args.domains, focus=effective_focus)
     if args.fixate:
         if len(names) > 1:
-            print(f"  [Fixate] {len(names)} domains resolved — pinning to "
-                  f"'{names[0]}' only (narrow with --domains/--focus)")
+            print(
+                f"  [Fixate] {len(names)} domains resolved — pinning to "
+                f"'{names[0]}' only (narrow with --domains/--focus)"
+            )
         names = names[:1]
         args.auto_discover = False
         args.revisit_stale = False
@@ -496,7 +567,7 @@ def main():
         overrides_pre = {"fixate": True}
     else:
         overrides_pre = {}
-    focus_weights = get_focus_weights(effective_focus)
+    get_focus_weights(effective_focus)
     profiles = load_json("run_profiles.json")
     db_suffix = profiles["profiles"][args.profile]["db_suffix"]
     db_path = str(RESULTS_DIR / f"forge_evolve{db_suffix}.db")
@@ -517,24 +588,28 @@ def main():
             args.max_parallel = 12
         overrides["max_eval"] = 200  # bigger eval batches = more GPU kernels
         overrides["time_budget_s"] = 0  # no time limit — let domains run fully
-        print(f"  [MaxGPU] Overrides: gen_pop={overrides['gen_pop']}, "
-              f"max_eval=200, time_budget=0, gpu_target={args.gpu_target*100:.0f}%")
+        print(
+            f"  [MaxGPU] Overrides: gen_pop={overrides['gen_pop']}, "
+            f"max_eval=200, time_budget=0, gpu_target={args.gpu_target * 100:.0f}%"
+        )
 
     # --compute-split: enable gen model + checker compute split
     if args.compute_split:
         overrides["enable_compute_split"] = True
-        print(f"  [ComputeSplit] Enabled — gen model + checker + train-first on unapplied DB entries")
+        print("  [ComputeSplit] Enabled — gen model + checker + train-first on unapplied DB entries")
 
     # ── Auto-discovery: scan codebase for new optimization topics ──
     project_root = str(Path(__file__).resolve().parents[2])
     revisit_scheduler = DomainRevisitScheduler(project_root=project_root)
     if args.auto_discover:
-        print(f"\n  [AutoDiscover] Scanning codebase for optimization topics...")
+        print("\n  [AutoDiscover] Scanning codebase for optimization topics...")
         scanner = TopicScanner(project_root)
-        topics = scanner.scan_all()
+        scanner.scan_all()
         summary = scanner.get_summary()
-        print(f"  [AutoDiscover] Found {summary['total_topics']} topics "
-              f"({summary['covered']} covered, {summary['uncovered']} uncovered)")
+        print(
+            f"  [AutoDiscover] Found {summary['total_topics']} topics "
+            f"({summary['covered']} covered, {summary['uncovered']} uncovered)"
+        )
         uncovered = scanner.get_uncovered_topics()
         # Skip domain generation if we already have enough domains registered
         # (avoids slow LLM generation on repeat boots). Only generate if we
@@ -542,41 +617,48 @@ def main():
         existing_generic = sum(1 for d in DOMAINS if d.startswith("Generic_"))
         if uncovered and existing_generic < args.max_new_domains:
             remaining = args.max_new_domains - existing_generic
-            print(f"  [AutoDiscover] {len(uncovered)} uncovered topics — "
-                  f"generating {remaining} domains (skip {existing_generic} existing)...")
+            print(
+                f"  [AutoDiscover] {len(uncovered)} uncovered topics — "
+                f"generating {remaining} domains (skip {existing_generic} existing)..."
+            )
             # Generate domains for uncovered topics (GenericDomain fallback)
             gen = LLMDomainGenerator(max_domains_per_run=remaining)
             generated = gen.generate_for_uncovered_topics(uncovered)
             registered = gen.register_domains(generated)
             if registered:
-                print(f"  [AutoDiscover] Registered {len(registered)} new domains: "
-                      f"{', '.join(registered[:5])}{'...' if len(registered) > 5 else ''}")
+                print(
+                    f"  [AutoDiscover] Registered {len(registered)} new domains: "
+                    f"{', '.join(registered[:5])}{'...' if len(registered) > 5 else ''}"
+                )
                 # Add new domains to the run list
                 names.extend(registered)
         print()
 
-    print(f"{'='*70}")
-    print(f"  ForgeEvolve [{args.profile}] — {len(names)} domains"
-          + (f" x {args.loops} loops" if args.loops > 1 else ""))
+    print(f"{'=' * 70}")
+    print(
+        f"  ForgeEvolve [{args.profile}] — {len(names)} domains" + (f" x {args.loops} loops" if args.loops > 1 else "")
+    )
     if effective_focus:
         print(f"  Focus: {effective_focus}")
     print(f"  DB: {db_path}")
     print(f"  Warm start: {profiles['profiles'][args.profile]['warm_start']}")
     if args.adaptive_parallel:
-        print(f"  Parallel: adaptive (target GPU={args.gpu_target*100:.0f}%, "
-              f"range={args.min_parallel}-{args.max_parallel})")
+        print(
+            f"  Parallel: adaptive (target GPU={args.gpu_target * 100:.0f}%, "
+            f"range={args.min_parallel}-{args.max_parallel})"
+        )
     else:
         print(f"  Parallel: fixed ({args.parallel})")
-    print(f"{'='*70}\n")
+    print(f"{'=' * 70}\n")
 
     grand_start = time.time()
     loop_summaries = []
 
     for loop in range(args.loops):
         if args.loops > 1:
-            print(f"\n{'-'*70}")
-            print(f"  LOOP {loop+1}/{args.loops}")
-            print(f"{'-'*70}\n")
+            print(f"\n{'-' * 70}")
+            print(f"  LOOP {loop + 1}/{args.loops}")
+            print(f"{'-' * 70}\n")
 
         all_results = []
         t_start = time.time()
@@ -589,7 +671,7 @@ def main():
 
             def _run_domain(idx_name):
                 idx, name = idx_name
-                t0 = time.time()
+                time.time()
                 results, t, err = run_one_domain(name, args.profile, overrides, db_path)
                 return idx, name, results, t, err
 
@@ -599,8 +681,10 @@ def main():
                 gpu_mon = GPUMonitor(target_util=args.gpu_target)
                 gpu_mon.start()
                 current_parallel = max(args.min_parallel, args.parallel)
-                print(f"  [AdaptiveParallel] GPU monitor started "
-                      f"(target={args.gpu_target*100:.0f}%, range={args.min_parallel}-{args.max_parallel})")
+                print(
+                    f"  [AdaptiveParallel] GPU monitor started "
+                    f"(target={args.gpu_target * 100:.0f}%, range={args.min_parallel}-{args.max_parallel})"
+                )
             else:
                 current_parallel = args.parallel
 
@@ -608,7 +692,6 @@ def main():
             # submit the next pending domain. Adjust pool size between waves.
             pending = list(enumerate(names))
             done = {}
-            wave_num = 0
             domain_start_times = {}  # idx -> start_time for heartbeat
 
             with ThreadPoolExecutor(max_workers=current_parallel) as pool:
@@ -619,7 +702,7 @@ def main():
                     future = pool.submit(_run_domain, (idx, name))
                     active[future] = (idx, name)
                     domain_start_times[idx] = time.time()
-                    print(f"[{idx+1:3d}/{len(names)}] {name}... STARTED", flush=True)
+                    print(f"[{idx + 1:3d}/{len(names)}] {name}... STARTED", flush=True)
 
                 while active:
                     # Wait for at least one to complete (with timeout for heartbeat)
@@ -631,9 +714,12 @@ def main():
                         for idx, st in domain_start_times.items():
                             elapsed = now - st
                             active_names.append(f"{names[idx]}({elapsed:.0f}s)")
-                        print(f"  [Heartbeat] {len(active)} running: "
-                              f"{', '.join(active_names[:4])}"
-                              f"{'...' if len(active_names) > 4 else ''}", flush=True)
+                        print(
+                            f"  [Heartbeat] {len(active)} running: "
+                            f"{', '.join(active_names[:4])}"
+                            f"{'...' if len(active_names) > 4 else ''}",
+                            flush=True,
+                        )
                         continue
                     for future in done_futures:
                         idx, name = active.pop(future)
@@ -642,14 +728,17 @@ def main():
                         domain_start_times.pop(idx, None)
                         if err or results is None:
                             err_msg = err if err else "results is None"
-                            print(f"[{idx+1:3d}/{len(names)}] {name}... ERROR ({t:.1f}s): {err_msg[:60]}", flush=True)
+                            print(f"[{idx + 1:3d}/{len(names)}] {name}... ERROR ({t:.1f}s): {err_msg[:60]}", flush=True)
                         else:
                             best = results["best_score"]
                             disc = results["discoveries"]
                             cov = results["archive_coverage"]
                             flag = " <<< FREEZE" if t > 30 else (" << slow" if t > 15 else "")
-                            print(f"[{idx+1:3d}/{len(names)}] {name}... "
-                                  f"best={best:10.4f}, {disc:4d} disc, archive={cov*100:.0f}%, {t:.1f}s{flag}", flush=True)
+                            print(
+                                f"[{idx + 1:3d}/{len(names)}] {name}... "
+                                f"best={best:10.4f}, {disc:4d} disc, archive={cov * 100:.0f}%, {t:.1f}s{flag}",
+                                flush=True,
+                            )
 
                         # Submit next pending domain if any
                         if pending:
@@ -658,19 +747,21 @@ def main():
                                 util = gpu_mon.get_avg_util()
                                 vram = gpu_mon.get_vram_usage()
                                 new_p = gpu_mon.recommend_parallelism(
-                                    current_parallel,
-                                    max_parallel=args.max_parallel,
-                                    min_parallel=args.min_parallel)
+                                    current_parallel, max_parallel=args.max_parallel, min_parallel=args.min_parallel
+                                )
                                 if new_p != current_parallel:
                                     current_parallel = new_p
                                     pool._max_workers = current_parallel
-                                    print(f"  [AdaptiveParallel] GPU={util:.0f}%, VRAM={vram*100:.0f}% "
-                                          f"→ parallelism {current_parallel}", flush=True)
+                                    print(
+                                        f"  [AdaptiveParallel] GPU={util:.0f}%, VRAM={vram * 100:.0f}% "
+                                        f"→ parallelism {current_parallel}",
+                                        flush=True,
+                                    )
                             idx_next, name_next = pending.pop(0)
                             future_next = pool.submit(_run_domain, (idx_next, name_next))
                             active[future_next] = (idx_next, name_next)
                             domain_start_times[idx_next] = time.time()
-                            print(f"[{idx_next+1:3d}/{len(names)}] {name_next}... STARTED", flush=True)
+                            print(f"[{idx_next + 1:3d}/{len(names)}] {name_next}... STARTED", flush=True)
                     # Process all completed futures in this batch before re-entering while
 
             if gpu_mon:
@@ -685,7 +776,7 @@ def main():
         else:
             # ── Sequential execution (fallback) ──
             for i, name in enumerate(names):
-                print(f"[{i+1:3d}/{len(names)}] {name}...", end=" ", flush=True)
+                print(f"[{i + 1:3d}/{len(names)}] {name}...", end=" ", flush=True)
                 torch.cuda.empty_cache()
                 results, t, err = run_one_domain(name, args.profile, overrides, db_path)
                 if err:
@@ -696,27 +787,29 @@ def main():
                     disc = results["discoveries"]
                     cov = results["archive_coverage"]
                     flag = " <<< FREEZE" if t > 30 else (" << slow" if t > 15 else "")
-                    print(f"best={best:10.4f}, {disc:4d} disc, archive={cov*100:.0f}%, {t:.1f}s{flag}")
+                    print(f"best={best:10.4f}, {disc:4d} disc, archive={cov * 100:.0f}%, {t:.1f}s{flag}")
                     all_results.append((name, results, t, None))
 
         # ── Run refinement domains spawned during this loop ──
         # When a domain converges, the engine spawns a refinement domain
         # that narrows the search around the best config. Run these now.
         refinement_results = []
-        for name, results, t, err in all_results:
+        for _name, results, _t, _err in all_results:
             if results and results.get("pending_refinements"):
                 for ref_name in results["pending_refinements"]:
                     if ref_name in DOMAINS:
                         print(f"  [Refinement] Running {ref_name}...")
                         ref_domain = DOMAINS[ref_name]()
                         ref_results, ref_t, ref_err = run_one_domain(
-                            ref_name, args.profile, overrides, db_path,
-                            domain_instance=ref_domain)
+                            ref_name, args.profile, overrides, db_path, domain_instance=ref_domain
+                        )
                         if ref_err:
                             print(f"    ERROR: {ref_err[:60]}")
                         else:
-                            print(f"    best={ref_results['best_score']:.4f}, "
-                                  f"{ref_results['discoveries']} disc, {ref_t:.1f}s")
+                            print(
+                                f"    best={ref_results['best_score']:.4f}, "
+                                f"{ref_results['discoveries']} disc, {ref_t:.1f}s"
+                            )
                             refinement_results.append((ref_name, ref_results, ref_t, None))
 
         # Add refinement results to the summary
@@ -729,11 +822,11 @@ def main():
         # previously-converged domains may find new optima.
         if args.revisit_stale and loop > 0:
             # Update scheduler with results from this loop
-            for name, results, t, err in all_results:
+            for name, results, _t, _err in all_results:
                 if results:
                     revisit_scheduler.update_after_run(
-                        name, loop, results["best_score"],
-                        converged=results.get("pending_refinements") is not None)
+                        name, loop, results["best_score"], converged=results.get("pending_refinements") is not None
+                    )
 
             # Check for stale domains to re-run
             stale = revisit_scheduler.get_stale_domains(current_loop=loop + 1)
@@ -743,13 +836,13 @@ def main():
                 for name, priority in stale[:5]:  # cap at 5 per loop
                     if name in DOMAINS:
                         print(f"  [Revisit] Re-running {name} (priority={priority:.2f})...")
-                        r_results, r_t, r_err = run_one_domain(
-                            name, args.profile, overrides, db_path)
+                        r_results, r_t, r_err = run_one_domain(name, args.profile, overrides, db_path)
                         if r_err:
                             print(f"    ERROR: {r_err[:60]}")
                         else:
-                            print(f"    best={r_results['best_score']:.4f}, "
-                                  f"{r_results['discoveries']} disc, {r_t:.1f}s")
+                            print(
+                                f"    best={r_results['best_score']:.4f}, {r_results['discoveries']} disc, {r_t:.1f}s"
+                            )
                             revisit_results.append((name, r_results, r_t, None))
                 if revisit_results:
                     all_results.extend(revisit_results)
@@ -761,30 +854,44 @@ def main():
         # Save JSON summary (per-loop, last loop overwrites)
         valid = [(n, r, t) for n, r, t, e in all_results if r is not None]
         summary = {
-            "profile": args.profile, "loop": loop + 1, "total_loops": args.loops,
+            "profile": args.profile,
+            "loop": loop + 1,
+            "total_loops": args.loops,
             "total_domains": len(names),
-            "total_time_s": total_t, "total_time_m": total_t / 60,
-            "valid_runs": len(valid), "failed_runs": len(all_results) - len(valid),
-            "results": [{"domain": n, "best_score": r["best_score"],
-                          "discoveries": r["discoveries"],
-                          "archive_coverage": r["archive_coverage"],
-                          "time_s": t, "best_config": r.get("best_config")}
-                         for n, r, t in valid],
+            "total_time_s": total_t,
+            "total_time_m": total_t / 60,
+            "valid_runs": len(valid),
+            "failed_runs": len(all_results) - len(valid),
+            "results": [
+                {
+                    "domain": n,
+                    "best_score": r["best_score"],
+                    "discoveries": r["discoveries"],
+                    "archive_coverage": r["archive_coverage"],
+                    "time_s": t,
+                    "best_config": r.get("best_config"),
+                }
+                for n, r, t in valid
+            ],
         }
         summary_path = RESULTS_DIR / f"evolve{db_suffix}_summary.json"
         with open(summary_path, "w") as f:
             json.dump(summary, f, indent=2, default=str)
         print(f"\n  Summary: {summary_path}")
 
-        loop_summaries.append({
-            "loop": loop + 1, "time_s": total_t,
-            "valid": len(valid), "failed": len(all_results) - len(valid),
-            "best_scores": {n: r["best_score"] for n, r, t in valid},
-        })
+        loop_summaries.append(
+            {
+                "loop": loop + 1,
+                "time_s": total_t,
+                "valid": len(valid),
+                "failed": len(all_results) - len(valid),
+                "best_scores": {n: r["best_score"] for n, r, t in valid},
+            }
+        )
 
         # Ideas report (only on last loop to save time)
         if loop == args.loops - 1 and not args.no_ideas and valid:
-            print(f"  Extracting discoveries...")
+            print("  Extracting discoveries...")
             top = extract_top_discoveries(db_path, top_n=20)
             ideas = generate_ideas_report(top, args.profile)
             ideas_path = RESULTS_DIR / f"evolve{db_suffix}_ideas.md"
@@ -792,16 +899,16 @@ def main():
                 f.write(ideas)
             print(f"  Ideas: {ideas_path}")
 
-        print(f"\n  Loop {loop+1} done in {total_t/60:.1f}m")
+        print(f"\n  Loop {loop + 1} done in {total_t / 60:.1f}m")
 
     # ── Grand summary across all loops ──
     grand_t = time.time() - grand_start
     if args.loops > 1:
-        print(f"\n{'='*70}")
-        print(f"  GRAND SUMMARY: {args.loops} loops in {grand_t:.1f}s ({grand_t/60:.1f}m)")
-        print(f"{'='*70}")
+        print(f"\n{'=' * 70}")
+        print(f"  GRAND SUMMARY: {args.loops} loops in {grand_t:.1f}s ({grand_t / 60:.1f}m)")
+        print(f"{'=' * 70}")
         print(f"  {'Loop':>4s} {'Time':>8s} {'Valid':>6s} {'Top Score':>12s} {'Domain':>20s}")
-        print(f"  {'-'*4} {'-'*8} {'-'*6} {'-'*12} {'-'*20}")
+        print(f"  {'-' * 4} {'-' * 8} {'-' * 6} {'-' * 12} {'-' * 20}")
         for ls in loop_summaries:
             if ls["best_scores"]:
                 top_domain = max(ls["best_scores"], key=ls["best_scores"].get)
@@ -811,24 +918,24 @@ def main():
                 print(f"  {ls['loop']:4d} {ls['time_s']:7.1f}s {ls['valid']:6d} {'N/A':>12s} {'(no valid)':>20s}")
 
         # Show score progression per domain across loops
-        print(f"\n  Score progression (top 10 domains):")
+        print("\n  Score progression (top 10 domains):")
         all_domains = set()
         for ls in loop_summaries:
             all_domains.update(ls["best_scores"].keys())
         # Rank by final loop score
         final = loop_summaries[-1]["best_scores"]
         top_domains = sorted(all_domains, key=lambda d: final.get(d, -1e9), reverse=True)[:10]
-        header = f"  {'Domain':<25s}" + "".join(f" {'L'+str(i+1):>8s}" for i in range(args.loops))
+        header = f"  {'Domain':<25s}" + "".join(f" {'L' + str(i + 1):>8s}" for i in range(args.loops))
         print(header)
         for d in top_domains:
             row = f"  {d:<25s}"
             for ls in loop_summaries:
-                s = ls["best_scores"].get(d, float('nan'))
+                s = ls["best_scores"].get(d, float("nan"))
                 row += f" {s:8.2f}"
             print(row)
-        print(f"\n  Total: {grand_t:.1f}s ({grand_t/60:.1f}m)")
+        print(f"\n  Total: {grand_t:.1f}s ({grand_t / 60:.1f}m)")
     else:
-        print(f"\n  Done in {grand_t/60:.1f}m")
+        print(f"\n  Done in {grand_t / 60:.1f}m")
 
 
 if __name__ == "__main__":

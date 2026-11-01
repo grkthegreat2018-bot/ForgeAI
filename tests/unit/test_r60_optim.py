@@ -4,6 +4,7 @@ losses (arXiv 2609.24150): eal_loss + wtv_loss.
 
 All CPU-runnable.
 """
+
 import os
 import sys
 
@@ -11,8 +12,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from forge.decoding.acceptance_losses import eal_loss, expected_accepted_length, wtv_loss
 from forge.training.optim.sf_spectral_optimizers import (
@@ -27,6 +27,7 @@ from forge.training.optim.sf_spectral_optimizers import (
 # SAMuon-lite
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def test_samuon_bulk_gain_1_reduces_to_plain_muon():
     """bulk_gain=1.0 must reproduce the plain Muon update:
     p ← p − lr · NS(mom) · max(1, m/n)^0.5  (up to bf16 rounding)."""
@@ -36,8 +37,7 @@ def test_samuon_bulk_gain_1_reduces_to_plain_muon():
     grad = torch.randn(m, n)
     momentum, lr = 0.95, 0.05
 
-    opt = SAMuonLite([p], lr=lr, momentum=momentum, bulk_gain=1.0,
-                     power_iters=3, weight_decay=0.0)
+    opt = SAMuonLite([p], lr=lr, momentum=momentum, bulk_gain=1.0, power_iters=3, weight_decay=0.0)
     p.grad = grad
     p_init = p.detach().clone()
     opt.step()
@@ -47,8 +47,8 @@ def test_samuon_bulk_gain_1_reduces_to_plain_muon():
     expected = expected * max(1, m / n) ** 0.5
     delta = p.detach() - p_init
     assert torch.allclose(delta, -lr * expected, rtol=0.05, atol=2e-2), (
-        f"bulk_gain=1.0 should equal plain Muon; max diff "
-        f"{(delta + lr * expected).abs().max().item():.4f}")
+        f"bulk_gain=1.0 should equal plain Muon; max diff {(delta + lr * expected).abs().max().item():.4f}"
+    )
 
 
 def test_samuon_bulk_gain_amplifies_bulk():
@@ -60,8 +60,7 @@ def test_samuon_bulk_gain_amplifies_bulk():
     updates = {}
     for gain in (1.0, 2.0):
         p = nn.Parameter(torch.zeros(m, n))
-        opt = SAMuonLite([p], lr=0.1, momentum=0.95, bulk_gain=gain,
-                         weight_decay=0.0)
+        opt = SAMuonLite([p], lr=0.1, momentum=0.95, bulk_gain=gain, weight_decay=0.0)
         p.grad = grad
         opt.step()
         updates[gain] = p.detach().clone()
@@ -78,8 +77,7 @@ def test_samuon_converges_toy_matrix_problem():
     def run(bulk_gain):
         torch.manual_seed(3)
         W = nn.Parameter(torch.randn(m, n))
-        opt = SAMuonLite([W], lr=0.1, momentum=0.9, bulk_gain=bulk_gain,
-                         weight_decay=0.0)
+        opt = SAMuonLite([W], lr=0.1, momentum=0.9, bulk_gain=bulk_gain, weight_decay=0.0)
         losses = []
         for _ in range(60):
             loss = ((W - W_star) ** 2).sum()
@@ -91,10 +89,8 @@ def test_samuon_converges_toy_matrix_problem():
 
     samuon = run(1.5)
     plain = run(1.0)
-    assert samuon[-1] < 0.5 * samuon[0], \
-        f"SAMuon-lite did not converge: {samuon[0]:.3f} → {samuon[-1]:.3f}"
-    assert plain[-1] < 0.5 * plain[0], \
-        f"plain Muon baseline did not converge: {plain[0]:.3f} → {plain[-1]:.3f}"
+    assert samuon[-1] < 0.5 * samuon[0], f"SAMuon-lite did not converge: {samuon[0]:.3f} → {samuon[-1]:.3f}"
+    assert plain[-1] < 0.5 * plain[0], f"plain Muon baseline did not converge: {plain[0]:.3f} → {plain[-1]:.3f}"
     # Spectral split should not be catastrophically worse than plain Muon.
     assert samuon[-1] < 5.0 * plain[-1]
 
@@ -110,10 +106,10 @@ def test_samuon_state_and_non2d_fallback():
     g1d = torch.randn(8)
     p1d.grad = g1d.clone()
     opt.step()
-    assert opt.state[p2d]['momentum'].shape == p2d.shape
-    assert opt.state[p1d]['momentum'].shape == p1d.shape
+    assert opt.state[p2d]["momentum"].shape == p2d.shape
+    assert opt.state[p1d]["momentum"].shape == p1d.shape
     # 1-D fallback: mom = (1-β)·g, p ← p − lr·mom.
-    assert torch.allclose(opt.state[p1d]['momentum'], 0.1 * g1d)
+    assert torch.allclose(opt.state[p1d]["momentum"], 0.1 * g1d)
     assert torch.allclose(p1d.detach(), p1d_init - 0.02 * 0.1 * g1d)
 
 
@@ -132,22 +128,22 @@ def test_samuon_top_singular_pair_recovers_rank1():
 
 def test_samuon_builder_and_factory():
     """build_samuon_lite: hidden 2D → SAMuon-lite, embed/head/scalars → AdamW."""
+
     class Tiny(nn.Module):
         def __init__(self):
             super().__init__()
-            self.embed = nn.Embedding(16, 8)      # embed → AdamW
-            self.fc = nn.Linear(8, 8)             # hidden 2D → SAMuon
-            self.norm = nn.LayerNorm(8)           # 1-D → AdamW
-            self.head = nn.Linear(8, 16)          # head → AdamW
+            self.embed = nn.Embedding(16, 8)  # embed → AdamW
+            self.fc = nn.Linear(8, 8)  # hidden 2D → SAMuon
+            self.norm = nn.LayerNorm(8)  # 1-D → AdamW
+            self.head = nn.Linear(8, 16)  # head → AdamW
 
     model = Tiny()
-    opt = build_samuon_lite(model, max_lr=0.003, weight_decay=0.01,
-                            bulk_gain=1.5)
+    opt = build_samuon_lite(model, max_lr=0.003, weight_decay=0.01, bulk_gain=1.5)
     assert isinstance(opt, SAMuonLiteWithAuxAdam)
     # Exposed param_groups = SAMuon groups only (hidden matrices).
-    flat = [p for g in opt.param_groups for p in g['params']]
+    flat = [p for g in opt.param_groups for p in g["params"]]
     assert len(flat) == 1 and flat[0].shape == (8, 8)
-    assert opt.param_groups[0]['bulk_gain'] == 1.5
+    assert opt.param_groups[0]["bulk_gain"] == 1.5
 
     # One step: every trainable param with nonzero grad should move.
     before = {n: p.detach().clone() for n, p in model.named_parameters()}
@@ -156,12 +152,12 @@ def test_samuon_builder_and_factory():
     loss = model.head(h).sum()
     loss.backward()
     opt.step()
-    moved = [n for n, p in model.named_parameters()
-             if not torch.equal(p.detach(), before[n])]
+    moved = [n for n, p in model.named_parameters() if not torch.equal(p.detach(), before[n])]
     assert len(moved) == len(before), f"params not updated: {set(before) - set(moved)}"
 
     # Factory wiring.
     from forge.training.training_utils import configure_optimizer
+
     opt2 = configure_optimizer(model, 0.003, 0.01, optimizer_name="samuon_lite")
     assert isinstance(opt2, SAMuonLiteWithAuxAdam)
 
@@ -169,6 +165,7 @@ def test_samuon_builder_and_factory():
 # ═══════════════════════════════════════════════════════════════════════════
 # eal_loss — Expected Accepted Length (greedy verification)
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 def _one_hot_logits(idx: int, vocab: int, scale: float = 30.0) -> torch.Tensor:
     """Logits that softmax ≈ one-hot at idx."""
@@ -192,11 +189,11 @@ def test_eal_positive_and_monotonic_in_mismatch():
     target = torch.stack([_one_hot_logits(0, V) for _ in range(W)])
     # Draft puts varying mass on the target's pick (token 0).
     near = torch.full((W, V), 0.0)
-    near[:, 0] = 3.0   # strong but imperfect match
+    near[:, 0] = 3.0  # strong but imperfect match
     mid = torch.full((W, V), 0.0)
-    mid[:, 0] = 1.0    # weaker match
+    mid[:, 0] = 1.0  # weaker match
     far = torch.full((W, V), 0.0)
-    far[:, 1] = 3.0    # peak on the WRONG token
+    far[:, 1] = 3.0  # peak on the WRONG token
     l_near = eal_loss(near, target).item()
     l_mid = eal_loss(mid, target).item()
     l_far = eal_loss(far, target).item()
@@ -237,6 +234,7 @@ def test_eal_gradient_pushes_mass_to_target_argmax():
 # wtv_loss — Window Total-Variation (sampling verification)
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def test_wtv_zero_at_identical_distributions():
     torch.manual_seed(6)
     W, V = 5, 7
@@ -251,7 +249,7 @@ def test_wtv_hand_computed_3class():
       pos1: q = p = [1,0,0]          → TV₁ = 0, w₁ = 1 → contrib 0
       pos2: q = [1,0,0], p = [0,1,0] → TV₂ = 1, w₂ = 1 → contrib 1
     Expected loss = 0·1 + 1·1 = 1.0."""
-    W, V = 2, 3
+    _W, V = 2, 3
     draft = torch.stack([_one_hot_logits(0, V), _one_hot_logits(0, V)])
     target = torch.stack([_one_hot_logits(0, V), _one_hot_logits(1, V)])
     assert wtv_loss(draft, target).item() == pytest.approx(1.0, abs=1e-3)
@@ -304,6 +302,7 @@ def test_wtv_gradient_flows():
 # DSpark trainer seam (loss_type routing)
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class _StubLLM(nn.Module):
     """Minimal main-model stub: returns hidden states via return_hidden,
     exposes .head for target logits (d_model != vocab on purpose)."""
@@ -327,8 +326,7 @@ def test_dspark_trainer_loss_type_routing():
     torch.manual_seed(8)
     for loss_type in ("ce", "eal", "wtv"):
         model = _StubLLM()
-        head = DSparkHead(d_model=8, vocab_size=16, n_predict=3,
-                          n_layers=1, seq_mode="markov")
+        head = DSparkHead(d_model=8, vocab_size=16, n_predict=3, n_layers=1, seq_mode="markov")
         trainer = DSparkTrainer(model, head, lr=1e-3, loss_type=loss_type)
         ids = torch.randint(0, 16, (2, 10))
         loss, stats = trainer.compute_loss(ids)
@@ -339,6 +337,7 @@ def test_dspark_trainer_loss_type_routing():
 
 def test_dspark_trainer_rejects_bad_loss_type():
     from forge.decoding.dspark import DSparkHead, DSparkTrainer
+
     model = _StubLLM()
     head = DSparkHead(d_model=8, vocab_size=16, n_predict=2, n_layers=1)
     with pytest.raises(ValueError):

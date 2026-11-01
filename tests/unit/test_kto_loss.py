@@ -4,6 +4,7 @@ KTO (arXiv:2402.01306, ICML 2024) uses binary good/bad labels instead of
 paired preference data. These tests verify the loss function, KL reference
 point EMA, gradient flow, and data format compatibility.
 """
+
 import os
 import sys
 
@@ -22,6 +23,7 @@ from forge.training.runners.dpo_align import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 class _DummyTokenizer:
     """Minimal tokenizer stub for build_*_sample tests (no HF dependency)."""
@@ -48,6 +50,7 @@ class _DummyTokenizer:
 # ---------------------------------------------------------------------------
 # Loss function tests
 # ---------------------------------------------------------------------------
+
 
 def test_kto_loss_good_response():
     """For a good (label=True) response, loss should DECREASE when the policy
@@ -91,8 +94,7 @@ def test_kto_loss_bad_response():
     loss_hi = kto_loss(policy_logp_hi, ref_logp, labels, beta=beta, kl_ref=kl_ref)
 
     assert loss_lo.item() < loss_hi.item(), (
-        f"Bad response: loss should be lower when policy < ref "
-        f"(got lo={loss_lo.item():.4f} vs hi={loss_hi.item():.4f})"
+        f"Bad response: loss should be lower when policy < ref (got lo={loss_lo.item():.4f} vs hi={loss_hi.item():.4f})"
     )
     assert loss_lo.item() < 0.5, f"Loss for strong bad response should be small, got {loss_lo.item():.4f}"
     print(f"PASS: kto_loss bad response (lo={loss_lo.item():.4f} < hi={loss_hi.item():.4f})")
@@ -134,6 +136,7 @@ def test_kto_loss_kl_ref_shifts_decision_boundary():
 # ---------------------------------------------------------------------------
 # KL reference point tests
 # ---------------------------------------------------------------------------
+
 
 def test_kto_kl_reference_initialization():
     """KL reference point should initialize to the first batch mean."""
@@ -180,6 +183,7 @@ def test_kto_kl_reference_detached():
 # ---------------------------------------------------------------------------
 # Gradient flow tests
 # ---------------------------------------------------------------------------
+
 
 def test_kto_gradient_flow_good():
     """Gradients should flow through KTO loss for good (label=True) examples."""
@@ -262,6 +266,7 @@ def test_kto_gradient_direction_good_vs_bad():
 # Data format tests
 # ---------------------------------------------------------------------------
 
+
 def test_kto_vs_dpo_data_format():
     """KTO works with binary labels (prompt, response, label);
     DPO works with pairs (prompt, chosen, rejected)."""
@@ -310,8 +315,10 @@ def test_kto_loss_vs_dpo_loss_different_inputs():
     """KTO loss and DPO loss accept different inputs and both produce valid scalars."""
     # DPO: paired logps.
     dpo_l = dpo_loss(
-        torch.tensor([2.0]), torch.tensor([1.0]),
-        torch.tensor([0.0]), torch.tensor([0.0]),
+        torch.tensor([2.0]),
+        torch.tensor([1.0]),
+        torch.tensor([0.0]),
+        torch.tensor([0.0]),
         beta=0.1,
     )
     assert dpo_l.item() > 0 and torch.isfinite(dpo_l)
@@ -321,7 +328,8 @@ def test_kto_loss_vs_dpo_loss_different_inputs():
         torch.tensor([2.0, -2.0]),
         torch.tensor([0.0, 0.0]),
         torch.tensor([True, False]),
-        beta=0.1, kl_ref=0.0,
+        beta=0.1,
+        kl_ref=0.0,
     )
     assert kto_l.item() > 0 and torch.isfinite(kto_l)
     print(f"PASS: both losses produce valid scalars (dpo={dpo_l.item():.4f}, kto={kto_l.item():.4f})")
@@ -331,6 +339,7 @@ def test_kto_loss_vs_dpo_loss_different_inputs():
 # Numerical correctness tests
 # ---------------------------------------------------------------------------
 
+
 def test_kto_loss_matches_formula():
     """Verify KTO loss matches the exact formula from the paper."""
     beta = 0.1
@@ -339,7 +348,7 @@ def test_kto_loss_matches_formula():
     ref_logp = torch.tensor([0.2])
     labels = torch.tensor([True])
 
-    log_ratio = (1.5 - 0.2)  # 1.3
+    log_ratio = 1.5 - 0.2  # 1.3
     expected = -torch.log(torch.sigmoid(torch.tensor(beta * (log_ratio - kl_ref)))).item()
     actual = kto_loss(policy_logp, ref_logp, labels, beta=beta, kl_ref=kl_ref).item()
 
@@ -355,7 +364,7 @@ def test_kto_loss_bad_matches_formula():
     ref_logp = torch.tensor([0.2])
     labels = torch.tensor([False])
 
-    log_ratio = (1.5 - 0.2)  # 1.3
+    log_ratio = 1.5 - 0.2  # 1.3
     expected = -torch.log(torch.sigmoid(torch.tensor(beta * (kl_ref - log_ratio)))).item()
     actual = kto_loss(policy_logp, ref_logp, labels, beta=beta, kl_ref=kl_ref).item()
 

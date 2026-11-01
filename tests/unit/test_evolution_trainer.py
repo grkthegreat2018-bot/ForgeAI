@@ -1,20 +1,26 @@
 """Tests for forge.evolution.trainer — GeneratorTrainer REINFORCE updates."""
 
-import sys; sys.path.insert(0, r"D:\windsurf\ForgeAI")
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import copy
 
 import pytest
 import torch
 
-from forge.evolution.generators import GeneratorConfig, BatchedGenerator
+from forge.evolution.generators import BatchedGenerator, GeneratorConfig
 from forge.evolution.trainer import GeneratorTrainer
 
 
 def _make_batched_gen():
     cfg = GeneratorConfig(
-        n_generators=5, noise_dim=4, context_dim=8,
-        hidden_dim=16, output_dim=4,
+        n_generators=5,
+        noise_dim=4,
+        context_dim=8,
+        hidden_dim=16,
+        output_dim=4,
     )
     return BatchedGenerator(cfg, device=torch.device("cpu"))
 
@@ -33,8 +39,11 @@ def _make_candidates():
 def trainer():
     gen = _make_batched_gen()
     return GeneratorTrainer(
-        gen, lr=1e-3, baseline_decay=0.9,
-        device=torch.device("cpu"), pushaway_strength=0.3,
+        gen,
+        lr=1e-3,
+        baseline_decay=0.9,
+        device=torch.device("cpu"),
+        pushaway_strength=0.3,
     )
 
 
@@ -145,7 +154,7 @@ class TestNotifyMutation:
         state = trainer.optimizer.state.get(trainer.batched_gen.W0, {})
         assert "exp_avg" in state
         # Snapshot the exp_avg for gen_idx 0
-        before = state["exp_avg"][0].detach().clone()
+        state["exp_avg"][0].detach().clone()
         # Notify mutation for gen 0, then run update with positive reward
         trainer.notify_mutation(0)
         candidates2 = [
@@ -166,7 +175,7 @@ class TestPushawayStrength:
 
     def test_custom_pushaway_used_in_update(self):
         """Stronger pushaway should produce larger weight delta than weak pushaway."""
-        import copy
+
         # Weak pushaway
         gen_weak = _make_batched_gen()
         w0_before = gen_weak.W0.detach().clone()
@@ -174,7 +183,7 @@ class TestPushawayStrength:
         # Strong pushaway — start from identical weights
         gen_strong = _make_batched_gen()
         with torch.no_grad():
-            for p1, p2 in zip(gen_weak.parameters(), gen_strong.parameters()):
+            for p1, p2 in zip(gen_weak.parameters(), gen_strong.parameters(), strict=False):
                 p2.copy_(p1)
         w0_before_strong = gen_strong.W0.detach().clone()
         t_strong = GeneratorTrainer(gen_strong, pushaway_strength=1.0, device=torch.device("cpu"))
@@ -188,9 +197,7 @@ class TestPushawayStrength:
         delta_weak = (gen_weak.W0.detach() - w0_before).abs().sum().item()
         delta_strong = (gen_strong.W0.detach() - w0_before_strong).abs().sum().item()
         # Strong pushaway should produce a larger weight change
-        assert delta_strong > delta_weak, (
-            f"Strong pushaway delta ({delta_strong}) should exceed weak ({delta_weak})"
-        )
+        assert delta_strong > delta_weak, f"Strong pushaway delta ({delta_strong}) should exceed weak ({delta_weak})"
 
 
 class TestBaselineDecay:
@@ -255,7 +262,10 @@ class TestMaxGradNormClipping:
     def test_grad_norm_clipped(self):
         gen = _make_batched_gen()
         t = GeneratorTrainer(
-            gen, lr=1e-3, max_grad_norm=0.5, device=torch.device("cpu"),
+            gen,
+            lr=1e-3,
+            max_grad_norm=0.5,
+            device=torch.device("cpu"),
         )
         candidates = [
             {"params": torch.rand(4), "generator_idx": 0, "noise": torch.randn(4)},
@@ -266,8 +276,9 @@ class TestMaxGradNormClipping:
         # Manually run the update logic to inspect grad norm before step
         t.batched_gen.train()
         import torch.nn as nn
+
         losses = []
-        for cand, score in zip(candidates, scores):
+        for cand, score in zip(candidates, scores, strict=False):
             noise = cand["noise"].to(t.device)
             target = cand["params"].to(t.device)
             out = t.batched_gen.forward_single(noise, context, cand["generator_idx"])
@@ -282,7 +293,5 @@ class TestMaxGradNormClipping:
         total_loss.backward()
         # Clip
         torch.nn.utils.clip_grad_norm_(t.batched_gen.parameters(), 0.5)
-        total_norm = torch.norm(
-            torch.stack([p.grad.norm() for p in t.batched_gen.parameters() if p.grad is not None])
-        )
+        total_norm = torch.norm(torch.stack([p.grad.norm() for p in t.batched_gen.parameters() if p.grad is not None]))
         assert total_norm.item() <= 0.5 + 1e-5

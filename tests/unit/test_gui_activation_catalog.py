@@ -3,15 +3,18 @@
 Verifies that the catalog mirrors ActivationConfig exactly (no drift),
 that presets resolve, and that normalize/validate helpers work.
 """
+
 import dataclasses
 
 from forge_gui.api import activation_catalog as cat
 
 # ── ActivationConfig mirror ────────────────────────────────────────────
 
+
 def _activation_config_fields():
     """Get ActivationConfig field names (import lazily — pulls in torch)."""
     from forge.engine.activation import ActivationConfig
+
     return {f.name for f in dataclasses.fields(ActivationConfig)}
 
 
@@ -21,6 +24,7 @@ ARCH_OVERRIDE_CATEGORY = "Architecture Overrides"
 def _model_config_fields():
     """Get ModelConfig field names (import lazily — pulls in torch)."""
     from forge.config import ModelConfig
+
     return {f.name for f in dataclasses.fields(ModelConfig)}
 
 
@@ -34,8 +38,7 @@ def test_catalog_covers_all_activation_config_fields():
     ``test_arch_overrides_are_model_config_fields`` instead.
     """
     cfg_fields = _activation_config_fields()
-    catalog_names = {f.name for f in cat.FIELDS
-                     if f.category != ARCH_OVERRIDE_CATEGORY}
+    catalog_names = {f.name for f in cat.FIELDS if f.category != ARCH_OVERRIDE_CATEGORY}
     missing = cfg_fields - catalog_names
     extra = catalog_names - cfg_fields
     assert not missing, f"ActivationConfig fields missing from catalog: {missing}"
@@ -46,8 +49,7 @@ def test_arch_overrides_are_model_config_fields():
     """Architecture Override catalog entries must name real ModelConfig
     fields — they are applied via config_overrides at model construction."""
     model_fields = _model_config_fields()
-    arch_names = {f.name for f in cat.FIELDS
-                  if f.category == ARCH_OVERRIDE_CATEGORY}
+    arch_names = {f.name for f in cat.FIELDS if f.category == ARCH_OVERRIDE_CATEGORY}
     assert arch_names, "expected at least one Architecture Overrides field"
     bogus = arch_names - model_fields
     assert not bogus, f"Arch overrides not in ModelConfig: {bogus}"
@@ -60,15 +62,13 @@ def test_no_duplicate_field_names():
 
 def test_all_fields_have_valid_category():
     for f in cat.FIELDS:
-        assert f.category in cat.CATEGORIES, \
-            f"field {f.name} has unknown category {f.category!r}"
+        assert f.category in cat.CATEGORIES, f"field {f.name} has unknown category {f.category!r}"
 
 
 def test_combo_fields_have_options():
     for f in cat.FIELDS:
         if f.kind == "combo":
-            assert len(f.options) >= 2, \
-                f"combo field {f.name} has fewer than 2 options"
+            assert len(f.options) >= 2, f"combo field {f.name} has fewer than 2 options"
 
 
 def test_fields_by_category_groups_all():
@@ -83,6 +83,7 @@ def test_fields_by_category_groups_all():
 
 # ── defaults ───────────────────────────────────────────────────────────
 
+
 def test_default_config_has_all_fields():
     defaults = cat.default_config()
     assert set(defaults.keys()) == {f.name for f in cat.FIELDS}
@@ -91,11 +92,11 @@ def test_default_config_has_all_fields():
 def test_default_config_matches_field_defaults():
     defaults = cat.default_config()
     for f in cat.FIELDS:
-        assert defaults[f.name] == f.default, \
-            f"default mismatch for {f.name}: {defaults[f.name]} vs {f.default}"
+        assert defaults[f.name] == f.default, f"default mismatch for {f.name}: {defaults[f.name]} vs {f.default}"
 
 
 # ── presets ────────────────────────────────────────────────────────────
+
 
 def test_preset_names_unique():
     names = [p.name for p in cat.PRESETS]
@@ -118,6 +119,7 @@ def test_preset_config_unknown_returns_none():
 
 # ── normalize_value ────────────────────────────────────────────────────
 
+
 def test_normalize_combo_none():
     f = cat.spec("kv_cache")
     assert f is not None
@@ -139,6 +141,7 @@ def test_normalize_bool():
 
 # ── validate ───────────────────────────────────────────────────────────
 
+
 def test_validate_default_config_clean():
     errors = cat.validate(cat.default_config())
     assert errors == [], f"default config has validation errors: {errors}"
@@ -153,6 +156,7 @@ def test_validate_bad_combo_value():
 
 
 # ── active_diff ────────────────────────────────────────────────────────
+
 
 def test_active_diff_no_current():
     diff = cat.active_diff(None, cat.default_config())
@@ -176,6 +180,7 @@ def test_active_diff_changed():
 
 
 # ── spec lookup ────────────────────────────────────────────────────────
+
 
 def test_spec_known():
     f = cat.spec("kv_cache")

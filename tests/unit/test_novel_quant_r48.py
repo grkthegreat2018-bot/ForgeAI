@@ -1,4 +1,5 @@
 """Unit tests for R48 extreme low-bit quantization."""
+
 from __future__ import annotations
 
 import math
@@ -29,8 +30,7 @@ class TestBinaryPacking:
     """Test binary bit packing/unpacking."""
 
     def test_pack_unpack_roundtrip(self):
-        w = torch.tensor([[1, -1, 1, 1, -1, -1, 1, -1],
-                          [-1, -1, 1, 1, 1, -1, -1, 1]], dtype=torch.int8)
+        w = torch.tensor([[1, -1, 1, 1, -1, -1, 1, -1], [-1, -1, 1, 1, 1, -1, -1, 1]], dtype=torch.int8)
         packed = _pack_binary_bits(w)
         assert packed.dtype == torch.uint8
         assert packed.shape == (2, 1)
@@ -74,7 +74,7 @@ class TestBinaryKMeans:
     def test_cluster_two_groups(self):
         torch.manual_seed(42)
         w = torch.zeros(8, 8, dtype=torch.int8)
-        w[:4] = 1   # first 4 rows all +1
+        w[:4] = 1  # first 4 rows all +1
         w[4:] = -1  # last 4 rows all -1
         cb, idx = _binary_kmeans(w, K=2, device=w.device, n_iters=10)
         assert cb.shape == (2, 8)
@@ -115,8 +115,7 @@ class TestNanoQuant:
 
         err_low = (q_low(x) - ref).abs().mean().item()
         err_high = (q_high(x) - ref).abs().mean().item()
-        assert err_high < err_low, \
-            f"Higher rank should be better: {err_high} vs {err_low}"
+        assert err_high < err_low, f"Higher rank should be better: {err_high} vs {err_low}"
 
     def test_refine_improves(self):
         """Gradient refinement should improve over ADMM-only."""
@@ -130,8 +129,7 @@ class TestNanoQuant:
 
         err_no = (q_no_refine(x) - ref).abs().mean().item()
         err_yes = (q_refined(x) - ref).abs().mean().item()
-        assert err_yes <= err_no + 0.01, \
-            f"Refine should not hurt: {err_yes} vs {err_no}"
+        assert err_yes <= err_no + 0.01, f"Refine should not hurt: {err_yes} vs {err_no}"
 
     def test_packed_storage(self):
         """Verify U and V are packed as bits, not int8."""
@@ -185,8 +183,7 @@ class TestBTC:
 
         err_small = (q_small(x) - ref).abs().mean().item()
         err_large = (q_large(x) - ref).abs().mean().item()
-        assert err_large <= err_small, \
-            f"Larger codebook should be better: {err_large} vs {err_small}"
+        assert err_large <= err_small, f"Larger codebook should be better: {err_large} vs {err_small}"
 
     def test_packed_codebook(self):
         """Verify codebook is packed as bits."""
@@ -236,8 +233,7 @@ class TestTernaryPTQ:
             unique = w[i].abs().unique()
             # Should be {0, s} (or just {s} if no zeros)
             for v in unique:
-                assert v == 0 or abs(v - s) < 1e-4, \
-                    f"Row {i}: found value {v}, expected 0 or {s}"
+                assert v == 0 or abs(v - s) < 1e-4, f"Row {i}: found value {v}, expected 0 or {s}"
 
 
 class TestModelConversion:
@@ -270,8 +266,8 @@ class TestModelConversion:
     def test_ternary_model_with_calib(self):
         model = nn.Sequential(nn.Linear(64, 128), nn.ReLU(), nn.Linear(128, 64))
         acts = {
-            '0': torch.randn(32, 64),
-            '2': torch.randn(32, 128),
+            "0": torch.randn(32, 64),
+            "2": torch.randn(32, 128),
         }
         n = quantize_model_ternary_ptq(model, activations=acts, refine_iters=5, verbose=False)
         assert n == 2
@@ -298,9 +294,9 @@ class TestModelConversion:
         model = nn.Sequential(nn.Linear(64, 128), nn.ReLU(), nn.Linear(128, 64))
         quantize_model_nanoquant(model, rank=16, admm_iters=5, verbose=False)
         mem = estimate_r48_memory(model)
-        assert mem['total_mb'] > 0
-        assert mem['total_params'] == 64*128 + 128*64
-        assert 'NanoQuantLinear' in mem['breakdown']
+        assert mem["total_mb"] > 0
+        assert mem["total_params"] == 64 * 128 + 128 * 64
+        assert "NanoQuantLinear" in mem["breakdown"]
 
 
 class TestDeviceMovement:
@@ -312,7 +308,7 @@ class TestDeviceMovement:
         lin = nn.Linear(64, 32)
         q = NanoQuantLinear.from_linear(lin, rank=16, admm_iters=10)
         q = q.cuda()
-        x = torch.randn(1, 64, device='cuda')
+        x = torch.randn(1, 64, device="cuda")
         out1 = q(x)
 
         q = q.cpu()
@@ -396,8 +392,7 @@ class TestNanoQuantQAT:
             nn.ReLU(),
             nn.Linear(32, 32),
         )
-        n = convert_model_to_nanoquant_qat(model, rank=8, admm_iters=5,
-                                            verbose=False)
+        n = convert_model_to_nanoquant_qat(model, rank=8, admm_iters=5, verbose=False)
         assert n == 2
         # Check that linears were replaced
         for m in model.modules():
@@ -412,8 +407,7 @@ class TestNanoQuantQAT:
             nn.ReLU(),
             nn.Linear(32, 32),
         )
-        convert_model_to_nanoquant_qat(model, rank=8, admm_iters=5,
-                                       verbose=False)
+        convert_model_to_nanoquant_qat(model, rank=8, admm_iters=5, verbose=False)
         n = bake_qat_model(model, verbose=False)
         assert n == 2
         for m in model.modules():

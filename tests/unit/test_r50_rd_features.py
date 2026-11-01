@@ -3,6 +3,7 @@ DRY penalty, DoLa decoding, filler-token KV, depth upscaling, PRM head.
 
 All CPU-runnable; models/tokenizers are deterministic stubs.
 """
+
 import os
 import sys
 
@@ -10,8 +11,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from forge.engine.decision_head import ProcessRewardHead, expected_calibration_error, fit_prm, score_steps
 from forge.engine.decoding import DoLaDecoding, StandardDecoding, _sample_from_logits, build_decoding
@@ -24,19 +24,18 @@ from research.merge_models import depth_layer_types, depth_upscale, parse_layer_
 # DRY repetition penalty
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def test_dry_penalizes_repeated_suffix_continuation():
     # context: 1,2,3,4 | 1,2,3,4 — last token repeats the 4-token suffix;
     # its continuation earlier in the context is token 1 (position 4).
     ctx = [1, 2, 3, 4, 1, 2, 3, 4]
-    pen = _dry_penalties(ctx, last_n=512, allowed_length=2,
-                         multiplier=1.0, base=1.75)
-    assert pen == {1: pytest.approx(1.75 ** 2)}
+    pen = _dry_penalties(ctx, last_n=512, allowed_length=2, multiplier=1.0, base=1.75)
+    assert pen == {1: pytest.approx(1.75**2)}
 
 
 def test_dry_allowed_length_free_repeats():
     ctx = [1, 2, 3, 4, 1, 2, 3, 4]
-    pen = _dry_penalties(ctx, last_n=512, allowed_length=4,
-                         multiplier=1.0, base=1.75)
+    pen = _dry_penalties(ctx, last_n=512, allowed_length=4, multiplier=1.0, base=1.75)
     assert pen == {}
 
 
@@ -60,9 +59,9 @@ def test_min_k_sensitivity_controls_truncation():
     (dead expression), so sensitivity had no effect — argmax always won.
     Now higher sensitivity must truncate more aggressively."""
     from forge.engine.forge_engine import _min_k_filter
+
     # diffs: sharp cliff at pos0 (5.0), medium cliff at pos4 (2.7).
-    logits = torch.tensor(
-        [[10., 5., 4.9, 4.8, 4.7, 2.0, 1.9, 1.8, 1.7, 1.6]])
+    logits = torch.tensor([[10.0, 5.0, 4.9, 4.8, 4.7, 2.0, 1.9, 1.8, 1.7, 1.6]])
     low = _min_k_filter(logits.clone(), 0.1)
     high = _min_k_filter(logits.clone(), 0.9)
     n_low = torch.isfinite(low).sum().item()
@@ -75,19 +74,27 @@ def test_min_k_sensitivity_controls_truncation():
 
 def test_dry_in_sample_chain_shifts_argmax():
     logits = torch.zeros(1, 16)
-    logits[0, 5] = 10.0   # argmax
+    logits[0, 5] = 10.0  # argmax
     logits[0, 6] = 9.0
     tok = _sample_from_logits(
-        logits.clone(), temperature=0.7, top_p=1.0, top_k=0,
-        repetition_penalty=1.0, generated_ids=[], min_p=0.0,
-        min_k=0.0, dry_penalties={5: 50.0},
-        top_p_fn=StandardDecoding()._top_p)
+        logits.clone(),
+        temperature=0.7,
+        top_p=1.0,
+        top_k=0,
+        repetition_penalty=1.0,
+        generated_ids=[],
+        min_p=0.0,
+        min_k=0.0,
+        dry_penalties={5: 50.0},
+        top_p_fn=StandardDecoding()._top_p,
+    )
     assert tok.item() == 6
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # DoLa decoding
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class _StubHead(nn.Module):
     def __init__(self, vocab):
@@ -132,7 +139,7 @@ def test_dola_candidate_top_k_masks():
     model = _DoLaStub(vocab=8)
     hidden = torch.zeros(1, 4, 8)
     dola = DoLaDecoding(early_layer=2, candidate_top_k=3)
-    final = torch.tensor([[0., 1., 2., 3., 4., 5., 6., 7.]])
+    final = torch.tensor([[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]])
     out = dola._contrast_logits(model, final, [hidden] * 8, [2])
     finite = torch.isfinite(out[0])
     assert finite.sum().item() == 3
@@ -176,16 +183,23 @@ def test_dola_contrast_accepts_inference_tensors():
 # Filler-token KV
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def _kv(B=1, n_kv=2, T=1, d=4, start=0.0):
-    k = torch.arange(start, start + B * n_kv * T * d,
-                     dtype=torch.float32).reshape(B, n_kv, T, d)
+    k = torch.arange(start, start + B * n_kv * T * d, dtype=torch.float32).reshape(B, n_kv, T, d)
     return k, k.clone()
 
 
 def test_filler_kv_evicts_fillers_first():
-    cache = FillerKVCache(observation_window=4, budget=8, n_kv_heads=2,
-                          head_dim=4, n_sink=4, filler_ids={5, 7, 11, 13},
-                          device="cpu", dtype=torch.float32)
+    cache = FillerKVCache(
+        observation_window=4,
+        budget=8,
+        n_kv_heads=2,
+        head_dim=4,
+        n_sink=4,
+        filler_ids={5, 7, 11, 13},
+        device="cpu",
+        dtype=torch.float32,
+    )
     # 20 appends of 1 token; fillers at positions 5,7,11,13 (unprotected:
     # sink=0..3, obs=16..19) → pass1 evicts 4, pass2 evicts 4 more → 12 kept.
     k, v = _kv(T=20)
@@ -199,7 +213,6 @@ def test_filler_kv_evicts_fillers_first():
     assert torch.equal(kept_k[0, 0, -4:], k[0, 0, -4:])
     # no unprotected filler position survived: kept values must not
     # contain the value-vector of any evicted filler position
-    evicted_vals = {5., 7., 11., 13.}
     kept_first = set(kept_k[0, 0, :, 0].tolist())
     assert kept_first.isdisjoint({v * 4.0 for v in []})  # sanity
     info = cache.info()
@@ -208,9 +221,9 @@ def test_filler_kv_evicts_fillers_first():
 
 
 def test_filler_kv_no_token_ids_falls_back_to_scores():
-    cache = FillerKVCache(observation_window=4, budget=8, n_kv_heads=2,
-                          head_dim=4, n_sink=2, device="cpu",
-                          dtype=torch.float32)
+    cache = FillerKVCache(
+        observation_window=4, budget=8, n_kv_heads=2, head_dim=4, n_sink=2, device="cpu", dtype=torch.float32
+    )
     k, v = _kv(T=16)
     cache.append(k, v, 0)  # no token_ids → pure score eviction
     assert cache.seq_len == 12
@@ -219,8 +232,7 @@ def test_filler_kv_no_token_ids_falls_back_to_scores():
 
 
 def test_filler_kv_clear_and_get_past_kv():
-    cache = FillerKVCache(budget=8, n_kv_heads=2, head_dim=4,
-                          device="cpu", dtype=torch.float32)
+    cache = FillerKVCache(budget=8, n_kv_heads=2, head_dim=4, device="cpu", dtype=torch.float32)
     assert cache.get_past_kv() is None
     k, v = _kv(T=4)
     cache.append(k, v, 0)
@@ -231,8 +243,7 @@ def test_filler_kv_clear_and_get_past_kv():
 
 def test_filler_strategy_wrapper_and_factory():
     strat = FillerKVCacheStrategy()
-    strat.init(n_heads=2, head_dim=4, n_kv_heads=2, max_seq_len=16,
-               device="cpu", dtype=torch.float32)
+    strat.init(n_heads=2, head_dim=4, n_kv_heads=2, max_seq_len=16, device="cpu", dtype=torch.float32)
     k, v = _kv(T=4)
     strat.append(k, v, 0, token_ids=[1, 2, 3, 4])
     assert strat.seq_len == 4
@@ -249,6 +260,7 @@ def test_filler_token_ids_helper():
     class _Tok:
         def encode(self, s, add_special_tokens=False):
             return [ord(c) for c in s[:2]]
+
     ids = filler_token_ids(_Tok())
     assert isinstance(ids, frozenset) and len(ids) > 0
 
@@ -259,8 +271,8 @@ def test_snapkv_multi_token_overflow_regression():
     broadcast — IndexError. Fixed by masking only the first `total`
     slots."""
     from forge.engine.kv.snapkv import SnapKVCache
-    cache = SnapKVCache(observation_window=4, budget=8, n_kv_heads=2,
-                        head_dim=4, device="cpu", dtype=torch.float32)
+
+    cache = SnapKVCache(observation_window=4, budget=8, n_kv_heads=2, head_dim=4, device="cpu", dtype=torch.float32)
     k, v = _kv(T=20)
     cache.append(k, v, 0)  # buffer grows to 32 > total=20
     assert cache.seq_len == 12
@@ -270,10 +282,10 @@ def test_snapkv_multi_token_overflow_regression():
 # Depth upscaling (passthrough merge)
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def _fake_state(n_blocks=4, d=8):
     torch.manual_seed(0)
-    state = {"embed.weight": torch.randn(32, d),
-             "head.weight": torch.randn(32, d)}
+    state = {"embed.weight": torch.randn(32, d), "head.weight": torch.randn(32, d)}
     for i in range(n_blocks):
         state[f"blocks.{i}.attn.w"] = torch.full((d, d), float(i))
         state[f"blocks.{i}.ffn.w"] = torch.full((d,), float(i))
@@ -304,21 +316,20 @@ def test_depth_upscale_duplicates_blocks():
 
 def test_depth_upscale_layer_types():
     state = _fake_state(4)
-    _, meta = depth_upscale(state, [0, 1, 0, 1],
-                            layer_types=["mamba", "attn", "mamba", "attn"])
+    _, meta = depth_upscale(state, [0, 1, 0, 1], layer_types=["mamba", "attn", "mamba", "attn"])
     assert meta["layer_types"] == ["mamba", "attn", "mamba", "attn"]
     with pytest.raises(ValueError):
         depth_upscale(state, [0, 1], layer_types=["mamba"])
     with pytest.raises(ValueError):
         depth_upscale(state, [0, 9])
-    types = depth_layer_types(state, [0, 1, 0],
-                              ["mamba", "attn", "mamba", "attn"])
+    types = depth_layer_types(state, [0, 1, 0], ["mamba", "attn", "mamba", "attn"])
     assert types == ["mamba", "attn", "mamba"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Process Reward Model
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class _StubTokenizer:
     def encode(self, text, add_special_tokens=True):
@@ -383,9 +394,7 @@ def test_fit_prm_learns_separable_labels():
         steps = [f"reason {i}", f"concl {last}"]
         labels = [1, 1 if i % 2 == 0 else 0]
         dataset.append(("question?", steps, labels))
-    _head, metrics = fit_prm(model, tok, "cpu", dataset,
-                            epochs=30, val_frac=0.25, progress=False,
-                            seed=0)
+    _head, metrics = fit_prm(model, tok, "cpu", dataset, epochs=30, val_frac=0.25, progress=False, seed=0)
     assert metrics["n_examples"] == 24
     assert metrics["steps"] == 48
     assert 0.0 <= metrics["val_acc"] <= 1.0

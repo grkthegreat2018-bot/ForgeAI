@@ -4,6 +4,7 @@ Per AGENTS.md section A: V12-Jamba MUST derive from ForgeLM V2 (the Jamba
 base), carry forward all prior keys, and be bit-exact lossless at warm
 start (zero-init new keys).
 """
+
 from __future__ import annotations
 
 from forge.config import MODEL_CONFIGS, get_config
@@ -88,12 +89,19 @@ class TestV12JambaPreset:
         v2 = get_config("forgelm_v2")
         v12 = get_config("forgelm_v12_jamba")
         v12_only_keys = {
-            "parent", "dropped_keys",
-            "use_mamba3", "mamba3_d_state",
-            "use_kronecker_embed", "kronecker_d_char", "kronecker_max_char_len",
-            "use_outro", "outro_sink_threshold",
-            "use_forge_hybrid", "forge_hybrid_d_state",
-            "forge_hybrid_sink_threshold", "forge_hybrid_n_ssm_layers",
+            "parent",
+            "dropped_keys",
+            "use_mamba3",
+            "mamba3_d_state",
+            "use_kronecker_embed",
+            "kronecker_d_char",
+            "kronecker_max_char_len",
+            "use_outro",
+            "outro_sink_threshold",
+            "use_forge_hybrid",
+            "forge_hybrid_d_state",
+            "forge_hybrid_sink_threshold",
+            "forge_hybrid_n_ssm_layers",
             # V12-Jamba intentionally enables PIT (was False in V2)
             "use_pit",
         }
@@ -101,6 +109,4 @@ class TestV12JambaPreset:
             if key in v12_only_keys:
                 continue
             assert key in v12.__dict__, f"V12-Jamba dropped V2 key: {key}"
-            assert v12.__dict__[key] == val, (
-                f"V12-Jamba changed V2 key {key}: {val} → {v12.__dict__[key]}"
-            )
+            assert v12.__dict__[key] == val, f"V12-Jamba changed V2 key {key}: {val} → {v12.__dict__[key]}"

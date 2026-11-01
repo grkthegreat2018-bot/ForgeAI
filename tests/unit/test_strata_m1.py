@@ -1,6 +1,7 @@
 """StrataLM M1 tests - model dynamics on the packed-cell substrate.
 Mirrors the FluxLM learn/recall probes in test_flux.py on the
 BlockStore/CellBlock substrate. CPU-only."""
+
 import numpy as np
 import torch
 
@@ -12,7 +13,7 @@ def _cfg(**kw):
     kw.setdefault("slots_per_block", 1 << 12)
     kw.setdefault("ring_capacity", 1 << 14)
     kw.setdefault("journal_cap", 50_000)
-    kw.setdefault("eos_token_id", -1)       # no mid-stream episode fires
+    kw.setdefault("eos_token_id", -1)  # no mid-stream episode fires
     return StrataConfig(**kw)
 
 
@@ -73,7 +74,7 @@ def test_recall_past_filler():
     long noise span still predicts (the substrate is the memory, not a
     context window)."""
     m = StrataLM(_cfg())
-    filler = "q w e r t y u i o p " * 15          # 150 tokens of noise
+    filler = "q w e r t y u i o p " * 15  # 150 tokens of noise
     m.ingest(_ids("the secret word is zephyr. " + filler), tag="mem")
     m.soft_reset()
     m.observe(_ids("the secret word is"))
@@ -86,11 +87,9 @@ def test_weights_are_local_not_meshed():
     block store grows new cells; existing rows keep their bytes."""
     m = StrataLM(_cfg())
     m.ingest(_ids("aaa bbb aaa bbb "), tag="a")
-    before = {k: sum(int(b.occupied()) for b in bl)
-              for k, bl in m.store.kinds.items()}
+    before = {k: sum(int(b.occupied()) for b in bl) for k, bl in m.store.kinds.items()}
     m.ingest(_ids("x y z x y z "), tag="b")
-    after = {k: sum(int(b.occupied()) for b in bl)
-             for k, bl in m.store.kinds.items()}
+    after = {k: sum(int(b.occupied()) for b in bl) for k, bl in m.store.kinds.items()}
     for k in after:
         assert after[k] >= before.get(k, 0)
 
@@ -108,8 +107,7 @@ def test_surprise_gated_writes():
     # repeat so new cells < writes; and surprise decays -> the second
     # 'same ' writes less than the first
     assert tots > 0
-    assert all(s["writes"] <= len(_ids("same " * 5)) for s_list in
-               stats.values() for s in s_list)
+    assert all(s["writes"] <= len(_ids("same " * 5)) for s_list in stats.values() for s in s_list)
 
 
 def test_channel_weights_adapt():
@@ -126,8 +124,7 @@ def test_uni_escape_floor():
     m.ingest(_ids("aaa bbb ccc " * 20), tag="t")
     p = torch.softmax(m._predict().float(), -1)
     denom = m._total + m._k("uni_alpha") * m.vocab_size
-    uni_pv = torch.as_tensor(
-        (m._uni + m._k("uni_alpha")) / denom, dtype=torch.float32)
+    uni_pv = torch.as_tensor((m._uni + m._k("uni_alpha")) / denom, dtype=torch.float32)
     assert (p >= 0.05 * uni_pv - 1e-6).all()
     assert torch.isfinite(p).all() and abs(float(p.sum()) - 1.0) < 1e-4
 
@@ -152,7 +149,7 @@ def test_observe_writes_nothing():
     n = m.observe(_ids("just context tokens "))
     assert n == len(_ids("just context tokens "))
     assert m._count == n and m._total == 0
-    assert not m.store.kinds          # no blocks created
+    assert not m.store.kinds  # no blocks created
     assert len(m._journal) == 0
 
 
@@ -174,9 +171,9 @@ def test_auto_episode_boundary():
     c.auto_episode = True
     m = StrataLM(c)
     doc1 = _ids("the cat sat. ")
-    m.ingest(doc1 + [2] + _ids("do"), tag="t")
+    m.ingest([*doc1, 2, *_ids("do")], tag="t")
     assert m._ep_start == len(doc1) + 1
-    assert m._keys_at(m._count - 1) == {}      # 2 in-episode tokens
+    assert m._keys_at(m._count - 1) == {}  # 2 in-episode tokens
     m.revert_tag("t")
     assert m._ep_start == 0
 
@@ -252,8 +249,7 @@ def test_revert_since_point_in_time():
     assert m._count == mark
     assert rep["reverted"] > 0
     # ring still holds the kept span; recency rebuilt in-window
-    assert all(0 <= m._count - 1 - p < m.config.recency_span
-               for p, _ in m._recent)
+    assert all(0 <= m._count - 1 - p < m.config.recency_span for p, _ in m._recent)
     # hedge weights return to the mark's state
     assert np.allclose(m._w, w_at_mark)
 
@@ -297,7 +293,7 @@ def test_explain_provenance():
     m.soft_reset()
     m.observe(_ids("the cat sat on the"))
     rep = m.explain(top_k=5)
-    assert rep["cells"]                         # cells fired
+    assert rep["cells"]  # cells fired
     c0 = rep["cells"][0]
     assert c0["channel"].startswith("o")
     assert c0["tag"] == "train" and c0["followers"]
@@ -327,7 +323,7 @@ def test_snapshot_roundtrip(tmp_path):
     assert np.array_equal(m2._uni, m._uni)
     assert np.allclose(m2._w, m._w)
     for kind, bl in m.store.kinds.items():
-        for b1, b2 in zip(bl, m2.store.kinds[kind]):
+        for b1, b2 in zip(bl, m2.store.kinds[kind], strict=False):
             assert torch.equal(b1.tag, b2.tag)
             assert torch.equal(b1.foll, b2.foll)
     # teach still recalls after load
@@ -355,8 +351,7 @@ def test_generate_greedy_recalls():
     m = StrataLM(_cfg())
     m.ingest(_ids("the cat sat on the mat. " * 10), tag="t")
     m.soft_reset()
-    out = m.generate(_ids("the cat sat on the"), max_new=4,
-                     temperature=0.0, learn=False)
+    out = m.generate(_ids("the cat sat on the"), max_new=4, temperature=0.0, learn=False)
     assert len(out) == 4
     # a learned corpus continues predictably
     assert all(isinstance(t, int) for t in out)

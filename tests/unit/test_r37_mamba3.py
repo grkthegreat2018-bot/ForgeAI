@@ -8,14 +8,14 @@ Tests:
 5. Zero-init imaginary part verification
 6. Cross-arch with MambaKey
 """
+
 import os
 import sys
 
 import pytest
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from forge.keys.architecture.mamba3_key import (
     MAMBA3_COMPLEX_NORMS,
@@ -67,7 +67,7 @@ def _make_mamba3_state() -> dict[str, torch.Tensor]:
         elif key == "x_proj.weight":
             new_out = DT_RANK + 2 * D_STATE * 2
             new_x = torch.randn(new_out, D_INNER)
-            new_x[:tensor.shape[0]] = tensor
+            new_x[: tensor.shape[0]] = tensor
             m3[key] = new_x
         elif key in MAMBA3_COMPLEX_NORMS:
             real = tensor
@@ -79,6 +79,7 @@ def _make_mamba3_state() -> dict[str, torch.Tensor]:
 
 
 # ── 1. construction & properties ──────────────────────────────────────────────
+
 
 class TestMamba3KeyProperties:
     """Test Mamba3Key construction and properties."""
@@ -108,6 +109,7 @@ class TestMamba3KeyProperties:
 
 # ── 2. forward: Mamba-2 -> Mamba-3 ────────────────────────────────────────────
 
+
 class TestMamba3Forward:
     """Test forward (Mamba-2 -> Mamba-3) conversion."""
 
@@ -133,8 +135,7 @@ class TestMamba3Forward:
         """Imaginary part of A_log is zero-init."""
         state = _make_mamba2_state()
         result = Mamba3Key().forward(state)
-        assert torch.equal(result.weights["A_log"][..., 1],
-                           torch.zeros(D_INNER, D_STATE))
+        assert torch.equal(result.weights["A_log"][..., 1], torch.zeros(D_INNER, D_STATE))
 
     def test_forward_x_proj_expanded(self):
         """x_proj.weight expands from (dt_rank+2*d_state, d_inner) to
@@ -162,8 +163,7 @@ class TestMamba3Forward:
         result = Mamba3Key().forward(state)
         for key in MAMBA3_PASSTHROUGH:
             assert key in result.weights
-            assert torch.equal(result.weights[key], state[key]), \
-                f"Passthrough mismatch: {key}"
+            assert torch.equal(result.weights[key], state[key]), f"Passthrough mismatch: {key}"
 
     def test_forward_norms_become_complex(self):
         """dt/A/B/C norms gain a trailing 2 dim (imag=0)."""
@@ -173,10 +173,8 @@ class TestMamba3Forward:
             assert key in result.weights
             t = result.weights[key]
             assert t.shape[-1] == 2, f"{key} not complex: {t.shape}"
-            assert torch.equal(t[..., 1], torch.zeros_like(t[..., 1])), \
-                f"{key} imag not zero"
-            assert torch.equal(t[..., 0], state[key]), \
-                f"{key} real not preserved"
+            assert torch.equal(t[..., 1], torch.zeros_like(t[..., 1])), f"{key} imag not zero"
+            assert torch.equal(t[..., 0], state[key]), f"{key} real not preserved"
 
     def test_forward_dt_proj_stays_real(self):
         """dt_proj stays real (no complex expansion)."""
@@ -200,6 +198,7 @@ class TestMamba3Forward:
 
 
 # ── 3. reverse: Mamba-3 -> Mamba-2 ────────────────────────────────────────────
+
 
 class TestMamba3Reverse:
     """Test reverse (Mamba-3 -> Mamba-2) extraction."""
@@ -226,8 +225,7 @@ class TestMamba3Reverse:
         result = Mamba3Key().reverse(state)
         expected_out = DT_RANK + 2 * D_STATE
         assert tuple(result.data["x_proj.weight"].shape) == (expected_out, D_INNER)
-        assert torch.equal(result.data["x_proj.weight"],
-                           state["x_proj.weight"][:expected_out])
+        assert torch.equal(result.data["x_proj.weight"], state["x_proj.weight"][:expected_out])
 
     def test_reverse_norms_become_real(self):
         """Complex norms collapse back to real (take index 0)."""
@@ -264,6 +262,7 @@ class TestMamba3Reverse:
 
 # ── 4. round-trip: Mamba-2 -> Mamba-3 -> Mamba-2 is identity ──────────────────
 
+
 class TestMamba3RoundTrip:
     """Test round-trip losslessness."""
 
@@ -284,8 +283,9 @@ class TestMamba3RoundTrip:
         state = _make_mamba2_state()
         key = Mamba3Key()
         rev = key.reverse(key.forward(state).weights)
-        assert set(rev.data.keys()) == set(state.keys()), \
+        assert set(rev.data.keys()) == set(state.keys()), (
             f"Key set mismatch: {set(rev.data.keys()) ^ set(state.keys())}"
+        )
 
     def test_round_trip_with_explicit_dims(self):
         """Round-trip works with explicitly provided d_state/dt_rank."""
@@ -298,6 +298,7 @@ class TestMamba3RoundTrip:
 
 
 # ── 5. zero-init imaginary part verification ──────────────────────────────────
+
 
 class TestMamba3ZeroInit:
     """Verify the imaginary part is exactly zero after forward."""
@@ -335,6 +336,7 @@ class TestMamba3ZeroInit:
 
 
 # ── 6. cross-arch with MambaKey ───────────────────────────────────────────────
+
 
 class TestMamba3CrossArch:
     """Test cross-arch conversion with MambaKey / Mamba2Key."""

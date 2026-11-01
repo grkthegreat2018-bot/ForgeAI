@@ -3,6 +3,7 @@
 R39-1/2/3: Qwen3, Gemma3, Llama4 architecture adapters
 R39-7: LASER + METRO MoE load balancing
 """
+
 from __future__ import annotations
 
 import pytest
@@ -20,6 +21,7 @@ from forge.engine.compat.arch_adapters import (
 from forge.moe.routers import LASERRouter, METRORouter
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
 
 def _make_qwen3_state(n_layers=2, d_model=64, vocab=256):
     """Create a minimal Qwen3-like state dict."""
@@ -98,6 +100,7 @@ def _make_llama4_state(n_layers=2, d_model=64, vocab=256, n_experts=4):
 
 # ── R39-1: Qwen3 ───────────────────────────────────────────────────────────
 
+
 class TestQwen3Adapter:
     def test_detect_qwen3(self):
         sd = _make_qwen3_state()
@@ -132,8 +135,7 @@ class TestQwen3Adapter:
         sd = _make_qwen3_state(n_layers=1)
         forge = convert_qwen3_checkpoint(sd, n_layers=1)
         assert torch.equal(forge["embed.weight"], sd["model.embed_tokens.weight"])
-        assert torch.equal(forge["blocks.0.attn.q_proj.weight"],
-                          sd["model.layers.0.self_attn.q_proj.weight"])
+        assert torch.equal(forge["blocks.0.attn.q_proj.weight"], sd["model.layers.0.self_attn.q_proj.weight"])
 
     def test_qwen3_detect_n_layers(self):
         sd = _make_qwen3_state(n_layers=3)
@@ -141,6 +143,7 @@ class TestQwen3Adapter:
 
 
 # ── R39-2: Gemma3 ──────────────────────────────────────────────────────────
+
 
 class TestGemma3Adapter:
     def test_detect_gemma3(self):
@@ -166,8 +169,7 @@ class TestGemma3Adapter:
         forge = convert_gemma3_checkpoint(sd, n_layers=1)
         assert torch.equal(forge["embed.weight"], sd["model.embed_tokens.weight"])
         # o_proj → out_proj (tensor unchanged)
-        assert torch.equal(forge["blocks.0.attn.out_proj.weight"],
-                          sd["model.layers.0.self_attn.o_proj.weight"])
+        assert torch.equal(forge["blocks.0.attn.out_proj.weight"], sd["model.layers.0.self_attn.o_proj.weight"])
 
     def test_gemma3_layer_types(self):
         """Gemma3 alternates SWA and global attention."""
@@ -180,6 +182,7 @@ class TestGemma3Adapter:
 
 
 # ── R39-3: Llama4 ──────────────────────────────────────────────────────────
+
 
 class TestLlama4Adapter:
     def test_detect_llama4(self):
@@ -207,13 +210,14 @@ class TestLlama4Adapter:
         sd = _make_llama4_state(n_layers=1, n_experts=2)
         forge = convert_llama4_checkpoint(sd, n_layers=1)
         assert torch.equal(forge["embed.weight"], sd["model.embed_tokens.weight"])
-        assert torch.equal(forge["blocks.0.moe.router.weight"],
-                          sd["model.layers.0.feed_forward.router.weight"])
-        assert torch.equal(forge["blocks.0.moe.experts.0.w_gate.weight"],
-                          sd["model.layers.0.feed_forward.experts.0.w1.weight"])
+        assert torch.equal(forge["blocks.0.moe.router.weight"], sd["model.layers.0.feed_forward.router.weight"])
+        assert torch.equal(
+            forge["blocks.0.moe.experts.0.w_gate.weight"], sd["model.layers.0.feed_forward.experts.0.w1.weight"]
+        )
 
 
 # ── Auto-detection ─────────────────────────────────────────────────────────
+
 
 class TestAutoDetection:
     def test_auto_convert_qwen3(self):
@@ -239,6 +243,7 @@ class TestAutoDetection:
 
 # ── R39-7: LASER ───────────────────────────────────────────────────────────
 
+
 class TestLASER:
     def test_construction(self):
         router = LASERRouter(n_experts=8, n_layers=32, default_top_k=2)
@@ -263,8 +268,7 @@ class TestLASER:
         assert torch.allclose(weights.sum(dim=-1), torch.ones(4), atol=1e-5)
 
     def test_custom_overrides(self):
-        router = LASERRouter(n_experts=8, n_layers=10, default_top_k=2,
-                             layer_k_overrides={0: 4, 5: 1})
+        router = LASERRouter(n_experts=8, n_layers=10, default_top_k=2, layer_k_overrides={0: 4, 5: 1})
         assert router.get_top_k(0) == 4
         assert router.get_top_k(5) == 1
         assert router.get_top_k(3) == 2  # default
@@ -277,6 +281,7 @@ class TestLASER:
 
 
 # ── R39-7: METRO ───────────────────────────────────────────────────────────
+
 
 class TestMETRO:
     def test_construction(self):

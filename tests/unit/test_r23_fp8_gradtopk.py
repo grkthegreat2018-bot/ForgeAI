@@ -6,9 +6,11 @@ Tests R21 training-time features that R23 wires into the V8 training loop:
 - TopKGradientOptimizer: wraps any optimizer, sparsifies gradients to top-K%
   with EF21 error feedback (10x fewer gradient transfers)
 """
-import sys
 
-sys.path.insert(0, r"D:\windsurf\ForgeAI")
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch
 import torch.nn as nn
@@ -18,6 +20,7 @@ _DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # ── R23-FP8-1: FP8 activation memory ────────────────────────────────────────
+
 
 def test_fp8_activation_memory():
     """FP8 compressed activation should use ~1 byte/element vs 2 for bf16."""
@@ -44,15 +47,14 @@ def test_fp8_activation_memory():
     print(f"  bf16 act memory: {bf16_bytes} bytes ({bf16_per_elem:.2f} B/elem)")
     print(f"  Compression: {compression:.2f}x")
 
-    assert fp8_per_elem < 1.5, \
-        f"FP8 should be ~1 byte/elem, got {fp8_per_elem:.2f}"
-    assert compression > 1.5, \
-        f"FP8 should compress >1.5x vs bf16, got {compression:.2f}x"
+    assert fp8_per_elem < 1.5, f"FP8 should be ~1 byte/elem, got {fp8_per_elem:.2f}"
+    assert compression > 1.5, f"FP8 should compress >1.5x vs bf16, got {compression:.2f}x"
 
     print("  fp8_activation_memory: PASS")
 
 
 # ── R23-FP8-2: FP8 quantization round-trip ──────────────────────────────────
+
 
 def test_fp8_activation_roundtrip():
     """FP8 quantize → dequantize should have <10% mean relative error."""
@@ -64,14 +66,14 @@ def test_fp8_activation_roundtrip():
     x_dq = FP8ActivationLinear._dequantize_fp8(x_fp8, scale)
 
     rel_err = (x - x_dq).abs().mean().item() / x.abs().mean().item()
-    print(f"  FP8 round-trip: {x.numel()} elements, {rel_err*100:.2f}% error")
-    assert rel_err < 0.10, \
-        f"FP8 round-trip error should be <10%, got {rel_err*100:.2f}%"
+    print(f"  FP8 round-trip: {x.numel()} elements, {rel_err * 100:.2f}% error")
+    assert rel_err < 0.10, f"FP8 round-trip error should be <10%, got {rel_err * 100:.2f}%"
 
     print("  fp8_activation_roundtrip: PASS")
 
 
 # ── R23-FP8-3: Forward correctness ──────────────────────────────────────────
+
 
 def test_fp8_activation_forward_correct():
     """FP8ActivationLinear forward should be close to plain nn.Linear (same weights)."""
@@ -94,14 +96,14 @@ def test_fp8_activation_forward_correct():
         out_plain = plain_layer(x)
 
     rel_err = (out_fp8 - out_plain).abs().mean().item() / out_plain.abs().mean().item()
-    print(f"  FP8 vs plain Linear: {rel_err*100:.2f}% relative error")
-    assert rel_err < 0.05, \
-        f"FP8 forward should be within 5% of plain, got {rel_err*100:.2f}%"
+    print(f"  FP8 vs plain Linear: {rel_err * 100:.2f}% relative error")
+    assert rel_err < 0.05, f"FP8 forward should be within 5% of plain, got {rel_err * 100:.2f}%"
 
     print("  fp8_activation_forward_correct: PASS")
 
 
 # ── R23-FP8-4: Backward pass ────────────────────────────────────────────────
+
 
 def test_fp8_activation_backward():
     """Forward + backward through FP8ActivationLinear should produce finite grads."""
@@ -134,6 +136,7 @@ def test_fp8_activation_backward():
 
 # ── R23-GradTopK-5: Sparsity verification ───────────────────────────────────
 
+
 def test_gradtopk_sparsity():
     """TopKGradientOptimizer with ratio=0.1 should produce ~10% dense gradients."""
     from forge.training.optim.r21_cross_domain import TopKGradientOptimizer
@@ -162,15 +165,14 @@ def test_gradtopk_sparsity():
     non_zero = (sparse_grad.abs() > 0).sum().item()
     density = non_zero / total_elements
 
-    print(f"  GradTopK ratio=0.1: {non_zero}/{total_elements} non-zero "
-          f"({density*100:.1f}% dense)")
-    assert 0.05 < density < 0.15, \
-        f"Gradient should be ~10% dense, got {density*100:.1f}%"
+    print(f"  GradTopK ratio=0.1: {non_zero}/{total_elements} non-zero ({density * 100:.1f}% dense)")
+    assert 0.05 < density < 0.15, f"Gradient should be ~10% dense, got {density * 100:.1f}%"
 
     print("  gradtopk_sparsity: PASS")
 
 
 # ── R23-GradTopK-6: Error feedback convergence ──────────────────────────────
+
 
 def test_gradtopk_error_feedback():
     """With EF21, TopK should converge similarly to dense over 20 steps."""
@@ -216,13 +218,13 @@ def test_gradtopk_error_feedback():
     # On tiny models with 20 steps, TopK 10% converges slower — allow 10x slack
     ratio = final_topk / max(final_dense, 1e-8)
     print(f"  TopK/dense final loss ratio: {ratio:.2f}")
-    assert ratio < 10.0, \
-        f"TopK with EF should converge (ratio={ratio:.2f})"
+    assert ratio < 10.0, f"TopK with EF should converge (ratio={ratio:.2f})"
 
     print("  gradtopk_error_feedback: PASS")
 
 
 # ── R23-GradTopK-7: Ratio sweep ─────────────────────────────────────────────
+
 
 def test_gradtopk_ratio_sweep():
     """Test multiple ratios and verify actual sparsity matches expected."""
@@ -251,22 +253,21 @@ def test_gradtopk_ratio_sweep():
 
         if ratio >= 1.0:
             expected = 1.0
-            assert non_zero == total, \
-                f"ratio=1.0 should keep all gradients, got {non_zero}/{total}"
+            assert non_zero == total, f"ratio=1.0 should keep all gradients, got {non_zero}/{total}"
         else:
             expected = ratio
             # Allow some tolerance for rounding (k = max(1, int(n * ratio)))
             assert abs(actual_density - expected) < 0.02, (
-                f"ratio={ratio}: expected ~{expected*100:.0f}% dense, "
-                f"got {actual_density*100:.1f}%")
+                f"ratio={ratio}: expected ~{expected * 100:.0f}% dense, got {actual_density * 100:.1f}%"
+            )
 
-        print(f"  ratio={ratio:.2f}: {actual_density*100:.1f}% dense "
-              f"({non_zero}/{total})")
+        print(f"  ratio={ratio:.2f}: {actual_density * 100:.1f}% dense ({non_zero}/{total})")
 
     print("  gradtopk_ratio_sweep: PASS")
 
 
 # ── R23-FP8-GradTopK-8: Combined training ───────────────────────────────────
+
 
 def test_fp8_gradtopk_combined():
     """FP8ActivationLinear + TopKGradientOptimizer should reduce loss + memory."""
@@ -301,8 +302,10 @@ def test_fp8_gradtopk_combined():
     bf16_bytes = 16 * d * 2  # bf16 baseline for one layer's activation
 
     print(f"  Combined: {initial_loss:.4f} -> {final_loss:.4f}")
-    print(f"  FP8 act memory: {fp8_bytes} bytes vs bf16 {bf16_bytes} bytes "
-          f"({bf16_bytes/max(fp8_bytes,1):.1f}x compression)")
+    print(
+        f"  FP8 act memory: {fp8_bytes} bytes vs bf16 {bf16_bytes} bytes "
+        f"({bf16_bytes / max(fp8_bytes, 1):.1f}x compression)"
+    )
 
     assert final_loss < initial_loss, "Loss should decrease over 20 steps"
     assert fp8_bytes < bf16_bytes, "FP8 should use less memory than bf16"
@@ -311,6 +314,7 @@ def test_fp8_gradtopk_combined():
 
 
 # ── R23-FP8-GradTopK-9: NVMe speedup simulation ─────────────────────────────
+
 
 def test_fp8_gradtopk_nvme_speedup():
     """GradTopK should reduce gradient elements transferred (NVMe block switch)."""
@@ -340,7 +344,7 @@ def test_fp8_gradtopk_nvme_speedup():
     loss2 = F.mse_loss(model2(x), y)
     loss2.backward()
     # Count elements before sparsification
-    pre_sparsify_elements = model2.weight.grad.numel()
+    model2.weight.grad.numel()
     topk_opt.step()
     # After step, count non-zero (transferred) elements
     transferred_with = (model2.weight.grad.abs() > 0).sum().item()
@@ -351,10 +355,8 @@ def test_fp8_gradtopk_nvme_speedup():
     print(f"  With GradTopK:    {transferred_with} gradient elements transferred")
     print(f"  Transfer speedup: {speedup:.1f}x")
 
-    assert transferred_with < transferred_without, \
-        "GradTopK should reduce transferred elements"
-    assert speedup > 5.0, \
-        f"GradTopK 10% should give >5x transfer speedup, got {speedup:.1f}x"
+    assert transferred_with < transferred_without, "GradTopK should reduce transferred elements"
+    assert speedup > 5.0, f"GradTopK 10% should give >5x transfer speedup, got {speedup:.1f}x"
 
     print("  fp8_gradtopk_nvme_speedup: PASS")
 

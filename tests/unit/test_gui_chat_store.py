@@ -1,4 +1,5 @@
 """Unit tests for forge_gui.api.chat_store (persistence, ratings, SFT export)."""
+
 import json
 
 import pytest
@@ -57,8 +58,7 @@ def test_export_only_good_turns(store, tmp_path):
     assert out.parent.name == "sft"
     assert out.suffix == ".jsonl"
     assert n == 1
-    lines = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines()
-             if l.strip()]
+    lines = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(lines) == 1
     msgs = lines[0]["messages"]
     # prefix up to the good turn: user + assistant (no system configured)
@@ -70,6 +70,7 @@ def test_export_format_matches_sft_train(store):
     """Exported lines must be loadable by sft_train.load_examples."""
     import sys
     from pathlib import Path
+
     root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(root))
     from forge.training.runners.sft_train import load_examples
@@ -93,8 +94,7 @@ def test_export_with_system_prompt(store):
     i = store.append_message(conv["id"], "assistant", "a")
     store.rate_message(conv["id"], i, "good")
     out, _n = store.export_training_data()
-    msgs = next(json.loads(l)["messages"] for l in
-            out.read_text(encoding="utf-8").splitlines() if l.strip())
+    msgs = next(json.loads(line)["messages"] for line in out.read_text(encoding="utf-8").splitlines() if line.strip())
     assert msgs[0]["role"] == "system"
     assert msgs[0]["content"] == "You are Forge."
 

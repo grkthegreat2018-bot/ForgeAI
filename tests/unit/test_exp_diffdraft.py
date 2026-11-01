@@ -1,4 +1,5 @@
 """CPU tests for forge/exp/diffdraft.py."""
+
 import torch
 
 from forge.exp.diffdraft import DiffusionDraftHead, _truncate_pasts, spec_verify
@@ -7,6 +8,7 @@ from forge.exp.diffdraft import DiffusionDraftHead, _truncate_pasts, spec_verify
 def _tiny_attn_model():
     from forge.config import get_config
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = get_config("forgelm_tiny", layer_types=["attention"] * 4)
     cfg.vocab_size = 256
     cfg.device = "cpu"

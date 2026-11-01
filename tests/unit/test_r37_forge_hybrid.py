@@ -1,4 +1,5 @@
 """Tests for R37-5: ForgeHybrid Key — Sink-Aware SSM+Attention Routing."""
+
 from __future__ import annotations
 
 import pytest
@@ -159,9 +160,9 @@ class TestForgeHybridKey:
         assert routing.shape == (1, 5)
         assert not routing[0, 0]  # ratio 1.0 < 2.0 → attention
         assert not routing[0, 1]  # ratio 1.5 < 2.0 → attention
-        assert routing[0, 2]      # ratio 3.0 > 2.0 → SSM
+        assert routing[0, 2]  # ratio 3.0 > 2.0 → SSM
         assert not routing[0, 3]  # ratio 0.5 < 2.0 → attention
-        assert routing[0, 4]      # ratio 2.5 > 2.0 → SSM
+        assert routing[0, 4]  # ratio 2.5 > 2.0 → SSM
 
     def test_default_threshold_is_infinity(self):
         """Default threshold = inf means all tokens use attention (warm start)."""
@@ -173,6 +174,7 @@ class TestForgeHybridKey:
     def test_cross_arch_with_mamba(self):
         """Cross-arch should work with other BI keys."""
         from tests.fixtures.keys.architecture.mamba_key import MambaKey
+
         hybrid = ForgeHybridKey(d_model=64, d_state=8)
         mamba = MambaKey()
         # Can't do real cross-arch without proper Mamba weights,

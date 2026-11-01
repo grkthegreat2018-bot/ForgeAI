@@ -1,4 +1,4 @@
-﻿"""Unit tests for SystemOneEvaluator (forge/engine/decide.py).
+"""Unit tests for SystemOneEvaluator (forge/engine/decide.py).
 
 TypeSafe System One-compatible typed decisions: noul / choice / score
 questions answered via candidate-continuation scoring in single forward
@@ -10,6 +10,7 @@ Tests cover:
   - both scoring paths (single-token fast path, batched continuation)
   - evaluate() end-to-end on a CPU tiny model + real tokenizer
 """
+
 import sys
 from pathlib import Path
 
@@ -28,10 +29,12 @@ from forge.engine.decide import (
 
 # â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+
 def _tiny_model():
     """Random-init gen_model_tiny (vocab 65536) on CPU."""
     from forge.config import get_config
     from forge.model_loader import ConfigurableResearchLLM
+
     cfg = get_config("gen_model_tiny")
     cfg.device = "cpu"
     cfg.dtype = "float32"
@@ -50,6 +53,7 @@ def tokenizer():
     """Real Jamba tokenizer (gigatoken); skips if unavailable."""
     try:
         from research.tokenizer_cache import get_tokenizer
+
         return get_tokenizer()
     except Exception as e:
         pytest.skip(f"tokenizer unavailable: {e}")
@@ -62,6 +66,7 @@ def evaluator(tokenizer):
 
 
 # â”€â”€ _jsonable â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
 
 class TestJsonable:
     def test_none(self):
@@ -79,6 +84,7 @@ class TestJsonable:
 
 # â”€â”€ _parse_question validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+
 class TestParseQuestion:
     def test_noul_minimal(self):
         q = _parse_question("k", {"type": "noul"})
@@ -87,9 +93,9 @@ class TestParseQuestion:
         assert q.candidates == [" yes", " no"]
 
     def test_noul_with_criteria(self):
-        q = _parse_question("k", {
-            "type": "noul", "instructions": "Is it spam?",
-            "criteria": {"true": "spam", "false": "ham"}})
+        q = _parse_question(
+            "k", {"type": "noul", "instructions": "Is it spam?", "criteria": {"true": "spam", "false": "ham"}}
+        )
         assert q.noul_descs == {"true": "spam", "false": "ham"}
 
     def test_choice_requires_criteria(self):
@@ -110,10 +116,8 @@ class TestParseQuestion:
         with pytest.raises(QuestionValidationError, match="2-10"):
             _parse_question("k", {"type": "score", "criteria": ["x"]})
         with pytest.raises(QuestionValidationError, match="2-10"):
-            _parse_question("k", {"type": "score",
-                                  "criteria": [str(i) for i in range(11)]})
-        q = _parse_question("k", {"type": "score",
-                                  "criteria": ["bad", "ok", "good"]})
+            _parse_question("k", {"type": "score", "criteria": [str(i) for i in range(11)]})
+        q = _parse_question("k", {"type": "score", "criteria": ["bad", "ok", "good"]})
         assert q.labels == ["0", "1", "2"]
         assert q.candidates == [" 0", " 1", " 2"]
         assert q.legend == {"0": "bad", "1": "ok", "2": "good"}
@@ -132,6 +136,7 @@ class TestParseQuestion:
 
 
 # â”€â”€ _peaked_confidence â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
 
 class TestPeakedConfidence:
     def test_uniform_is_zero(self):
@@ -155,9 +160,7 @@ _STATE = "Acme Corp reported record Q3 revenue of $4.2B, up 18% YoY."
 
 class TestEvaluate:
     def test_noul_wire_shape(self, evaluator):
-        out = evaluator.evaluate(
-            _STATE, {"good_news": {"type": "noul",
-                                   "instructions": "The news is positive."}})
+        out = evaluator.evaluate(_STATE, {"good_news": {"type": "noul", "instructions": "The news is positive."}})
         ans = out["answers"]["good_news"]
         assert ans["type"] == "noul"
         assert 0.0 <= ans["noul"] <= 1.0
@@ -169,11 +172,14 @@ class TestEvaluate:
     def test_choice_wire_shape(self, evaluator):
         out = evaluator.evaluate(
             _STATE,
-            {"sector": {"type": "choice",
-                        "instructions": "Which sector does this concern?",
-                        "criteria": {"finance": "financial results",
-                                     "sports": "athletics",
-                                     "weather": "forecasts"}}})
+            {
+                "sector": {
+                    "type": "choice",
+                    "instructions": "Which sector does this concern?",
+                    "criteria": {"finance": "financial results", "sports": "athletics", "weather": "forecasts"},
+                }
+            },
+        )
         ans = out["answers"]["sector"]
         assert ans["type"] == "choice"
         assert ans["choice"] in {"finance", "sports", "weather"}
@@ -185,9 +191,14 @@ class TestEvaluate:
     def test_score_wire_shape(self, evaluator):
         out = evaluator.evaluate(
             _STATE,
-            {"hype": {"type": "score",
-                      "instructions": "How bullish is this report?",
-                      "criteria": ["bearish", "neutral", "bullish"]}})
+            {
+                "hype": {
+                    "type": "score",
+                    "instructions": "How bullish is this report?",
+                    "criteria": ["bearish", "neutral", "bullish"],
+                }
+            },
+        )
         ans = out["answers"]["hype"]
         assert ans["type"] == "score"
         assert 0.0 <= ans["score"] <= 2.0
@@ -202,10 +213,12 @@ class TestEvaluate:
     def test_mixed_questions_in_one_call(self, evaluator):
         out = evaluator.evaluate(
             _STATE,
-            {"pos": {"type": "noul", "instructions": "Positive news?"},
-             "sector": {"type": "choice",
-                        "criteria": {"finance": None, "sports": None}},
-             "hype": {"type": "score", "criteria": ["low", "high"]}})
+            {
+                "pos": {"type": "noul", "instructions": "Positive news?"},
+                "sector": {"type": "choice", "criteria": {"finance": None, "sports": None}},
+                "hype": {"type": "score", "criteria": ["low", "high"]},
+            },
+        )
         assert set(out["answers"]) == {"pos", "sector", "hype"}
         assert out["answers"]["pos"]["type"] == "noul"
         assert out["answers"]["sector"]["type"] == "choice"
@@ -213,8 +226,8 @@ class TestEvaluate:
 
     def test_state_as_dict(self, evaluator):
         out = evaluator.evaluate(
-            {"company": "Acme", "revenue": 4.2},
-            {"ok": {"type": "noul", "instructions": "Revenue mentioned?"}})
+            {"company": "Acme", "revenue": 4.2}, {"ok": {"type": "noul", "instructions": "Revenue mentioned?"}}
+        )
         assert 0.0 <= out["answers"]["ok"]["noul"] <= 1.0
 
     def test_empty_state_rejected(self, evaluator):
@@ -237,23 +250,21 @@ class TestEvaluate:
 
     def test_context_limit_truncates(self, evaluator):
         long_state = "word " * 5000
-        out = evaluator.evaluate(
-            long_state, {"q": {"type": "noul"}}, context_limit=256)
+        out = evaluator.evaluate(long_state, {"q": {"type": "noul"}}, context_limit=256)
         assert out["usage"]["input_tokens"] <= 300  # 256 + slack
 
 
 # â”€â”€ ForgeEngine.decide() â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+
 class TestEngineDecide:
     def test_decide_via_engine(self, tokenizer):
         from forge.engine.forge_engine import ForgeEngine
+
         model = _tiny_model()
         engine = ForgeEngine(model, tokenizer, device="cpu")
         try:
-            out = engine.decide(
-                _STATE,
-                {"q": {"type": "choice",
-                       "criteria": {"a": "first", "b": "second"}}})
+            out = engine.decide(_STATE, {"q": {"type": "choice", "criteria": {"a": "first", "b": "second"}}})
             assert out["answers"]["q"]["choice"] in {"a", "b"}
         finally:
             del engine
@@ -262,6 +273,7 @@ class TestEngineDecide:
 
 # â”€â”€ POST /v1/systemone route â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+
 class _StubRegistry:
     """Minimal ModelRegistry stand-in for route tests."""
 
@@ -269,9 +281,16 @@ class _StubRegistry:
         self._engine = engine
 
     def list_models(self):
-        return [{"id": "forgelm-v2-jamba", "awake": True,
-                 "vram_budget_gb": 8.0, "config": "forgelm_v2",
-                 "last_used_ago_s": 0.0, "generations": 0}]
+        return [
+            {
+                "id": "forgelm-v2-jamba",
+                "awake": True,
+                "vram_budget_gb": 8.0,
+                "config": "forgelm_v2",
+                "last_used_ago_s": 0.0,
+                "generations": 0,
+            }
+        ]
 
     def get_engine(self, model_id):
         return self._engine if model_id == "forgelm-v2-jamba" else None
@@ -292,20 +311,24 @@ def route_client(evaluator):
     from fastapi.testclient import TestClient
 
     from forge.engine.forge_server import ForgeServer
+
     server = ForgeServer(registry=_StubRegistry(_StubEngine(evaluator)))
     return TestClient(server.app)
 
 
 class TestSystemOneRoute:
     def test_systemone_happy_path(self, route_client):
-        resp = route_client.post("/v1/systemone", json={
-            "state": _STATE,
-            "model": "jev-latest",  # unregistered alias -> falls back
-            "questions": {
-                "pos": {"type": "noul", "instructions": "Positive?"},
-                "sector": {"type": "choice",
-                           "criteria": {"finance": None, "sports": None}},
-            }})
+        resp = route_client.post(
+            "/v1/systemone",
+            json={
+                "state": _STATE,
+                "model": "jev-latest",  # unregistered alias -> falls back
+                "questions": {
+                    "pos": {"type": "noul", "instructions": "Positive?"},
+                    "sector": {"type": "choice", "criteria": {"finance": None, "sports": None}},
+                },
+            },
+        )
         assert resp.status_code == 200
         assert resp.headers.get("x-typesafe-request-id")
         body = resp.json()
@@ -315,21 +338,18 @@ class TestSystemOneRoute:
         assert "usage" in body
 
     def test_systemone_validation_422(self, route_client):
-        resp = route_client.post("/v1/systemone", json={
-            "state": _STATE,
-            "model": "forgelm-v2-jamba",
-            "questions": {"bad": {"type": "choice"}}})  # missing criteria
+        resp = route_client.post(
+            "/v1/systemone",
+            json={"state": _STATE, "model": "forgelm-v2-jamba", "questions": {"bad": {"type": "choice"}}},
+        )  # missing criteria
         assert resp.status_code == 422
 
     def test_systemone_bad_type_422(self, route_client):
-        resp = route_client.post("/v1/systemone", json={
-            "state": _STATE,
-            "questions": {"bad": {"type": "essay"}}})
+        resp = route_client.post("/v1/systemone", json={"state": _STATE, "questions": {"bad": {"type": "essay"}}})
         assert resp.status_code == 422
 
     def test_models_typesafe_shape(self, route_client):
-        resp = route_client.get("/v1/models",
-                          headers={"X-TypeSafe-SDK": "python/0.6.0"})
+        resp = route_client.get("/v1/models", headers={"X-TypeSafe-SDK": "python/0.6.0"})
         assert resp.status_code == 200
         models = resp.json()["models"]
         assert models[0]["name"] == "forgelm-v2-jamba"

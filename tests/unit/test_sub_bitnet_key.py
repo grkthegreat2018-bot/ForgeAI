@@ -5,6 +5,7 @@ benefit, IRB error decay across rounds, low-rank residual path, the Key
 interface (forward/reverse/class), state-dict apply, the inference module,
 and the config-driven builder. All CPU, no CUDA required.
 """
+
 import math
 
 import pytest
@@ -35,6 +36,7 @@ def _sqnr(w: torch.Tensor, w_hat: torch.Tensor) -> float:
 
 
 # ── Core quantize / dequantize ───────────────────────────────────────────────
+
 
 class TestQuantizeDequantize:
     def test_roundtrip_shapes_and_dtype(self):
@@ -83,8 +85,8 @@ class TestQuantizeDequantize:
         packed = quantize_sub_bitnet(w, n_rounds=1, rank=0)
         sb_sqnr = _sqnr(w, dequantize_sub_bitnet(packed, torch.float32))
         assert sb_sqnr > naive_sqnr, (
-            f"SubBitnet SQNR {sb_sqnr:.2f} dB should beat naive sign "
-            f"{naive_sqnr:.2f} dB (Hadamard incoherence benefit)")
+            f"SubBitnet SQNR {sb_sqnr:.2f} dB should beat naive sign {naive_sqnr:.2f} dB (Hadamard incoherence benefit)"
+        )
 
     def test_irb_error_decays_with_rounds(self):
         """More IRB rounds → lower reconstruction error (exponential decay)."""
@@ -108,8 +110,7 @@ class TestQuantizeDequantize:
         assert packed1["rank"] == 16
         assert packed1["rank_u"] is not None
         err1 = ((w - dequantize_sub_bitnet(packed1, torch.float32)) ** 2).mean().item()
-        assert err1 <= err0 + 1e-9, (
-            f"low-rank residual err {err1:.5f} should be <= no-residual {err0:.5f}")
+        assert err1 <= err0 + 1e-9, f"low-rank residual err {err1:.5f} should be <= no-residual {err0:.5f}"
 
     def test_low_rank_factors_shapes(self):
         w = torch.randn(32, 64)
@@ -119,6 +120,7 @@ class TestQuantizeDequantize:
 
 
 # ── binary_quantize_round unit ───────────────────────────────────────────────
+
 
 class TestBinaryRound:
     def test_signs_and_scale_shape(self):
@@ -139,6 +141,7 @@ class TestBinaryRound:
 
 
 # ── Key interface ────────────────────────────────────────────────────────────
+
 
 class TestSubBitnetKey:
     def test_key_properties(self):
@@ -209,6 +212,7 @@ class TestSubBitnetKey:
 
 # ── apply_sub_bitnet state-dict ──────────────────────────────────────────────
 
+
 class TestApplySubBitnet:
     def test_applies_to_2d_weights_only(self):
         state = {
@@ -239,6 +243,7 @@ class TestApplySubBitnet:
 
 
 # ── SubBitnetLinear inference module ─────────────────────────────────────────
+
 
 class TestSubBitnetLinear:
     def test_from_linear_matches_dequantize(self):
@@ -272,8 +277,7 @@ class TestSubBitnetLinear:
         assert torch.allclose(y, expected, atol=1e-5)
 
     def test_effective_bits_sub_bitnet(self):
-        sub = SubBitnetLinear(8192, 2048, bias=False, n_rounds=1, rank=0,
-                              use_hadamard=True)
+        sub = SubBitnetLinear(8192, 2048, bias=False, n_rounds=1, rank=0, use_hadamard=True)
         bpw = sub.effective_bits_per_weight()
         # ~1.0 bit/w (hadamard pads 8192→8192, already power of 2)
         assert bpw < 1.58, f"eff_bpw {bpw:.3f} must be sub-bitnet (< 1.58)"
@@ -305,6 +309,7 @@ class TestSubBitnetLinear:
 
 # ── Model conversion ─────────────────────────────────────────────────────────
 
+
 class TestConvertModel:
     def test_convert_replaces_linears(self):
         model = torch.nn.Sequential(
@@ -325,11 +330,12 @@ class TestConvertModel:
             def __init__(self):
                 super().__init__()
                 self.embed = torch.nn.Linear(16, 32)  # 'embed' → skip
-                self.head = torch.nn.Linear(32, 16)   # 'head' → skip
-                self.fc = torch.nn.Linear(32, 32)     # → convert
+                self.head = torch.nn.Linear(32, 16)  # 'head' → skip
+                self.fc = torch.nn.Linear(32, 32)  # → convert
 
             def forward(self, x):
                 return self.head(self.fc(self.embed(x)))
+
         m = M()
         convert_model_to_sub_bitnet(m, n_rounds=1, rank=0)
         assert not isinstance(m.embed, SubBitnetLinear)
@@ -339,9 +345,11 @@ class TestConvertModel:
 
 # ── Config-driven builder ────────────────────────────────────────────────────
 
+
 class TestBuildFromConfig:
     def test_build_reads_config_fields(self):
         from forge.config import ModelConfig
+
         cfg = ModelConfig()
         cfg.sub_bitnet_rounds = 2
         cfg.sub_bitnet_rank = 8
@@ -355,6 +363,7 @@ class TestBuildFromConfig:
 
     def test_build_defaults_when_unset(self):
         from forge.config import ModelConfig
+
         cfg = ModelConfig()
         sub = build_sub_bitnet_linear(cfg, 32, 16, bias=False)
         assert sub.n_rounds == 1
@@ -364,11 +373,12 @@ class TestBuildFromConfig:
 
 # ── Hadamard correctness (sanity for the reused primitive) ───────────────────
 
+
 class TestHadamardPrimitive:
     def test_orthogonal_and_symmetric(self):
         H = _hadamard_matrix(8, torch.device("cpu"), torch.float32)
-        I = torch.eye(8)
-        assert torch.allclose(H @ H.T, I, atol=1e-5)
+        ident = torch.eye(8)
+        assert torch.allclose(H @ H.T, ident, atol=1e-5)
         assert torch.allclose(H, H.T, atol=1e-5)  # symmetric → inverse == self
 
     def test_power_of_2_assertion(self):
@@ -393,6 +403,7 @@ def _qwen_available() -> bool:
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa
         from huggingface_hub import try_to_load_from_cache
+
         path = try_to_load_from_cache(_QWEN_ID, "config.json")
         return path is not None and not isinstance(path, Exception)
     except Exception:
@@ -401,10 +412,17 @@ def _qwen_available() -> bool:
 
 def _load_qwen(device: str = _DEV):
     from transformers import AutoModelForCausalLM, AutoTokenizer
+
     tok = AutoTokenizer.from_pretrained(_QWEN_ID, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        _QWEN_ID, torch_dtype=_DTYPE, trust_remote_code=True,
-    ).to(device).eval()
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            _QWEN_ID,
+            torch_dtype=_DTYPE,
+            trust_remote_code=True,
+        )
+        .to(device)
+        .eval()
+    )
     return model, tok
 
 
@@ -415,7 +433,6 @@ def _collect_linear_weights(model) -> dict[str, torch.Tensor]:
     measurement (bfloat16 has only 7 bits of mantissa — too coarse for dB).
     """
     skip = ("embed", "head", "lm_head", "output")
-    device = next(model.parameters()).device
     weights = {}
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Linear) and not any(s in name for s in skip):
@@ -426,7 +443,7 @@ def _collect_linear_weights(model) -> dict[str, torch.Tensor]:
 def _weight_sqnr_db(w: torch.Tensor, w_hat: torch.Tensor) -> float:
     w = w.float()
     w_hat = w_hat.float()
-    sig = (w ** 2).sum()
+    sig = (w**2).sum()
     noise = ((w - w_hat) ** 2).sum().clamp(min=1e-12)
     return (10.0 * torch.log10(sig / noise)).item()
 
@@ -462,12 +479,15 @@ class TestQwenRealWeights:
     def calib_activations(self, qwen):
         """Collect calibration activations from the FP16 model for GPTQ."""
         from forge.engine.quant.novel_quant_r46 import collect_activations
+
         model, tok = qwen
         # Use a short text for calibration (128 tokens)
-        text = ("Quantization is a technique used to reduce the memory footprint "
-                "of large language models by representing weights with lower "
-                "precision numbers. This enables deployment on resource-constrained "
-                "devices while maintaining reasonable performance.")
+        text = (
+            "Quantization is a technique used to reduce the memory footprint "
+            "of large language models by representing weights with lower "
+            "precision numbers. This enables deployment on resource-constrained "
+            "devices while maintaining reasonable performance."
+        )
         ids = tok(text, return_tensors="pt")["input_ids"].to(_DEV)
         acts = collect_activations(model, ids, n_samples=128, device=_DEV)
         return acts
@@ -491,8 +511,8 @@ class TestQwenRealWeights:
             packed = quantize_sub_bitnet(w, n_rounds=1, rank=0, use_hadamard=True)
             sb_sqnr = _weight_sqnr_db(w, dequantize_sub_bitnet(packed, torch.float32))
             assert sb_sqnr > naive_sqnr, (
-                f"layer {name}: SubBitnet {sb_sqnr:.2f} dB should beat naive "
-                f"{naive_sqnr:.2f} dB on real Qwen weights")
+                f"layer {name}: SubBitnet {sb_sqnr:.2f} dB should beat naive {naive_sqnr:.2f} dB on real Qwen weights"
+            )
 
     def test_irb_rounds_improve_real_weights(self, linear_weights):
         """More IRB rounds → strictly lower MSE on real Qwen weights."""
@@ -511,8 +531,7 @@ class TestQwenRealWeights:
         err0 = _weight_mse(w, dequantize_sub_bitnet(packed0, torch.float32))
         packed1 = quantize_sub_bitnet(w, n_rounds=1, rank=32)
         err1 = _weight_mse(w, dequantize_sub_bitnet(packed1, torch.float32))
-        assert err1 <= err0 + 1e-9, (
-            f"rank-32 residual MSE {err1:.6f} should be <= no-residual {err0:.6f}")
+        assert err1 <= err0 + 1e-9, f"rank-32 residual MSE {err1:.6f} should be <= no-residual {err0:.6f}"
 
     def test_sub_bitnet_linear_forward_matches_quantize(self, linear_weights):
         """SubBitnetLinear.forward uses the same dequant path as the standalone fn."""
@@ -545,15 +564,12 @@ class TestQwenRealWeights:
         worst = min(s for _, s in sqnrs)
         for name, sq in sqnrs:
             print(f"  [Qwen 0.5B] {name}: {sq:.2f} dB SQNR (1 bit/w)")
-        assert worst > 3.0, (
-            f"worst layer SQNR {worst:.2f} dB below 3 dB floor; "
-            f"layers: {sqnrs}")
+        assert worst > 3.0, f"worst layer SQNR {worst:.2f} dB below 3 dB floor; layers: {sqnrs}"
 
     def test_effective_bits_on_real_layer(self, linear_weights):
         """A real Qwen layer's effective bit-width is sub-bitnet (< 1.58)."""
         w = linear_weights[next(iter(linear_weights.keys()))]
-        sub = SubBitnetLinear(w.shape[1], w.shape[0], bias=False,
-                              n_rounds=1, rank=0, use_hadamard=True)
+        sub = SubBitnetLinear(w.shape[1], w.shape[0], bias=False, n_rounds=1, rank=0, use_hadamard=True)
         bpw = sub.effective_bits_per_weight()
         assert bpw < 1.58, f"real layer bpw {bpw:.3f} must be sub-bitnet"
 
@@ -561,6 +577,7 @@ class TestQwenRealWeights:
         """Converting all linears in the real model preserves forward shape."""
         model, tok = qwen
         import copy
+
         model_q = copy.deepcopy(model)
         convert_model_to_sub_bitnet(model_q, n_rounds=1, rank=0)
         n_sub = sum(1 for m in model_q.modules() if isinstance(m, SubBitnetLinear))
@@ -583,22 +600,23 @@ class TestQwenRealWeights:
         import copy
 
         import torch.nn as nn
+
         model, tok = qwen
         model_q = copy.deepcopy(model)
         convert_model_to_sub_bitnet(model_q, n_rounds=1, rank=0)
         model_q.eval()
-        text = ("Quantization is a technique used to reduce the memory footprint "
-                "of large language models by representing weights with lower "
-                "precision numbers.")
+        text = (
+            "Quantization is a technique used to reduce the memory footprint "
+            "of large language models by representing weights with lower "
+            "precision numbers."
+        )
         ids = tok(text, return_tensors="pt")["input_ids"][:, :128].to(_DEV)
         with torch.no_grad():
             out = model_q(ids)
             logits = out.logits if hasattr(out, "logits") else out[0]
             shift_logits = logits[:, :-1, :].contiguous()
             shift_labels = ids[:, 1:].contiguous()
-            loss = nn.CrossEntropyLoss()(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1))
+            loss = nn.CrossEntropyLoss()(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         ppl = torch.exp(loss).item()
         assert math.isfinite(ppl), f"1-bit quantized PPL not finite: {ppl}"
         print(f"  [Qwen 0.5B] SubBitnet 1-bit PPL: {ppl:.2f} (finite, no QAT)")
@@ -616,22 +634,23 @@ class TestQwenRealWeights:
         import copy
 
         import torch.nn as nn
+
         model, tok = qwen
         model_q = copy.deepcopy(model)
         convert_model_to_sub_bitnet(model_q, n_rounds=3, rank=64)
         model_q.eval()
-        text = ("Quantization is a technique used to reduce the memory footprint "
-                "of large language models by representing weights with lower "
-                "precision numbers.")
+        text = (
+            "Quantization is a technique used to reduce the memory footprint "
+            "of large language models by representing weights with lower "
+            "precision numbers."
+        )
         ids = tok(text, return_tensors="pt")["input_ids"][:, :128].to(_DEV)
         with torch.no_grad():
             out = model_q(ids)
             logits = out.logits if hasattr(out, "logits") else out[0]
             shift_logits = logits[:, :-1, :].contiguous()
             shift_labels = ids[:, 1:].contiguous()
-            loss = nn.CrossEntropyLoss()(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1))
+            loss = nn.CrossEntropyLoss()(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         ppl = torch.exp(loss).item()
         assert math.isfinite(ppl), f"3-round+rank64 PPL not finite: {ppl}"
         assert ppl < 80, f"3-round+rank64 PPL {ppl:.1f} unexpectedly high (>80)"
@@ -648,10 +667,13 @@ class TestQwenRealWeights:
         import copy
 
         import torch.nn as nn
+
         model, tok = qwen
-        text = ("Quantization is a technique used to reduce the memory footprint "
-                "of large language models by representing weights with lower "
-                "precision numbers.")
+        text = (
+            "Quantization is a technique used to reduce the memory footprint "
+            "of large language models by representing weights with lower "
+            "precision numbers."
+        )
         ids = tok(text, return_tensors="pt")["input_ids"][:, :128].to(_DEV)
 
         def _ppl(n_rounds, rank):
@@ -672,10 +694,8 @@ class TestQwenRealWeights:
 
         ppl_no_rank = _ppl(3, 0)
         ppl_with_rank = _ppl(3, 64)
-        print(f"  [Qwen 0.5B] 3-round no-rank PPL: {ppl_no_rank:.2f}, "
-              f"+rank-64 PPL: {ppl_with_rank:.2f}")
-        assert ppl_with_rank < ppl_no_rank, (
-            f"rank-64 PPL {ppl_with_rank:.2f} should be < no-rank {ppl_no_rank:.2f}")
+        print(f"  [Qwen 0.5B] 3-round no-rank PPL: {ppl_no_rank:.2f}, +rank-64 PPL: {ppl_with_rank:.2f}")
+        assert ppl_with_rank < ppl_no_rank, f"rank-64 PPL {ppl_with_rank:.2f} should be < no-rank {ppl_no_rank:.2f}"
 
     # ── BiLLM-style 1-bit tests ───────────────────────────────────────────
 
@@ -695,14 +715,12 @@ class TestQwenRealWeights:
             packed_bm = quantize_sub_bitnet_billm(w, use_hadamard=True)
             sqnr_bm = _weight_sqnr_db(w, dequantize_sub_bitnet_billm(packed_bm, torch.float32))
             print(f"  [BiLLM vs IRB] {name}: IRB {sqnr_irb:.2f} dB, BiLLM {sqnr_bm:.2f} dB")
-            assert sqnr_bm > sqnr_irb, (
-                f"layer {name}: BiLLM {sqnr_bm:.2f} dB should beat IRB {sqnr_irb:.2f} dB")
+            assert sqnr_bm > sqnr_irb, f"layer {name}: BiLLM {sqnr_bm:.2f} dB should beat IRB {sqnr_irb:.2f} dB"
 
     def test_billm_effective_bits_sub_bitnet(self, linear_weights):
         """BiLLM effective bit-width is sub-bitnet (< 1.58)."""
         w = linear_weights[next(iter(linear_weights.keys()))]
-        sub = SubBitnetLinearBiLLM(w.shape[1], w.shape[0], bias=False,
-                                   use_hadamard=True, salient_frac=0.05)
+        sub = SubBitnetLinearBiLLM(w.shape[1], w.shape[0], bias=False, use_hadamard=True, salient_frac=0.05)
         bpw = sub.effective_bits_per_weight()
         assert bpw < 1.58, f"BiLLM bpw {bpw:.3f} must be sub-bitnet"
         print(f"  [BiLLM] effective bpw: {bpw:.3f}")
@@ -722,17 +740,20 @@ class TestQwenRealWeights:
         import copy
 
         import torch.nn as nn
+
         model, tok = qwen
-        text = ("Quantization is a technique used to reduce the memory footprint "
-                "of large language models by representing weights with lower "
-                "precision numbers.")
+        text = (
+            "Quantization is a technique used to reduce the memory footprint "
+            "of large language models by representing weights with lower "
+            "precision numbers."
+        )
         ids = tok(text, return_tensors="pt")["input_ids"][:, :128].to(_DEV)
 
         # BiLLM + SVD residual (best config: frac=0.10, order=2, rank=48)
         mq_bm = copy.deepcopy(model)
-        convert_model_to_sub_bitnet(mq_bm, method="billm", salient_frac=0.10,
-                                    salient_order=2, svd_rank=48,
-                                    svd_block_size=32)
+        convert_model_to_sub_bitnet(
+            mq_bm, method="billm", salient_frac=0.10, salient_order=2, svd_rank=48, svd_block_size=32
+        )
         mq_bm.eval()
         with torch.no_grad():
             out = mq_bm(ids)
@@ -762,13 +783,11 @@ class TestQwenRealWeights:
 
         print(f"  [Qwen 0.5B 1-bit] IRB PPL: {ppl_irb:.2f}, BiLLM+SVD PPL: {ppl_bm:.2f}")
         assert math.isfinite(ppl_bm), f"BiLLM PPL not finite: {ppl_bm}"
-        assert ppl_bm < ppl_irb, (
-            f"BiLLM PPL {ppl_bm:.2f} should beat IRB PPL {ppl_irb:.2f}")
+        assert ppl_bm < ppl_irb, f"BiLLM PPL {ppl_bm:.2f} should beat IRB PPL {ppl_irb:.2f}"
         # BiLLM+SVD at ~1.55 bpw gives PPL ~1000-2000 on short corpora.
         # This is far from FP16 (PPL ~22) but dramatically better than
         # pure 1-bit (PPL ~3.7M). Sub-bitnet quality is an open research problem.
-        assert ppl_bm < 5000, (
-            f"BiLLM+SVD PPL {ppl_bm:.2f} should be functional (<5000)")
+        assert ppl_bm < 5000, f"BiLLM+SVD PPL {ppl_bm:.2f} should be functional (<5000)"
 
     def test_billm_salient_frac_sweep(self, qwen, calib_activations):
         """Sweep salient_frac to find the best quality/storage trade-off.
@@ -780,18 +799,21 @@ class TestQwenRealWeights:
         import copy
 
         import torch.nn as nn
+
         model, tok = qwen
-        text = ("Quantization is a technique used to reduce the memory footprint "
-                "of large language models by representing weights with lower "
-                "precision numbers.")
+        text = (
+            "Quantization is a technique used to reduce the memory footprint "
+            "of large language models by representing weights with lower "
+            "precision numbers."
+        )
         ids = tok(text, return_tensors="pt")["input_ids"][:, :128].to(_DEV)
 
         results = []
         for frac in (0.05, 0.10, 0.15):
             mq = copy.deepcopy(model)
-            convert_model_to_sub_bitnet(mq, method="billm", salient_frac=frac,
-                                        salient_order=2, svd_rank=48,
-                                        svd_block_size=32)
+            convert_model_to_sub_bitnet(
+                mq, method="billm", salient_frac=frac, salient_order=2, svd_rank=48, svd_block_size=32
+            )
             mq.eval()
             with torch.no_grad():
                 out = mq(ids)
@@ -806,10 +828,7 @@ class TestQwenRealWeights:
                 torch.cuda.empty_cache()
 
         for frac, _bpw, ppl in results:
-            print(f"  [BiLLM+SVD sweep] salient_frac={frac:.2f}: "
-                  f"PPL={ppl:.2f}")
+            print(f"  [BiLLM+SVD sweep] salient_frac={frac:.2f}: PPL={ppl:.2f}")
         # At least one config should give functional PPL (< 5000)
         best_ppl = min(p for _, _, p in results)
-        assert best_ppl < 5000, (
-            f"best BiLLM+SVD PPL {best_ppl:.2f} should be functional (<5000); "
-            f"full sweep: {results}")
+        assert best_ppl < 5000, f"best BiLLM+SVD PPL {best_ppl:.2f} should be functional (<5000); full sweep: {results}"

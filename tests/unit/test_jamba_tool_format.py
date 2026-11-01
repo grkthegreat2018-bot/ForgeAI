@@ -3,6 +3,7 @@
 Tests that the updated chat_template.py correctly renders and parses
 Jamba's JSON tool call format with  /  markers.
 """
+
 import pytest
 
 from forge.self_play.discovery.chat_template import (
@@ -33,8 +34,7 @@ class TestJambaToolCallFormat:
 
     def test_render_openai_format(self):
         """Render OpenAI-format tool calls (function/arguments)."""
-        calls = [{"function": {"name": "write_file",
-                                "arguments": '{"content": "hello"}'}}]
+        calls = [{"function": {"name": "write_file", "arguments": '{"content": "hello"}'}}]
         result = render_tool_calls(calls)
         assert '"name": "write_file"' in result
         assert '"content": "hello"' in result
@@ -96,9 +96,13 @@ class TestJambaChatTemplate:
         messages = [
             {"role": "user", "content": "Read the file"},
         ]
-        tools = [{"name": "read_file", "description": "Read a file",
-                  "parameters": {"type": "object",
-                                "properties": {"path": {"type": "string"}}}}]
+        tools = [
+            {
+                "name": "read_file",
+                "description": "Read a file",
+                "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+            }
+        ]
         result = apply_chat_template(messages, tools=tools, add_generation_prompt=True)
         assert "read_file" in result
         assert "<|im_start|>system" in result
@@ -107,8 +111,7 @@ class TestJambaChatTemplate:
         """Tool response uses Jamba  markers."""
         messages = [
             {"role": "user", "content": "Read file"},
-            {"role": "assistant", "content": "", "tool_calls": [
-                {"name": "read_file", "args": {"path": "test.py"}}]},
+            {"role": "assistant", "content": "", "tool_calls": [{"name": "read_file", "args": {"path": "test.py"}}]},
             {"role": "tool", "content": "print('hello')"},
         ]
         result = apply_chat_template(messages, add_generation_prompt=False)
@@ -120,7 +123,6 @@ class TestJambaChatTemplate:
         """Thinking tags are defined correctly."""
         # Jamba thinking tags:  (U+1F9D0 + ...) and  (...)
         # Build from unicode to avoid tool-call parsing confusion
-        think_start_expected = "\U0001f9d0"  # placeholder — actual is multi-char
         # Just verify they're non-empty strings
         assert len(THINK_START) > 0
         assert len(THINK_END) > 0
@@ -133,10 +135,8 @@ class TestBackwardCompat:
     def test_parse_legacy_pythonic_format(self):
         """Legacy LFM2.5 Pythonic tool calls still parse."""
         # Build the legacy markers from hex (same as original code)
-        legacy_start = bytes.fromhex(
-            "3c7c746f6f6c5f63616c6c5f73746172747c3e").decode("ascii")
-        legacy_end = bytes.fromhex(
-            "3c7c746f6f6c5f63616c6c5f656e647c3e").decode("ascii")
+        legacy_start = bytes.fromhex("3c7c746f6f6c5f63616c6c5f73746172747c3e").decode("ascii")
+        legacy_end = bytes.fromhex("3c7c746f6f6c5f63616c6c5f656e647c3e").decode("ascii")
         text = f'{legacy_start}[read_file(path="/tmp/test.py")]{legacy_end}'
         calls, _musing = parse_tool_calls(text)
         assert calls is not None

@@ -180,9 +180,11 @@ class TestReadSafetensorsEntries:
 
     def test_entries_parsed_sorted(self, tmp_checkpoint_dir):
         path = str(tmp_checkpoint_dir / "hdr.safetensors")
-        state = {"b": torch.randn(4, 4, dtype=torch.bfloat16),
-                 "a": torch.randn(8, dtype=torch.float32),
-                 "i": torch.arange(5, dtype=torch.int64)}
+        state = {
+            "b": torch.randn(4, 4, dtype=torch.bfloat16),
+            "a": torch.randn(8, dtype=torch.float32),
+            "i": torch.arange(5, dtype=torch.int64),
+        }
         save_checkpoint(state, path)
         entries, data_start = _read_safetensors_entries(path)
         names = [e[0] for e in entries]
@@ -203,8 +205,7 @@ class TestReadSafetensorsEntries:
     def test_unknown_dtype_raises(self, tmp_path):
         # Hand-craft a safetensors file with an unsupported dtype name.
         path = str(tmp_path / "bad.safetensors")
-        hdr = json.dumps({"x": {"dtype": "NOPE",
-                                "shape": [1], "data_offsets": [0, 4]}})
+        hdr = json.dumps({"x": {"dtype": "NOPE", "shape": [1], "data_offsets": [0, 4]}})
         with open(path, "wb") as f:
             f.write(struct.pack("<Q", len(hdr)))
             f.write(hdr.encode())
@@ -228,8 +229,7 @@ class TestPipelinedLoad:
         with pytest.raises(ValueError, match="CUDA"):
             load_safetensors_pipelined(path, "meta")
 
-    @pytest.mark.skipif(not torch.cuda.is_available(),
-                        reason="pipelined loader requires CUDA")
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="pipelined loader requires CUDA")
     def test_roundtrip_bit_exact(self, tmp_checkpoint_dir):
         path = str(tmp_checkpoint_dir / "rt.safetensors")
         state = {
@@ -247,38 +247,33 @@ class TestPipelinedLoad:
             assert loaded[k].device.type == "cuda"
             assert torch.equal(loaded[k].cpu(), ref), k
 
-    @pytest.mark.skipif(not torch.cuda.is_available(),
-                        reason="pipelined loader requires CUDA")
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="pipelined loader requires CUDA")
     def test_multi_chunk_spanning(self, tmp_checkpoint_dir):
         """A tensor larger than chunk_mb is filled across chunk boundaries."""
         path = str(tmp_checkpoint_dir / "big.safetensors")
         big = torch.randn(1024, 1024, dtype=torch.bfloat16)  # 2 MiB
         save_checkpoint({"big": big, "tail": torch.randn(7)}, path)
         # 1 MiB chunks -> big spans 2 chunks, tail follows in the same range
-        loaded = load_safetensors_pipelined(path, "cuda", num_threads=1,
-                                            chunk_mb=1)
+        loaded = load_safetensors_pipelined(path, "cuda", num_threads=1, chunk_mb=1)
         assert torch.equal(loaded["big"].cpu(), big)
 
-    @pytest.mark.skipif(not torch.cuda.is_available(),
-                        reason="pipelined loader requires CUDA")
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="pipelined loader requires CUDA")
     def test_multi_thread_ranges(self, tmp_checkpoint_dir):
         """Many tensors -> split across threads -> all bytes land."""
         path = str(tmp_checkpoint_dir / "mt.safetensors")
-        state = {f"w{i:03d}": torch.randn(256, 256, dtype=torch.bfloat16)
-                 for i in range(16)}
+        state = {f"w{i:03d}": torch.randn(256, 256, dtype=torch.bfloat16) for i in range(16)}
         save_checkpoint(state, path)
-        loaded = load_safetensors_pipelined(path, "cuda", num_threads=4,
-                                            chunk_mb=1)
+        loaded = load_safetensors_pipelined(path, "cuda", num_threads=4, chunk_mb=1)
         for k, ref in state.items():
             assert torch.equal(loaded[k].cpu(), ref), k
 
-    @pytest.mark.skipif(not torch.cuda.is_available(),
-                        reason="pipelined loader requires CUDA")
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="pipelined loader requires CUDA")
     def test_truncated_file_raises(self, tmp_checkpoint_dir, tmp_path):
         src = str(tmp_checkpoint_dir / "full.safetensors")
         save_checkpoint({"w": torch.randn(64, 64)}, src)
         dst = str(tmp_path / "trunc.safetensors")
-        data = open(src, "rb").read()
+        with open(src, "rb") as f:
+            data = f.read()
         with open(dst, "wb") as f:
             f.write(data[:-32])  # cut the tail of the data blob
         # Either the metadata validator rejects the lying data_offsets

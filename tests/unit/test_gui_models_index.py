@@ -5,6 +5,7 @@ full config *dict* (not a registry name string). ``ModelsIndex.models()`` fed
 that dict into ``dict.get()`` → ``TypeError: unhashable type: 'dict'``, which
 broke the Dashboard refresh and the Engine page checkpoint list on every tick.
 """
+
 from __future__ import annotations
 
 import json
@@ -20,6 +21,7 @@ def ckpt_root(tmp_path, monkeypatch):
     ckpt_dir = tmp_path / "research" / "checkpoints"
     ckpt_dir.mkdir(parents=True)
     import forge_gui.api.models_index as mi_mod
+
     monkeypatch.setattr(mi_mod, "project_root", lambda: tmp_path)
     return ckpt_dir
 
@@ -27,15 +29,13 @@ def ckpt_root(tmp_path, monkeypatch):
 def _write_ckpt(ckpt_dir, name, meta):
     (ckpt_dir / name).write_bytes(b"\x00" * 16)
     if meta is not None:
-        (ckpt_dir / (name + ".meta.json")).write_text(
-            json.dumps(meta), encoding="utf-8")
+        (ckpt_dir / (name + ".meta.json")).write_text(json.dumps(meta), encoding="utf-8")
 
 
 class TestMetaConfigParsing:
     def test_dict_config_does_not_crash(self, ckpt_root):
         """meta['config'] as a dict must not raise unhashable-dict TypeError."""
-        _write_ckpt(ckpt_root, "m.safetensors",
-                    {"step": 40, "config": {"d_model": 2048, "n_layers": 16}})
+        _write_ckpt(ckpt_root, "m.safetensors", {"step": 40, "config": {"d_model": 2048, "n_layers": 16}})
         idx = ModelsIndex()
         models = idx.models()  # used to raise TypeError
         assert len(models) == 1
