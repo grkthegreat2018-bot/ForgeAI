@@ -40,6 +40,13 @@ from forge.evolution.code_evolve import _extract_code  # noqa: E402
 
 MODEL_ID = "Qwen/Qwen2.5-Coder-3B-Instruct"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+BACKENDS = {
+    "groq": (GROQ_URL, "GROQ_API_KEY", "openai/gpt-oss-120b",
+             {"reasoning_effort": "low"}),
+    "deepseek": (DEEPSEEK_URL, "DEEPSEEK_API_KEY", "deepseek-flash",
+                 {}),
+}
 
 _print_lock = threading.Lock()
 
@@ -194,9 +201,10 @@ def _hf_gen(model, tok, prompt: str, max_new: int) -> str:
                       skip_special_tokens=True)
 
 
-def _groq_gen(api_key: str, model_name: str, prompt: str,
-              max_new: int, temperature: float = 0.0,
-              extra_user: tuple | None = None) -> str:
+def _api_gen(url: str, api_key: str, model_name: str, prompt: str,
+             max_new: int, temperature: float = 0.0,
+             extra_user: tuple | None = None,
+             extra_body: dict | None = None) -> str:
     """curl.exe transport — Python urllib gets Cloudflare-1010'd on this
     route (browser-signature ban), while curl reaches the API fine."""
     import subprocess
@@ -206,13 +214,13 @@ def _groq_gen(api_key: str, model_name: str, prompt: str,
         msgs.append({"role": "assistant", "content": _fence(prev)})
         msgs.append({"role": "user", "content": feedback})
     body = {"model": model_name, "messages": msgs,
-            "temperature": temperature, "max_tokens": max_new,
-            "reasoning_effort": "low"}
+            "temperature": temperature, "max_tokens": max_new}
+    body.update(extra_body or {})
     data = json.dumps(body).encode()
     for attempt in range(8):
         try:
             r = subprocess.run(
-                ["curl.exe", "-s", "-X", "POST", GROQ_URL,
+                ["curl.exe", "-s", "-X", "POST", url,
                  "-H", f"Authorization: Bearer {api_key}",
                  "-H", "Content-Type: application/json",
                  "--data-binary", "@-", "--max-time", "300",
@@ -223,23 +231,28 @@ def _groq_gen(api_key: str, model_name: str, prompt: str,
             status = status.strip()
             if status == "429":
                 wait = 60 + 15 * attempt
-                _log(f"[groq] 429 rate-limit, waiting {wait}s")
+                _log(f"[api] 429 rate-limit, waiting {wait}s")
                 time.sleep(wait)
                 continue
             d = json.loads(body_txt)
             if "error" in d:
                 raise RuntimeError(str(d["error"])[:150])
-            return d["choices"][0]["message"]["content"]
+            msg = d["choices"][0]["message"]
+            content = msg.get("content") or ""
+            # reasoning models: fall back to reasoning if content empty
+            if not content.strip() and msg.get("reasoning_content"):
+                content = msg["reasoning_content"]
+            return content
         except json.JSONDecodeError:
             wait = 20 * (attempt + 1)
-            _log(f"[groq] bad response (status={status}), retry {wait}s")
+            _log(f"[api] bad response (status={status}), retry {wait}s")
             time.sleep(wait)
         except Exception as e:
             wait = 20 * (attempt + 1)
-            _log(f"[groq] {type(e).__name__} retry in {wait}s "
+            _log(f"[api] {type(e).__name__} retry in {wait}s "
                  f"({str(e)[:100]})")
             time.sleep(wait)
-    raise RuntimeError("groq retries exhausted")
+    raise RuntimeError("api retries exhausted")
 
 
 def _fence(resp: str) -> str:
@@ -259,8 +272,10 @@ def main() -> int:
     ap.add_argument("--per-target", type=int, default=25)
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-new", type=int, default=900)
-    ap.add_argument("--backend", choices=["hf", "groq"], default="hf")
-    ap.add_argument("--groq-model", default="openai/gpt-oss-120b")
+    ap.add_argument("--backend", choices=["hf", "groq", "deepseek"],
+                    default="hf")
+    ap.add_argument("--api-model", default=None,
+                    help="override the backend's default model id")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--retries", type=int, default=1,
                     help="semantic-fail feedback retries per prompt")
@@ -277,7 +292,7 @@ def main() -> int:
     _log(f"[gen] {len(oracles)} semantic oracles loaded")
 
     model = tok = None
-    api_key = None
+    api_key = api_url = model_name = extra_body = None
     if args.backend == "hf":
         import os
         import torch
@@ -288,10 +303,20 @@ def main() -> int:
         model.eval()
     else:
         import os
-        api_key = os.environ.get("GROQ_API_KEY")
+        api_url, key_env, model_name, extra_body = BACKENDS[args.backend]
+        model_name = args.api_model or model_name
+        api_key = os.environ.get(key_env)
         if not api_key:
-            print("GROQ_API_KEY not set", file=sys.stderr)
+            # fall back to the repo .env
+            env = REPO / ".env"
+            if env.exists():
+                for line in env.read_text().splitlines():
+                    if line.startswith(key_env + "="):
+                        api_key = line.split("=", 1)[1].strip()
+        if not api_key:
+            print(f"{key_env} not set", file=sys.stderr)
             return 2
+        _log(f"[gen] {args.backend}: {model_name} @ {api_url}")
 
     stats = {"ok": 0, "semantic_fail": 0, "compile_fail": 0,
              "exec_fail": 0, "no_target": 0, "gen_err": 0}
@@ -312,13 +337,14 @@ def main() -> int:
                               f"{last_detail}. Reply with ONLY one "
                               "```python code block containing the "
                               "corrected complete implementation.")
-                    raw = _groq_gen(api_key, args.groq_model, p,
-                                    args.max_new,
-                                    temperature=(args.temperature
-                                               if attempt == 0
-                                               else max(0.3,
-                                                        args.temperature)),
-                                    extra_user=fb)
+                    raw = _api_gen(api_url, api_key, model_name, p,
+                                   args.max_new,
+                                   temperature=(args.temperature
+                                                if attempt == 0
+                                                else max(0.3,
+                                                         args.temperature)),
+                                   extra_user=fb,
+                                   extra_body=extra_body)
                 code = _extract_code(raw)
                 if not code.strip():
                     last_detail = "no code block in output"
@@ -350,7 +376,7 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8") as out_f:
         items = list(enumerate(prompts))
-        if args.backend == "groq":
+        if args.backend in ("groq", "deepseek"):
             with ThreadPoolExecutor(max_workers=args.workers) as ex:
                 list(ex.map(work, items))
         else:
