@@ -1368,6 +1368,29 @@ Config presets in `forge/config.py`:
   `proposer_ckpt.safetensors` dup of `proposer_ckpt/model.safetensors`
   was deleted after byte-identical sha256; its `.meta.json`/`.train.pt`
   sidecars moved to `research/checkpoints/`.)
+- **LFM3 d-series** (derived from `lfm3_1p7b`, same `lfm3_1p7b_cc` ckpt):
+  `lfm3_1p7b_d1` — zero-init grafts, all dormant at init: GDN2 side-paths
+  on conv layers 1,5,9,13,17,21 (immediately before each full-attn),
+  ValueResidual, LearnedSink, AttnRes, CopySpan/edit head, Verifier head.
+  Lineage gate `scripts/test_lfm3_d1_parity.py`: max|dlogit|=0.0 on the
+  real ckpt (CPU fp32), 1.7288B→1.8029B (+73.9M dormant).
+  d2 strict-lossless restructures are config flags, not a preset yet:
+  `share_rope` (dedup identical RoPE tables; SWA vs full-attn tables stay
+  distinct), `conv_kernel_size=11` + `_warm_start_conv` zero-pad port
+  (K=7→11, prefill+decode bit-exact), `zero_centered_norm` (w→w−1 reparam,
+  `_warm_start_zero_centered_norm` port; qk-norm identity fast-path
+  re-derived post-load), `use_fused_gemm` now WIRED (was dead code — fused
+  QKV+gate / gate-up GEMMs consumed in forward; ctor RNG forked so init
+  streams match unfused builds; loader `_refresh_fused_gemm` repacks
+  checkpoint rows post-load), `swa_ring_kv` (SWA-layer KV buffer capped at
+  the window, slot=pos%W — decode unbounded on those layers; pos_t path
+  stays graph-capturable via pos_t%W; eager reads re-materialize the held
+  window in position order; int8-cache path excluded). NGramMemory +
+  `use_suffix_spec` already existed (gate=0 inert, `.draft()` ready).
+  Function-identical modulo SDPA kernel-tiling (~1e-7), verified by
+  argmax-trajectory tests (`tests/unit/test_swa_ring_kv.py`,
+  `test_share_rope.py`, `test_fused_qkv_gate.py`, `test_conv_widen`,
+  `test_zero_centered_norm`).
 
 All legacy presets (`forgelm_v2_light`, `forgelm_v2_pro`, `forgelm_v12`,
 `forgelm_v10_1.2b`, `forgelm_v11_3b_vl`, `lfm25_tiny`, `lfm25_1.2b`, V3–V9)
