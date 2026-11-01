@@ -92,14 +92,16 @@ def _hf_generate(model, tok, prompt: str, max_new: int = 512) -> str:
 
 
 def bench_model(model_id: str, prompts: list, device: str,
-                max_new: int) -> dict:
+                max_new: int, lora_tag: str | None = None,
+                lora_root: str | None = None) -> dict:
     from forge.evolution.code_evolve import (CodeEvolveConfig,
                                             LLMProposer)
     # Go through the real proposer machinery — it picks forge-engine for
     # converted dirs, HF fallback for repo ids.
     cfg = CodeEvolveConfig(target="x", model_id=model_id,
                            proposer_device=device,
-                           max_gen_tokens=max_new)
+                           max_gen_tokens=max_new,
+                           lora_tag=lora_tag, lora_root=lora_root)
     prop = LLMProposer(cfg)
     rows = []
     t0 = time.time()
@@ -134,6 +136,11 @@ def main() -> int:
                     "grid)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--max-new", type=int, default=512)
+    ap.add_argument("--lora-tag", default=None,
+                    help="attach this registry adapter tag to every benched "
+                         "model (run trained models in their own invocation)")
+    ap.add_argument("--lora-root", default=None,
+                    help="adapter registry dir (default: loras_lfm3)")
     ap.add_argument("--out", default="results/proposer_bench.json")
     args = ap.parse_args()
 
@@ -144,7 +151,8 @@ def main() -> int:
         print(f"=== {mid}")
         try:
             reports.append(bench_model(mid, grid, args.device,
-                                       args.max_new))
+                                       args.max_new, args.lora_tag,
+                                       args.lora_root))
         except Exception as e:
             reports.append({"model": mid, "fatal": str(e)[:300]})
         print(json.dumps({k: v for k, v in reports[-1].items()
