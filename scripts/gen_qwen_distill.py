@@ -1,18 +1,24 @@
-"""Qwen-teacher distill set for the LFM3 proposer.
+"""Teacher distill set for the LFM3 proposer — HF or Groq backend.
 
 Draws the REAL prompt distribution — logged proposal prompts from
-code_programs (stratified per target so every basin is covered) plus
-template prompts over every seed in evolution/targets — and asks
-Qwen2.5-Coder-3B-Instruct for the completion. Rows that don't extract
-to compilable code are dropped (teacher quality filter).
+code_programs (stratified per target) plus template prompts over every
+seed in evolution/targets — and asks a teacher model for the completion.
 
-Then: LoRA 'qwen_distill' on lfm3_1p7b_cc via the sft_train path —
-teaches Qwen's terse fenced-output style + capability while keeping
-the 1.7B resident footprint.
+SEMANTIC GATE (the fix after round-1 poison): each completion is exec'd
+and run through the matched evolution target's own test(ns) — compile-
+valid is not enough; the code must produce identical outputs. Semantic
+failures get ONE feedback retry (the teacher sees the failure detail)
+before the row is dropped. Unmatched-target rows are kept as
+unverifiable (they still teach format).
+
+Groq backend: GROQ_API_KEY env, OpenAI-compatible /chat/completions.
+Model choice matters legally — avoid Llama-family ids (Llama Community
+License bars using outputs to improve other models). gpt-oss-120b
+(Apache-2.0) is the default teacher.
 
 Usage:
-    venv\\Scripts\\python.exe scripts/gen_qwen_distill.py \
-        --rows 200 --out results/qwen_distill.jsonl
+    GROQ_API_KEY=... venv\\Scripts\\python.exe scripts/gen_qwen_distill.py \
+        --backend groq --rows 300 --out results/qwen_distill_v2.jsonl
 """
 from __future__ import annotations
 
@@ -21,6 +27,10 @@ import json
 import re
 import sqlite3
 import sys
+import threading
+import time
+import types
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -29,11 +39,19 @@ sys.path.insert(0, str(REPO))
 from forge.evolution.code_evolve import _extract_code  # noqa: E402
 
 MODEL_ID = "Qwen/Qwen2.5-Coder-3B-Instruct"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
+_print_lock = threading.Lock()
+
+
+def _log(msg):
+    with _print_lock:
+        print(msg, flush=True)
+
+
+# ── prompt sources ────────────────────────────────────────────────────
 
 def _real_prompts(db: str, per_target: int, total: int) -> list[str]:
-    """Stratified sample of logged proposal prompts — the true basin
-    distribution, deduped by prompt text."""
     conn = sqlite3.connect(db)
     rows = conn.execute(
         "SELECT target, prompt FROM code_programs "
@@ -58,8 +76,6 @@ def _real_prompts(db: str, per_target: int, total: int) -> list[str]:
 
 
 def _target_prompts(targets_dir: Path) -> list[str]:
-    """One template prompt per target seed — guaranteed basin coverage
-    even where logged prompts are thin."""
     import hashlib
     out = []
     for f in sorted(targets_dir.glob("*.py")):
@@ -102,12 +118,73 @@ def _target_prompts(targets_dir: Path) -> list[str]:
     return out
 
 
-def _gen(model, tok, prompt: str, max_new: int = 700) -> str:
+# ── semantic oracle ───────────────────────────────────────────────────
+
+def _load_oracles(targets_dir: Path):
+    table = {}
+    for f in sorted(targets_dir.glob("*.py")):
+        if f.name.startswith("_"):
+            continue
+        mod = types.ModuleType(f.stem)
+        try:
+            exec(compile(f.read_text(encoding="utf-8", errors="replace"),
+                         f.name, "exec"), mod.__dict__)
+        except Exception:
+            continue
+        req = tuple(sorted(getattr(mod, "REQUIRED", []) or ()))
+        test = getattr(mod, "test", None)
+        if req and callable(test):
+            table[frozenset(req)] = (f.stem, test)
+    return table
+
+
+def _required_from_prompt(prompt: str) -> frozenset:
+    m = re.search(r"keep public names \(([^)]*)\)", prompt)
+    if not m:
+        return frozenset()
+    return frozenset(s.strip() for s in m.group(1).split(",")
+                     if s.strip())
+
+
+def _semantic_check(code: str, prompt: str, table) -> tuple[str, str]:
+    """-> ('ok'|'semantic_fail'|'compile_fail'|'exec_fail'|
+          'no_target', detail)"""
+    try:
+        compile(code, "<c>", "exec")
+    except SyntaxError:
+        return "compile_fail", "syntax"
+    req = _required_from_prompt(prompt)
+    entry = table.get(req)
+    if entry is None:
+        cands = [v for k, v in table.items() if k <= req]
+        entry = cands[0] if len(cands) == 1 else None
+    if entry is None:
+        return "no_target", ""
+    tname, test = entry
+    ns = {}
+    try:
+        exec(compile(code, "<c>", "exec"), ns)
+    except Exception as e:
+        return "exec_fail", f"{type(e).__name__}: {str(e)[:80]}"
+    missing = [n for n in req if n not in ns]
+    if missing:
+        return "semantic_fail", f"missing names {missing}"
+    try:
+        res = test(ns)
+    except Exception as e:
+        return "exec_fail", f"test_raise {type(e).__name__}: {str(e)[:80]}"
+    if res.get("ok"):
+        return "ok", tname
+    return "semantic_fail", f"{tname}: {res.get('detail', '?')[:150]}"
+
+
+# ── generation backends ───────────────────────────────────────────────
+
+def _hf_gen(model, tok, prompt: str, max_new: int) -> str:
     import torch
-    msgs = [{"role": "user", "content": prompt}]
-    text = tok.apply_chat_template(msgs, tokenize=False,
-                                   add_generation_prompt=True)
-    text += "```python\n"
+    text = tok.apply_chat_template(
+        [{"role": "user", "content": prompt}], tokenize=False,
+        add_generation_prompt=True) + "```python\n"
     ids = tok(text, return_tensors="pt").to(model.device)
     with torch.no_grad():
         out = model.generate(**ids, max_new_tokens=max_new,
@@ -117,57 +194,172 @@ def _gen(model, tok, prompt: str, max_new: int = 700) -> str:
                       skip_special_tokens=True)
 
 
+def _groq_gen(api_key: str, model_name: str, prompt: str,
+              max_new: int, temperature: float = 0.0,
+              extra_user: tuple | None = None) -> str:
+    """curl.exe transport — Python urllib gets Cloudflare-1010'd on this
+    route (browser-signature ban), while curl reaches the API fine."""
+    import subprocess
+    msgs = [{"role": "user", "content": prompt}]
+    if extra_user:
+        prev, feedback = extra_user
+        msgs.append({"role": "assistant", "content": _fence(prev)})
+        msgs.append({"role": "user", "content": feedback})
+    body = {"model": model_name, "messages": msgs,
+            "temperature": temperature, "max_tokens": max_new,
+            "reasoning_effort": "low"}
+    data = json.dumps(body).encode()
+    for attempt in range(8):
+        try:
+            r = subprocess.run(
+                ["curl.exe", "-s", "-X", "POST", GROQ_URL,
+                 "-H", f"Authorization: Bearer {api_key}",
+                 "-H", "Content-Type: application/json",
+                 "--data-binary", "@-", "--max-time", "300",
+                 "-w", "\nHTTPSTATUS:%{http_code}"],
+                input=data, capture_output=True, timeout=320)
+            txt = r.stdout.decode("utf-8", errors="replace")
+            body_txt, _, status = txt.rpartition("HTTPSTATUS:")
+            status = status.strip()
+            if status == "429":
+                wait = 60 + 15 * attempt
+                _log(f"[groq] 429 rate-limit, waiting {wait}s")
+                time.sleep(wait)
+                continue
+            d = json.loads(body_txt)
+            if "error" in d:
+                raise RuntimeError(str(d["error"])[:150])
+            return d["choices"][0]["message"]["content"]
+        except json.JSONDecodeError:
+            wait = 20 * (attempt + 1)
+            _log(f"[groq] bad response (status={status}), retry {wait}s")
+            time.sleep(wait)
+        except Exception as e:
+            wait = 20 * (attempt + 1)
+            _log(f"[groq] {type(e).__name__} retry in {wait}s "
+                 f"({str(e)[:100]})")
+            time.sleep(wait)
+    raise RuntimeError("groq retries exhausted")
+
+
+def _fence(resp: str) -> str:
+    if not resp.lstrip().startswith("```"):
+        resp = "```python\n" + resp
+    if "```" not in resp[10:]:
+        resp = resp.rstrip() + "\n```\n"
+    return resp
+
+
+# ── main ──────────────────────────────────────────────────────────────
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="forge_evolve.db")
     ap.add_argument("--rows", type=int, default=200)
     ap.add_argument("--per-target", type=int, default=25)
-    ap.add_argument("--out", default="results/qwen_distill.jsonl")
-    ap.add_argument("--max-new", type=int, default=700)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--max-new", type=int, default=900)
+    ap.add_argument("--backend", choices=["hf", "groq"], default="hf")
+    ap.add_argument("--groq-model", default="openai/gpt-oss-120b")
+    ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--retries", type=int, default=1,
+                    help="semantic-fail feedback retries per prompt")
+    ap.add_argument("--temperature", type=float, default=0.0)
     args = ap.parse_args()
 
     prompts = _real_prompts(args.db, args.per_target, args.rows)
     seed_prompts = _target_prompts(REPO / "forge" / "evolution" / "targets")
-    prompts = prompts + [p for p in seed_prompts if p[:300]
-                         not in {q[:300] for q in prompts}]
-    print(f"[gen] {len(prompts)} prompts "
-          f"({len(seed_prompts)} target-template)")
+    prompts += [p for p in seed_prompts
+                if p[:300] not in {q[:300] for q in prompts}]
+    _log(f"[gen] {len(prompts)} prompts "
+         f"({len(seed_prompts)} target-template) backend={args.backend}")
+    oracles = _load_oracles(REPO / "forge" / "evolution" / "targets")
+    _log(f"[gen] {len(oracles)} semantic oracles loaded")
 
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(MODEL_ID)
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, dtype=torch.bfloat16, device_map="cuda")
-    model.eval()
+    model = tok = None
+    api_key = None
+    if args.backend == "hf":
+        import os
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        tok = AutoTokenizer.from_pretrained(MODEL_ID)
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID, dtype=torch.bfloat16, device_map="cuda")
+        model.eval()
+    else:
+        import os
+        api_key = os.environ.get("GROQ_API_KEY")
+        if not api_key:
+            print("GROQ_API_KEY not set", file=sys.stderr)
+            return 2
+
+    stats = {"ok": 0, "semantic_fail": 0, "compile_fail": 0,
+             "exec_fail": 0, "no_target": 0, "gen_err": 0}
+    done = [0]
+
+    def work(item):
+        i, p = item
+        raw = None
+        try:
+            for attempt in range(args.retries + 1):
+                if args.backend == "hf":
+                    raw = _hf_gen(model, tok, p, args.max_new)
+                else:
+                    fb = None
+                    if attempt and raw is not None:
+                        fb = (raw,
+                              "Your previous code failed verification: "
+                              f"{last_detail}. Reply with ONLY one "
+                              "```python code block containing the "
+                              "corrected complete implementation.")
+                    raw = _groq_gen(api_key, args.groq_model, p,
+                                    args.max_new,
+                                    temperature=(args.temperature
+                                               if attempt == 0
+                                               else max(0.3,
+                                                        args.temperature)),
+                                    extra_user=fb)
+                code = _extract_code(raw)
+                if not code.strip():
+                    last_detail = "no code block in output"
+                    status = "compile_fail"
+                else:
+                    status, last_detail = _semantic_check(code, p, oracles)
+                if status in ("ok", "no_target"):
+                    break
+            if status in ("ok", "no_target"):
+                row = {"prompt": p, "response": _fence(raw),
+                       "target": "qwen_distill",
+                       "verified": status == "ok",
+                       "semantic": status}
+                with _print_lock:
+                    out_f.write(json.dumps(row) + "\n")
+                    out_f.flush()
+                stats["ok" if status == "ok" else status] += 1
+            else:
+                stats[status] = stats.get(status, 0) + 1
+                _log(f"[gen] {i} drop {status}: {last_detail[:80]}")
+        except Exception as e:
+            stats["gen_err"] += 1
+            _log(f"[gen] {i} gen error: {str(e)[:120]}")
+        done[0] += 1
+        if done[0] % 20 == 0:
+            _log(f"[gen] {done[0]}/{len(prompts)} {stats}")
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    n_ok = n_bad = 0
-    with out.open("w", encoding="utf-8") as f:
-        for i, p in enumerate(prompts):
-            try:
-                raw = _gen(model, tok, p, args.max_new)
-            except Exception as e:
-                print(f"[gen] {i} gen error: {str(e)[:120]}", flush=True)
-                n_bad += 1
-                continue
-            code = _extract_code(raw)
-            ok = bool(code.strip())
-            if ok:
-                try:
-                    compile(code, "<c>", "exec")
-                except SyntaxError:
-                    ok = False
-            if ok:
-                f.write(json.dumps({"prompt": p, "response": raw,
-                                    "target": "qwen_distill"}) + "\n")
-                n_ok += 1
-            else:
-                n_bad += 1
-            if (i + 1) % 20 == 0:
-                print(f"[gen] {i+1}/{len(prompts)} ok={n_ok} bad={n_bad}",
-                      flush=True)
-    print(f"[gen] done: {n_ok} usable / {n_bad} dropped -> {out}")
+    with out.open("w", encoding="utf-8") as out_f:
+        items = list(enumerate(prompts))
+        if args.backend == "groq":
+            with ThreadPoolExecutor(max_workers=args.workers) as ex:
+                list(ex.map(work, items))
+        else:
+            for item in items:
+                work(item)
+
+    total = sum(stats.values())
+    _log(f"[gen] done: {stats} kept={stats['ok'] + stats['no_target']}"
+         f"/{total} -> {out}")
     return 0
 
 
