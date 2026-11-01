@@ -33,18 +33,29 @@ class RMSNorm(nn.Module):
     Falls back to F.rms_norm on CPU or when Triton is unavailable.
     """
 
-    def __init__(self, d_model, eps=1e-6, use_triton: bool = False):
+    def __init__(self, d_model, eps=1e-6, use_triton: bool = False,
+                 zero_centered: bool = False):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(d_model))
+        # Zero-centered reparam (Qwen3-Next, d2): the stored parameter is
+        # gamma-1 and the forward adds 1 back — identical function, but
+        # weight decay now pulls toward the IDENTITY scale instead of
+        # zeroing the channel gains during hone.
+        self._zero_centered = zero_centered
+        init = torch.zeros(d_model) if zero_centered else torch.ones(d_model)
+        self.weight = nn.Parameter(init)
         self.eps = eps
         self.normalized_shape = [d_model]
         self._use_triton = use_triton
 
+    def _gamma(self):
+        return (1 + self.weight) if self._zero_centered else self.weight
+
     def forward(self, x):
+        w = self._gamma()
         if self._use_triton:
             from forge.decoding.triton_train_kernels import triton_rms_norm
-            return triton_rms_norm(x, self.weight, self.eps)
-        return F.rms_norm(x, self.normalized_shape, self.weight, self.eps)
+            return triton_rms_norm(x, w, self.eps)
+        return F.rms_norm(x, self.normalized_shape, w, self.eps)
 
 
 class RotaryEmbedding(nn.Module):
@@ -189,7 +200,8 @@ class GroupedQueryAttention(nn.Module):
                  use_rope=True, head_dim: int | None = None,
                  sliding_window: int | None = None,
                  use_out_gate: bool = False,
-                 rope_partial_factor: float = 1.0):
+                 rope_partial_factor: float = 1.0,
+                 zero_centered_norm: bool = False):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
@@ -220,8 +232,12 @@ class GroupedQueryAttention(nn.Module):
         self.use_qk_norm = use_qk_norm
         self._qk_norm_identity = True  # assume identity until weights loaded
         if use_qk_norm:
-            self.q_norm = RMSNorm(self.head_dim, eps=getattr(self, '_qk_norm_eps', 1e-6))
-            self.k_norm = RMSNorm(self.head_dim, eps=getattr(self, '_qk_norm_eps', 1e-6))
+            self.q_norm = RMSNorm(
+                self.head_dim, eps=getattr(self, '_qk_norm_eps', 1e-6),
+                zero_centered=zero_centered_norm)
+            self.k_norm = RMSNorm(
+                self.head_dim, eps=getattr(self, '_qk_norm_eps', 1e-6),
+                zero_centered=zero_centered_norm)
 
         # ValueResidual: V_0 from layer 0 is injected by the parent model.
         # When set, v = v + gate * v0 (applied before attention).
@@ -727,13 +743,14 @@ class ModularBlock(nn.Module):
         self._use_adaln = _cond_dim is not None
         _norm_type = getattr(config, 'norm_type', 'rmsnorm')
         _norm_eps = getattr(config, 'norm_eps', 1e-6)
+        _zc = getattr(config, 'zero_centered_norm', False)
         if self._use_adaln:
             from forge.training.losses.adaln_zero import AdaLNZero
             self.ln1 = AdaLNZero(config.d_model, _cond_dim,
                                  norm_type=_norm_type, eps=_norm_eps)
         elif norm is RMSNorm:
             self.ln1 = RMSNorm(config.d_model, eps=_norm_eps,
-                              use_triton=_use_triton)
+                              use_triton=_use_triton, zero_centered=_zc)
         else:
             self.ln1 = norm(config.d_model)
         # Determine layer type: conv, mamba, or attention
@@ -793,7 +810,7 @@ class ModularBlock(nn.Module):
                                  norm_type=_norm_type, eps=_norm_eps)
         elif norm is RMSNorm:
             self.ln2 = RMSNorm(config.d_model, eps=_norm_eps,
-                              use_triton=_use_triton)
+                              use_triton=_use_triton, zero_centered=_zc)
         else:
             self.ln2 = norm(config.d_model)
         from .builders import build_ffn  # lazy: circular dep
@@ -895,9 +912,11 @@ class ModularBlock(nn.Module):
         if self._use_sandwich:
             if norm is RMSNorm:
                 self.post_attn_norm = RMSNorm(config.d_model, eps=_norm_eps,
-                                              use_triton=_use_triton)
+                                              use_triton=_use_triton,
+                                              zero_centered=_zc)
                 self.post_ffn_norm = RMSNorm(config.d_model, eps=_norm_eps,
-                                             use_triton=_use_triton)
+                                             use_triton=_use_triton,
+                                             zero_centered=_zc)
             else:
                 self.post_attn_norm = norm(config.d_model)
                 self.post_ffn_norm = norm(config.d_model)

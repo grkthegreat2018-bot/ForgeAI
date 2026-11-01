@@ -66,10 +66,11 @@ class ConfigurableResearchLLM(nn.Module):
         norm = RMSNorm if getattr(config, 'norm_type', 'layernorm') == 'rmsnorm' else nn.LayerNorm
         _use_triton_f = getattr(config, 'use_triton_kernels', False)
         _norm_eps = getattr(config, 'norm_eps', 1e-6)
+        _zc = getattr(config, 'zero_centered_norm', False)
         # Embedding norm: applied after embedding, before layers (LFM2.5 has this)
         if getattr(config, 'use_embed_norm', False):
             if norm is RMSNorm:
-                self.embed_norm = RMSNorm(config.d_model, eps=_norm_eps, use_triton=_use_triton_f)
+                self.embed_norm = RMSNorm(config.d_model, eps=_norm_eps, use_triton=_use_triton_f, zero_centered=_zc)
             else:
                 self.embed_norm = norm(config.d_model)
         else:
@@ -77,7 +78,7 @@ class ConfigurableResearchLLM(nn.Module):
         # Final norm: applied after layers, before head (standard, LFM2.5 doesn't have this)
         if getattr(config, 'use_final_norm', True):
             if norm is RMSNorm:
-                self.ln_f = RMSNorm(config.d_model, eps=_norm_eps, use_triton=_use_triton_f)
+                self.ln_f = RMSNorm(config.d_model, eps=_norm_eps, use_triton=_use_triton_f, zero_centered=_zc)
             else:
                 self.ln_f = norm(config.d_model)
         else:

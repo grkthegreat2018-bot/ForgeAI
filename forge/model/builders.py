@@ -53,7 +53,10 @@ def build_attention(config: ModelConfig, layer_idx: int = 0) -> nn.Module:
                                      head_dim=getattr(config, 'head_dim', None),
                                      sliding_window=sliding_window,
                                      use_out_gate=use_out_gate,
-                                     rope_partial_factor=rope_partial)
+                                     rope_partial_factor=rope_partial,
+                                     zero_centered_norm=getattr(
+                                         config, 'zero_centered_norm',
+                                         False))
         attn = _maybe_bitnet_attention(config, attn)
         attn = _maybe_apply_lerope(config, attn)
         attn = _maybe_apply_learned_sink(config, attn)

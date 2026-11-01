@@ -37,6 +37,11 @@ class ModelConfig:
     # byte-identical by construction, so sharing is function-exact; it
     # makes 262K-table models affordable (11 per-layer copies -> 2).
     share_rope: bool = False
+    # Zero-centered RMSNorm reparam (Qwen3-Next): norm weights are stored
+    # as gamma-1 and the forward adds 1 back — identical function, but
+    # weight decay pulls toward identity scale instead of zero gain.
+    # Checkpoints written at gamma are ported by subtracting 1 at load.
+    zero_centered_norm: bool = False
 
     # === Weight sharing ===
     # Tie input embeddings to output head (default True for most small models).

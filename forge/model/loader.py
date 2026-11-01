@@ -576,6 +576,31 @@ class ModelLoader:
         return state
 
     @staticmethod
+    def _warm_start_zero_center(state: dict, model) -> dict:
+        """Port gamma-stored norm weights to zero-centered storage (d2).
+
+        Under zero_centered_norm the parameter holds gamma-1, so every
+        zero-centered RMSNorm weight arriving from a standard checkpoint
+        is shifted down by exactly 1 — function-exact. Enumerates the
+        built model's norm modules rather than pattern-matching keys, so
+        HF-remapped names can't drift out of sync.
+        """
+        if not state:
+            return state
+        from forge.model.layers import RMSNorm
+        shifted = 0
+        for name, mod in model.named_modules():
+            if type(mod) is RMSNorm and getattr(mod, '_zero_centered', False):
+                key = f"{name}.weight"
+                if key in state:
+                    state[key] = state[key] - 1.0
+                    shifted += 1
+        if shifted:
+            print(f"  [FastBuild] zero-centered norm port: "
+                  f"{shifted} weights shifted -1 (lossless)")
+        return state
+
+    @staticmethod
     def _warm_start_mamba3(state: dict, config: ModelConfig) -> dict:
         """Convert Mamba-2 real SSM states to Mamba-3 complex states (lossless).
 
@@ -681,8 +706,11 @@ class ModelLoader:
         for block in model.blocks:
             attn = block.attn
             if hasattr(attn, 'q_norm') and hasattr(attn, '_qk_norm_identity'):
-                q_id = (attn.q_norm.weight == 1.0).all()
-                k_id = (attn.k_norm.weight == 1.0).all()
+                # zero-centered norms store gamma-1: identity means w==0
+                q0 = getattr(attn.q_norm, '_zero_centered', False)
+                k0 = getattr(attn.k_norm, '_zero_centered', False)
+                q_id = (attn.q_norm.weight == (0.0 if q0 else 1.0)).all()
+                k_id = (attn.k_norm.weight == (0.0 if k0 else 1.0)).all()
                 attn._qk_norm_identity = bool(q_id and k_id)
             if hasattr(attn, 'lambda_param') and hasattr(attn, 'set_identity'):
                 attn.set_identity((attn.lambda_param == 0.0).all().item())
@@ -1038,6 +1066,7 @@ class ModelLoader:
             state = ModelLoader._warm_start_attention(state, config)
             state = ModelLoader._warm_start_mamba3(state, config)
             state = ModelLoader._warm_start_conv(state, config)
+            state = ModelLoader._warm_start_zero_center(state, model)
             state = ModelLoader._apply_ffn_compression(state, config)
 
             t_weights = time.time() - t_weights
@@ -1209,6 +1238,7 @@ class ModelLoader:
             state = ModelLoader._warm_start_attention(state, config)
             state = ModelLoader._warm_start_mamba3(state, config)
             state = ModelLoader._warm_start_conv(state, config)
+            state = ModelLoader._warm_start_zero_center(state, model)
             state = ModelLoader._apply_ffn_compression(state, config)
 
             t_weights = time.time() - t_weights
