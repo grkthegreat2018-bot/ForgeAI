@@ -61,6 +61,8 @@ class ConfigurableResearchLLM(nn.Module):
             self.embed = nn.Embedding(config.vocab_size, config.d_model)
             self.head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.blocks = nn.ModuleList([ModularBlock(config, layer_idx=i) for i in range(config.n_layers)])
+        if getattr(config, 'share_rope', False):
+            self._share_rope_tables()
         norm = RMSNorm if getattr(config, 'norm_type', 'layernorm') == 'rmsnorm' else nn.LayerNorm
         _use_triton_f = getattr(config, 'use_triton_kernels', False)
         _norm_eps = getattr(config, 'norm_eps', 1e-6)
@@ -266,6 +268,35 @@ class ConfigurableResearchLLM(nn.Module):
         self._embed_device: torch.device | None = None
         self._ln_f_device: torch.device | None = None
         self._block_devices: list[torch.device] | None = None
+
+    def _share_rope_tables(self) -> int:
+        """Deduplicate RotaryEmbedding tables across layers (d2 item).
+
+        Layers with identical rope params build byte-identical cos/sin
+        buffers, so rebinding duplicates to one canonical instance is
+        function-exact — same values, same storage. Buffers are
+        non-persistent, so checkpoint state dicts are unaffected.
+        Exact-type check skips learnable variants (LeRoPE/AdaRoPE wrap
+        or subclass the table and own their parameters).
+        Returns the number of duplicated tables folded.
+        """
+        from forge.model.layers import RotaryEmbedding
+        canon: dict[tuple, RotaryEmbedding] = {}
+        folded = 0
+        for mod in self.modules():
+            rope = getattr(mod, 'rope', None)
+            if type(rope) is not RotaryEmbedding:
+                continue
+            key = (rope.dim, rope.max_seq_len, rope.base,
+                   rope.partial_rotary_factor,
+                   repr(sorted(rope.rope_scaling.items()))
+                   if isinstance(rope.rope_scaling, dict)
+                   else repr(rope.rope_scaling))
+            prev = canon.setdefault(key, rope)
+            if prev is not rope:
+                mod.rope = prev
+                folded += 1
+        return folded
 
     def cache_devices(self):
         """Scan and cache module device placement (lazy, on first forward)."""

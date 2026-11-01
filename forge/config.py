@@ -32,6 +32,11 @@ class ModelConfig:
     # RoPE variant: "standard", "lerope", or "adarope" (both learnable variants
     # init to identity = standard RoPE, lossless at start).
     rope_variant: str = "standard"
+    # Share one RotaryEmbedding table set across layers with identical
+    # rope params (dim, theta, scaling, partial factor). Buffer values are
+    # byte-identical by construction, so sharing is function-exact; it
+    # makes 262K-table models affordable (11 per-layer copies -> 2).
+    share_rope: bool = False
 
     # === Weight sharing ===
     # Tie input embeddings to output head (default True for most small models).
