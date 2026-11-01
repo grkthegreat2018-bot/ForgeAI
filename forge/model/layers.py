@@ -264,9 +264,22 @@ class GroupedQueryAttention(nn.Module):
                 position_ids: torch.Tensor | None = None,
                 cu_seqlens: torch.Tensor | None = None):
         B, T, _C = x.shape
-        q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        # Fused path: one GEMM emits q/k/v (+ gate logits for LFM3 out-
+        # gate). Rows are packed from the loaded weights by the loader.
+        gate_logits = None
+        if getattr(self, '_fused_qkv', False):
+            parts = self.qkv_proj(x)
+            if self.qkv_proj.g_dim:
+                q_raw, k_raw, v_raw, gate_logits = parts
+            else:
+                q_raw, k_raw, v_raw = parts
+        else:
+            q_raw = self.q_proj(x)
+            k_raw = self.k_proj(x)
+            v_raw = self.v_proj(x)
+        q = q_raw.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        k = k_raw.view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v = v_raw.view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
 
         # ValueResidual (ResFormer): add V_0 from layer 0 to this layer's V.
         # gate=0 at init → v unchanged (lossless). Training opens the gate.
@@ -351,7 +364,7 @@ class GroupedQueryAttention(nn.Module):
         # contamination. Only during training (no KV cache, no attention_bias).
         if cu_seqlens is not None and not use_cache and attention_bias is None:
             out = varlen_attention(q, k, v, cu_seqlens)
-            return self._finish_attn(x, out), new_kv
+            return self._finish_attn(x, out, gate_logits), new_kv
 
         # Single-token decode with cached KV: no causal mask needed (all keys are valid)
         total_len = k.shape[-2]
@@ -429,9 +442,10 @@ class GroupedQueryAttention(nn.Module):
             mask = _causal_mask(T, total_len, total_len - T,
                                 q.device, q.dtype)
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
-        return self._finish_attn(x, out), new_kv
+        return self._finish_attn(x, out, gate_logits), new_kv
 
-    def _finish_attn(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+    def _finish_attn(self, x: torch.Tensor, out: torch.Tensor,
+                     gate_logits: torch.Tensor | None = None) -> torch.Tensor:
         """(B,H,T,Dh) attn output -> optional per-head sigmoid gate ->
         (B,T,H*Dh) -> out_proj.
 
@@ -440,8 +454,8 @@ class GroupedQueryAttention(nn.Module):
         """
         out = out.transpose(1, 2)                        # (B,T,H,Dh)
         if self.gate_proj is not None:
-            gate = torch.sigmoid(self.gate_proj(x))      # (B,T,H)
-            out = out * gate.unsqueeze(-1)
+            lg = gate_logits if gate_logits is not None else self.gate_proj(x)
+            out = out * torch.sigmoid(lg).unsqueeze(-1)  # (B,T,H,1)
         out = out.reshape(out.shape[0], out.shape[1], -1)
         return self.out_proj(out)
 
@@ -714,8 +728,11 @@ class SwiGLUFFN(nn.Module):
         self._use_triton = use_triton
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate = self.w_gate(x)
-        up = self.w_up(x)
+        if getattr(self, '_fused_gate_up', False):
+            gate, up = self.gate_up_proj(x)
+        else:
+            gate = self.w_gate(x)
+            up = self.w_up(x)
         if self.use_clamp:
             # GPT-OSS clamped SwiGLU: scaled sigmoid + clamp + (up+1) residual
             gate = gate.clamp(min=None, max=self.clamp_limit)

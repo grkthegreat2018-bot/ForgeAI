@@ -34,13 +34,17 @@ class FusedQKVLinear(nn.Module):
     """
 
     def __init__(self, d_model: int, q_dim: int, k_dim: int, v_dim: int,
-                 bias: bool = False):
+                 bias: bool = False, g_dim: int = 0):
         super().__init__()
         self.d_model = d_model
         self.q_dim = q_dim
         self.k_dim = k_dim
         self.v_dim = v_dim
-        self.out_dim = q_dim + k_dim + v_dim
+        # d2: LFM3 per-head output gate rides in the SAME GEMM — the gate
+        # reads the block input just like q/k/v, so its n_heads rows are
+        # appended after v (Qwen3-Next fused-QKV+gate pattern).
+        self.g_dim = g_dim
+        self.out_dim = q_dim + k_dim + v_dim + g_dim
         self.weight = nn.Parameter(torch.empty(self.out_dim, d_model))
         nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
         self.bias = None
@@ -48,11 +52,13 @@ class FusedQKVLinear(nn.Module):
             self.bias = nn.Parameter(torch.empty(self.out_dim))
             nn.init.uniform_(self.bias, -1.0 / d_model ** 0.5, 1.0 / d_model ** 0.5)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Returns (q, k, v) tensors, each (B, T, dim)."""
+    def forward(self, x: torch.Tensor):
+        """Returns (q, k, v) — or (q, k, v, gate_logits) when g_dim > 0."""
         out = F.linear(x, self.weight, self.bias)
-        q, k, v = out.split([self.q_dim, self.k_dim, self.v_dim], dim=-1)
-        return q, k, v
+        if self.g_dim:
+            return out.split([self.q_dim, self.k_dim, self.v_dim,
+                              self.g_dim], dim=-1)
+        return out.split([self.q_dim, self.k_dim, self.v_dim], dim=-1)
 
     @property
     def q_weight(self) -> torch.Tensor:

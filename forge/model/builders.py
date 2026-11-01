@@ -239,21 +239,68 @@ def _maybe_fuse_qkv(config: ModelConfig, attn: nn.Module) -> nn.Module:
     # Don't fuse if already BitNet (BitNet handles its own kernel)
     if type(q_proj).__name__ == "BitNetLinear":
         return attn
+    g_proj = getattr(attn, 'gate_proj', None)
+    g_dim = g_proj.out_features if g_proj is not None else 0
     fused_w, fused_b = fuse_qkv_weights(
         q_proj.weight, k_proj.weight, v_proj.weight,
         q_proj.bias, k_proj.bias, v_proj.bias)
-    fused = FusedQKVLinear(
-        config.d_model, q_proj.out_features, k_proj.out_features, v_proj.out_features,
-        bias=fused_b is not None)
+    if g_dim:
+        fused_w = torch.cat([fused_w, g_proj.weight], dim=0)
+        if fused_b is not None:
+            fused_b = torch.cat([fused_b, g_proj.bias or
+                                 torch.zeros(g_dim, device=fused_b.device,
+                                             dtype=fused_b.dtype)])
+    # fork_rng: the fused module's kaiming init would otherwise consume
+    # global RNG state and shift every later layer's random init vs the
+    # unfused build — the values are overwritten immediately anyway.
+    with torch.random.fork_rng():
+        fused = FusedQKVLinear(
+            config.d_model, q_proj.out_features, k_proj.out_features,
+            v_proj.out_features, bias=fused_b is not None, g_dim=g_dim)
     with torch.no_grad():
         fused.weight.copy_(fused_w)
         if fused_b is not None:
             fused.bias.copy_(fused_b)
     attn.qkv_proj = fused
-    # Keep original projections for weight loading compat (set to identity/no-op)
-    # They won't be called in forward — the fused path is used instead.
+    # Keep original projections — checkpoints load into q/k/v/gate_proj
+    # keys, and loader._refresh_fused_qkv re-packs the fused matrix
+    # AFTER weights land (the build-time copy is only init garbage).
     attn._fused_qkv = True
     return attn
+
+
+def refresh_fused_qkv(attn: nn.Module) -> None:
+    """Re-pack attn.qkv_proj from the loaded q/k/v/gate weights.
+
+    Call after checkpoint weights land — the fused matrix built at
+    construction only ever held init values.
+    """
+    fused = getattr(attn, 'qkv_proj', None)
+    if fused is None or not getattr(attn, '_fused_qkv', False):
+        return
+    parts = [attn.q_proj.weight, attn.k_proj.weight, attn.v_proj.weight]
+    if fused.g_dim:
+        parts.append(attn.gate_proj.weight)
+    with torch.no_grad():
+        fused.weight.copy_(torch.cat(parts, dim=0))
+        if fused.bias is not None:
+            bs = [attn.q_proj.bias, attn.k_proj.bias, attn.v_proj.bias]
+            if fused.g_dim:
+                bs.append(attn.gate_proj.bias if attn.gate_proj.bias
+                          is not None else torch.zeros(
+                              fused.g_dim, device=fused.bias.device,
+                              dtype=fused.bias.dtype))
+            fused.bias.copy_(torch.cat(bs, dim=0))
+
+
+def refresh_fused_gate_up(ffn: nn.Module) -> None:
+    """Re-pack ffn.gate_up_proj from the loaded w_gate/w_up weights."""
+    fused = getattr(ffn, 'gate_up_proj', None)
+    if fused is None or not getattr(ffn, '_fused_gate_up', False):
+        return
+    with torch.no_grad():
+        fused.weight.copy_(
+            torch.cat([ffn.w_gate.weight, ffn.w_up.weight], dim=0))
 
 
 def _build_moe_ffn(config: ModelConfig) -> nn.Module:
@@ -408,7 +455,10 @@ def build_ffn(config: ModelConfig) -> nn.Module:
             from forge.keys.quantization.fused_gemm_key import FusedGateUpLinear, fuse_gateup_weights
             hidden = ffn.w_gate.out_features
             fused_w = fuse_gateup_weights(ffn.w_gate.weight, ffn.w_up.weight)
-            fused = FusedGateUpLinear(config.d_model, hidden, bias=False)
+            # fork_rng: the ctor's kaiming init must not perturb the global
+            # stream (values are overwritten immediately anyway).
+            with torch.random.fork_rng():
+                fused = FusedGateUpLinear(config.d_model, hidden, bias=False)
             with torch.no_grad():
                 fused.weight.copy_(fused_w)
             ffn.gate_up_proj = fused

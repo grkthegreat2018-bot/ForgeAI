@@ -697,6 +697,24 @@ class ModelLoader:
         return state
 
     @staticmethod
+    def _refresh_fused_qkv(model) -> None:
+        """Re-pack fused qkv/gate-up matrices from the loaded weights —
+        construction-time fusion only held init values."""
+        from forge.model.builders import (refresh_fused_gate_up,
+                                          refresh_fused_qkv)
+        n_qkv = n_ffn = 0
+        for mod in model.modules():
+            if getattr(mod, '_fused_qkv', False):
+                refresh_fused_qkv(mod)
+                n_qkv += 1
+            if getattr(mod, '_fused_gate_up', False):
+                refresh_fused_gate_up(mod)
+                n_ffn += 1
+        if n_qkv or n_ffn:
+            print(f"  [FastBuild] Fused GEMMs re-packed: "
+                  f"{n_qkv} qkv, {n_ffn} gate-up")
+
+    @staticmethod
     def _scan_qk_norm_identity(model: "ConfigurableResearchLLM",
                                 config: ModelConfig) -> None:
         """Detect non-identity QK-Norm weights and sync diff-attn identity.
@@ -1146,6 +1164,7 @@ class ModelLoader:
 
             # Post-load QK-norm + diff-attn identity scan
             ModelLoader._scan_qk_norm_identity(model, config)
+            ModelLoader._refresh_fused_qkv(model)
 
             # ── Post-load IRI-FP4 quantization (V2 default quant) ──
             # If use_iri_fp4=True but the checkpoint didn't have .iri_packed
@@ -1257,6 +1276,7 @@ class ModelLoader:
 
             # Post-load: detect non-identity QK-Norm weights.
             ModelLoader._scan_qk_norm_identity(model, config)
+            ModelLoader._refresh_fused_qkv(model)
 
             print(f"  [FastBuild] Weights: {t_weights:.1f}s | GPU transfer: {t_gpu:.1f}s")
         elif checkpoint_path:
