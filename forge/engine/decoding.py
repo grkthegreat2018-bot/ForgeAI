@@ -260,7 +260,8 @@ class StandardDecoding(DecodingStrategy):
                  dry_multiplier: float = 0.0, dry_base: float = 1.75,
                  dry_allowed_length: int = 2, dry_penalty_last_n: int = 512,
                  stop=None, tokenizer=None,
-                 kv_compact=None, suffix_mem=None, **_ignored):
+                 kv_compact=None, suffix_mem=None,
+                 cancel_check=None, **_ignored):
         ids = input_ids.clone()
         # EOS detection: check model attr, config, then known defaults
         eos = getattr(model, "eos_token_id", None)
@@ -323,7 +324,7 @@ class StandardDecoding(DecodingStrategy):
                     temperature, top_p, top_k, repetition_penalty,
                     min_p, min_k, dry_multiplier, dry_base,
                     dry_allowed_length, dry_penalty_last_n, prompt_ids,
-                    suffix_mem, stop_matcher)
+                    suffix_mem, stop_matcher, cancel_check)
             except Exception:
                 import logging
                 logging.getLogger(__name__).warning(
@@ -343,12 +344,27 @@ class StandardDecoding(DecodingStrategy):
             if kv_compact is not None:
                 past_kv = kv_compact(past_kv, force=True)
 
+        # Deferred readback (plan 4.6) is only correct when all recurrent
+        # state lives in past_kv — module-resident conv/SSM banks mutate
+        # in place and can't be un-advanced on a break without rollback.
+        # Checked AFTER prefill so lazily-created state attrs exist.
+        # (_v0 capture fires only on the non-cached prefill; _conv_state_
+        # reset/prefix are one-shot flags, not per-token buffers.)
+        _defer_sync = not any(
+            callable(getattr(h, "snapshot_state", None))
+            or any(getattr(h, a, None) is not None
+                   for a in _MUTABLE_RECURRENT_ATTRS)
+            for h in _spec_state_holders(model))
+
         # Prompt-boundary KV for the prefix cache — captured before decode
         # mutates the state (end-of-generation KV must not be stored under
         # a prompt-only key).
         model._forge_prefill_kv = past_kv
 
         for _ in range(max_new_tokens):
+            # Cooperative abort (POST /v1/abort): keep the partial text.
+            if cancel_check is not None and cancel_check():
+                break
             # DRY penalty: suppress tokens that continue a repeated
             # n-gram suffix anywhere in prompt+generated context.
             dry_pen = (
@@ -375,6 +391,24 @@ class StandardDecoding(DecodingStrategy):
                 min_p=min_p, min_k=min_k,
                 dry_penalties=dry_pen,
                 top_p_fn=self._top_p)
+
+            # Plan 4.6 async readback — only on models whose state lives
+            # entirely in past_kv (fresh (k,v) tuples per step). Hybrid
+            # models mutate module-resident conv/SSM banks in place, so a
+            # speculatively-launched step can't be discarded on break
+            # without a full recurrent rollback (costlier than the sync).
+            _next = None
+            if _defer_sync:
+                with torch.inference_mode():
+                    out = model(next_token, past_key_values=past_kv,
+                                use_cache=True)
+                    _nl, _nk = unpack_output_with_kv(out)
+                    if needs_kv_clone:
+                        _nl = _nl.clone()
+                        _nk = _clone_state_tree(_nk)
+                    if kv_compact is not None:
+                        _nk = kv_compact(_nk)
+                    _next = (_nl, _nk)
 
             # Single GPU->CPU sync per token: .item() brings the id over,
             # then the EOS check runs on the CPU scalar (no second sync).
@@ -403,16 +437,19 @@ class StandardDecoding(DecodingStrategy):
             # already emitted in prior steps).
             if stop_matcher is not None and stop_matcher.push(tok_id):
                 break
-            with torch.inference_mode():
-                out = model(next_token, past_key_values=past_kv, use_cache=True)
-                logits, past_kv = unpack_output_with_kv(out)
-                if needs_kv_clone:
-                    logits = logits.clone()
-                    past_kv = _clone_state_tree(past_kv)
-                # R65: keep the KV window bounded (throttled inside the
-                # engine helper — ~zero cost under the watermark).
-                if kv_compact is not None:
-                    past_kv = kv_compact(past_kv)
+            if _next is not None:
+                logits, past_kv = _next
+            else:
+                with torch.inference_mode():
+                    out = model(next_token, past_key_values=past_kv, use_cache=True)
+                    logits, past_kv = unpack_output_with_kv(out)
+                    if needs_kv_clone:
+                        logits = logits.clone()
+                        past_kv = _clone_state_tree(past_kv)
+                    # R65: keep the KV window bounded (throttled inside the
+                    # engine helper — ~zero cost under the watermark).
+                    if kv_compact is not None:
+                        past_kv = kv_compact(past_kv)
 
         # Expose final KV cache state + next-position logits for the
         # _finish_to_stop fast path (the last emitted token is already
@@ -428,7 +465,7 @@ class StandardDecoding(DecodingStrategy):
                          temperature, top_p, top_k, repetition_penalty,
                          min_p, min_k, dry_multiplier, dry_base,
                          dry_allowed_length, dry_penalty_last_n, prompt_ids,
-                         suffix_mem, stop_matcher):
+                         suffix_mem, stop_matcher, cancel_check=None):
         """Decode via a replayed CUDA graph over static KV.
 
         Prefill runs eagerly into the persistent PreAllocatedKVCache
@@ -478,7 +515,20 @@ class StandardDecoding(DecodingStrategy):
                         return graphs[tag], buffers[tag]
             return None
 
+        # Deferred readback (plan 4.6): on rewindable state — pure
+        # attention, all KV in the static cache — launch this token's
+        # replay BEFORE .item() so the D2H overlaps the replay. A break
+        # then rewinds position/mask (cheap). Conv/SSM/Titan banks can't
+        # be rewound, so hybrids keep the original sync-first order.
+        _defer_sync = not any(
+            callable(getattr(h, "snapshot_state", None))
+            or any(getattr(h, a, None) is not None
+                   for a in _MUTABLE_RECURRENT_ATTRS)
+            for h in _spec_state_holders(model))
+
         for _ in range(max_new_tokens):
+            if cancel_check is not None and cancel_check():
+                break
             dry_pen = (
                 _dry_penalties(
                     prompt_ids + generated_ids,
@@ -502,21 +552,47 @@ class StandardDecoding(DecodingStrategy):
                 dry_penalties=dry_pen,
                 top_p_fn=self._top_p)
 
+            _replayed = None
+            _pos = cache.position
+            _step = (_step_bufs(_pos + 1)
+                     if _defer_sync and _pos < cache.max_seq_len
+                     else None)
+            if _step is not None:
+                _prev_logits = logits.clone()  # graph overwrites the buf
+                graph, bufs = _step
+                mask_buf[:, _pos] = 1
+                cache.pos_t.fill_(_pos)
+                bufs['input_ids'].copy_(next_token)
+                with torch.inference_mode():
+                    graph.replay()
+                    _new_logits, _ = unpack_output_with_kv(bufs['output'])
+                cache.position += 1
+                _replayed = (_new_logits, _pos, _prev_logits)
+
             tok_id = next_token.item()
             generated_ids.append(tok_id)
             if suffix_mem is not None:
                 suffix_mem.feed_one(tok_id)
-            if tok_id in eos_set:
-                break
-            if len(generated_ids) >= MAX_REPEAT and all(g == tok_id for g in generated_ids[-MAX_REPEAT:]):
-                break
-            if len(generated_ids) >= 20:
+            _stop = tok_id in eos_set
+            if not _stop and len(generated_ids) >= MAX_REPEAT and all(g == tok_id for g in generated_ids[-MAX_REPEAT:]):
+                _stop = True
+            if not _stop and len(generated_ids) >= 20:
                 recent = generated_ids[-20:]
                 if len(set(recent)) / len(recent) < 0.4:
-                    break
-            _generated_tokens.append(next_token)
-            if stop_matcher is not None and stop_matcher.push(tok_id):
+                    _stop = True
+            if not _stop:
+                _generated_tokens.append(next_token)
+                if stop_matcher is not None and stop_matcher.push(tok_id):
+                    _stop = True
+            if _stop:
+                if _replayed is not None:
+                    _, _p, logits = _replayed
+                    cache.position = _p
+                    mask_buf[:, _p] = 0
                 break
+            if _replayed is not None:
+                logits = _replayed[0]
+                continue
 
             # Drive static state and replay the captured step.
             pos = cache.position
@@ -1558,6 +1634,14 @@ _RECURRENT_STATE_ATTRS = (
     "_conv_state", "_conv_state_reset", "_conv_state_prefix",
     "_ssm_state", "_ssm_state_real", "_ssm_state_imag", "_state_reset",
     "_v0", "_v0_capture",
+)
+
+# The subset that advances on EVERY cached decode step — presence of any
+# of these means a speculatively-launched forward can't be discarded on a
+# break (no cheap rollback), so deferred readback must stay off.
+_MUTABLE_RECURRENT_ATTRS = (
+    "_conv_state", "_ssm_state", "_ssm_state_real", "_ssm_state_imag",
+    "_memory",
 )
 
 

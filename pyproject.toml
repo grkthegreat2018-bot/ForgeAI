@@ -1,13 +1,15 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "forgeai"
 version = "0.1.0"
 description = "ForgeAI research — model architecture, training, and inference"
+readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+authors = [{name = "ForgeAI"}]
 
 # Core runtime dependencies (not re-listed from requirements.txt —
 # this section is for `pip install -e .` metadata only).
@@ -18,7 +20,11 @@ dependencies = [
     "transformers>=4.40",
     "safetensors>=0.4",
     "python-dotenv>=1.0",
+    "msgspec>=0.18",
 ]
+
+[project.urls]
+Repository = "https://github.com/grkthegreat2018-bot/ForgeLM"
 
 [project.optional-dependencies]
 # Heavy optional deps — install via: pip install -e ".[gpu]"

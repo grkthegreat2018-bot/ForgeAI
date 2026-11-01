@@ -32,9 +32,9 @@ Output: Two filtered JSONL files (stage1_short.jsonl, stage2_long.jsonl)
 
   # Step 1: Prepare curriculum data
   python -m research.training.runners.curriculum_sft prepare \\
-      --input forge/distillation/hf_datasets/gsm8k.jsonl \\
-             forge/distillation/hf_datasets/openr1_math.jsonl \\
-             forge/distillation/hf_datasets/openthoughts_114k.jsonl \\
+      --input data/hf_datasets/gsm8k.jsonl \\
+             data/hf_datasets/openr1_math.jsonl \\
+             data/hf_datasets/openthoughts_114k.jsonl \\
       --output-dir research/data/curriculum \\
       --short-cot-max-tokens 150 \\
       --long-cot-min-tokens 300 \\

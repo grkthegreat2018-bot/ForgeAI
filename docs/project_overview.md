@@ -58,6 +58,15 @@
 **Checkpoint**: `research/checkpoints/ForgeLM_V2.safetensors` (current production V2)
 **Tokenizer**: `research/checkpoints/forgelm_v2_tokenizer/`
 
+**Non-transformer memory families** (`forge/model/flux/`, `forge/model/strata/`):
+FluxLM is a sparse online associative-memory store repositioned (competitive
+audit A6) as *a revertible memory layer, not an LM* — journaled bit-exact
+undo + `explain()` cell provenance; the competitive set is agent memory
+(mem0/MemGPT/Letta), not transformers. Head-to-head vs a TF-IDF RAG
+baseline on held-out doc-grounded QA: `scripts/bench_flux_vs_rag.py`.
+STRATA is the deployment container format — division of labor in
+`docs/STRATA_VS_FLUXLM.md`.
+
 ---
 
 ## 2. ForgeEngine
@@ -87,17 +96,20 @@ output = engine.generate("Hello", max_new_tokens=100, temperature=0.7)
 
 ## 3. KV Cache Backends
 
-**File**: `forge/engine/kv_backend.py`
+**File**: `forge/engine/kv_backend.py` — audited 2026-10-31 (A2).
+
+Decode runs on per-layer `past_kv` tensors directly; the ~30 registered
+`KVCacheStrategy` classes are bookkeeping objects — only the
+`compact_past_kv` seam is live. `info()` reports `decode_live` per
+strategy; only these compact the real cache:
 
 | Strategy | Description | Status |
 |----------|-------------|--------|
-| standard | Pre-allocated tensor, O(1) append | ✅ Working |
-| paged | vLLM-style paged memory + prefix caching | ✅ Working |
-| rotorquant | Givens rotation + Lloyd-Max quant (3-4 bit) | ✅ Working |
-| hadamard_int4 | Block-diagonal Hadamard + INT4 | ✅ Working |
-| compressed | H2O heavy-hitter eviction + KV quant | ✅ Working |
-| streaming | StreamingLLM attention sinks + sliding window | ✅ Working |
-| snapkv | Observation-window eviction | ✅ Working |
+| beacon | Importance-scored prefix eviction | ✅ decode-live |
+| anchor | Anchor-token retention + eviction | ✅ decode-live |
+| metakv | Learned/meta eviction policy | ✅ decode-live |
+| flux | Flux-scored compaction | ✅ decode-live |
+| standard / paged / rotorquant / hadamard_int4 / compressed / streaming / snapkv / ~20 more | Bookkeeping strategies (`append`/`get` never called by decode) | ⚠️ dormant (`decode_live: False`) |
 
 ---
 
@@ -300,7 +312,7 @@ Pure-PyTorch fused linear+CE — avoids materializing full [B*T, V] logits. 2-3x
 | r31_single_tool, r31_multi_turn | Tool-use / multi-turn data |
 | tasks/ | Task-definition data |
 
-**Distillation data**: `forge/distillation/hf_datasets/` — bbh, bigbench, codeforces, code_alpaca, dolphin_r1, folio, gsm8k, hermes_fc, magicoder, math_hard, metamath, no_robots, openhermes, …
+**Distillation data**: `data/hf_datasets/` (moved out of the `forge/` package in A20) — bbh, bigbench, codeforces, code_alpaca, dolphin_r1, folio, gsm8k, hermes_fc, magicoder, math_hard, metamath, no_robots, openhermes, …
 
 ---
 
@@ -310,6 +322,7 @@ Pure-PyTorch fused linear+CE — avoids materializing full [B*T, V] logits. 2-3x
 
 | Benchmark | Description | Status |
 |-----------|-------------|--------|
+| external_eval.py | ARC-E/C, HellaSwag, MMLU (loglikelihood MC) + GSM8K (greedy) over `data/eval/*.jsonl`; `scripts/run_external_eval.py --compare` regression gate | ✅ Working (A1) |
 | goal_scorer.py | Multi-dimensional: minimalism, efficiency, diversity, consistency, confidence | ✅ Working |
 | ckpt_tester.py / goal_tasks.py | Checkpoint eval harness + task set | ✅ Working |
 | test_model_compare.py | Quality/code/reasoning/tool-use comparison (25 tests) | ❌ Removed |

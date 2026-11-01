@@ -34,6 +34,9 @@ $env:PYTHONPATH="D:\windsurf\ForgeAI"
 ## Quickstart
 
 ```powershell
+# pre-flight: verify local checkpoints/tokenizer exist before any run
+.\venv\Scripts\python.exe scripts\check_assets.py   # add --all for optional assets
+
 # evolve a single engine hot-path with the LFM3 proposer (default model)
 .\venv\Scripts\python.exe scripts\fn_evolve.py --target prefix_hash `
     --evals 60 --status-file .devin\run.json --eval-log --log-gens
@@ -58,7 +61,19 @@ replays CUDA graphs, so this only speeds prefill), `--lora-root` /
 `--lora-tag` (tagged adapters; defaults to `forge/evolution/loras_lfm3`),
 `--no-eval-pool --workers 1` (serial subprocess-per-eval debug mode).
 
+### Server env vars
+
+- `FORGE_HOST` / `FORGE_PORT` — bind address/port (`forge_server.py`)
+- `FORGE_API_KEY` — bearer key gating mutating `/v1` methods
+- `FORGE_MODEL_ALIASES` — `fast=forgelm-v2-jamba,code=lfm3` style aliases
+- `FORGE_LOG_REQUESTS=1` — one JSON line per request to stderr
+- `FORGE_NO_CACHE=1` — disable the exact-match response cache
+- `FORGE_LORA_ROOTS` — `os.pathsep`-separated allowed LoRA directories
+- `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1` — refuse HF downloads;
+  cached artifacts only (load fails loudly on a cache miss)
+- `FORGE_HF_REVISION` — default HF revision for hub-resolved models
+
 ### Secondary environments
 
-- `requirements_ov.txt` � OpenVINO GenAI venv (`venv_ov\Scripts\python.exe`) for NPU/CPU proposer offload.
-- `requirements_train.txt` � training venv (`venv_train\Scripts\python.exe`) for SFT/LoRA hone rounds.
+- `requirements_ov.txt` — OpenVINO GenAI venv (`venv_ov\Scripts\python.exe`) for NPU/CPU proposer offload.
+- `requirements_train.txt` — training venv (`venv_train\Scripts\python.exe`) for SFT/LoRA hone rounds.

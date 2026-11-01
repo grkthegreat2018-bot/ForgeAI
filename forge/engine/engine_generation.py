@@ -87,6 +87,23 @@ class _GenerationMixin:
         head = getattr(self.model, "_head", None)
         return head.report() if head is not None else "(no head)"
 
+    # ---------------- cooperative cancellation (Phase 6b) ---------------
+
+    def request_cancel(self):
+        """Signal the in-flight generation to stop at the next token.
+
+        Cooperative: the decode loops check ``self._gen_cancel`` per
+        iteration and break out with their partial output — no model or
+        KV-cache state is corrupted, and the flag is cleared at the start
+        of the next ``generate``/``generate_raw``/``generate_stream``
+        call.  Cheap and idempotent; safe to call from any thread.
+        """
+        self._gen_cancel = True
+
+    def cancel_generation(self):
+        """Alias for :meth:`request_cancel` (server abort contract)."""
+        self.request_cancel()
+
     @torch.no_grad()
     def generate(self, prompt: str, max_new_tokens: int = 100,
                  temperature: float = 0.0, top_p: float = 1.0,
@@ -98,6 +115,7 @@ class _GenerationMixin:
                  dry_multiplier: float = 0.0, dry_base: float = 1.75,
                  dry_allowed_length: int = 2, dry_penalty_last_n: int = 512,
                  json_schema: dict | None = None,
+                 logits_processor=None,
                  stop: list[str] | None = None,
                  logprobs: int | None = None,
                  prompt_logprobs: int | None = None,
@@ -137,6 +155,13 @@ class _GenerationMixin:
                 logits processor to mask tokens that would produce
                 schema-invalid JSON. Bypasses prefix cache / CacheBlend /
                 AirLLM paths (constrained decoding needs per-step masking).
+            logits_processor: optional callback ``(logits, token_ids) -> logits``
+                applied per decode step BEFORE top-k/temperature — same seam
+                ``generate_stream`` exposes (server-side penalties/logit_bias
+                on the non-stream path).  Like ``json_schema`` it routes the
+                decode through the per-step ``_decode_tokens`` loop and
+                bypasses prefix cache / CacheBlend / AirLLM.  ``json_schema``
+                takes precedence when both are given.
             learn: memory-model gate (FluxLM only). ``False`` runs the whole
                 call observe-only — no prompt ingestion, no decode-time
                 writes, no journal entries — so held-out evaluation cannot
@@ -173,11 +198,13 @@ class _GenerationMixin:
                 if params.mem_bias is not None:
                     saved["gen_bias"] = self.model._gen_bias
                     self.model._gen_bias = float(params.mem_bias)
+            self._gen_cancel = False  # new call clears a stale abort flag
             try:
                 return self._generate_with_oom_recovery(
                     self._generate_impl, prompt, params,
                     finish_sentence, context_limit,
                     json_schema=json_schema,
+                    logits_processor=logits_processor,
                     logprobs=logprobs,
                     prompt_logprobs=prompt_logprobs,
                     return_logprobs=return_logprobs)
@@ -191,6 +218,7 @@ class _GenerationMixin:
     def _generate_impl(self, prompt, params: SamplingParams,
                        finish_sentence, context_limit,
                        json_schema: dict | None = None,
+                       logits_processor=None,
                        logprobs: int | None = None,
                        prompt_logprobs: int | None = None,
                        return_logprobs: bool = False) -> str | dict:
@@ -252,14 +280,16 @@ class _GenerationMixin:
                     "token_id": tid, "token_lp": float(lp[tid]),
                     "top_ids": ti.tolist(), "top_vals": tv.tolist()})
 
-        # Per-step decode paths: constrained decoding (json_schema) and
-        # logprobs capture share the _decode_tokens loop — the schema
-        # masks per step, the observer records raw logits per step.  Both
-        # bypass prefix cache / CacheBlend / AirLLM (those fast paths
-        # can't run per-step processors or observers).
-        if json_schema is not None or lp_observer is not None:
+        # Per-step decode paths: constrained decoding (json_schema),
+        # caller logits_processors and logprobs capture share the
+        # _decode_tokens loop — the schema/processor masks per step, the
+        # observer records raw logits per step.  All bypass prefix
+        # cache / CacheBlend / AirLLM (those fast paths can't run
+        # per-step processors or observers).
+        if (json_schema is not None or lp_observer is not None
+                or logits_processor is not None):
             processor = (self._build_xgrammar_processor(json_schema)
-                         if json_schema is not None else None)
+                         if json_schema is not None else logits_processor)
             eos_set = self._eos_token_ids()
             generated_ids: list[int] = []
             logits, past_kv = self._prefill(ids)
@@ -322,7 +352,13 @@ class _GenerationMixin:
                     dry_penalty_last_n=params.dry_penalty_last_n,
                     stop=params.stop, tokenizer=self.tokenizer,
                     kv_compact=self._maybe_compact_past_kv,
-                    suffix_mem=self._suffix_mem_for(params))
+                    suffix_mem=self._suffix_mem_for(params),
+                    # Seam for strategy loops: honored by decoders that
+                    # support cooperative abort, harmlessly **_ignored
+                    # by the rest — engine-side loops check the flag
+                    # directly via getattr(self, "_gen_cancel").
+                    cancel_check=lambda: getattr(
+                        self, "_gen_cancel", False))
 
         # Capture KV cache from decoding step for fast finish-to-stop path
         captured_kv = getattr(self.model, '_forge_last_kv', None)
@@ -1215,6 +1251,10 @@ class _GenerationMixin:
             if params.stop and check_stop else None)
         try:
             for _ in range(params.max_new_tokens):
+                # Cooperative abort (Phase 6b): request_cancel() sets the
+                # flag; break with the partial sequence like an EOS stop.
+                if getattr(self, "_gen_cancel", False):
+                    break
                 raw_logits = logits[:, -1, :]
                 next_logits = raw_logits
 
@@ -1565,6 +1605,7 @@ class _GenerationMixin:
             return self._safe_decode_ids(generated_ids, skip_special_tokens)
 
         with self._gen_lock:
+            self._gen_cancel = False  # clear a stale abort flag at entry
             return self._generate_with_oom_recovery(_run)
 
     @torch.no_grad()
@@ -1633,6 +1674,7 @@ class _GenerationMixin:
         # Callers that stop early should close() the generator.
         self._gen_lock.acquire()
         try:
+            self._gen_cancel = False  # clear a stale abort flag at entry
             ids = self._tokenize(prompt)
             eos_set = self._eos_token_ids(eos_token_ids)
             generated_ids: list[int] = []
@@ -1780,37 +1822,25 @@ class _GenerationMixin:
             except torch.cuda.OutOfMemoryError:
                 pass
 
-            # Attempt 2: reduce KV bits + switch to S4R.
+            # Attempt 2: switch to beacon — a LIVE compaction strategy
+            # (AUDIT A2: s4r/cpu_offload are dormant — swapping the
+            # bookkeeping object never touched the real past_kv, so the
+            # old retry ladder was a placebo. beacon's compact_past_kv
+            # actually shrinks decode KV on watermark crossings).
             # Snapshot ALL state _activate_kv_cache touches so a failed
             # retry restores a consistent engine (EC-114).
             old_kv = self.kv_cache
             old_bits = self._active_kv_bits
             old_name = self._active_kv_cache_name
             try:
-                self._log("Retrying with S4R 4-bit KV cache...")
-                self._activate_kv_cache("s4r", None)
+                self._log("Retrying with beacon KV compaction...")
+                self._activate_kv_cache("beacon", None)
                 result = generate_fn(*args, **kwargs)
-                self._kv_downgrade = {"from": old_name, "to": "s4r",
+                self._kv_downgrade = {"from": old_name, "to": "beacon",
                                       "reason": "oom_recovery"}
-                self._log("OOM recovery successful (S4R 4-bit) — engine "
-                          "now on the downgraded KV strategy; recorded in "
-                          "stats(). kv_downgrade", level="warn")
-                return result
-            except torch.cuda.OutOfMemoryError:
-                self.kv_cache = old_kv
-                self._active_kv_bits = old_bits
-                self._active_kv_cache_name = old_name
-
-            # Attempt 3: CPU offload KV cache
-            try:
-                self._log("Retrying with CPU offload KV cache...")
-                self._activate_kv_cache("cpu_offload", None)
-                result = generate_fn(*args, **kwargs)
-                self._kv_downgrade = {"from": old_name, "to": "cpu_offload",
-                                      "reason": "oom_recovery"}
-                self._log("OOM recovery successful (CPU offload KV) — "
+                self._log("OOM recovery successful (beacon compaction) — "
                           "engine now on the downgraded KV strategy; "
-                          "recorded in stats().kv_downgrade", level="warn")
+                          "recorded in stats(). kv_downgrade", level="warn")
                 return result
             except torch.cuda.OutOfMemoryError:
                 self.kv_cache = old_kv

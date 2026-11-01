@@ -182,9 +182,10 @@ class HotSwapManager:
     def set_infinite_context(self, enabled: bool = True, budget: int = 100_000):
         """Enable/disable infinite context mode.
 
-        When enabled, uses KV cache eviction (streaming/snapkv/kvzip) to
-        maintain unbounded context within the VRAM budget. The `budget`
-        controls how many tokens are kept in VRAM before eviction kicks in.
+        When enabled, uses a live KV compaction strategy (beacon —
+        ``compact_past_kv`` on watermark crossings) to maintain unbounded
+        context within the VRAM budget. The `budget` controls how many
+        tokens are kept in VRAM before compaction kicks in.
         """
         with self._lock:
             if self._pending is None:
@@ -193,9 +194,12 @@ class HotSwapManager:
             if enabled:
                 self._pending.max_context_tokens = 1_000_000
                 self._pending.kv_cache_tokens = budget
-                # Auto-select an eviction strategy if currently using standard
-                if self._pending.kv_cache in ("standard", "paged"):
-                    self._pending.kv_cache = "streaming"
+                # Auto-select a LIVE eviction strategy (AUDIT A2:
+                # "streaming" is dormant — decode never invokes it;
+                # beacon compacts past_kv on watermark crossings).
+                if self._pending.kv_cache in ("standard", "paged",
+                                              "streaming"):
+                    self._pending.kv_cache = "beacon"
             else:
                 self._pending.max_context_tokens = 32768
                 self._pending.kv_cache_tokens = None

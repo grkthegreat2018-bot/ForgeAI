@@ -55,7 +55,6 @@ class ActivationConfig:
     use_prefix_cache: bool = False
     use_chunked_prefix_cache: bool = False  # R&D14: LMCache rolling-hash
     use_cache_blend: bool = False           # R&D14: LMCache CacheBlend
-    use_spec_attn: bool = False
     kv_cache_tokens: int | None = None
     use_chunked_prefill: bool = False
 
@@ -187,10 +186,11 @@ class ActivationConfig:
             ...): they alter outputs and target the (rare) attn layers.
         """
         defaults = {
-            "kv_cache": "rotorquant",      # 4-bit rotated KV (attn layers)
+            "kv_cache": "standard",        # honest name — mamba KV is
+                                           # dict-state; dormant quant
+                                           # names must not label it (A19)
             "decoding": "standard",
             "quantize": None,              # bf16 best-case; pass "forge_quant" for smaller
-            "kv_bits": 4,
             "use_prefix_cache": True,      # LRU prefix reuse (stores mamba states)
             "use_chunked_prefill": True,   # 512-token chunks
             "use_triton_conv": True,       # no-op on mamba, kept for conv models

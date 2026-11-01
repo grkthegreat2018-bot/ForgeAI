@@ -17,7 +17,9 @@ Usage:
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import pickle
 import sqlite3
 import threading
@@ -47,15 +49,63 @@ def _dumps(obj) -> str:
     return json.dumps(obj, default=_NumpyEncoder().default)
 
 
+# ── Provenance blob cap (A21) ────────────────────────────────────────────
+# forge_evolve_meta_inner.db reached 40GB because discoveries rows stored
+# ~1MB script_text/input_text/output_text payloads each — the ledger only
+# needs enough text to identify the discovery. FORGE_META_BLOB_CAP caps
+# each provenance TEXT column at write time: over-cap values are cut and
+# suffixed with "...[truncated]", and the sha256 of the ORIGINAL
+# concatenated payloads is recorded in content_sha256 so truncation is
+# auditable (ledger integrity, A13). 0 disables the cap entirely.
+# scripts/truncate_meta_blobs.py applies the same policy retroactively.
+_BLOB_CAP_ENV = "FORGE_META_BLOB_CAP"
+_BLOB_CAP_DEFAULT = 2048
+TRUNCATED_SUFFIX = "...[truncated]"
+_PROVENANCE_COLS = ("script_text", "input_text", "output_text",
+                    "expected_text")
+
+
+def blob_cap_bytes() -> int:
+    """Active provenance-blob cap in chars; 0 means 'store full text'."""
+    try:
+        return int(os.environ.get(_BLOB_CAP_ENV, _BLOB_CAP_DEFAULT))
+    except (TypeError, ValueError):
+        return _BLOB_CAP_DEFAULT
+
+
+def truncate_blob(value, cap: int | None = None):
+    """Cap a provenance text value. Non-str or under-cap passes through."""
+    if not isinstance(value, str):
+        return value
+    if cap is None:
+        cap = blob_cap_bytes()
+    if cap <= 0 or len(value) <= cap:
+        return value
+    return value[:cap] + TRUNCATED_SUFFIX
+
+
+def provenance_sha256(*texts) -> str:
+    """sha256 over the ORIGINAL (pre-truncation) provenance payloads."""
+    h = hashlib.sha256()
+    for t in texts:
+        if isinstance(t, str):
+            h.update(t.encode("utf-8", "replace"))
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
 class FindingsDB:
     """SQLite-backed persistent storage for ForgeEvolve findings."""
 
     def __init__(self, db_path: str | Path = "forge_evolve.db"):
-        if db_path is None or str(db_path).strip() in ("", "None"):
-            # A stray `db_path=None` used to become a real file literally
-            # named "None" — a 119MB orphan showed up at the repo root.
-            # Fail fast so the caller's missing-path bug surfaces at the
-            # call site, not as a junk artifact.
+        if db_path is None:
+            # None = "no persistence" — test/frontier callers pass it
+            # deliberately. Before, str(None) connected to a file
+            # literally named "None" (a 119MB orphan at the repo root);
+            # an in-memory db gives the same throwaway semantics
+            # without the artifact.
+            db_path = ":memory:"
+        if str(db_path).strip() in ("", "None"):
             raise ValueError(
                 f"FindingsDB needs a real db_path, got {db_path!r}")
         self.db_path = str(db_path)
@@ -104,7 +154,7 @@ class FindingsDB:
 
     # Current schema version. Bump when adding columns/tables; migration
     # logic below auto-upgrades existing DBs idempotently.
-    SCHEMA_VERSION = "2"
+    SCHEMA_VERSION = "3"
 
     def _init_tables(self):
         c = self.conn.cursor()
@@ -316,6 +366,13 @@ class FindingsDB:
             WHERE input_text IS NOT NULL AND output_text IS NOT NULL
         """)
 
+        # ── v3: content_sha256 on discoveries (A21) ─────────────────────
+        # Hex sha256 of the ORIGINAL concatenated provenance texts, set
+        # only when a payload was truncated under FORGE_META_BLOB_CAP —
+        # NULL means 'stored verbatim'. Lets the 40GB-meta_inner cleanup
+        # keep ledger integrity after payloads are cut.
+        self._add_column_if_missing("discoveries", "content_sha256 TEXT")
+
         # Record schema_version (idempotent upsert)
         c.execute("""
             INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)
@@ -358,12 +415,16 @@ class FindingsDB:
             gen_model_size, gen_model_version, scoring_hash
         These are stored in the new provenance columns. Existing callers
         that omit them continue to work (NULL is stored).
+        Provenance text over FORGE_META_BLOB_CAP chars is truncated with a
+        "...[truncated]" marker; the original payload's sha256 lands in
+        content_sha256 (A21 — see module header for the 40GB rationale).
         """
         with self._lock:
             c = self.conn.cursor()
             n_saved = 0
             n_updated = 0
             n_skipped = 0
+            cap = blob_cap_bytes()
             for d in discoveries:
                 config_json = _dumps(d.get("config"))
                 score = d.get("score", 0)
@@ -375,6 +436,20 @@ class FindingsDB:
                 gen_model_size = d.get("gen_model_size")
                 gen_model_version = d.get("gen_model_version")
                 scoring_hash = d.get("scoring_hash")
+                # A21 payload cap: over-cap provenance text is truncated
+                # and the sha of the ORIGINAL concatenation is recorded —
+                # NULL content_sha256 means 'stored verbatim'.
+                content_sha256 = None
+                if cap > 0:
+                    originals = (script_text, input_text,
+                                 output_text, expected_text)
+                    if any(isinstance(t, str) and len(t) > cap
+                           for t in originals):
+                        content_sha256 = provenance_sha256(*originals)
+                        script_text = truncate_blob(script_text, cap)
+                        input_text = truncate_blob(input_text, cap)
+                        output_text = truncate_blob(output_text, cap)
+                        expected_text = truncate_blob(expected_text, cap)
                 # Check if this exact config already exists for this domain
                 c.execute(
                     "SELECT id, score FROM discoveries WHERE domain=? AND config_json=? "
@@ -397,7 +472,8 @@ class FindingsDB:
                                 expected_text=COALESCE(?, expected_text),
                                 gen_model_size=COALESCE(?, gen_model_size),
                                 gen_model_version=COALESCE(?, gen_model_version),
-                                scoring_hash=COALESCE(?, scoring_hash)
+                                scoring_hash=COALESCE(?, scoring_hash),
+                                content_sha256=COALESCE(?, content_sha256)
                             WHERE id=?
                         """, (
                             run_id, d.get("generation", 0), score,
@@ -405,6 +481,7 @@ class FindingsDB:
                             _dumps(d.get("metadata", {})),
                             script_text, input_text, output_text, expected_text,
                             gen_model_size, gen_model_version, scoring_hash,
+                            content_sha256,
                             existing_id,
                         ))
                         n_updated += 1
@@ -416,8 +493,9 @@ class FindingsDB:
                     (run_id, domain, generation, config_json, score,
                      behavioral_json, metadata_json,
                      script_text, input_text, output_text, expected_text,
-                     gen_model_size, gen_model_version, scoring_hash)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     gen_model_size, gen_model_version, scoring_hash,
+                     content_sha256)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     run_id, domain, d.get("generation", 0),
                     config_json,
@@ -426,6 +504,7 @@ class FindingsDB:
                     _dumps(d.get("metadata", {})),
                     script_text, input_text, output_text, expected_text,
                     gen_model_size, gen_model_version, scoring_hash,
+                    content_sha256,
                 ))
                 n_saved += 1
             self.conn.commit()
@@ -667,7 +746,8 @@ class FindingsDB:
             SELECT config_json, score, behavioral_json, metadata_json,
                    run_id, generation,
                    script_text, input_text, output_text, expected_text,
-                   gen_model_size, gen_model_version, scoring_hash
+                   gen_model_size, gen_model_version, scoring_hash,
+                   content_sha256
             FROM discoveries
             WHERE domain=? AND score >= ?
             ORDER BY score DESC
@@ -689,6 +769,7 @@ class FindingsDB:
             "gen_model_size": r[10],
             "gen_model_version": r[11],
             "scoring_hash": r[12],
+            "content_sha256": r[13],
         } for r in rows]
 
     def query_best_configs(self, domain: str, limit: int = 10) -> list[dict]:

@@ -341,7 +341,13 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   floor (novel successor in known suffix used to give -inf lift → inf
   surprise → NaN fast weights; real-text-only bug).
 - `forge/model/flux/` — FluxLM (R52): sparse online associative-memory
-  LM, NOT a transformer.  Package layout: `config.py` (FluxConfig),
+  LM, NOT a transformer.  **Positioning (competitive audit A6): a
+  revertible memory layer, not an LM — the moat is journaled bit-exact
+  undo + `explain()` cell provenance; the competitive set is agent
+  memory (mem0/MemGPT/Letta), not transformers.**  Held-out doc-grounded
+  QA head-to-head vs a TF-IDF RAG baseline:
+  `scripts/bench_flux_vs_rag.py`; STRATA division of labor:
+  `docs/STRATA_VS_FLUXLM.md`.  Package layout: `config.py` (FluxConfig),
   `helpers.py` (`_mix64`/`_s64`/`_scatter_sum`/teacher loader),
   `journal.py` (FluxJournal), `tables.py` (_GPUCellTables),
   `kernels.py` (triton, HAS_TRITON-gated), `model.py` (FluxLM =
@@ -903,7 +909,11 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   (halves ttoks/tcnt: -1.28GB; M=12 slightly *helps*: 0.85).
   held_qa=0.0 at 30K is retrieval/extraction-bound, not coverage
   (63/80 held answers exist in corpus); `knn_atype`/`knn_span`/
-  `knn_subq` + self-play are the open lever.  LFM2's 64400 tokenizer
+  `knn_subq` + self-play are the open lever.  Head-to-head confirms it
+  at small scale already (`scripts/bench_flux_vs_rag.py`, 500-2000
+  synthetic docs, R69 knobs + Q/A-format scaffold): flux=0.0 vs TF-IDF
+  rag=1.0 — knn retrieves fact-type-correct but entity-confused rows
+  and the hedge mixture collapses to one channel.  LFM2's 64400 tokenizer
   is NOT flux's 65536 vocab - only ForgeLM V2 is a same-vocab
   teacher, and w8a8/int8 quant hits a CUBLAS scaled_mm limit on this
   box (fp16 works).  Tests: `test_grow_*` (3), `test_knn_dedup_*`,
@@ -929,6 +939,11 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   probes+dense; `pk_of` per-call salt alloc breaks capture; add() not
   graphable → two-tier thin-write + deferred repair.  Tests:
   `tests/unit/test_strata.py` (27) + `test_strata_m1.py` (25).
+  Division of labor (audit A12, `docs/STRATA_VS_FLUXLM.md`): FluxLM =
+  research vehicle, STRATA = deployment artifact format — new
+  capabilities land in FluxLM first; STRATA ports only stabilized
+  pieces.  Consolidation trigger: fold into flux/ if the container
+  ships no unique value by next round.
 - `forge/scrape_feed.py` + `scripts/scrape_feed.py` — R61: continuous
   online scraper -> normalized doc feed.  Sources (`wiki-random` /
   `wiki-all` resumable allpages cursor / `wiki-recent` / `wiki-search` /
@@ -1345,6 +1360,13 @@ Config presets in `forge/config.py`:
   min_size. Conv `_pad_mask` reproduces HF apply_mask_to_padding_states
   for left-padded batch gen. Run: `rsi_evolve.py --model
   research/checkpoints/lfm3_1p7b_cc --lora-root forge/evolution/loras_lfm3`.
+  (A20: the multi-GB extensionless *merged-model* saves sft_train used
+  to drop next to the adapters — `loras*/<tag>` torch.save blobs — now
+  live under `research/checkpoints/lora_merged/<registry>/`; the
+  registry dirs keep only `*.lora.safetensors` + manifest. The stale
+  `proposer_ckpt.safetensors` dup of `proposer_ckpt/model.safetensors`
+  was deleted after byte-identical sha256; its `.meta.json`/`.train.pt`
+  sidecars moved to `research/checkpoints/`.)
 
 All legacy presets (`forgelm_v2_light`, `forgelm_v2_pro`, `forgelm_v12`,
 `forgelm_v10_1.2b`, `forgelm_v11_3b_vl`, `lfm25_tiny`, `lfm25_1.2b`, V3–V9)
@@ -1787,6 +1809,51 @@ D:\windsurf\ForgeAI\venv\Scripts\python.exe D:\windsurf\ForgeAI\scripts\bench_lo
   innovation slot from `ActivationConfig`/feature_registry, the engine
   must either wire it to a real path or refuse it — half-dead flags are
   how the critique got to 220 entries.
+
+## Competitive Audit 2026-10-31 — Implementation Status
+
+`docs/COMPETITIVE_AUDIT_2026-10-31.md` ranked items, landed this round:
+
+- **A1 external evals** (`forge/evaluation/external_eval.py`,
+  `scripts/download_eval_data.py`, `scripts/run_external_eval.py`):
+  vendored loglikelihood-MC + gsm8k evaluator over local JSONL
+  (`data/eval/`), no lm_eval dep. Baseline report →
+  `results/external_eval_v2.json`; `--compare` gates regressions.
+- **A2 dormant-zoo honesty** (`forge/engine/kv_backend.py`): only
+  beacon/anchor/metakv/flux are decode-live (`compact_past_kv` seam);
+  every other KV strategy is a bookkeeping object whose `info()`
+  reports `decode_live: False`. `CudaGraphRunner` dead path removed;
+  `use_spec_attn` flag deleted from all six plumbing sites.
+- **A4 fla kernels** (`forge/keys/attention/fla_delta.py`): KDA +
+  GDN2 use fla 0.4.2 chunked delta kernels on CUDA with eager
+  fallback (pin fla==0.4.2 — 0.6.0 needs triton `gluon`, absent in
+  triton-windows 3.4).
+- **A9 observability** (`forge/training/training_utils.py`):
+  `write_status_json` fans scalars out to wandb (`FORGE_WANDB=1`) and
+  tensorboard (`FORGE_TB_DIR=`) — env-gated, best-effort, covers every
+  runner with zero call-site changes.
+- **A14 capability trajectory** (`forge/self_play/infinite_loop.py`):
+  frozen 8-item `_CAPABILITY_PROBE` scored on each epoch's candidate;
+  `capability_score` per-epoch + `capability_trajectory` last-25 land in
+  status.json (`--no-capability-probe` to disable).
+- **A3 hygiene**: `scripts/check_assets.py` (tokenizer/checkpoint
+  gate), `tests/unit/test_research_import_ratchet.py` (pins forge/
+  `research.*` imports at 61 — shrink-only), CI ruff ratchet
+  (tests/ full check; forge/+scripts/ F821,F823).
+- **A18 evolution ACL**: `sandbox.json` `forge/evolution` → read_only
+  for model-facing tools (self-improvement stack was the one writable
+  forge dir); `PROTECTED_ENGINE_FILES` += code_evolve/eval_pool/
+  mutator/database/best_configs. Verified: tool writes to
+  `forge/evolution/*` denied, `forge/results` still writable.
+- **A19 honest auto-activate**: `kv_cache="rotorquant"` is now
+  assigned ONLY when `quarot` keystack exists (it wires QuaRot-KV);
+  everything else gets `"standard"` — diagnostics no longer report a
+  4-bit KV cache that does not exist. mamba_hybrid profile labels
+  `kv_cache="standard"` too.
+- **6b serving gaps (plan approved)**: `response_format`→xgrammar
+  `json_schema` on chat completions (non-stream), `/info` capabilities,
+  `/health/ready` 503-while-loading, Prometheus text `/metrics`
+  (`?format=prometheus` or Accept: text/plain; JSON stays default).
 
 ## Environment
 

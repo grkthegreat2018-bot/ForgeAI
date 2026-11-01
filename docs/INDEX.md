@@ -8,6 +8,8 @@
 - **docs/CODEBASE_CRITIQUE_2026-09-16.md** — second critique pass
 - **docs/project_overview.md** — High-level project overview
 - **docs/forge_engine_guide.md** — ForgeEngine inference engine guide
+- **docs/ADAPTER_AUTHORING.md** — Recipe for adding a new HF model (preset + key map + forge_convert.json + bit-exact port test)
+- **docs/RD_SUNSET_POLICY.md** — use_* flag sunset policy (beat the incumbent within 3 R&D rounds or the flag is deleted)
 - **docs/EVOLVE_ROADMAP.md** — Evolve-loop roadmap: shipped/queued work + theory
 - **docs/ENGINE_IMPROVEMENT_PLAN.md** — ForgeEngine improvement plan (research-complete, awaiting execution)
 - **docs/ENGINE_CRITIQUE_DB.md** — Living catalogue of ForgeEngine weaknesses, dead code, and improvement opportunities
@@ -16,6 +18,7 @@
 - **docs/V14_RSI_DESIGN.md** — ForgeLM V14-RSI ~2.5B RSI-loop coder design (preset `forgelm_v14_rsi`)
 - **docs/LIVET_DESIGN.md** — LiveT live-training design (journaled GDN2/Titan/NGram live surfaces)
 - **docs/STRATA_M1_DESIGN.md** — STRATA M1 model-dynamics design (FluxLM successor)
+- **docs/STRATA_VS_FLUXLM.md** — STRATA vs FluxLM division-of-labor decision (audit A12) + consolidation trigger
 
 ## R&D Round Notes (chronological)
 - `rd_round_32.md` through `rd_round_49_plan.md` — Per-round research notes

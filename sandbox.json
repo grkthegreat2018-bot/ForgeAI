@@ -5,7 +5,7 @@
     "research/results": "read_write",
     "forge/data": "read_write",
     "forge/results": "read_write",
-    "forge/evolution": "read_write",
+    "forge/evolution": "read_only",
     "sandbox": "read_write",
     ".devin": "read_write",
     "forge/engine": "read_only",

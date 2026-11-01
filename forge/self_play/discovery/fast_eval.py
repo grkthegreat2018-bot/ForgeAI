@@ -538,7 +538,7 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
         print("  [FastEval] Reusing self-play engine (skipping model reload)")
         # Re-activate: switch from mtp_selfspec to standard decoding for eval
         engine.activate(kv_cache="hadamard_int4", decoding="standard",
-                        use_triton_conv=True, use_spec_attn=True,
+                        use_triton_conv=True,
                         kv_cache_tokens=4096, warmup=True)
     else:
         # Load engine fresh with base checkpoint
@@ -549,7 +549,7 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
             device=device,
         )
         engine.activate(kv_cache="hadamard_int4", decoding="standard",
-                        use_triton_conv=True, use_spec_attn=True,
+                        use_triton_conv=True,
                         kv_cache_tokens=4096, warmup=True)
 
     # Build the eval set ONCE so both sides answer identical questions.

@@ -22,8 +22,9 @@ COLLAPSE RULES (used for lossless ports):
 LOSSLESS AT INIT (same ForgeHybrid/KDA pattern): the branch output is
 weighted by scalar ``gate`` initialized to 0 — bit-exact vs. baseline.
 
-Recurrence is fp32 sequential (same as KDALayer) — the paper's chunkwise
-WY kernel is a follow-up; fla-org has upstream impls to crib from.
+Recurrence runs fp32; on CUDA it dispatches to fla-org's chunked DPLR
+Triton kernel (fla_delta.gdn2_scan — exact decoupled-gate mapping),
+with the sequential Python loop as CPU/fallback reference.
 
 Usage:
     config.use_gdn2 = True           # side-path on every block
@@ -178,12 +179,20 @@ class GDN2Layer(nn.Module):
     def _scan(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
               alpha: torch.Tensor, egate: torch.Tensor, wgate: torch.Tensor,
               S: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Naive sequential GDN2 recurrence in fp32.
+        """Sequential GDN2 recurrence in fp32.
 
         q,k: (B,T,H,d_k) normalized; v: (B,T,H,d_v);
         alpha: (B,T,H,d_k); egate: (B,T,H,d_k); wgate: (B,T,H,d_v);
         S: (B,H,d_k,d_v). Returns (o (B,T,H,d_v), S_final).
+
+        Uses fla's chunked DPLR kernel on CUDA when available
+        (fla_delta.gdn2_scan — exact decoupled-gate mapping); the Python
+        loop below is the CPU/fallback reference (T==1 decode stays too).
         """
+        from forge.keys.attention.fla_delta import gdn2_scan
+        fast = gdn2_scan(q, k, v, alpha, egate, wgate, S)
+        if fast is not None:
+            return fast
         T = q.shape[1]
         outs = []
         for t in range(T):

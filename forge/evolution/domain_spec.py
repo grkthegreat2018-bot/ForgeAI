@@ -130,6 +130,10 @@ class DomainSpec:
     checker_requirements: str = ""
     # For model_boot: config name to boot (e.g. "forgelm_v2")
     checker_model_config: str = ""
+    # When False, the spec is data-only (e.g. a scoring stub consumed by a
+    # hand-written Python domain via load_spec) and is NOT registered in
+    # DOMAINS as a standalone JSONSpecDomain.
+    discoverable: bool = True
 
     @property
     def output_dim(self) -> int:
@@ -156,6 +160,7 @@ class DomainSpec:
             checker_type=d.get("checker_type", "script"),
             checker_requirements=d.get("checker_requirements", ""),
             checker_model_config=d.get("checker_model_config", ""),
+            discoverable=d.get("discoverable", True),
         )
 
     @classmethod

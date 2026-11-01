@@ -16,7 +16,10 @@ jobs:
           python-version: "3.13"
       - run: pip install ruff
       - run: ruff check tests/
-      - run: ruff format --check tests/
+      # Undefined-name ratchet — the select list expands as the lint zoo in
+      # forge/ and scripts/ is cleaned. (tests/ is one-time formatted
+      # separately, so no `ruff format --check` gate here.)
+      - run: ruff check forge/ scripts/ --select F821,F823
 
   test-cpu:
     runs-on: ubuntu-latest
@@ -28,20 +31,11 @@ jobs:
       - name: Install dependencies
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install safetensors transformers
+          pip install safetensors transformers msgspec python-dotenv fastapi pydantic uvicorn datasets
           pip install -e ".[dev]" --no-deps
           pip install pytest
       - name: Run CPU tests
         run: pytest tests/ -v -m "not gpu" --tb=short
 
-  test-gpu:
-    # GPU tests — only run on self-hosted runner with CUDA
-    runs-on: self-hosted
-    if: false  # Disabled until self-hosted GPU runner is configured
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: |
-          pip install -e ".[dev]" --no-deps
-      - name: Run GPU tests
-        run: pytest tests/ -v -m "gpu" --tb=short
+  # test-gpu intentionally removed — GPU tests run locally on the RTX 5070
+  # box (12 GB VRAM); no self-hosted GPU runner is configured for CI.

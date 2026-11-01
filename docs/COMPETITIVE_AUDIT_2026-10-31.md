@@ -177,6 +177,9 @@ Verified against `git ls-files` / `git status` (2026-10-31):
 ---
 
 ## A18 [NEW] Sandbox/ACL threat-model notes. **P2**
+(partially addressed by the 2026-02 hardening pass — see AGENTS.md
+"Security Posture"; the `forge/evolution: read_write` ACL and
+PROTECTED_ENGINE_FILES gap below remain open)
 
 - `sandbox.json` grants **`forge/evolution` read_write** to model-facing
   tools — the directory containing `code_evolve.py`, `eval_pool.py`,
@@ -202,6 +205,110 @@ Verified against `git ls-files` / `git status` (2026-10-31):
   stack to PROTECTED_ENGINE_FILES; document the `file`-tool
   read-own-source choice as deliberate.
 - **Effort:** S.
+
+## A19 [NEW] Auto-activate is a no-op + mislabels the sole base model. **P1**
+
+Read of `_auto_activate_optimal` (`engine_checkpoints.py:326-465`) for
+the actual production path — ForgeLM V2, mamba-hybrid, plain bf16
+safetensors (no `load_quantize`, no bitnet_prequant):
+
+- `is_mamba_hybrid` → only `quantize=None`.
+- `vram_ratio > 0.5` feature block (`use_block_fusion`,
+  `use_breakable_cuda_graph`, `use_learned_prefix_cache`) is gated by
+  `not is_mamba_hybrid` → **skipped entirely on V2**.
+- `kv_cache="rotorquant"`, `kv_bits=4` are set for every CUDA model —
+  but `RotorQuantKVCache` implements only `append`/`get` (dead on the
+  decode path; no `compact_past_kv`). Net effect on the sole base
+  model: **zero live features activated, and diagnostics report a 4-bit
+  KV cache that does not exist.** Direct violation of "report effective
+  state, not requested state".
+- `mtp_selfspec` never fires (V2 keystack has no MTP heads).
+- The working config that the proposer actually uses —
+  `use_chunked_prefix_cache=True`, per `finetune_proposer.py` — is set
+  manually, not auto-activated.
+
+**Fix:** define an explicit `forgelm_v2` activation profile in
+`_auto_activate_optimal` (validated features only: chunked prefix
+cache, suffix/adaptive spec once verified on dict-state, block fusion
+after RoPE-free validation) and either wire `compact_past_kv` into
+rotorquant or stop assigning it — diagnostics must show what is
+actually in effect.
+**Effort:** S-M.
+
+## A20 [NEW] ~13-16GB of artifacts inside the `forge/` package. **P2**
+
+- `forge/evolution/loras_lfm3/min_k_filter` = **3.98GB** file with no
+  extension — a full merged-model save sitting next to its own 32MB
+  `min_k_filter.lora.safetensors`. Same pattern for `default` (1.95GB).
+  If full saves are intended (merged engine for next round), they need
+  real names + a real home — a 4GB extensionless blob in `forge/` reads
+  as a bug.
+- `forge/evolution/proposer_ckpt/model.safetensors` (1.2GB) AND
+  `forge/evolution/proposer_ckpt.safetensors` (1.2GB) — a directory and
+  a stray file that are almost certainly the same weights stored twice.
+- `forge/distillation/hf_datasets/` = 4.9GB of jsonl inside the package
+  (should be `data/` — already-ignored location by convention).
+- All verified **untracked** (gitignored), so no git bloat — but
+  `forge/` is 16.8GB on disk, taxing every copy/rg/backup/wheel-op.
+  Relocate artifacts to `checkpoints/`/`data/` and add a package-size
+  guard to CI or pre-commit.
+- **Effort:** S.
+
+## A21 [NEW] meta_inner.db is 40GB of real data, not bloat — with dead tables. **P3**
+
+- `forge_evolve_meta_inner.db`: 9.86M pages × 4KB, freelist=0 (VACUUM
+  won't shrink it). 41,541 `discoveries` rows + 682 runs carrying full
+  `script_text`/`input_text`/`output_text` blobs — ~1MB payloads per
+  row is where the 40GB lives.
+- Same dead schema as the main DB: `evaluations`, `gen_models`,
+  `gen_model_performance` all 0 rows.
+- Questions for the owner: who consumes inner-run discoveries? If the
+  answer is "the meta-evolution report only", blob payloads can be
+  truncated/externalized (hash + first-2KB) — the ledger's integrity
+  (A13) doesn't need megabyte text per row, and 40GB makes every
+  backup/copy slow.
+- **Effort:** S.
+
+## A22 [NEW] GUI stack rescinded — it is lean. **(not an issue)**
+
+Checked for a planned "GUI maintenance cost" item: `forge_gui_server`
+0.56MB + `forge_gui` 0.67MB + `forge_ui/src` 0.36MB of code. The
+three-package split is layered (domain/API/frontend), not duplicated.
+No action.
+
+## A23 [NEW] Evolution→production link exists but was never exercised — and has no score floor. **P1**
+
+`best_configs.py` is a well-designed apply path (allowlist of 3 SFT
+params, explicit-user-flag precedence, reverted-promotion guards).
+But:
+
+- **`forge/evolution/best_configs.json` does not exist** — the
+  `--apply-best` export has never been run. `sft_train.py:1154` calls
+  `apply_to_namespace`, gets `{}`, silently applies nothing. The
+  "live evolution -> production link" (its own docstring) is dormant.
+- **No score floor**: `export_best_configs` takes the top-scoring
+  config per domain unconditionally. The main DB's discoveries are ALL
+  negative-scored — running `--apply-best` today would write "best"
+  configs whose scores are negative and override production defaults
+  with them. `apply_to_namespace` has no `score > baseline` check.
+  Fix: export only discoveries with `metadata.verified == True` AND
+  `verified.delta > 0` (the field already exists — `scout.report`
+  reads it).
+- **`mark_applied` has exactly one caller**: `engine.py:1272`
+  (ForgeEvolve TrainFirst mode fine-tunes on unapplied solutions, then
+  marks). Scout discoveries have no equivalent consumer — `scout.report`
+  prints unapplied rows for a human. The `applied` flag is a
+  TrainFirst-specific lifecycle, not a general production-apply ledger.
+- **meta_inner.db confirmation** (see A21): all 41,541 discoveries are
+  `applied=0`, domain='synthetic', **avg score −54.02** — the deepest
+  recursion layer produces exclusively negative synthetic rows at
+  ~1MB/row. Verify the inner loop's domain assignment is even reachable
+  with non-synthetic domains, or stop persisting payloads for
+  synthetic-domain rows.
+
+**Fix (S):** run `--apply-best` once with the score-floor fix;
+extend `SFT_PARAM_MAP` beyond 3 params as domains mature; drop or
+truncate payloads for synthetic-domain discoveries.
 
 ## B. Already-covered items — verify & execute existing plan
 
@@ -445,12 +552,101 @@ latency, (c) is the honest product shape.
    (cheap; redirects the whole RSI program at metrics that matter)
 6. **A13** eval-pool integrity canaries (protects the promotion ledger
    that A5/A11 depend on)
-7. **A2+A14** dormant-zoo cull (enforce the invariants already written;
-   KV zoo is 3/30 live)
+7. **A2+A14+A19** dormant-zoo cull + auto-activate honesty (enforce the
+   invariants already written; KV zoo is 3/30 live, and V2 currently
+   reports a 4-bit KV cache that does not exist)
+8. **A4** fla kernel adoption (with plan 1.9 as the pattern)
 8. **A4** fla kernel adoption (with plan 1.9 as the pattern)
 9. **A6** FluxLM repositioning + RAG head-to-head (+A12 consolidation
    decision at the same time)
 10. Phase 4/5 decode core + continuous batching (A15 confirms the
     diagnosis — the real throughput win)
-11. A18 sandbox ACL tightening (S; protects the same ledger as A13)
-12. A8-A10, A16-A17 as capacity allows
+11. A23 score-floor + first real `--apply-best` export (S; closes the
+    evolution→production loop)
+12. A18 sandbox ACL tightening (S; protects the same ledger as A13)
+13. A20 artifact relocation (S), A21 payload policy (S)
+14. A8-A10, A16-A17 as capacity allows
+
+---
+
+## Implementation status (2026-10-31, post-audit session)
+
+Executed against this audit. Honest status per item:
+
+| Item | Status | Evidence |
+|---|---|---|
+| A1 external eval | DONE | First external baseline landed `results/external_eval_v2.json` (ForgeLM V2, bf16, 100/task, GSM8K 50): arc_easy **0.51**, arc_challenge **0.29**, hellaswag **0.45**, mmlu **0.33**, gsm8k **0.02** — above chance on retrieval tasks, ~0 on math reasoning (consistent with a 3B hybrid not trained for CoT). Infra fixed en route: model silently ran fp32 (config.dtype never applied → 12.8GB VRAM); `generate()` was cacheless O(T²) (~1-2 tok/s → ~40× speedup via KV-cached decode); MC scoring batched per-item (~4× fewer forwards); corrupt `mmlu.jsonl` repaired; per-task partial saves |
+| A2 dormant zoo | DONE | `kv_backend` live-registry marks non-live strategies `decode_live: False` + dormant note; `use_spec_attn` dead flag removed from activation/session/server/self-play plumbing and the GUI catalog; docs no longer claim dormant paths are live |
+| A3 repo hygiene | DONE | `LICENSE`, `.gitignore` (`results/`, scratch), `tools/llama` untracked, ruff F821 fixes in `forge/` + `scripts/`, CI lint ratchet + `research.*` import-count ratchet (61), `scripts/check_assets.py` asset gate |
+| A4 fla kernels | DONE | `flash-linear-attention==0.4.2`/`fla-core==0.4.2` pinned (0.6.x needs Triton gluon, absent on triton-windows); KDA→`chunk_kda`, GDN2→`chunk_dplr_delta_rule` verified vs naive recurrence (~2e-3); CPU fallback tested |
+| A5 proposer | PARTIAL | `Qwen2.5-Coder-3B-Instruct` cached (5.76GB), `scripts/bench_proposer.py` gate-rate head-to-head written; LFM3 remains the verified default until the comparison lands |
+| A6 FluxLM | DONE | RAG head-to-head run: FluxLM held_qa 0.0 vs 40-line TF-IDF baseline 0.90-1.00 - repositioned as research memory layer, not a retrieval competitor |
+| A8 multi-LoRA | DONE (scope-corrected) | Per-request `lora_adapter` on streaming + non-stream paths, path validation before SSE (403 not error-chunk), serialize-and-restore in `finally`; single-residency documented |
+| A9 observability | DONE | `write_status_json` fans out to optional W&B (`FORGE_WANDB=1`) and TensorBoard (`FORGE_TB_DIR`); file-first, best-effort, never breaks training |
+| A10 adapter guide | DONE | `docs/ADAPTER_AUTHORING.md` + stale `test_lfm3_port.py` ref corrected to `scripts/test_lfm3_port.py` |
+| A13 eval-pool ACL | DONE | `ToolSecurityManager` denies writes to `forge/evolution/**` (incl. `targets/*` glob, `best_configs.json`); `results/` stays writable |
+| A14 KV dormancy | DONE (with A2) | 3/30 live strategies marked; unknown names still fail loudly |
+| A16 sunset policy | DONE | `docs/RD_SUNSET_POLICY.md` + `introduced_round` on `FeatureSpec` |
+| A17 capability probe | DONE | Frozen 8-item probe scored per RSI epoch, history + `status.json` telemetry, `--no-capability-probe` opt-out |
+| A18 sandbox ACL | DONE | see A13 |
+| A19 auto-activate | DONE | `mamba_hybrid` profile reports `kv_cache="standard"`; `rotorquant` only wires QuaRot-KV on quarot checkpoints; stale test expectations updated |
+| A20 artifacts | DONE | `forge/` 16.8GB → 2.40GB; merged-LoRA blobs + hf_datasets relocated to `research/checkpoints/lora_merged/` and `data/`; byte-identical duplicate deleted (sha256-verified) |
+| A21 meta_inner | DONE (cap) + USER DECISION | `FORGE_META_BLOB_CAP` caps payload text at write; real 40GB is `generators.weights_blob` (682 rows) - purge via `scripts/truncate_meta_blobs.py --purge-generator-weights` is destructive, awaiting user |
+| A23 score floor | DONE | `--apply-best` exports only `metadata.verified.delta > 0` rows; first run exported 0 configs (43 quant rows correctly rejected) - the floor works, the ledger is empty |
+| B/6b serving | DONE (approved subset) | `response_format`→json_schema, `/info`, `/health/ready` 503-while-loading, `/v1/abort` (engine + BatchQueue, cooperative `cancel_check` in StandardDecoding), keep-alive TTL eviction, prompt_token_ids, min_tokens, stop_token_ids, penalties→logits_processor, `n>1` (streaming rejected honestly), aliases, model-field JIT + HF revision + offline, request logging, `scripts/bench_serving.py` (self-test 4/4) |
+
+Test-suite state: 3783 passed / 10 failed → triaged: 4 fixed
+(`use_spec_attn` catalog, jamba rotorquant expectations, MathProg
+JSON-spec shadowing, persistence zero-eval guard), quamba2 0-quant
+silent-degrade fixed (chain now verifies >0 quantized linears), rest were
+VRAM-contention flakes that pass standalone.
+
+Still open: A7 on-ramp polish, A11 meta-target economics, A12 STRATA/FluxLM
+consolidation decision, A15 continuous batching (the real throughput win),
+Prometheus-text `/metrics` (JSON endpoint exists), `--purge-generator-weights`
+(40GB, needs user), proposer head-to-head numbers.
+
+---
+
+## Round-2 status addendum (2026-10-31, same session)
+
+- **A11 evolution economics** — CLOSED (infra side): `decode_step` meta-target
+  (`forge/evolution/targets/decode_step.py`, metric `us_per_token`,
+  budget ≤20000µs) is registered in `scripts/rsi_evolve.py` and
+  `scripts/evolve_all.py` (weight 100); `scripts/ledger_audit.py` reports
+  applied-rate / stage distribution / per-target bests. Remaining gap is
+  outcome-side: the ledger still shows 0 applied discoveries — the
+  machinery to see that is what was missing.
+- **A12 STRATA vs FluxLM** — CLOSED: `docs/STRATA_VS_FLUXLM.md` holds the
+  division-of-labor decision (FluxLM = research vehicle, STRATA =
+  deployment-artifact format; duplicated components kept in both for now —
+  no consolidation without a bit-exact comparison).
+- **A13 eval-pool integrity** — DONE: `forge/evolution/eval_pool.py` gained
+  (1) worker-side is-check canaries over math/time/random/builtins/torch/
+  numpy refs + first-sight genuineness checks for late-imported watched
+  modules — drift → `stage="poison"` result + worker exit/respawn;
+  (2) parent-side sha256 of the target file (~1Hz) — mismatch → restore
+  from stored bytes + pending job flagged poison; (3) per-worker
+  `tempfile.mkdtemp` cwd — relative-path writes no longer land in repo
+  root (db, targets, .env all out of relative reach). New tests:
+  `tests/unit/test_eval_pool_integrity.py` (3/3). Residuals stated
+  honestly: absolute-path .env reads / db writes still possible;
+  first-sight genuineness is spoofable; network unrestricted.
+- **A15 decode profile** — PARTIAL landed: deferred readback (plan 4.6)
+  implemented in `StandardDecoding.generate` — the next forward launches
+  BEFORE `.item()` so the D2H overlaps the forward. Gated by
+  `_defer_sync`: only models with NO module-resident mutable state
+  (`_conv_state`/`_ssm_state`/`_ssm_state_real`/`_ssm_state_imag`/`_memory`
+  or `snapshot_state`) take the fast order, because a discarded forward
+  would otherwise pollute banked conv/SSM/Titan state (checked post-prefill
+  so lazy attrs exist). Pure-attention / dict-state models get the win;
+  hybrids keep exact old ordering. Verified bit-identical outputs; 33
+  decode/spec/e2e tests pass. The Phase-4-class win for hybrids remains
+  the static-graph path (already 1258 tok/s batched) — the eager-loop
+  sync cannot be removed without per-step recurrent snapshots that cost
+  more launches than they save.
+- **Prometheus /metrics** — CLOSED: `?format=prometheus` / Accept
+  negotiation existed; missing `# HELP`/`# TYPE` on per-model series
+  added + test (`test_metrics_prometheus`, 12/12 in file).
+- **A7 on-ramp** — CLOSED: README quickstart + `check_assets.py` step +
+  server env-var section (FORGE_*/HF_HUB_OFFLINE/FORGE_HF_REVISION).

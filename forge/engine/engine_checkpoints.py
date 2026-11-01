@@ -420,12 +420,16 @@ class _CheckpointLoadingMixin:
             vram_free, vram_total = self._memory_info(self.device)
             vram_ratio = vram_free / vram_total if vram_total > 0 else 0
 
-            # RotorQuant KV cache: Givens rotation + Lloyd-Max quantization
-            # More refined than TurboQuant (block-diagonal vs dense rotation,
-            # deferred quantization for zero error compounding during prefill).
-            # 3-4 bit KV with 0.94% error, ~8x compression.
-            overrides.setdefault("kv_cache", "rotorquant")
-            overrides.setdefault("kv_bits", 4)
+            # A19: "rotorquant"/kv_bits is a dormant bookkeeping name —
+            # decode KV is unquantized per-layer state. Assign it ONLY
+            # to wire the QuaRot-KV object on checkpoints that actually
+            # carry quarot keystack; everything else gets the honest
+            # "standard" label (info() reports decode_live either way).
+            if "quarot" in self.keystack_features:
+                overrides.setdefault("kv_cache", "rotorquant")
+                overrides.setdefault("kv_bits", 4)
+            else:
+                overrides.setdefault("kv_cache", "standard")
 
             if vram_ratio > 0.5 and not is_mamba_hybrid:
                 # Ample VRAM — enable aggressive speed features

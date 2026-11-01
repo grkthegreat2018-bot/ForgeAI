@@ -201,8 +201,6 @@ FIELDS: tuple[FieldSpec, ...] = (
               "Mixture-of-sparse-attention heads."),
     FieldSpec("use_fa4", "FA4 attention", "bool", "Prefill & Attention",
               "FlashAttention-4 kernels (CUDA only)."),
-    FieldSpec("use_spec_attn", "Spec attention", "bool", "Prefill & Attention",
-              "Reserved speculative-attention flag."),
     # Kernels & Graphs
     FieldSpec("use_compile", "torch.compile", "bool", "Kernels & Graphs",
               "Compile the model (1.3-2x decode, +2-3 min load). Broken on some triton stacks — use fast load if compile fails."),

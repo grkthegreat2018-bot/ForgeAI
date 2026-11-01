@@ -22,6 +22,7 @@ Usage:
     out = registry.generate("qwen2.5", "Explain quantum computing")
 """
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -34,6 +35,11 @@ from forge.engine.forge_engine import ForgeEngine, _checkpoint_size_cache
 import contextlib
 
 logger = logging.getLogger(__name__)
+
+# HF repo-id shape: "owner/repo" (letters, digits, _, ., - on both sides).
+# Matches `model`-field values like "liquidai/LFM2.5-1.2B-Instruct-GGUF"
+# that should just-in-time pull from the Hub rather than raise KeyError.
+_HF_REPO_RE = re.compile(r"[\w.-]+/[\w.-]+")
 
 
 @dataclass
@@ -55,6 +61,9 @@ class EngineEntry:
     # Actual VRAM footprint measured via mem_get_info delta at load
     # (EC-161); 0 when unmeasured (CPU device or pre-measure loads).
     measured_vram_bytes: int = 0
+    # Idle TTL (Phase 6b): seconds of disuse after which evict_expired()
+    # puts the model to sleep (level 1).  None = never auto-sleep.
+    keep_alive_s: float | None = None
 
 
 class VRAMBudgetExceeded(Exception):
@@ -97,11 +106,18 @@ class ModelRegistry:
     def register(self, model_id: str, checkpoint: str, config_name: str,
                  tokenizer_path: str | None = None,
                  vram_budget_gb: float = 0,
+                 keep_alive_s: float | None = None,
                  **engine_kwargs) -> ForgeEngine:
         """Register and load a model, managing VRAM automatically.
 
         If VRAM is insufficient, idle engines are put to sleep to free space.
         If vram_budget_gb is 0, auto-calculates from checkpoint file size.
+
+        Args:
+            keep_alive_s: idle TTL in seconds.  Once set,
+                :meth:`evict_expired` puts the model to sleep (level 1)
+                after this much disuse — the Ollama ``keep_alive``
+                semantic.  ``None`` (default) = never auto-sleep.
 
         Returns the loaded ForgeEngine (or existing if already registered).
         """
@@ -112,6 +128,8 @@ class ModelRegistry:
                 entry = self._entries[model_id]
                 self._ensure_awake(model_id)
                 entry.last_used = time.time()
+                if keep_alive_s is not None:
+                    entry.keep_alive_s = keep_alive_s
                 return entry.engine
 
             # Calculate VRAM budget
@@ -168,6 +186,7 @@ class ModelRegistry:
                 config_name=config_name,
                 tokenizer_path=tok_path,
                 measured_vram_bytes=measured,
+                keep_alive_s=keep_alive_s,
             )
             self._entries[model_id] = entry
 
@@ -184,7 +203,13 @@ class ModelRegistry:
                  top_k: int = 80, repetition_penalty: float = 1.05,
                  stop: list[str] | None = None, seed: int | None = None,
                  **kwargs) -> str:
-        """Generate text from a registered model. Auto-wakes if asleep."""
+        """Generate text from a registered model. Auto-wakes if asleep.
+
+        Unknown ``model_id`` values shaped like a HuggingFace repo
+        (``owner/name``) are pulled just-in-time via
+        :meth:`register_hf_model`; anything else raises ``KeyError``.
+        """
+        self._ensure_registered(model_id)
         with self._lock:
             if model_id not in self._entries:
                 raise KeyError(f"Model '{model_id}' not registered. "
@@ -211,6 +236,8 @@ class ModelRegistry:
                 logprobs=kwargs.get('logprobs'),
                 prompt_logprobs=kwargs.get('prompt_logprobs'),
                 return_logprobs=kwargs.get('return_logprobs', False),
+                json_schema=kwargs.get('json_schema'),
+                logits_processor=kwargs.get('logits_processor'),
             )
 
         try:
@@ -260,7 +287,12 @@ class ModelRegistry:
 
         Yields decoded text chunks (one per token) as they are generated.
         Sampling args mirror ForgeEngine.generate_stream.
+
+        Unknown ``model_id`` values shaped like a HuggingFace repo
+        (``owner/name``) are pulled just-in-time via
+        :meth:`register_hf_model`; anything else raises ``KeyError``.
         """
+        self._ensure_registered(model_id)
         with self._lock:
             if model_id not in self._entries:
                 raise KeyError(f"Model '{model_id}' not registered. "
@@ -341,6 +373,149 @@ class ModelRegistry:
                 if self._entries.get(from_model) is entry:
                     entry.is_awake = False
             self._ensure_awake(to_model)
+
+    # ── Phase 6b: HF JIT pull, keep_alive TTL, cooperative abort ─────────
+
+    @staticmethod
+    def _is_hf_repo_id(model_id: str) -> bool:
+        """True when ``model_id`` looks like an HF repo (``owner/name``)
+        and is not a path that exists on disk."""
+        return (_HF_REPO_RE.fullmatch(model_id) is not None
+                and not Path(model_id).exists())
+
+    def _ensure_registered(self, model_id: str):
+        """Resolve ``model_id`` to a registered entry, pulling HF repos.
+
+        Called by ``generate``/``generate_stream`` before their lock-held
+        fast path: the JIT download + load must not run while holding the
+        registry lock (it would freeze every other model's requests for
+        the duration of a multi-GB pull).
+        """
+        with self._lock:
+            if model_id in self._entries:
+                return
+            available = list(self._entries.keys())
+        if not self._is_hf_repo_id(model_id):
+            raise KeyError(f"Model '{model_id}' not registered. "
+                           f"Available: {available}")
+        self.register_hf_model(model_id, model_id)
+
+    def register_hf_model(self, model_id: str, repo_id: str,
+                          revision: str | None = None,
+                          keep_alive_s: float | None = None,
+                          **engine_kwargs) -> str:
+        """Just-in-time register a model straight from a HuggingFace repo.
+
+        Downloads the repo's weights into the local HF cache via
+        ``ForgeLoader.download_hf_checkpoint`` (itself built on the
+        existing ``_load_huggingface``/``_download_hf_file`` machinery),
+        then routes through the normal :meth:`register` →
+        ``ForgeEngine.from_checkpoint`` path.
+
+        Args:
+            model_id: registry id the model is served under.
+            repo_id: HF repo (``owner/name``).
+            revision: branch/tag/commit pin.  ``None`` falls back to the
+                ``FORGE_HF_REVISION`` environment variable, then
+                ``main``.
+            keep_alive_s: idle TTL stored on the entry (see
+                :meth:`register` / :meth:`evict_expired`).
+
+        Honors ``HF_HUB_OFFLINE=1``/``TRANSFORMERS_OFFLINE=1`` — raises
+        ``ValueError`` without touching the network.
+
+        Returns ``model_id``.
+        """
+        from forge.engine.forge_loader import ForgeLoader
+
+        local = ForgeLoader().download_hf_checkpoint(
+            repo_id, revision=revision)
+        size = 0
+        try:
+            p = Path(local)
+            if p.is_dir():
+                size = sum(f.stat().st_size
+                           for f in p.rglob("*") if f.is_file())
+            else:
+                size = p.stat().st_size
+        except OSError:
+            size = 0
+        budget = engine_kwargs.pop("vram_budget_gb", 0.0)
+        if not budget and size:
+            budget = size * 1.5 / 1e9
+        self.register(
+            model_id,
+            checkpoint=str(local),
+            config_name=engine_kwargs.pop("config_name", "forgelm_v2"),
+            vram_budget_gb=budget,
+            keep_alive_s=keep_alive_s,
+            **engine_kwargs)
+        return model_id
+
+    def evict_expired(self, now: float | None = None) -> list[str]:
+        """Sleep (level 1) models idle past their ``keep_alive_s`` TTL.
+
+        Models with ``keep_alive_s=None`` or an in-flight generation are
+        skipped.  Returns the model_ids actually put to sleep.
+        """
+        now = time.time() if now is None else now
+        slept: list[str] = []
+        with self._lock:
+            for entry in list(self._entries.values()):
+                if (entry.keep_alive_s is None or entry.in_flight > 0
+                        or not self._sync_awake(entry)):
+                    continue
+                if now - entry.last_used <= entry.keep_alive_s:
+                    continue
+                # engine.sleep() waits on _gen_lock — off the registry
+                # lock like the LRU eviction path (EC-199).
+                try:
+                    self._sleep_unlocked(entry, 1)
+                except Exception as e:
+                    logger.warning("TTL sleep failed for %s: %s",
+                                   entry.model_id, e)
+                    continue
+                if self._entries.get(entry.model_id) is entry:
+                    entry.is_awake = False
+                slept.append(entry.model_id)
+                logger.info("TTL-expired %s → sleep L1 (idle %.0fs)",
+                            entry.model_id, now - entry.last_used)
+        return slept
+
+    def abort(self, model_id: str | None = None) -> int:
+        """Cooperatively cancel in-flight generations.
+
+        Signals each awake engine's ``request_cancel()`` (or
+        ``cancel_generation()`` fallback) — the decode loops observe the
+        flag at the next token boundary and return their partial output.
+        ``model_id=None`` aborts every awake model.  Queued-not-started
+        requests are the BatchQueue's job (``BatchQueue.abort``).
+
+        Returns the count of in-flight generations signalled.
+        """
+        with self._lock:
+            if model_id is not None and model_id not in self._entries:
+                raise KeyError(f"Model '{model_id}' not registered. "
+                               f"Available: {list(self._entries.keys())}")
+            targets = ([self._entries[model_id]] if model_id is not None
+                       else list(self._entries.values()))
+            signaled = 0
+            for entry in targets:
+                if not self._sync_awake(entry):
+                    continue
+                cancel = getattr(entry.engine, "request_cancel", None)
+                if cancel is None:
+                    cancel = getattr(entry.engine, "cancel_generation", None)
+                if cancel is None:
+                    continue
+                try:
+                    cancel()
+                except Exception as e:
+                    logger.warning("abort: %s cancel failed: %s",
+                                   entry.model_id, e)
+                    continue
+                signaled += entry.in_flight
+            return signaled
 
     def unregister(self, model_id: str):
         """Remove a model from the registry and free all its resources."""

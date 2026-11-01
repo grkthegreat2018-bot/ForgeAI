@@ -114,29 +114,82 @@ def loglikelihood(model: Any, tokenizer: Any, context: str,
         greedy.all().item())
 
 
+def loglikelihood_batch(model: Any, tokenizer: Any, context: str,
+                        continuations: list[str], device: torch.device,
+                        max_seq_len: int = 8192
+                        ) -> list[tuple[float, int, bool]]:
+    """Batched ``loglikelihood``: all continuations share *context*, so the
+    (ctx+cont) rows go through ONE (B, Tmax) forward instead of B full
+    forwards — ~4x fewer passes on 4-choice tasks, identical scoring
+    (right-pad tail positions are never read).  Returns per-continuation
+    (sum_logprob, n_cont_tokens, all_greedy)."""
+    ctx_ids = _encode(tokenizer, context, device)
+    rows = []
+    for i, cont in enumerate(continuations):
+        cont_ids = _encode(tokenizer, cont, device)
+        if not cont_ids:
+            continue
+        ids = ctx_ids + cont_ids
+        if len(ids) > max_seq_len:  # keep the tail: continuation must survive
+            overflow = len(ids) - max_seq_len
+            ids = ids[overflow:]
+            ctx_len = max(len(ctx_ids) - overflow, 0)
+        else:
+            ctx_len = len(ctx_ids)
+        rows.append((i, ids, ctx_len))
+    if not rows:
+        return [(0.0, 0, False)] * len(continuations)
+    tmax = max(len(ids) for _, ids, _ in rows)
+    x = torch.zeros(len(rows), tmax, dtype=torch.long, device=device)
+    for r, (_, ids, _) in enumerate(rows):
+        x[r, :len(ids)] = torch.tensor(ids, dtype=torch.long, device=device)
+    with torch.no_grad():
+        out = model(x)
+        logits = out[0] if isinstance(out, tuple) else (
+            out.logits if hasattr(out, "logits") else out)
+    out_list: list[tuple[float, int, bool]] = [(0.0, 0, False)] * len(continuations)
+    for r, (i, ids, ctx_len) in enumerate(rows):
+        T = len(ids)
+        logp = F.log_softmax(logits[r, :T - 1].float(), dim=-1)
+        tgt = x[r, 1:T]
+        tok_lp = logp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1)
+        cont_lp = tok_lp[ctx_len - 1:]
+        greedy = (logp[ctx_len - 1:].argmax(-1) == tgt[ctx_len - 1:])
+        out_list[i] = (float(cont_lp.sum().item()), int(cont_lp.numel()),
+                       bool(greedy.all().item()))
+    return out_list
+
+
 def generate(model: Any, tokenizer: Any, prompt: str,
              device: torch.device, max_new_tokens: int = 256,
              stop_ids: set[int] | None = None,
              max_seq_len: int = 8192) -> str:
-    """Greedy generation; returns decoded continuation text only."""
+    """Greedy generation; returns decoded continuation text only.
+
+    Uses the model KV/conv/SSM cache: one T=prefill forward then single-token
+    steps.  The previous cacheless loop re-forwarded the whole prefix per
+    token (O(T^2) compute, ~1-2 tok/s on the hybrid stack)."""
     ids = _encode(tokenizer, prompt, device)[-max_seq_len:]
-    prompt_len = len(ids)
     x = torch.tensor([ids], dtype=torch.long, device=device)
     stop = set(stop_ids or ())
     eos = getattr(tokenizer, "eos_token_id", None)
     if eos is not None:
         stop.add(eos)
+    out_ids: list[int] = []
     with torch.no_grad():
+        out = model(x, use_cache=True, logits_last_only=True)
+        logits, past = out[0], out[2]
+        nxt = int(logits[0, -1].argmax().item())
         for _ in range(max_new_tokens):
-            logits = _forward_logits(model, x[:, -max_seq_len:])
-            nxt = int(logits[-1].argmax().item())
             if nxt in stop:
                 break
-            x = torch.cat(
-                [x, torch.tensor([[nxt]], dtype=torch.long,
-                                 device=device)], dim=1)
-    return tokenizer.decode(x[0, prompt_len:].tolist(),
-                            skip_special_tokens=True)
+            out_ids.append(nxt)
+            xt = torch.tensor([[nxt]], dtype=torch.long, device=device)
+            out = model(xt, past_key_values=past, use_cache=True,
+                        logits_last_only=True)
+            logits, past = out[0], out[2]
+            nxt = int(logits[0, -1].argmax().item())
+    return tokenizer.decode(out_ids, skip_special_tokens=True)
 
 
 # ── Prompt formats (lm-eval conventions) ─────────────────────────────────
@@ -195,12 +248,11 @@ def run_mc_task(model: Any, tokenizer: Any, rows: list[dict],
         else:
             ctx = _mc_prompt(row["context"])
             conts = [f" {c.strip()}" for c in choices]
-        lps, norms = [], []
-        for cont in conts:
-            lp, ntok, _ = loglikelihood(
-                model, tokenizer, ctx, cont, device, max_seq_len)
-            lps.append(lp)
-            norms.append(lp / max(len(cont.encode("utf-8")), 1))
+        scored = loglikelihood_batch(
+            model, tokenizer, ctx, conts, device, max_seq_len)
+        lps = [s[0] for s in scored]
+        norms = [s[0] / max(len(c.encode("utf-8")), 1)
+                 for s, c in zip(scored, conts)]
         correct += int(int(np_argmax(lps)) == gold)
         correct_norm += int(int(np_argmax(norms)) == gold)
         n += 1
@@ -244,12 +296,18 @@ def np_argmax(xs: list[float]) -> int:
 
 def run_eval(model: Any, tokenizer: Any, device: torch.device | str,
              tasks: list[str] | tuple[str, ...] = ALL_TASKS,
-             limit: int | None = None,
+             limit: int | dict[str, int] | None = None,
              data_dir: str | Path = DEFAULT_DATA_DIR,
              max_seq_len: int = 8192,
              gsm8k_max_new: int = 256,
-             verbose: bool = True) -> dict[str, Any]:
-    """Run the external benchmark suite; returns a report dict."""
+             verbose: bool = True,
+             partial_out: str | Path | None = None,
+             ) -> dict[str, Any]:
+    """Run the external benchmark suite; returns a report dict.
+
+    partial_out: if set, writes a partial report JSON after each task so a
+    crash late in the suite (e.g. OOM in gsm8k generation) does not lose
+    already-measured scores."""
     device = torch.device(device)
     model.eval()
 
@@ -261,7 +319,9 @@ def run_eval(model: Any, tokenizer: Any, device: torch.device | str,
 
     results: dict[str, Any] = {}
     for task in tasks:
-        rows = load_task(task, limit=limit, data_dir=data_dir)
+        task_limit = (limit.get(task) if isinstance(limit, dict)
+                      else limit)
+        rows = load_task(task, limit=task_limit, data_dir=data_dir)
         if task in GEN_TASKS:
             results[task] = run_gsm8k(
                 model, tokenizer, rows, device,
@@ -273,6 +333,15 @@ def run_eval(model: Any, tokenizer: Any, device: torch.device | str,
                 max_seq_len=max_seq_len, progress=_prog(task))
         else:
             raise ValueError(f"unknown task {task!r}; have {ALL_TASKS}")
+        if partial_out:
+            try:
+                headline_p = {t: (r["acc_norm"] if t in NORM_TASKS else r["acc"])
+                              for t, r in results.items()}
+                Path(partial_out).write_text(json.dumps(
+                    {"partial": True, "tasks": results,
+                     "headline": headline_p}, indent=2), encoding="utf-8")
+            except Exception:
+                pass
     headline = {t: (r["acc_norm"] if t in NORM_TASKS else r["acc"])
                 for t, r in results.items()}
     return {"tasks": results, "headline": headline,

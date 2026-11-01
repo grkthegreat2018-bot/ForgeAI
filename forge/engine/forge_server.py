@@ -29,13 +29,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import inspect
 import json
 import logging
 import os
+import re
+import sys
 import tempfile
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Literal
 
@@ -76,6 +81,129 @@ _MAX_BATCH_PROMPTS = 64
 # this long => the dispatcher died — error out instead of hanging (EC-073).
 _STREAM_IDLE_TIMEOUT_S = 300.0
 
+# Exact-match response cache cap (plan 6b — Triton-style dedup: single-GPU
+# byte-exact request→response memoization only, NO fuzzy dedup).
+_RESP_CACHE_MAX = 256
+
+# HF-repo-id shape for /v1/router/register (e.g. "LiquidAI/LFM2.5-1.2B"):
+# two dotted-word segments, no path separator, and the string must not
+# exist on disk (local paths win — a "dir/file" that exists stays local).
+_HF_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
+
+# Model aliases: FORGE_MODEL_ALIASES="fast=forgelm-v2-jamba,code=lfm3".
+# Parsed once per ForgeServer init into this module-level map (vLLM's
+# --served-model-name analogue). Resolution is pure-lookup — unknown
+# names pass through and hit the registry's usual KeyError/404.
+_MODEL_ALIASES: dict[str, str] = {}
+
+
+def _parse_model_aliases(raw: str | None) -> dict[str, str]:
+    """Parse ``alias=target,alias2=target2`` env strings."""
+    out: dict[str, str] = {}
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        alias, target = part.split("=", 1)
+        alias, target = alias.strip(), target.strip()
+        if alias and target:
+            out[alias] = target
+    return out
+
+
+def _resolve_model(name: str) -> str:
+    """Map a request's ``model`` through FORGE_MODEL_ALIASES.
+
+    Unknown names are returned unchanged — the registry lookup below
+    still 404/KeyErrors exactly as before."""
+    return _MODEL_ALIASES.get(name, name)
+
+
+def _log_request_line(request: Request, rid: str, status: int,
+                      t0: float) -> None:
+    """FORGE_LOG_REQUESTS=1: one JSON line per request to stderr."""
+    try:
+        sys.stderr.write(json.dumps({
+            "method": request.method,
+            "path": request.url.path,
+            "rid": rid,
+            "status": status,
+            "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
+        }) + "\n")
+    except Exception:
+        pass  # logging must never break a request
+
+
+def _build_penalty_processor(req, eos_ids: set[int] | None = None):
+    """Combine OpenAI penalty fields into one ``logits_processor``.
+
+    Engine contract (see ``engine_generation._decode_tokens``): the
+    callable receives ``(logits[:, -1, :], generated_ids)`` BEFORE
+    sampling and returns modified logits.  Semantics (OpenAI/vLLM):
+      frequency_penalty fp : logit[t] -= count(t in generated) * fp
+      presence_penalty  pp : logit[t] -= pp   (only when count(t) > 0)
+      logit_bias           : logit[t] += bias (map of token-id → bias)
+      min_tokens           : every EOS id → -inf while fewer than
+        ``min_tokens`` tokens are generated — HF-style EOS suppression
+        (EOS can't be *sampled*, so decoding runs past the floor; it is
+        NOT the same as force-extending after an emitted EOS).
+
+    Counts cover generated tokens only (the prompt is excluded — OpenAI
+    penalties apply to the completion).  Returns None when nothing is
+    active so callers can skip the wiring entirely.
+    """
+    pp = float(getattr(req, "presence_penalty", 0.0) or 0.0)
+    fp = float(getattr(req, "frequency_penalty", 0.0) or 0.0)
+    min_tokens = int(getattr(req, "min_tokens", 0) or 0)
+    bias_map: dict[int, float] = {}
+    for k, v in (getattr(req, "logit_bias", None) or {}).items():
+        try:
+            bias_map[int(k)] = float(v)
+        except (TypeError, ValueError):
+            continue  # OpenAI keys are token-id strings — skip junk
+    eos_set = {int(e) for e in (eos_ids or ())}
+    if not pp and not fp and not bias_map \
+            and not (min_tokens > 0 and eos_set):
+        return None
+
+    def _processor(logits, generated_ids):
+        # Clone: the caller keeps the pre-processor tensor (raw_logits)
+        # for logprobs/step observers — mutating it in place would leak
+        # penalties into reported logprobs.
+        out = logits.clone()
+        rows = out if out.dim() > 1 else out.unsqueeze(0)
+        n_gen = len(generated_ids) if generated_ids is not None else 0
+        counts: dict[int, int] = {}
+        if (pp or fp) and generated_ids:
+            for t in generated_ids:
+                counts[t] = counts.get(t, 0) + 1
+        vocab = rows.shape[-1]
+        for row in rows:
+            if min_tokens > 0 and n_gen < min_tokens:
+                for e in eos_set:
+                    if 0 <= e < vocab:
+                        row[e] = float("-inf")
+            for t, c in counts.items():
+                if 0 <= t < vocab:
+                    row[t] = row[t] - c * fp - pp
+            for t, b in bias_map.items():
+                if 0 <= t < vocab:
+                    row[t] = row[t] + b
+        return out
+
+    return _processor
+
+
+# Sampling kwargs shared by registry.generate and registry.generate_stream
+# — used to translate a generate() kwargs dict for the stream-drain
+# fallback in _generate_once (penalties on the non-stream path).
+_STREAM_GEN_KWARGS = frozenset({
+    "max_new_tokens", "temperature", "top_p", "top_k",
+    "repetition_penalty", "min_p", "min_k", "dry_multiplier", "dry_base",
+    "dry_allowed_length", "dry_penalty_last_n", "stop", "seed",
+    "skip_special_tokens",
+})
+
 
 def _adapter_path_allowed(path: str) -> bool:
     """Request-supplied adapter paths must resolve to an existing file
@@ -95,6 +223,28 @@ def _adapter_path_allowed(path: str) -> bool:
     rp_l = rp.lower()
     return any(rp_l == r.lower() or rp_l.startswith(r.lower() + os.sep)
                for r in roots)
+
+
+def _response_format_schema(rf: dict | None) -> dict | None:
+    """Map an OpenAI ``response_format`` object to a json_schema dict.
+
+    ``{"type": "json_schema", "json_schema": {"name": ..., "schema":
+    {...}}}`` → the schema itself (or the whole json_schema object if it
+    lacks a nested ``schema`` key — xgrammar accepts either).
+    ``{"type": "json_object"}`` → a permissive object schema.
+    Anything else → None (no constraint).
+    """
+    if not isinstance(rf, dict):
+        return None
+    t = rf.get("type")
+    if t == "json_schema":
+        js = rf.get("json_schema")
+        if isinstance(js, dict):
+            return js.get("schema") or js
+        return None
+    if t == "json_object":
+        return {"type": "object"}
+    return None
 
 
 def _parse_reasoning(text: str, model: str = "") -> tuple[str, str | None]:
@@ -166,6 +316,23 @@ class ChatCompletionRequest(BaseModel):
     stop_token_ids: list[int] | None = None
     # OpenAI stream_options; include_usage=True adds a final usage chunk.
     stream_options: dict | None = None
+    # OpenAI response_format: {"type": "json_schema", "json_schema":
+    #   {"name": ..., "schema": {...}}}  or  {"type": "json_object"}.
+    # Forwarded to the engine's xgrammar FSM as json_schema. Non-stream
+    # path only (generate_stream has no schema plumbing).
+    response_format: dict | None = None
+    # Parallel choices (OpenAI n). Non-stream loops registry.generate n
+    # times; stream=true + n>1 is an honest 400 (SSE fan-out of N
+    # interleaved choices is not supported).
+    n: int | None = None
+    # OpenAI penalty fields — combined by _build_penalty_processor into
+    # one logits_processor (wired on generate_stream; forwarded to
+    # registry.generate as a kwarg — see _generate_once for the
+    # stream-drain fallback while engine.generate lacks the param).
+    min_tokens: int | None = None  # suppress EOS until N tokens generated
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
+    logit_bias: dict | None = None  # {token_id_str: bias}
 
 class ChatCompletionChoice(BaseModel):
     index: int = 0
@@ -188,7 +355,11 @@ class ChatCompletionResponse(BaseModel):
 
 class CompletionRequest(BaseModel):
     model: str = "forgelm-v2-jamba"
-    prompt: str
+    # Exactly one of prompt / prompt_token_ids is required — the handler
+    # detokenizes ids via the engine tokenizer and validates (400 on
+    # both-or-neither), vLLM/SGLang-style.
+    prompt: str | None = None
+    prompt_token_ids: list[int] | None = None
     temperature: float = 0.0
     top_p: float = 1.0
     top_k: int = 80
@@ -206,6 +377,12 @@ class CompletionRequest(BaseModel):
     prompt_logprobs: int | None = None
     # Token ids that end generation (streaming path only). EC-152.
     stop_token_ids: list[int] | None = None
+    # Parallel choices — same contract as ChatCompletionRequest.n.
+    n: int | None = None
+    min_tokens: int | None = None
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
+    logit_bias: dict | None = None
 
 class EmbeddingRequest(BaseModel):
     model: str = "forgelm-v2-jamba"
@@ -273,6 +450,18 @@ class RouterRegisterRequest(BaseModel):
     config_name: str = "forgelm_v2"
     tokenizer_path: str | None = None
     vram_budget_gb: float | None = None
+    # HF revision pin (hf://id@rev) — only used when `checkpoint` is an
+    # HF repo id; forwarded to registry.register_hf_model.
+    revision: str | None = None
+    # Ollama-style TTL: unload the model this many seconds after last
+    # use. Forwarded to register_hf_model / register when the registry
+    # accepts it; otherwise honored server-side in _sweep_keep_alive.
+    keep_alive_s: float | None = None
+
+class AbortRequest(BaseModel):
+    """POST /v1/abort — cancel in-flight generations (SGLang-style).
+    model=None aborts across all models."""
+    model: str | None = None
 
 class KVCacheTypeRequest(BaseModel):
     model: str = "forgelm-v2-jamba"
@@ -324,7 +513,6 @@ class UpdateBootConfigRequest(BaseModel):
     use_compile: bool | None = None
     use_triton_conv: bool | None = None
     use_prefix_cache: bool | None = None
-    use_spec_attn: bool | None = None
     warmup: bool | None = None
 
 class TaskResponse(BaseModel):
@@ -631,6 +819,20 @@ class ForgeServer:
         self._metrics = {"requests_total": 0, "errors_total": 0}
         # When set, mutating /v1 methods require `Authorization: Bearer`.
         self._api_key = os.environ.get("FORGE_API_KEY") or None
+        # FORGE_LOG_REQUESTS=1 → one JSON line per request to stderr.
+        self._log_requests = os.environ.get("FORGE_LOG_REQUESTS") == "1"
+        # Plan-6b: model aliases (FORGE_MODEL_ALIASES env, parsed once
+        # per server init) + exact-match response cache (FORGE_NO_CACHE=1
+        # disables) + server-side keep_alive bookkeeping for models that
+        # came through the local-path register route (the HF path's TTL
+        # lives inside registry.register_hf_model).
+        _MODEL_ALIASES.clear()
+        _MODEL_ALIASES.update(
+            _parse_model_aliases(os.environ.get("FORGE_MODEL_ALIASES")))
+        self._resp_cache: OrderedDict[str, dict] = OrderedDict()
+        self._cache_lock = threading.Lock()
+        self._resp_cache_enabled = os.environ.get("FORGE_NO_CACHE") != "1"
+        self._keep_alive: dict[str, float] = {}
         # Per-task locks serialize history render+append so concurrent
         # POSTs to one task can't interleave (EC-198).  They are
         # threading.Lock, NOT asyncio.Lock: waiters can live on different
@@ -764,6 +966,11 @@ class ForgeServer:
                     self.batch_queue.max_batch_size)
         logger.info("Session manager: max=%s tasks",
                     self.session_manager.max_sessions)
+        if _MODEL_ALIASES:
+            logger.info("Model aliases: %s",
+                        dict(_MODEL_ALIASES))
+        if not self._resp_cache_enabled:
+            logger.info("Response cache: DISABLED (FORGE_NO_CACHE)")
         logger.info("Endpoints: /v1/chat/completions, /v1/completions, "
                     "/v1/models, /v1/tasks, /v1/tasks/{id}/messages, "
                     "/v1/tasks/{id}/config (PATCH), /health")
@@ -840,6 +1047,195 @@ class ForgeServer:
             lock.release()
         except RuntimeError:
             pass  # already released — never strand callers
+
+    # ── Plan-6b helpers: penalties, cache, aliases, keep_alive ─────────
+
+    def _eos_ids_for(self, engine, req) -> set[int]:
+        """The merged EOS set a decode will actually stop on.
+
+        Mirrors engine._eos_token_ids(custom_ids): the built-in defaults
+        + tokenizer/model-provided ids + the request's stop_token_ids —
+        needed so min_tokens suppression covers the SAME ids the decode
+        loop would stop on (a lone FIM terminator still wants EOS
+        honored — and suppressed until the floor is reached)."""
+        from forge.engine.engine_common import _DEFAULT_EOS_TOKEN_IDS
+        custom = getattr(req, "stop_token_ids", None)
+        if engine is not None:
+            fn = getattr(engine, "_eos_token_ids", None)
+            if callable(fn):
+                try:
+                    return set(fn(custom))
+                except Exception:
+                    pass  # fall through to the manual merge
+            ids = set(_DEFAULT_EOS_TOKEN_IDS)
+            tid = getattr(getattr(engine, "tokenizer", None),
+                          "eos_token_id", None)
+            if isinstance(tid, (list, tuple, set, frozenset)):
+                ids.update(int(t) for t in tid)
+            elif tid is not None:
+                ids.add(int(tid))
+        else:
+            ids = set(_DEFAULT_EOS_TOKEN_IDS)
+        if custom:
+            ids.update(int(t) for t in custom)
+        return ids
+
+    def _penalty_processor_for(self, req):
+        """Build the combined penalty processor for a request.
+
+        Returns None when no penalty field is active — callers pass the
+        result straight through to logits_processor=None paths."""
+        eos_ids = None
+        if getattr(req, "min_tokens", None):
+            engine = None
+            try:
+                engine = self.registry.get_engine(req.model)
+            except Exception:
+                engine = None
+            eos_ids = self._eos_ids_for(engine, req)
+        return _build_penalty_processor(req, eos_ids)
+
+    def _generate_accepts_processor(self, model: str) -> bool:
+        """True only when the whole non-stream chain honors
+        ``logits_processor``: registry.generate must forward it AND
+        engine.generate must accept it.  On builds where either side is
+        missing this returns False and penalized non-stream requests
+        take the stream-drain fallback in _generate_once."""
+        try:
+            src = inspect.getsource(self.registry.generate)
+        except (OSError, TypeError):
+            src = ""
+        if "logits_processor" not in src:
+            return False
+        engine = None
+        try:
+            engine = self.registry.get_engine(model)
+        except Exception:
+            pass
+        gen = getattr(engine, "generate", None)
+        if gen is None:
+            return False
+        try:
+            params = inspect.signature(gen).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(p.kind is inspect.Parameter.VAR_KEYWORD
+                   or p.name == "logits_processor" for p in params)
+
+    def _generate_once(self, model: str, prompt: str, penalty_proc,
+                       gen_kwargs: dict,
+                       eos_token_ids: list[int] | None = None):
+        """One non-stream generation honoring request penalties.
+
+        - No penalties → plain registry.generate (returns str, or dict
+          when logprobs were requested).
+        - Penalties + a processor-capable generate chain → same call
+          with logits_processor forwarded.
+        - Penalties on a chain without logits_processor plumbing
+          (older registry/engine builds) → drain
+          registry.generate_stream: the stream decode path already
+          applies logits_processor and honors eos_token_ids, so
+          penalties/min_tokens genuinely take effect.
+          generate()-only features (json_schema, logprobs) can't ride
+          that path — when one is also requested we keep generate()
+          and warn that the penalties are dropped (the alternative —
+          silently applying schema without penalties — is a silent
+          no-op, which is worse than a logged one).
+        """
+        if penalty_proc is None or self._generate_accepts_processor(model):
+            return self.registry.generate(
+                model, prompt, logits_processor=penalty_proc,
+                **gen_kwargs)
+        needs_generate = any(gen_kwargs.get(k) for k in (
+            "json_schema", "logprobs", "prompt_logprobs",
+            "return_logprobs"))
+        if needs_generate:
+            logger.warning(
+                "presence/frequency/logit_bias/min_tokens dropped for "
+                "%s: this build's generate() has no logits_processor "
+                "plumbing and the request also needs generate()-only "
+                "features (schema/logprobs); penalties are applied on "
+                "the stream path today", model)
+            return self.registry.generate(model, prompt, **gen_kwargs)
+        stream_kw = {k: v for k, v in gen_kwargs.items()
+                     if k in _STREAM_GEN_KWARGS}
+        return "".join(self.registry.generate_stream(
+            model, prompt, logits_processor=penalty_proc,
+            eos_token_ids=eos_token_ids, **stream_kw))
+
+    def _cache_key(self, req) -> str | None:
+        """sha256 of the canonicalized request (model + messages/prompt
+        + sampling params — stream/n/stream_options are transport-only
+        and excluded so a cached n-choice entry can serve smaller n)."""
+        if not self._resp_cache_enabled:
+            return None
+        d = req.model_dump()
+        for k in ("stream", "n", "stream_options"):
+            d.pop(k, None)
+        blob = json.dumps(d, sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    def _cache_get(self, key: str, n: int) -> dict | None:
+        """LRU hit: a cached response serves the request when it holds
+        at least n choices (extra choices are sliced off — index labels
+        stay correct)."""
+        with self._cache_lock:
+            hit = self._resp_cache.get(key)
+            if hit is None:
+                return None
+            self._resp_cache.move_to_end(key)
+            choices = hit.get("choices") or ()
+            if len(choices) < n:
+                return None
+        out = dict(hit)
+        if len(choices) > n:
+            out["choices"] = list(choices[:n])
+        return out
+
+    def _cache_put(self, key: str, resp: dict) -> None:
+        with self._cache_lock:
+            self._resp_cache[key] = resp
+            self._resp_cache.move_to_end(key)
+            while len(self._resp_cache) > _RESP_CACHE_MAX:
+                self._resp_cache.popitem(last=False)
+
+    def _sweep_keep_alive(self) -> None:
+        """Periodic TTL pass, driven off the health probes (cheap —
+        no background thread).
+
+        1) ``registry.evict_expired()`` — parallel-agent contract: the
+           registry unloads models whose keep_alive TTL (set via
+           register_hf_model) has lapsed.
+        2) ``self._keep_alive`` — server-side TTLs recorded by the
+           LOCAL-path register route (registry.register has no
+           keep_alive_s param today).  Expiry is judged on
+           ``last_used_ago_s`` and honored as ``sleep(level=2)`` — the
+           Ollama "unload but stay registered" semantic, not a full
+           unregister."""
+        evict = getattr(self.registry, "evict_expired", None)
+        if callable(evict):
+            try:
+                evict()
+            except Exception as e:
+                logger.debug("evict_expired sweep failed: %s", e)
+        if not self._keep_alive:
+            return
+        try:
+            models = self.registry.list_models()
+        except Exception:
+            return
+        for m in models:
+            ka = self._keep_alive.get(m["id"])
+            if ka is not None and m.get("last_used_ago_s", 0) > ka:
+                logger.info("keep_alive expired: %s idle %.0fs > %.0fs — "
+                            "unloading (sleep level 2)",
+                            m["id"], m["last_used_ago_s"], ka)
+                try:
+                    self.registry.sleep(m["id"], level=2)
+                except Exception as e:
+                    logger.debug("keep_alive unload failed for %s: %s",
+                                 m["id"], e)
+                self._keep_alive.pop(m["id"], None)
 
     def _render_task_prompt(self, session, req: TaskMessageRequest) -> str:
         """Render system + history + the new user message for a task."""
@@ -978,11 +1374,14 @@ class ForgeServer:
             rid = request.headers.get("x-request-id") or uuid.uuid4().hex
             request.state.request_id = rid
             self._metrics["requests_total"] += 1
+            _t0 = time.perf_counter()
             if (self._api_key
                     and request.url.path.startswith("/v1")):
                 auth = request.headers.get("authorization", "")
                 if auth != f"Bearer {self._api_key}":
                     self._metrics["errors_total"] += 1
+                    if self._log_requests:
+                        _log_request_line(request, rid, 401, _t0)
                     return JSONResponse(
                         {"error": {
                             "message": "missing or invalid API key",
@@ -993,9 +1392,13 @@ class ForgeServer:
                 resp = await call_next(request)
             except Exception:
                 self._metrics["errors_total"] += 1
+                if self._log_requests:
+                    _log_request_line(request, rid, 500, _t0)
                 raise
             if resp.status_code >= 500:
                 self._metrics["errors_total"] += 1
+            if self._log_requests:
+                _log_request_line(request, rid, resp.status_code, _t0)
             resp.headers["X-Request-ID"] = rid
             return resp
 
@@ -1004,6 +1407,7 @@ class ForgeServer:
             """Deep health check: per-model state, queue depth, uptime.
 
             Plain JSON — use /metrics for the counters surface."""
+            self._sweep_keep_alive()
             stats = registry.stats()
             return {
                 "status": "ok",
@@ -1027,11 +1431,94 @@ class ForgeServer:
                 "batch_queue_pending": self.batch_queue.pending_count,
             }
 
-        @app.get("/metrics")
-        async def metrics():
-            """JSON metrics: request counters, per-model generations,
-            queue depth, uptime (EC-065)."""
+        @app.get("/health/ready")
+        async def health_ready():
+            """Readiness probe: 503 while a model load is in flight or no
+            model is awake (live-vs-ready split — /health stays liveness)."""
+            self._sweep_keep_alive()
             stats = registry.stats()
+            loading = sum(registry._inflight_loads.values()) > 0 \
+                if getattr(registry, "_inflight_loads", None) else False
+            if loading or stats["awake"] == 0:
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    status_code=503,
+                    content={"status": "loading" if loading else "asleep",
+                             "inflight_loads": len(
+                                 getattr(registry, "_inflight_loads", {}) or {}),
+                             "models_awake": stats["awake"]})
+            return {"status": "ready", "models_awake": stats["awake"]}
+
+        @app.get("/info")
+        async def info():
+            """Capabilities endpoint (NIM/TGI-style /info, plan 6b)."""
+            return {
+                "server": "forgeai", "version": "3.0.0",
+                "capabilities": {
+                    "streaming": True, "logprobs": True,
+                    "json_schema": True,  # via response_format (non-stream)
+                    "response_format": ["json_schema", "json_object"],
+                    "tool_calls": True, "lora_per_request": True,
+                    "sleep_levels": [0, 1, 2], "prompt_token_ids": True,
+                    "n_choices": True, "logit_bias": True,
+                    "min_tokens": True,
+                    "presence_frequency_penalty": True,
+                    "model_aliases": bool(_MODEL_ALIASES),
+                    "response_cache": self._resp_cache_enabled,
+                    "keep_alive": True,
+                    "abort": hasattr(registry, "abort"),
+                    "prometheus_metrics": True,
+                },
+                "models": [m["id"] for m in registry.stats()["models"]],
+            }
+
+        @app.get("/metrics")
+        async def metrics(request: Request, format: str | None = None):
+            """Metrics: JSON by default; Prometheus text exposition when
+            ``?format=prometheus`` or the client Accepts text/plain."""
+            stats = registry.stats()
+            want_prom = (format == "prometheus" or "text/plain"
+                         in request.headers.get("accept", ""))
+            if want_prom:
+                from fastapi.responses import PlainTextResponse
+                lines = [
+                    "# HELP forge_uptime_seconds Server uptime",
+                    "# TYPE forge_uptime_seconds gauge",
+                    f"forge_uptime_seconds "
+                    f"{round(time.time() - self._started_at, 1)}",
+                    "# HELP forge_requests_total Total HTTP requests",
+                    "# TYPE forge_requests_total counter",
+                    f"forge_requests_total {self._metrics['requests_total']}",
+                    "# HELP forge_errors_total Total 5xx responses",
+                    "# TYPE forge_errors_total counter",
+                    f"forge_errors_total {self._metrics['errors_total']}",
+                    "# HELP forge_generations_total Completions served",
+                    "# TYPE forge_generations_total counter",
+                    f"forge_generations_total "
+                    f"{sum(m.get('generations', 0) for m in stats['models'])}",
+                    "# HELP forge_tokens_generated_total Tokens generated",
+                    "# TYPE forge_tokens_generated_total counter",
+                    f"forge_tokens_generated_total "
+                    f"{sum(m.get('total_tokens', 0) for m in stats['models'])}",
+                    "# HELP forge_batch_queue_pending Queued batch jobs",
+                    "# TYPE forge_batch_queue_pending gauge",
+                    f"forge_batch_queue_pending "
+                    f"{self.batch_queue.pending_count}",
+                    "# HELP forge_model_generations_total "
+                    "Completions served per model",
+                    "# TYPE forge_model_generations_total counter",
+                    "# HELP forge_model_awake Model awake state",
+                    "# TYPE forge_model_awake gauge",
+                ]
+                for m in stats["models"]:
+                    mid = m["id"].replace('"', "")
+                    lines.append(
+                        f'forge_model_generations_total{{model="{mid}"}} '
+                        f"{m.get('generations', 0)}")
+                    lines.append(
+                        f'forge_model_awake{{model="{mid}"}} '
+                        f"{int(bool(m.get('awake')))}")
+                return PlainTextResponse("\n".join(lines) + "\n")
             return {
                 "uptime_s": round(time.time() - self._started_at, 1),
                 "requests_total": self._metrics["requests_total"],
@@ -1067,6 +1554,7 @@ class ForgeServer:
         @app.post("/v1/tokenize")
         async def tokenize(req: TokenizeRequest):
             """Tokenize text → token ids (EC-152)."""
+            req.model = _resolve_model(req.model)
             engine = registry.get_engine(req.model)
             if engine is None:
                 raise HTTPException(404, f"Model '{req.model}' not found")
@@ -1086,6 +1574,7 @@ class ForgeServer:
         @app.post("/v1/detokenize")
         async def detokenize(req: DetokenizeRequest):
             """Token ids → text (EC-152)."""
+            req.model = _resolve_model(req.model)
             engine = registry.get_engine(req.model)
             if engine is None:
                 raise HTTPException(404, f"Model '{req.model}' not found")
@@ -1156,13 +1645,40 @@ class ForgeServer:
         async def chat_completions(req: ChatCompletionRequest,
                                    request: Request):
             """OpenAI-compatible chat completions with SSE streaming and tool calling."""
+            req.model = _resolve_model(req.model)
+            n = max(1, req.n or 1)
+            if req.stream and n > 1:
+                # Honest rejection — interleaving N choices over one SSE
+                # stream needs per-choice chunk fan-out we don't do.
+                raise HTTPException(
+                    400, "n>1 parallel choices require stream=false")
             prompt = self._build_prompt(req)
 
             if req.stream:
+                # Validate here — an out-of-roots lora_adapter must fail
+                # the HTTP request itself, not appear as an SSE error
+                # chunk (same contract as the non-streaming path below;
+                # the actual swap happens inside _stream_chat).
+                if (req.lora_adapter
+                        and not _adapter_path_allowed(req.lora_adapter)):
+                    raise HTTPException(
+                        403, "lora_adapter path is outside allowed roots "
+                        "(repo tree + FORGE_LORA_ROOTS)")
                 return StreamingResponse(
                     self._stream_chat(req, prompt, request=request),
                     media_type="text/event-stream",
                 )
+
+            # Exact-match response cache (plan 6b): keyed on the
+            # canonicalized request minus transport fields — single-GPU
+            # byte-exact dedup, no fuzzy matching.  FORGE_NO_CACHE=1 off.
+            cache_key = self._cache_key(req)
+            if cache_key is not None:
+                hit = self._cache_get(cache_key, n)
+                if hit is not None:
+                    return hit
+
+            penalty_proc = self._penalty_processor_for(req)
 
             # Per-request LoRA adapter selection
             lora_swapped = False
@@ -1183,80 +1699,84 @@ class ForgeServer:
                         engine.load_lora(req.lora_adapter)
                         lora_swapped = True
 
-            # Non-streaming
-            raw_text = registry.generate(
-                req.model, prompt,
-                max_new_tokens=req.max_tokens,
-                temperature=req.temperature,
-                top_p=req.top_p,
-                top_k=req.top_k,
-                repetition_penalty=req.repetition_penalty,
-                min_p=req.min_p,
-                dry_multiplier=req.dry_multiplier,
-                dry_base=req.dry_base,
-                dry_allowed_length=req.dry_allowed_length,
-                dry_penalty_last_n=req.dry_penalty_last_n,
-                stop=req.stop,
-                seed=req.seed,
-                logprobs=req.top_logprobs if req.logprobs else None,
-                return_logprobs=bool(req.logprobs),
-            )
+            # Non-streaming — n parallel choices = n sequential
+            # generations under one LoRA swap (single-residency).
+            try:
+                raws = [
+                    self._generate_once(
+                        req.model, prompt, penalty_proc,
+                        dict(
+                            max_new_tokens=req.max_tokens,
+                            temperature=req.temperature,
+                            top_p=req.top_p,
+                            top_k=req.top_k,
+                            repetition_penalty=req.repetition_penalty,
+                            min_p=req.min_p,
+                            dry_multiplier=req.dry_multiplier,
+                            dry_base=req.dry_base,
+                            dry_allowed_length=req.dry_allowed_length,
+                            dry_penalty_last_n=req.dry_penalty_last_n,
+                            stop=req.stop,
+                            seed=req.seed,
+                            logprobs=(req.top_logprobs
+                                      if req.logprobs else None),
+                            return_logprobs=bool(req.logprobs),
+                            json_schema=_response_format_schema(
+                                req.response_format),
+                        ),
+                        eos_token_ids=req.stop_token_ids,
+                    )
+                    for _ in range(n)
+                ]
+            finally:
+                # Restore previous LoRA adapter if we swapped — even when
+                # a generate raises (a stranded foreign adapter would
+                # poison every later request).
+                if lora_swapped:
+                    engine = registry.get_engine(req.model)
+                    if engine is not None:
+                        engine.unload_lora()
+                        if prev_lora and prev_lora.get("path"):
+                            engine.load_lora(prev_lora["path"], rank=prev_lora.get("rank", 32),
+                                            alpha=prev_lora.get("alpha", 64))
 
-            # Restore previous LoRA adapter if we swapped
-            if lora_swapped:
-                engine = registry.get_engine(req.model)
-                if engine is not None:
-                    engine.unload_lora()
-                    if prev_lora and prev_lora.get("path"):
-                        engine.load_lora(prev_lora["path"], rank=prev_lora.get("rank", 32),
-                                        alpha=prev_lora.get("alpha", 64))
-            # Handle logprobs return (dict with text + logprobs)
-            lp_data = None
-            if isinstance(raw_text, dict):
-                lp_data = raw_text.get("logprobs")
-                raw_text = raw_text.get("text", "")
-            tool_calls, content = _parse_tool_calls_openai(raw_text)
-            # tool_choice enforcement
-            if req.tool_choice == "none" and tool_calls:
-                tool_calls = []
-                content = raw_text
-            elif isinstance(req.tool_choice, dict) and req.tool_choice.get("type") == "function":
-                # Force specific function
-                fn_name = req.tool_choice.get("function", {}).get("name")
-                if fn_name:
-                    tool_calls = [{"id": f"call_{uuid.uuid4().hex[:8]}",
-                                   "type": "function",
-                                   "function": {"name": fn_name, "arguments": "{}"}}]
-                    content = None
-            elif req.tool_choice == "required" and not tool_calls:
-                # Must call a tool — pick the first available
-                if req.tools:
-                    first_tool = req.tools[0]
-                    fn_name = first_tool.function.name if hasattr(first_tool, 'function') else first_tool.get('function', {}).get('name')
+            choices = []
+            for i, raw_text in enumerate(raws):
+                # Handle logprobs return (dict with text + logprobs)
+                lp_data = None
+                if isinstance(raw_text, dict):
+                    lp_data = raw_text.get("logprobs")
+                    raw_text = raw_text.get("text", "")
+                tool_calls, content = _parse_tool_calls_openai(raw_text)
+                # tool_choice enforcement
+                if req.tool_choice == "none" and tool_calls:
+                    tool_calls = []
+                    content = raw_text
+                elif isinstance(req.tool_choice, dict) and req.tool_choice.get("type") == "function":
+                    # Force specific function
+                    fn_name = req.tool_choice.get("function", {}).get("name")
                     if fn_name:
                         tool_calls = [{"id": f"call_{uuid.uuid4().hex[:8]}",
                                        "type": "function",
                                        "function": {"name": fn_name, "arguments": "{}"}}]
                         content = None
-            # Extract reasoning blocks (DeepSeek-R1/QwQ/Qwen3 thinking)
-            reasoning_text = None
-            if content:
-                content, reasoning_text = _parse_reasoning(content, req.model)
-            message: dict[str, Any] = {"role": "assistant", "content": content or None}
-            if reasoning_text:
-                message["reasoning_content"] = reasoning_text
-            if tool_calls:
-                message["tool_calls"] = tool_calls
-            finish = "tool_calls" if tool_calls else "stop"
-            resp_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-            # Build response dict directly to support reasoning_content (non-standard field)
-            resp = {
-                "id": resp_id,
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": req.model,
-                "choices": [{
-                    "index": 0,
+                elif req.tool_choice == "required" and not tool_calls:
+                    # Must call a tool — pick the first available
+                    if req.tools:
+                        first_tool = req.tools[0]
+                        fn_name = first_tool.function.name if hasattr(first_tool, 'function') else first_tool.get('function', {}).get('name')
+                        if fn_name:
+                            tool_calls = [{"id": f"call_{uuid.uuid4().hex[:8]}",
+                                           "type": "function",
+                                           "function": {"name": fn_name, "arguments": "{}"}}]
+                            content = None
+                # Extract reasoning blocks (DeepSeek-R1/QwQ/Qwen3 thinking)
+                reasoning_text = None
+                if content:
+                    content, reasoning_text = _parse_reasoning(content, req.model)
+                finish = "tool_calls" if tool_calls else "stop"
+                choices.append({
+                    "index": i,
                     "message": {
                         "role": "assistant",
                         "content": content or None,
@@ -1264,64 +1784,145 @@ class ForgeServer:
                     } | ({"reasoning_content": reasoning_text} if reasoning_text else {}),
                     "finish_reason": finish,
                     "logprobs": lp_data,
-                }],
-                "usage": _usage_dict(
-                    registry.get_engine(req.model), prompt, raw_text or ""),
+                })
+
+            resp_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+            engine = registry.get_engine(req.model)
+            # Build response dict directly to support reasoning_content (non-standard field)
+            resp = {
+                "id": resp_id,
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": req.model,
+                "choices": choices,
+                "usage": {
+                    "prompt_tokens": _token_count(engine, prompt),
+                    "completion_tokens": sum(
+                        _token_count(engine, r if isinstance(r, str)
+                                     else (r or {}).get("text", "") or "")
+                        for r in raws),
+                    "total_tokens": 0,
+                },
             }
+            resp["usage"]["total_tokens"] = (
+                resp["usage"]["prompt_tokens"]
+                + resp["usage"]["completion_tokens"])
+            if cache_key is not None:
+                self._cache_put(cache_key, resp)
             return resp
 
         @app.post("/v1/completions")
         async def completions(req: CompletionRequest, request: Request):
             """OpenAI-compatible text completions."""
+            req.model = _resolve_model(req.model)
+            # prompt_token_ids (vLLM/SGLang-style): detokenize via the
+            # engine tokenizer; mutually exclusive with `prompt`.
+            if req.prompt_token_ids is not None and req.prompt:
+                raise HTTPException(
+                    400, "prompt and prompt_token_ids are mutually "
+                         "exclusive — pass exactly one")
+            if req.prompt_token_ids is not None:
+                engine = registry.get_engine(req.model)
+                if engine is None:
+                    raise HTTPException(
+                        404, f"Model '{req.model}' not found")
+                tok = getattr(engine, "tokenizer", None)
+                if tok is None:
+                    raise HTTPException(503, "engine has no tokenizer")
+                try:
+                    req.prompt = tok.decode(list(req.prompt_token_ids))
+                except Exception as e:
+                    raise HTTPException(
+                        400, f"prompt_token_ids decode failed: {e}") from e
+            if not req.prompt:
+                raise HTTPException(
+                    400, "exactly one of prompt or prompt_token_ids is "
+                         "required")
+            n = max(1, req.n or 1)
+            if req.stream and n > 1:
+                raise HTTPException(
+                    400, "n>1 parallel choices require stream=false")
             if req.stream:
                 return StreamingResponse(
                     self._stream_completion(req, request=request),
                     media_type="text/event-stream",
                 )
-            raw_text = registry.generate(
-                req.model, req.prompt,
-                max_new_tokens=req.max_tokens,
-                temperature=req.temperature,
-                top_p=req.top_p,
-                top_k=req.top_k,
-                repetition_penalty=req.repetition_penalty,
-                min_p=req.min_p,
-                dry_multiplier=req.dry_multiplier,
-                dry_base=req.dry_base,
-                dry_allowed_length=req.dry_allowed_length,
-                dry_penalty_last_n=req.dry_penalty_last_n,
-                stop=req.stop,
-                seed=req.seed,
-                logprobs=req.logprobs,
-                prompt_logprobs=req.prompt_logprobs,
-                return_logprobs=bool(req.logprobs or req.prompt_logprobs),
-            )
-            # Unwrap dict return when logprobs were requested
-            lp_data = None
-            if isinstance(raw_text, dict):
-                lp_data = raw_text.get("logprobs")
-                raw_text = raw_text.get("text", "")
+
+            # Exact-match response cache (FORGE_NO_CACHE=1 disables).
+            cache_key = self._cache_key(req)
+            if cache_key is not None:
+                hit = self._cache_get(cache_key, n)
+                if hit is not None:
+                    return hit
+
+            penalty_proc = self._penalty_processor_for(req)
+
+            raws = [
+                self._generate_once(
+                    req.model, req.prompt, penalty_proc,
+                    dict(
+                        max_new_tokens=req.max_tokens,
+                        temperature=req.temperature,
+                        top_p=req.top_p,
+                        top_k=req.top_k,
+                        repetition_penalty=req.repetition_penalty,
+                        min_p=req.min_p,
+                        dry_multiplier=req.dry_multiplier,
+                        dry_base=req.dry_base,
+                        dry_allowed_length=req.dry_allowed_length,
+                        dry_penalty_last_n=req.dry_penalty_last_n,
+                        stop=req.stop,
+                        seed=req.seed,
+                        logprobs=req.logprobs,
+                        prompt_logprobs=req.prompt_logprobs,
+                        return_logprobs=bool(
+                            req.logprobs or req.prompt_logprobs),
+                    ),
+                    eos_token_ids=req.stop_token_ids,
+                )
+                for _ in range(n)
+            ]
+
+            choices = []
+            for i, raw_text in enumerate(raws):
+                # Unwrap dict return when logprobs were requested
+                lp_data = None
+                if isinstance(raw_text, dict):
+                    lp_data = raw_text.get("logprobs")
+                    raw_text = raw_text.get("text", "")
+                choice = {"index": i, "text": _strip_markers(raw_text),
+                          "finish_reason": "stop"}
+                choice["logprobs"] = lp_data if lp_data else None
+                choices.append(choice)
+
             resp_id = f"cmpl-{uuid.uuid4().hex[:12]}"
-            choice = {"index": 0, "text": _strip_markers(raw_text),
-                      "finish_reason": "stop"}
-            if lp_data:
-                choice["logprobs"] = lp_data
-            else:
-                choice["logprobs"] = None
-            return {
+            engine = registry.get_engine(req.model)
+            resp = {
                 "id": resp_id,
                 "object": "text_completion",
                 "created": int(time.time()),
                 "model": req.model,
-                "choices": [choice],
-                "usage": _usage_dict(
-                    registry.get_engine(req.model), req.prompt,
-                    raw_text or ""),
+                "choices": choices,
+                "usage": {
+                    "prompt_tokens": _token_count(engine, req.prompt),
+                    "completion_tokens": sum(
+                        _token_count(engine, r if isinstance(r, str)
+                                     else (r or {}).get("text", "") or "")
+                        for r in raws),
+                    "total_tokens": 0,
+                },
             }
+            resp["usage"]["total_tokens"] = (
+                resp["usage"]["prompt_tokens"]
+                + resp["usage"]["completion_tokens"])
+            if cache_key is not None:
+                self._cache_put(cache_key, resp)
+            return resp
 
         @app.post("/v1/embeddings")
         async def embeddings(req: EmbeddingRequest):
             """OpenAI-compatible text embeddings."""
+            req.model = _resolve_model(req.model)
             engine = registry.get_engine(req.model)
             if engine is None:
                 raise HTTPException(404, f"Model '{req.model}' not found")
@@ -1345,6 +1946,7 @@ class ForgeServer:
         @app.post("/v1/reranking")
         async def reranking(req: RerankingRequest):
             """Rerank documents by relevance to a query."""
+            req.model = _resolve_model(req.model)
             engine = registry.get_engine(req.model)
             if engine is None:
                 raise HTTPException(404, f"Model '{req.model}' not found")
@@ -1364,6 +1966,7 @@ class ForgeServer:
         @app.post("/v1/infill")
         async def infill(req: InfillRequest):
             """Fill-in-the-middle code completion."""
+            req.model = _resolve_model(req.model)
             prompt = f"<|fim_prefix|>{req.prefix}<|fim_suffix|>{req.suffix}<|fim_middle|>"
             raw_text = registry.generate(
                 req.model, prompt,
@@ -2249,19 +2852,79 @@ class ForgeServer:
 
             Allows adding models to a running server without restart.
             The model is loaded on first use (lazy) and evicted LRU-style
-            when VRAM is needed.
+            when VRAM is needed.  When ``checkpoint`` looks like an HF
+            repo id (``org/name`` — no path separator, not on disk), the
+            registry downloads+registers it via ``register_hf_model``;
+            ``revision`` pins the HF revision.  ``keep_alive_s`` is the
+            Ollama-style unload TTL — forwarded when the registry call
+            accepts it, otherwise honored server-side by
+            _sweep_keep_alive (driven off /health probes).
             """
+            is_hf_repo = (
+                not os.path.exists(req.checkpoint)
+                and _HF_REPO_RE.match(req.checkpoint) is not None)
             try:
-                engine = self.registry.register(
-                    req.model_id, req.checkpoint,
-                    config_name=req.config_name,
-                    tokenizer_path=req.tokenizer_path,
-                    vram_budget_gb=req.vram_budget_gb or 0,
-                )
+                if is_hf_repo:
+                    if not hasattr(self.registry, "register_hf_model"):
+                        raise HTTPException(
+                            501, "registry has no register_hf_model() — "
+                                 "HF-repo registration pending")
+                    # Returns the registered model_id (register() inside
+                    # loads eagerly — success means loaded).
+                    engine = self.registry.register_hf_model(
+                        req.model_id, req.checkpoint,
+                        revision=req.revision,
+                        keep_alive_s=req.keep_alive_s)
+                else:
+                    # Local path: forward keep_alive_s only when the
+                    # registry accepts it as a named param (a bare
+                    # **engine_kwargs sink would feed it to
+                    # ForgeEngine.from_checkpoint and crash).  The
+                    # server-side dict is kept regardless — it is the
+                    # TTL fallback for registry builds without the
+                    # param (evict_expired covers registry-held TTLs).
+                    kw: dict[str, Any] = {}
+                    if req.keep_alive_s is not None:
+                        self._keep_alive[req.model_id] = req.keep_alive_s
+                        try:
+                            if "keep_alive_s" in inspect.signature(
+                                    self.registry.register).parameters:
+                                kw["keep_alive_s"] = req.keep_alive_s
+                        except (TypeError, ValueError):
+                            pass
+                    engine = self.registry.register(
+                        req.model_id, req.checkpoint,
+                        config_name=req.config_name,
+                        tokenizer_path=req.tokenizer_path,
+                        vram_budget_gb=req.vram_budget_gb or 0,
+                        **kw)
                 return {"status": "ok", "model_id": req.model_id,
+                        "hf_repo": is_hf_repo,
                         "loaded": engine is not None}
+            except HTTPException:
+                raise
             except Exception as e:
                 raise HTTPException(400, str(e)) from e
+
+        @app.post("/v1/abort")
+        async def abort(req: AbortRequest):
+            """Request cancellation of in-flight generations.
+
+            SGLang-style ``/abort_request``: ``model`` scopes the abort to
+            one model; ``null`` signals all.  Auth is the middleware-wide
+            FORGE_API_KEY gate (POST /v1 is mutating — nothing extra).
+            Returns the number of in-flight generations signaled.
+            """
+            if not hasattr(registry, "abort"):
+                raise HTTPException(
+                    501, "registry has no abort() — generation "
+                         "cancellation is a pending integration item")
+            model = _resolve_model(req.model) if req.model else None
+            try:
+                n = registry.abort(model)
+            except KeyError as e:
+                raise HTTPException(404, str(e)) from e
+            return {"aborted": n, "model": model}
 
         @app.delete("/v1/router/{model_id}")
         async def router_unregister(model_id: str):
@@ -2286,6 +2949,10 @@ class ForgeServer:
             }
             return f"data: {json.dumps(chunk_data)}\n\n"
 
+        # Penalties ride the stream path today — generate_stream already
+        # plumbs logits_processor through to the decode loop.
+        penalty_proc = self._penalty_processor_for(req)
+
         def _gen():
             return self.registry.generate_stream(
                 req.model, prompt,
@@ -2302,9 +2969,34 @@ class ForgeServer:
                 stop=req.stop,
                 seed=req.seed,
                 eos_token_ids=req.stop_token_ids,
+                logits_processor=penalty_proc,
             )
 
+        # Per-request LoRA adapter selection — same swap-in/restore
+        # contract as the non-streaming path in chat_completions
+        # (single-residency adapters serialize, see engine_lora.py).
+        # The path check already happened in the route handler.
+        engine = None
+        lora_swapped = False
+        prev_lora = None
+
         try:
+            if req.lora_adapter:
+                engine = self.registry.get_engine(req.model)
+                if engine is not None:
+                    prev_lora = (engine.lora_info()
+                                 if engine.has_lora() else None)
+                    if (prev_lora
+                            and prev_lora.get("path") != req.lora_adapter):
+                        engine.unload_lora()
+                        # Mark before load so ``finally`` restores the
+                        # previous adapter even if this load raises.
+                        lora_swapped = True
+                        engine.load_lora(req.lora_adapter)
+                    elif not prev_lora:
+                        engine.load_lora(req.lora_adapter)
+                        lora_swapped = True
+
             # Initial role chunk
             yield _sse_chunk({"role": "assistant", "content": ""})
 
@@ -2366,6 +3058,18 @@ class ForgeServer:
             }
             yield f"data: {json.dumps(error_data)}\n\n"
             yield "data: [DONE]\n\n"
+        finally:
+            # Restore the previous LoRA adapter if we swapped (covers
+            # normal end, error chunks, client disconnect / aclose, and
+            # a failed load mid-swap).  Blocks on ``_gen_lock`` until
+            # the decode worker hits its next boundary — bounded.
+            if lora_swapped and engine is not None:
+                engine.unload_lora()
+                if prev_lora and prev_lora.get("path"):
+                    engine.load_lora(
+                        prev_lora["path"],
+                        rank=prev_lora.get("rank", 32),
+                        alpha=prev_lora.get("alpha", 64))
 
     async def _stream_task(self, task_id: str, stream_queue: asyncio.Queue,
                            future,
@@ -2483,6 +3187,10 @@ class ForgeServer:
             }
             return f"data: {json.dumps(chunk_data)}\n\n"
 
+        # Penalties ride the stream path today — generate_stream already
+        # plumbs logits_processor through to the decode loop.
+        penalty_proc = self._penalty_processor_for(req)
+
         def _gen():
             return self.registry.generate_stream(
                 req.model, req.prompt,
@@ -2499,6 +3207,7 @@ class ForgeServer:
                 stop=req.stop,
                 seed=req.seed,
                 eos_token_ids=req.stop_token_ids,
+                logits_processor=penalty_proc,
             )
 
         try:
@@ -2546,8 +3255,15 @@ def main():
     configure()
 
     parser = argparse.ArgumentParser(description="ForgeAI Inference Server v3.0")
-    parser.add_argument("--host", default="127.0.0.1", help="Bind address")
-    parser.add_argument("--port", type=int, default=8000, help="Bind port")
+    # Env-var config mirroring (plan 6b): FORGE_HOST / FORGE_PORT /
+    # FORGE_API_KEY / FORGE_LOG_REQUESTS / FORGE_MODEL_ALIASES /
+    # FORGE_NO_CACHE.
+    parser.add_argument("--host",
+                        default=os.environ.get("FORGE_HOST", "127.0.0.1"),
+                        help="Bind address (env FORGE_HOST)")
+    parser.add_argument("--port", type=int,
+                        default=int(os.environ.get("FORGE_PORT") or 8000),
+                        help="Bind port (env FORGE_PORT)")
     parser.add_argument("--models", type=str, default="forgelm-v2-jamba",
                         help="Comma-separated model IDs to load")
     parser.add_argument("--checkpoint", type=str, default=None,

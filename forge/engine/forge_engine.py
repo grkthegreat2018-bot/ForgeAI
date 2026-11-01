@@ -1,9 +1,10 @@
 """Forge Inference Engine — unified runtime backend for ForgeAI models.
 
 Pluggable strategy architecture with auto-detection and auto-activation:
-  - KV cache: standard, paged, rotorquant (4-bit default), hadamard_int4,
-    compressed, streaming, snapkv, snapkv_4bit, paged_eviction, xquant,
-    cpu_offload, s4r (15x compression), hqe_kv, 2bit
+  - KV cache: standard + beacon/anchor/metakv/flux (LIVE compaction via
+    compact_past_kv); ~25 additional registered strategies are dormant
+    bookkeeping objects — decode never invokes their append/get
+    (info() reports decode_live=False; AUDIT A2)
   - Decoding: standard, speculative, medusa, dspark, eagle3, mtp_selfspec
   - Quantization: none, int8, int4, fp8, w8a8, nvfp4, BitNet ternary
     (auto-selected based on VRAM + GPU capability)
@@ -14,9 +15,9 @@ Pluggable strategy architecture with auto-detection and auto-activation:
 Auto-detects KeyStack features from checkpoint metadata and auto-activates
 optimal strategies (auto_activate=True by default). Picks the highest
 quantization that fits VRAM (nvfp4 on Blackwell, w8a8 default, int4 when
-tight). Uses RotorQuant 4-bit KV cache by default (Givens rotation +
-Lloyd-Max quantization, ~8x compression, 0.94% error, deferred quantization
-for zero error compounding during prefill).
+tight). Decode KV is per-layer fp16/bf16 ``past_kv`` — the named KV
+"strategies" are bookkeeping objects; only beacon/anchor/metakv/flux
+compact the real cache (see kv_backend._LIVE_KV_STRATEGIES).
 
 Loading strategies (auto-selected by VRAM capacity):
   1. Pre-quantized BitNet → int8 direct load (4x VRAM cut)
@@ -27,7 +28,7 @@ Loading strategies (auto-selected by VRAM capacity):
 Usage:
     from forge.engine.forge_engine import ForgeEngine
 
-    # Auto-activates optimal strategies (S4R KV, torch.compile, prefix cache, etc.)
+    # Auto-activates optimal strategies (torch.compile, prefix cache, etc.)
     engine = ForgeEngine.from_checkpoint(
         checkpoint="research/checkpoints/ForgeLM_V2.safetensors",
         config_name="forgelm_v2",

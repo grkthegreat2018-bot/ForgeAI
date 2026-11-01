@@ -20,8 +20,10 @@ the gate. GDN-style parameterization for the warm start:
   - depthwise causal conv kernel = 4 on q/k/v
 
 Recurrence is evaluated in fp32 (state drift in low precision when
-gate~1). Naive recurrent PyTorch only — the chunked WY-representation
-kernel is a follow-up optimization (see rd_round_49_plan.md Phase 2).
+gate~1). On CUDA it dispatches to fla-org's chunked KDA Triton kernel
+(fla_delta.kda_scan — same recurrence); the sequential Python loop is
+the CPU/fallback reference (rd_round_49_plan.md Phase 2, landed via
+fla vendor — AUDIT A4).
 
 Usage:
     config.use_kda = True            # side-path on every block
@@ -177,12 +179,20 @@ class KDALayer(nn.Module):
     def _scan(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
               alpha: torch.Tensor, beta: torch.Tensor,
               S: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Naive sequential KDA recurrence in fp32.
+        """Sequential KDA recurrence in fp32.
 
         q,k: (B,T,H,d_k) normalized; v: (B,T,H,d_v);
         alpha: (B,T,H,d_k); beta: (B,T,H); S: (B,H,d_k,d_v).
         Returns (o (B,T,H,d_v), S_final).
+
+        Uses fla's chunked Triton kernel on CUDA when available
+        (fla_delta.kda_scan — same recurrence); the Python loop below is
+        the CPU/fallback reference (T==1 decode steps stay here too).
         """
+        from forge.keys.attention.fla_delta import kda_scan
+        fast = kda_scan(q, k, v, alpha, beta, S)
+        if fast is not None:
+            return fast
         T = q.shape[1]
         outs = []
         for t in range(T):

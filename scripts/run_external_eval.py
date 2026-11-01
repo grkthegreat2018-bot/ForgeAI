@@ -36,7 +36,7 @@ DEFAULT_TOK = REPO / "research" / "checkpoints" / "forgelm_v2_tokenizer"
 def load_model(ckpt: Path, cfg_path: Path, device: str):
     from forge.checkpoint_io import load_safetensors_pipelined
     cfg_dict = json.loads(cfg_path.read_text())
-    model = ConfigurableResearchLLM(ModelConfig(
+    kw = dict(
         vocab_size=cfg_dict["vocab_size"], d_model=cfg_dict["d_model"],
         n_layers=cfg_dict["n_layers"], n_heads=cfg_dict["n_heads"],
         n_kv_heads=cfg_dict["n_kv_heads"],
@@ -51,13 +51,40 @@ def load_model(ckpt: Path, cfg_path: Path, device: str):
         norm_eps=cfg_dict["norm_eps"],
         tie_word_embeddings=cfg_dict["tie_word_embeddings"],
         use_final_norm=cfg_dict["use_final_norm"],
-        use_embed_norm=cfg_dict["use_embed_norm"]))
-    state = load_safetensors_pipelined(str(ckpt), device)
-    missing, unexpected = model.load_state_dict(state, strict=False)
+        use_embed_norm=cfg_dict["use_embed_norm"])
+    dev = torch.device(device)
+    # Meta-device construction + assign-load: params materialize straight in
+    # bf16 on-device from the pipelined (12.9GB/s) GPU state — no fp32 CPU
+    # init (~12.8GB RNG writes), no CPU staging copies, no double VRAM peak.
+    # Fall back to the classic CPU path if any init is meta-unsafe.
+    try:
+        with torch.device("meta"):
+            model = ConfigurableResearchLLM(ModelConfig(**kw))
+        state = load_safetensors_pipelined(str(ckpt), dev)
+        missing, unexpected = model.load_state_dict(
+            state, strict=False, assign=True)
+        del state
+        model = model.to(torch.bfloat16)
+        mode = "meta+bf16"
+    except Exception as e:
+        print(f"  meta-device init failed ({e}); CPU load path")
+        model = ConfigurableResearchLLM(ModelConfig(**kw))
+        model = model.to(torch.bfloat16)
+        state = load_safetensors_pipelined(str(ckpt), dev)
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        del state
+        torch.cuda.empty_cache()
+        mode = "cpu+bf16"
     if missing or unexpected:
         print(f"  load: {len(missing)} missing / {len(unexpected)} "
               f"unexpected keys")
-    return model.to(device).eval()
+    model = model.eval()
+    if next(model.parameters()).device != dev:
+        model = model.to(dev)
+    print(f"  load mode: {mode} "
+          f"({sum(p.numel() for p in model.parameters()) / 1e9:.2f}B "
+          f"{next(model.parameters()).dtype})")
+    return model
 
 
 def main() -> int:
@@ -67,6 +94,8 @@ def main() -> int:
     ap.add_argument("--tokenizer", default=str(DEFAULT_TOK))
     ap.add_argument("--tasks", nargs="*", default=list(ALL_TASKS))
     ap.add_argument("--limit", type=int, default=200)
+    ap.add_argument("--gsm8k-limit", type=int, default=None,
+                    help="separate cap for gsm8k (greedy gen is slow)")
     ap.add_argument("--out", default="results/external_eval_v2.json")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available()
                     else "cpu")
@@ -74,6 +103,10 @@ def main() -> int:
                     help="baseline report json to gate against")
     ap.add_argument("--tol", type=float, default=0.01)
     ap.add_argument("--gsm8k-max-new", type=int, default=256)
+    ap.add_argument("--max-seq", type=int, default=2048,
+                    help="context cap per scored forward — the eager SSM "
+                    "scan's activation grows with T; 2048 keeps a 3B "
+                    "bf16 eval inside 12GB (A1 OOM fix)")
     args = ap.parse_args()
 
     from transformers import AutoTokenizer
@@ -82,8 +115,15 @@ def main() -> int:
     print(f"loading model: {args.ckpt}")
     model = load_model(Path(args.ckpt), Path(args.config), args.device)
 
+    limit: int | dict = args.limit
+    if args.gsm8k_limit is not None:
+        limit = {t: args.limit for t in args.tasks}
+        limit["gsm8k"] = args.gsm8k_limit
     report = run_eval(model, tok, args.device, tasks=args.tasks,
-                      limit=args.limit, gsm8k_max_new=args.gsm8k_max_new)
+                      limit=limit, gsm8k_max_new=args.gsm8k_max_new,
+                      max_seq_len=args.max_seq,
+                      partial_out=str(Path(args.out).with_suffix(
+                          ".partial.json")))
     out = save_report(report, Path(args.out),
                       model_tag=Path(args.ckpt).stem,
                       meta={"limit": args.limit, "device": args.device})

@@ -168,6 +168,15 @@ def main(argv: list[str] | None = None) -> int:
         for name, entry in sorted(exported.items()):
             print(f"  {name}: score={entry.get('score')} "
                   f"config={entry.get('config')}")
+        try:
+            import json as _json
+            skipped = _json.loads(
+                open(args.apply_best, encoding="utf-8").read()).get("skipped")
+            if skipped:
+                print(f"  ({skipped} discovery rows rejected by the "
+                      f"verified-delta>0 score floor)")
+        except Exception:
+            pass
         return 0
 
     if not args.domain:

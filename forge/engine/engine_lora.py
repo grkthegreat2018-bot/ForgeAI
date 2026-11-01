@@ -1,4 +1,16 @@
-"""LoRA adapter management mixin for ForgeEngine."""
+"""LoRA adapter management mixin for ForgeEngine.
+
+Residency model (audit A8): single-adapter serialize-and-restore.
+``load_lora`` unloads whatever is resident before attaching — there is
+NO concurrent multi-adapter residency.  Per-request selection
+(``ChatCompletionRequest.lora_adapter``) swaps the requested adapter in
+for one request (streaming and non-streaming alike) and restores the
+previous one afterwards; requests asking for different adapters
+serialize through ``_gen_lock``.  True multi-residency needs named
+adapter slots in ``forge.training.bitnet_lora`` (per-request bind
+instead of the single ``module.lora_adapter`` attribute) — out of
+scope; documented here so the contract is not misread as concurrent.
+"""
 from .engine_common import (  # noqa: F401
     _CKPT_CACHE_MAX,
     _DEFAULT_CPU_MEMORY_BYTES,
@@ -159,6 +171,12 @@ class _LoRAMixin:
         return getattr(self, '_lora_config', None) is not None
 
     def lora_info(self) -> dict | None:
-        """Return info about the currently loaded LoRA, or None."""
-        return getattr(self, '_lora_config', None)
+        """Return info about the currently loaded LoRA, or None.
+
+        Adds ``residency: "single"`` — adapters are serialize-and-restore,
+        not concurrent multi-adapter slots (module docstring, audit A8).
+        Returns a copy so callers cannot mutate ``_lora_config``.
+        """
+        cfg = getattr(self, '_lora_config', None)
+        return dict(cfg, residency="single") if cfg is not None else None
 

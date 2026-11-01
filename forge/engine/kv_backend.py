@@ -1,18 +1,21 @@
 """KV cache strategy backends.
 
-Pluggable KV cache implementations selectable at runtime:
-  - StandardKVCache: basic tensor cache (baseline)
-  - PagedKVCacheStrategy: vLLM-style paged memory (wraps paged_kv.py)
-  - RotorQuantKVCache: Givens rotation + Lloyd-Max quantization (wraps rotorquant.py)
-  - HadamardKVCache: block-diagonal Hadamard + INT4 quantization (SAW-INT4 inspired)
-  - CompressedKVCacheStrategy: H2O eviction + KV quant (wraps kv_compress.py)
+AUDIT A2 honesty note: the KVCacheStrategy objects are BOOKKEEPING — the
+decode loop drives per-layer ``past_kv`` (k,v) tuples directly and never
+calls ``append``/``get`` on these. The ONLY live seam is
+``compact_past_kv``, implemented by beacon/anchor/metakv/flux (see
+``_LIVE_KV_STRATEGIES``). Every other registered strategy builds a
+dormant object whose ``info()`` reports ``decode_live: False`` — kept
+for R&D, but ``diagnostics()`` no longer lets them masquerade as the
+effective decode cache.
 
-All implement the KVCacheStrategy interface:
+Interface:
   init(n_heads, head_dim, n_kv_heads, max_seq_len, device, dtype)
-  append(k, v, position) -> None
-  get(positions) -> (k, v)
+  append(k, v, position) -> None   # unused by decode (dormant seam)
+  get(positions) -> (k, v)         # unused by decode (dormant seam)
   clear()
   info() -> dict
+  compact_past_kv(past_kv) -> past_kv   # live seam (live strategies only)
 """
 from abc import ABC, abstractmethod
 
@@ -392,6 +395,17 @@ _LAZY_KV_STRATEGIES = frozenset({
     "anchor", "metakv",
 })
 
+#: Strategies whose work the decode loop actually invokes (AUDIT A2):
+#: the only live seam is ``compact_past_kv`` (beacon/anchor/metakv/flux,
+#: via ``_maybe_compact_past_kv``), plus ``standard`` — the honest
+#: bookkeeping default. EVERY other registered name builds a bookkeeping
+#: object whose append/get are never called; they are kept for R&D but
+#: ``info()`` now reports ``decode_live: False`` + ``dormant`` so
+#: ``diagnostics()``/``stats()`` show effective state, not requested state.
+_LIVE_KV_STRATEGIES = frozenset({
+    "standard", "beacon", "anchor", "metakv", "flux",
+})
+
 
 def build_kv_cache(strategy: str = "standard", **kwargs) -> KVCacheStrategy:
     """Factory: build KV cache by strategy name.
@@ -403,6 +417,26 @@ def build_kv_cache(strategy: str = "standard", **kwargs) -> KVCacheStrategy:
     ``bits=``, ``bits_v=`` for rotorquant).  A kwarg the strategy does
     not accept raises TypeError — an honest failure, not a silent drop.
     """
+    cache = _build_kv_cache_impl(strategy, **kwargs)
+    live = strategy in _LIVE_KV_STRATEGIES
+    cache.decode_live = live
+    inner_info = cache.info
+
+    def info():
+        d = inner_info()
+        d["decode_live"] = live
+        if not live:
+            d["dormant"] = ("append/get never invoked by the decode loop "
+                            "— bookkeeping object only (AUDIT A2); live "
+                            "compaction: beacon/anchor/metakv/flux")
+        return d
+
+    cache.info = info
+    return cache
+
+
+def _build_kv_cache_impl(strategy: str = "standard",
+                         **kwargs) -> KVCacheStrategy:
     strategies = {
         "standard": StandardKVCache,
         "paged": PagedKVCacheStrategy,

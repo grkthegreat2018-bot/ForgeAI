@@ -128,10 +128,12 @@ def _discover_json_domains() -> dict[str, type[BaseDomain]]:
     This allows JSON domains to be used everywhere a Python domain class is
     expected (run_evolve.py, rescore_db.py, etc.) without any code changes.
     """
-    from ..domain_spec import JSONSpecDomain, list_specs
+    from ..domain_spec import JSONSpecDomain, list_specs, load_spec
     registry = {}
     for spec_name in list_specs():
         try:
+            if not load_spec(spec_name).discoverable:
+                continue
             cls_name = "".join(w.capitalize() for w in spec_name.split("_"))
             # Build a dynamic subclass whose __init__ binds the spec_name
             def _make_init(sn):
@@ -165,7 +167,12 @@ class _DomainRegistry(dict):
             return
         self._merged = True
         try:
-            self.update(_discover_json_domains())
+            # Hand-written Python domains take precedence over JSON-spec
+            # stubs: some specs (e.g. math_prog.json) exist only so the
+            # scoring/simulator spec loads and cannot decode configs.
+            for k, v in _discover_json_domains().items():
+                if k not in self:
+                    self[k] = v
         except Exception:
             pass
 

@@ -24,12 +24,25 @@ host before the kill lands.
 VRAM: CUDA-bench targets are capped by the caller (CodeEvolve._cuda_cap)
 — workers that touch torch create their own CUDA context (~1.2GB each),
 so pool size for CUDA targets should be small (4-6).
+
+Integrity: exec'd candidates share the worker's module state — a
+monkeypatched math.sqrt/torch.allclose would silently poison the test
+gate and bench of every LATER eval. Workers hold canary refs captured
+at init (plus first-sight capture for torch/numpy a candidate imports
+mid-loop) and `is`-check them after every eval; drift reports
+stage="poison" and the worker exits so the parent respawns clean. The
+parent sha256s the target spec on disk (~1 Hz) and restores+flags on
+mid-eval writes. Each worker chdirs to a private tempdir so relative
+writes (forge_evolve.db, targets/*.py) and relative .env reads miss
+the repo root.
 """
 from __future__ import annotations
 
+import hashlib
 import multiprocessing as mp
 import os
 import queue as _queue
+import tempfile
 import time
 import traceback
 
@@ -138,6 +151,90 @@ def _eval_code(target, code: str, cand_name: str, cheap: dict | None = None) -> 
                 "detail": traceback.format_exc(limit=3)}
 
 
+_MISSING = object()
+
+_WATCH_LATE = {
+    "torch": ("allclose", "equal", "isclose"),
+    "numpy": ("dot", "allclose", "linalg.norm"),
+}
+
+
+def _canary_resolve(name: str):
+    """Re-resolve a dotted attr path (e.g. 'numpy.linalg.norm') from
+    sys.modules — catches both attr rebinding and module-object swaps."""
+    import sys as _sys
+    mod_name, _, rest = name.partition(".")
+    obj = _sys.modules.get(mod_name)
+    if obj is None:
+        return _MISSING
+    for part in rest.split("."):
+        obj = getattr(obj, part, _MISSING)
+        if obj is _MISSING:
+            return _MISSING
+    return obj
+
+
+def _canary_snapshot() -> dict:
+    """name -> captured object for post-eval `is` checks. The static
+    core is always present; torch/numpy only when already imported —
+    candidates that pull them in later hit first-sight capture."""
+    import builtins
+    import math
+    import random
+    import sys as _sys
+    refs = {}
+    for mod, attrs in (
+        (math, ("sqrt", "exp", "log", "fabs")),
+        (time, ("perf_counter", "time")),
+        (random, ("random",)),
+        (builtins, ("len", "sum", "min", "max", "abs", "round")),
+    ):
+        for a in attrs:
+            refs[f"{mod.__name__}.{a}"] = getattr(mod, a)
+    for mod_name, attrs in _WATCH_LATE.items():
+        if mod_name in _sys.modules:
+            for dotted in attrs:
+                name = f"{mod_name}.{dotted}"
+                obj = _canary_resolve(name)
+                if obj is not _MISSING:
+                    refs[name] = obj
+    return refs
+
+
+def _canary_sane(mod_name: str, obj) -> bool:
+    """Genuineness check for a late-appearing watched module's attr: a
+    real torch/numpy symbol reports __module__ under the package (or is
+    a C builtin); a candidate-defined lambda/function does neither."""
+    m = getattr(obj, "__module__", None)
+    if m is not None:
+        return str(m).split(".", 1)[0] == mod_name
+    import types
+    return callable(obj) and not isinstance(obj, types.FunctionType)
+
+
+def _canary_check(refs: dict) -> str | None:
+    """Post-eval drift check — `is` comparisons only. Returns the
+    drifted/poisoned attr name or None. Watched modules appearing in
+    sys.modules mid-loop get captured on first sight; a bogus attr on
+    first sight (lambda in np.dot) is already poison."""
+    import sys as _sys
+    for name, orig in refs.items():
+        if _canary_resolve(name) is not orig:
+            return name
+    for mod_name, attrs in _WATCH_LATE.items():
+        if mod_name not in _sys.modules:
+            continue
+        for dotted in attrs:
+            name = f"{mod_name}.{dotted}"
+            if name in refs:
+                continue
+            obj = _canary_resolve(name)
+            if obj is _MISSING or not _canary_sane(mod_name, obj):
+                return name
+            refs[name] = obj
+    return None
+
+
 _SECRET_ENV_RE = None
 
 
@@ -184,10 +281,14 @@ def _worker_main(job_q, result_q, target_path: str, max_jobs: int,
         os.path.dirname(__file__), os.pardir, os.pardir))
     if _root not in _sys.path:
         _sys.path.insert(0, _root)
+    # Private cwd: relative writes (forge_evolve.db, targets/*.py) and
+    # relative .env reads land in a tempdir, not the repo root.
+    os.chdir(tempfile.mkdtemp(prefix="forge_eval_"))
     for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
               "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ.setdefault(k, "2")
     target = _load_module(target_path, f"_evolve_target_{wid}")
+    canaries = _canary_snapshot()
     done = 0
     while True:
         try:
@@ -204,10 +305,16 @@ def _worker_main(job_q, result_q, target_path: str, max_jobs: int,
         except Exception as e:
             res = {"ok": False, "stage": "spawn",
                    "detail": f"worker eval crash: {e}"}
+        drifted = _canary_check(canaries)
+        if drifted is not None:
+            res = {"ok": False, "stage": "poison",
+                   "detail": f"canary drifted: {drifted}"}
         try:
             result_q.put((jid, res), timeout=10)
         except Exception:
             return
+        if drifted is not None:
+            return                # state untrusted — parent respawns
         done += 1
         if max_jobs and done >= max_jobs:
             return
@@ -253,7 +360,12 @@ class EvalPool:
                  timeout_s: float = 120.0, max_jobs: int = 40,
                  mem_cap_mb: int = 2048,
                  init_env: dict | None = None):
-        self.target_path = str(target_path)
+        self.target_path = os.path.abspath(str(target_path))
+        with open(self.target_path, "rb") as f:
+            self._target_bytes = f.read()
+        self._target_sha = hashlib.sha256(self._target_bytes).digest()
+        self._next_integrity_check = 0.0
+        self._poisoned: set[int] = set()     # jids: discard late results
         self.timeout_s = timeout_s
         self.max_jobs = max_jobs
         self.mem_cap_bytes = int(mem_cap_mb) * 1024 * 1024
@@ -401,6 +513,11 @@ class EvalPool:
                 w.job_id = None
                 w.completed += 1
                 self._boot_deaths = 0   # the boot chain is alive
+            if jid in self._poisoned:
+                # Late arrival for a job the integrity check already
+                # flagged — the in-flight result is untrusted.
+                self._poisoned.discard(jid)
+                continue
             self._results[jid] = res
 
     def _mem_watchdog(self, now: float) -> None:
@@ -428,6 +545,42 @@ class EvalPool:
                 "detail": f"worker RSS {rss >> 20}MB > cap "
                           f"{self.mem_cap_bytes >> 20}MB"}
 
+    def _integrity_check(self, now: float) -> None:
+        """Target-spec on-disk hash, ~1 Hz from the poll loop. A
+        candidate (or anything else) rewriting the spec mid-run rewrites
+        the gate future workers load — restore the init-time bytes and
+        flag every in-flight job poison; its worker can't be trusted."""
+        if now < self._next_integrity_check:
+            return
+        self._next_integrity_check = now + 1.0
+        try:
+            with open(self.target_path, "rb") as f:
+                digest = hashlib.sha256(f.read()).digest()
+        except OSError:
+            digest = None
+        if digest == self._target_sha:
+            return
+        try:
+            with open(self.target_path, "wb") as f:
+                f.write(self._target_bytes)
+        except OSError:
+            return                    # restore failed — retry next tick
+        if not self._pending:
+            print(f"[eval_pool] target file {self.target_path} "
+                  f"modified outside an eval — restored", flush=True)
+            return
+        for jid, slot in list(self._pending.items()):
+            w = slot[0]
+            print(f"[eval_pool] target file {self.target_path} "
+                  f"modified mid-eval — restored; flagging jid={jid} "
+                  f"(worker {w.wid})", flush=True)
+            self._pending.pop(jid, None)
+            self._poisoned.add(jid)
+            self._results[jid] = {
+                "ok": False, "stage": "poison",
+                "detail": "target file modified mid-eval — restored"}
+            self._respawn(w)
+
     def _enforce_deadlines(self) -> None:
         now = time.time()
         for jid, slot in list(self._pending.items()):
@@ -442,6 +595,7 @@ class EvalPool:
             self._pending.pop(jid, None)
             self._results[jid] = {"ok": False, "stage": "timeout"}
         self._mem_watchdog(now)
+        self._integrity_check(now)
         # Dead workers with an outstanding job. Two cases:
         #   exitcode == 0 (clean exit — max_jobs recycle raced our
         #     submit): the job sat unread in the dead worker's queue —

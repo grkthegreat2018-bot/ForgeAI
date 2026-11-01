@@ -155,6 +155,9 @@ tests/integration/*.db-journal
 # Training logs
 train_log.txt
 
+# run outputs
+results/
+
 # R&D round result outputs (regenerable experiment data)
 scripts/r2*_*.json
 scripts/_*.json

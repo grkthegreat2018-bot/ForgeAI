@@ -40,11 +40,17 @@ class FeatureSpec:
                    feature.
         handler:   Callable that activates the feature on the engine.
         cuda_only: If ``True``, the feature is skipped on non-CUDA devices.
+        introduced_round: R&D round number (e.g. 66) that introduced this
+                   flag — populate for NEW flags going forward so the
+                   sunset policy (docs/RD_SUNSET_POLICY.md) can age out
+                   flags that never ship. ``None`` = predates the policy
+                   (no backfill).
     """
 
     flag: str
     handler: FeatureHandler
     cuda_only: bool = False
+    introduced_round: int | None = None
 
 
 # ── Handler helpers ────────────────────────────────────────────────────────
@@ -594,6 +600,9 @@ def torch_zeros(eng: ForgeEngine, *shape: int):
 
 
 # ── The registry ─────────────────────────────────────────────────────────────
+# New specs MUST set ``introduced_round`` — flags that never beat the
+# incumbent within 3 R&D rounds are deleted, not left dormant
+# (docs/RD_SUNSET_POLICY.md). Legacy specs keep None (no backfill).
 
 _FEATURE_REGISTRY: list[FeatureSpec] = [
     # Attention / prefill

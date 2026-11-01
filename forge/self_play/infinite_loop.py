@@ -92,7 +92,6 @@ class LoopConfig:
     # (AGENTS.md directive A). Tracked in .devin/scratchpad.md.
     use_fused_qk_norm_rope_cache: bool = False  # fused QK-norm+RoPE+cache-write
     use_seq_split: bool = True       # sequence-split attention (long context)
-    use_spec_attn: bool = True       # speculative attention
     kv_cache_tokens: int = 4096      # KV cache token budget
     warmup: bool = True              # warmup dummy token (init CUDA kernels)
 
@@ -692,7 +691,6 @@ class InfiniteSelfPlayLoop:
                 use_chunked_prefill=cfg.use_chunked_prefill,
                 use_fused_qk_norm_rope_cache=cfg.use_fused_qk_norm_rope_cache,
                 use_seq_split=cfg.use_seq_split,
-                use_spec_attn=cfg.use_spec_attn,
                 warmup=cfg.warmup,
             )
             print(f"  [ForgeEngine] V10 features active: kv={cfg.kv_cache}, "
@@ -3158,13 +3156,13 @@ class ThinkingPipelineConfig:
     # Stage 1: CPT (midtraining with reasoning traces)
     cpt_enabled: bool = True
     cpt_reasoning_data: list[str] = field(default_factory=lambda: [
-        "forge/distillation/hf_datasets/openr1_math.jsonl",
-        "forge/distillation/hf_datasets/openthoughts_114k.jsonl",
-        "forge/distillation/hf_datasets/dolphin_r1.jsonl",
+        "data/hf_datasets/openr1_math.jsonl",
+        "data/hf_datasets/openthoughts_114k.jsonl",
+        "data/hf_datasets/dolphin_r1.jsonl",
     ])
     cpt_general_data: list[str] = field(default_factory=lambda: [
-        "forge/distillation/hf_datasets/orca_math.jsonl",
-        "forge/distillation/hf_datasets/metamath.jsonl",
+        "data/hf_datasets/orca_math.jsonl",
+        "data/hf_datasets/metamath.jsonl",
     ])
     cpt_reasoning_ratio: float = 0.6
     cpt_lr: float = 1e-4
@@ -3176,9 +3174,9 @@ class ThinkingPipelineConfig:
     # Stage 2: Curriculum SFT (mix distillation + 2-stage curriculum)
     sft_enabled: bool = True
     sft_data_inputs: list[str] = field(default_factory=lambda: [
-        "forge/distillation/hf_datasets/gsm8k.jsonl",
-        "forge/distillation/hf_datasets/openr1_math.jsonl",
-        "forge/distillation/hf_datasets/openthoughts_114k.jsonl",
+        "data/hf_datasets/gsm8k.jsonl",
+        "data/hf_datasets/openr1_math.jsonl",
+        "data/hf_datasets/openthoughts_114k.jsonl",
     ])
     sft_short_cot_max_tokens: int = 150
     sft_long_cot_min_tokens: int = 300
@@ -3205,7 +3203,7 @@ class ThinkingPipelineConfig:
     # Stage 4: RLVR (GRPO with repetition penalty)
     rlvr_enabled: bool = True
     rlvr_tasks: list[str] = field(default_factory=lambda: [
-        "forge/distillation/hf_datasets/gsm8k.jsonl",
+        "data/hf_datasets/gsm8k.jsonl",
     ])
     rlvr_task_type: str = "math"
     rlvr_max_steps: int = 500

@@ -5,6 +5,7 @@
   "simulator": "math_prog_simulate",
   "gen_model_type": "mlp",
   "transferable": false,
+  "discoverable": false,
   "params": [
     {"name": "s0", "type": "float", "range": [0.0, 1.0]}
   ],

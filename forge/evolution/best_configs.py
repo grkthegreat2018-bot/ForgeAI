@@ -12,6 +12,9 @@ Safety: only params listed in :data:`SFT_PARAM_MAP` are applied, and only
 when the user did not pass the flag explicitly.  Values matching
 documented *reverted* promotions (see AGENTS.md "Reverted promotions")
 are refused so a stale DB cannot silently re-promote a known-bad value.
+A23 score floor: export only emits configs whose discovery recorded a
+``metadata.verified.delta > 0`` win — rows without a verified promotion
+never reach production defaults.
 """
 from __future__ import annotations
 
@@ -47,12 +50,45 @@ REVERTED_GUARDS: dict[str, object] = {
 }
 
 
+# Rows scanned per domain when looking for an exportable config. The
+# score floor (below) rejects the top row far more often than not, so a
+# single-row peek is not enough.
+_EXPORT_SCAN_LIMIT = 200
+
+
+def _verified_delta(row: dict) -> float | None:
+    """Return the verified-win delta recorded on a discovery, else None.
+
+    Scout/CodeEvolve write ``metadata.verified = {delta, margin, ...}``
+    when a challenger beats the incumbent past a noise-aware margin.
+    Rows without that block (plain archive saves, failed verifies, the
+    synthetic meta-inner rows) have no promotion claim — unexportable.
+    """
+    meta = row.get("metadata") or {}
+    ev = meta.get("verified")
+    if not ev:
+        return None
+    try:
+        delta = float(ev.get("delta"))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return delta
+
+
 def export_best_configs(
     db_path: str = "forge_evolve.db",
     out_path: str | Path | None = None,
     domains: list[str] | None = None,
 ) -> dict[str, dict]:
     """Read the findings DB and write the best config per domain to JSON.
+
+    Score floor (A23): a config is only exportable when its discovery
+    carries ``metadata.verified.delta > 0`` — a challenger that provably
+    beat its incumbent. Unconditional top-score export would happily
+    promote negative-scored rows (the main DB's discoveries are ALL
+    negative) and poison production defaults. With no qualifying rows
+    the file is still written honestly as ``{"configs": {}, "skipped": N}``
+    rather than left stale.
 
     Returns the exported mapping ``{domain: {"config": ..., "score": ...}}``.
     """
@@ -63,18 +99,37 @@ def export_best_configs(
     out = Path(out_path) if out_path else BEST_CONFIGS_PATH
     db = FindingsDB(db_path)
     try:
-        domain_names = domains or sorted(set(list_specs()) | set(DOMAINS.keys()))
+        if domains is None:
+            # Domains actually present in the DB ∪ registered specs —
+            # spec-only iteration silently misses rows whose domain was
+            # renamed/removed (e.g. the main DB's 'quant' rows) and would
+            # under-report `skipped`.
+            db_domains = {r[0] for r in db.conn.execute(
+                "SELECT DISTINCT domain FROM discoveries")}
+            domain_names = sorted(
+                db_domains | set(list_specs()) | set(DOMAINS.keys()))
+        else:
+            domain_names = domains
         exported: dict[str, dict] = {}
+        skipped = 0  # discovery rows rejected by the verified-delta floor
         for name in domain_names:
-            best = db.query_best_configs(name, limit=1)
-            if not best:
-                continue
-            row = best[0]
-            if row.get("config") is None:
+            # Rows arrive score-DESC, so the first qualifying row is the
+            # best *verified* config — not merely the best-scoring one.
+            chosen, delta = None, None
+            for row in db.query_best_configs(name, limit=_EXPORT_SCAN_LIMIT):
+                if row.get("config") is None:
+                    continue
+                d = _verified_delta(row)
+                if d is not None and d > 0:
+                    chosen, delta = row, d
+                    break
+                skipped += 1
+            if chosen is None:
                 continue
             exported[name] = {
-                "config": row["config"],
-                "score": row.get("score"),
+                "config": chosen["config"],
+                "score": chosen.get("score"),
+                "delta": delta,
             }
     finally:
         close = getattr(db, "close", None)
@@ -84,7 +139,8 @@ def export_best_configs(
     payload = {
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "db_path": str(db_path),
-        "domains": exported,
+        "configs": exported,
+        "skipped": skipped,
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -92,13 +148,19 @@ def export_best_configs(
 
 
 def load_best_configs(path: str | Path | None = None) -> dict[str, dict]:
-    """Load the exported best-configs file. Returns {} if absent/corrupt."""
+    """Load the exported best-configs file. Returns {} if absent/corrupt.
+
+    Reads the current ``"configs"`` key; the legacy ``"domains"`` key is
+    still accepted so older exports/tests keep working.
+    """
     p = Path(path) if path else BEST_CONFIGS_PATH
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    return data.get("domains", {})
+    if not isinstance(data, dict):
+        return {}
+    return data.get("configs") or data.get("domains") or {}
 
 
 def apply_to_namespace(args, defaults: dict, param_map: dict | None = None) -> list[str]:

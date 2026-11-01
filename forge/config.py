@@ -1130,7 +1130,7 @@ MODEL_CONFIGS["rocinante_12b"] = ModelConfig(
 # LiquidAI/LFM3-1.7B). HF keys remap via ModelLoader._remap_hf_keys.
 # forge_convert.json in the dir names this preset; non-lossless delta vs
 # the HF reference is bounded by kernel-level fp error only (verified by
-# tests/unit/test_lfm3_port.py logit comparison).
+# scripts/test_lfm3_port.py logit comparison, venv_train).
 # ──────────────────────────────────────────────────────────────────────────────
 MODEL_CONFIGS["lfm3_1p7b"] = ModelConfig(
     vocab_size=128_000,

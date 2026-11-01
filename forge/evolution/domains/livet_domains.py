@@ -217,9 +217,9 @@ class MicroLiveLM(BaseDomain):
         probe = _pairs_stream(live_map, reps=1).to(dev)
         val_idx = torch.arange(probe.numel()) % 3 == 2
 
-        def fact_loss() -> float:
+        def fact_loss(s) -> float:
             with torch.no_grad():
-                logits = model(probe[:-1].unsqueeze(0))[0]
+                logits = s.model(probe[:-1].unsqueeze(0))[0]
                 if s.sparse is not None:
                     logits = logits + s.sparse.lift(probe[:-1].unsqueeze(0))
                 ce = F.cross_entropy(logits[0].float(), probe[1:],
@@ -237,7 +237,7 @@ class MicroLiveLM(BaseDomain):
 
         # Live-learning measurement: verbatim fact recall, cold vs ingest.
         s.reset()
-        loss_before = fact_loss()
+        loss_before = fact_loss(s)
         if dev == "cuda":
             torch.cuda.synchronize()
         t0 = time.time()
@@ -247,7 +247,7 @@ class MicroLiveLM(BaseDomain):
             torch.cuda.synchronize()
         ingest_tps = learn_ids.numel() / max(time.time() - t0, 1e-9)
         s.reset()                       # persistent mem stays; work clears
-        loss_after = fact_loss()
+        loss_after = fact_loss(s)
         live_gain = loss_before - loss_after
 
         # bs=1 incremental decode speed (prefill 16 + 16 single steps).

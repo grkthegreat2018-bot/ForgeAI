@@ -21,7 +21,7 @@ Uses the existing GRPOTrainer with:
 ## Usage
 
   python -m research.training.runners.rlvr_train \\
-      --tasks forge/distillation/hf_datasets/gsm8k.jsonl \\
+      --tasks data/hf_datasets/gsm8k.jsonl \\
       --checkpoint research/checkpoints/forgelm_v2_DPO.safetensors \\
       --save research/checkpoints/forgelm_v2_RLVR.safetensors \\
       --config forgelm_v2 \\

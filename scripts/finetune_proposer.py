@@ -263,6 +263,16 @@ def _lora_mode(own: list[dict], args) -> int:
           f"targets={lora_targets}", flush=True)
     root = Path(args.lora_root)
     root.mkdir(parents=True, exist_ok=True)
+    # A20: sft_train's --save writes the FULL merged model — a multi-GB
+    # torch.save blob that used to land extensionless inside
+    # forge/evolution/loras*/ (3.98GB 'min_k_filter', etc). Keep it out
+    # of the package: merged saves go to
+    # research/checkpoints/lora_merged/<registry>/, and only the
+    # hot-swap adapter (<tag>.lora.safetensors) is moved back into the
+    # registry root after a successful run.
+    merged_dir = (Path("research/checkpoints/lora_merged")
+                  / Path(args.lora_root).name)
+    merged_dir.mkdir(parents=True, exist_ok=True)
     rc_all = 0
     for p in plans:
         data = root / f"{p.tag}.lora.jsonl"
@@ -271,13 +281,14 @@ def _lora_mode(own: list[dict], args) -> int:
                 f.write(json.dumps(
                     {"prompt": r["prompt"], "response": r["response"]}) + "\n")
         stem = root / p.tag
+        save_stem = merged_dir / f"{p.tag}.merged.pt"
         cmd = [
             sys.executable, "-m", "forge.training.runners.sft_train",
             "--data", str(data),
             "--checkpoint", str(ckpt_dir),
             "--config", forge_cfg,
             "--tokenizer", str(ckpt_dir),
-            "--save", str(stem),
+            "--save", str(save_stem),
             "--max-steps", str(args.lora_steps), "--lr", str(args.lora_lr),
             "--batch-size", str(args.batch_size),
             "--seq-len", str(args.seq_len),
@@ -296,11 +307,16 @@ def _lora_mode(own: list[dict], args) -> int:
             cmd += ["--lora-init", p.init_from]
         print("[lora] " + " ".join(cmd), flush=True)
         rc = subprocess.run(cmd).returncode
+        # sft_train derives the adapter path from --save, so it lands
+        # next to the merged save in merged_dir — move it into the
+        # registry root where LoRARegistry/manifest expects it.
+        adapter_src = save_stem.with_suffix(".lora.safetensors")
         adapter = stem.with_suffix(".lora.safetensors")
-        if rc != 0 or not adapter.exists():
+        if rc != 0 or not adapter_src.exists():
             print(f"[lora] train failed for '{p.tag}' rc={rc}")
             rc_all = 1
             continue
+        shutil.move(str(adapter_src), str(adapter))
         if len(p.rows) < args.min_rows:
             print(f"[lora] '{p.tag}' trained on {len(p.rows)} rows "
                   f"(< min-rows {args.min_rows}) — NOT registering "

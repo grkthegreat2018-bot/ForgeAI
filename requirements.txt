@@ -22,6 +22,14 @@ bitsandbytes==0.49.2
 # Triton for torch.compile on Windows (patched at runtime by research.training_utils).
 triton-windows==3.4.0.post21
 
+# fla-org chunked linear-attention kernels (GDN2/KDA fast path — AUDIT A4).
+# 0.6.x requires triton.experimental.gluon (absent in triton-windows 3.4);
+# 0.4.2 is the newest version that imports cleanly on this box.
+# Install with --no-deps: its transformers>=5 pin conflicts with unsloth.
+flash-linear-attention==0.4.2
+fla-core==0.4.2
+einops>=0.8
+
 # Utilities
 python-dotenv==1.0.1
 

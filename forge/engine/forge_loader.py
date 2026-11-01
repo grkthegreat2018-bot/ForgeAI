@@ -28,10 +28,60 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+# ── HuggingFace Hub helpers ──────────────────────────────────────────────────
+
+def _hf_offline() -> bool:
+    """True when HF hub downloads are disabled via standard env vars."""
+    return (os.environ.get("HF_HUB_OFFLINE") == "1"
+            or os.environ.get("TRANSFORMERS_OFFLINE") == "1")
+
+
+def _resolve_hf_revision(revision: str | None) -> str:
+    """Effective HF revision: per-call arg → ``FORGE_HF_REVISION`` env → main."""
+    return revision or os.environ.get("FORGE_HF_REVISION") or "main"
+
+
+def _hf_select_files(repo_id: str, files: list[str] | None) -> list[str]:
+    """Pick the checkpoint files worth downloading from a repo file list.
+
+    ``files=None`` (listing unavailable) falls back to the conventional
+    top-level names — the download loop tolerates individual failures, and
+    the caller only requires ≥1 weight file to land.
+    """
+    if not files:
+        files = [
+            "model.safetensors.index.json", "model.safetensors",
+            "config.json", "generation_config.json", "tokenizer.json",
+            "tokenizer_config.json", "special_tokens_map.json",
+            "forge_convert.json",
+            repo_id.rsplit("/", 1)[-1] + ".gguf", "model.gguf",
+        ]
+    keep = [
+        f for f in files
+        if "/" not in f
+        and f.lower().endswith((".safetensors", ".gguf", ".json", ".jinja"))
+    ]
+    if any(f.endswith(".safetensors") for f in keep):
+        # Real weights found — never pull a multi-GB GGUF on top.
+        keep = [f for f in keep if not f.endswith(".gguf")]
+    else:
+        ggufs = [f for f in keep if f.endswith(".gguf")]
+        if len(ggufs) > 1:
+            # Quant-variant repos carry many files — one is enough.
+            best = next((g for g in ggufs if "q4_k_m" in g.lower()), ggufs[0])
+            keep = [f for f in keep if not f.endswith(".gguf")] + [best]
+    return keep
+
+
 # ── GGUF constants ───────────────────────────────────────────────────────────
 
 GGUF_MAGIC = b"GGUF"
 GGUF_DEFAULT_ALIGNMENT = 32
+
+# Sanity caps for untrusted GGUF metadata — a corrupt file can declare
+# absurd dims/offsets to force huge allocs or out-of-bounds mmap reads.
+_GGUF_MAX_DIMS = 8          # spec GGML_MAX_DIMS is 4; 8 is a generous cap
+_GGUF_MAX_ELEMS = 2 ** 31   # per-tensor element-count cap
 
 GGUF_TYPES = {
     0:  ("u8",   1),
@@ -312,6 +362,10 @@ def _dequant_gguf_tensor(mmap_obj: mmap.mmap, file_offset: int,
     n_elem = 1
     for d in dims:
         n_elem *= d
+    if n_elem > _GGUF_MAX_ELEMS:
+        raise ValueError(
+            f"GGUF tensor: n_elems={n_elem} exceeds cap "
+            f"{_GGUF_MAX_ELEMS} (corrupt header)")
 
     block_size = _GGUF_BLOCK_SIZE.get(dtype, 32)
     block_bytes = _GGUF_BLOCK_BYTES.get(dtype, 0)
@@ -342,6 +396,31 @@ def _dequant_gguf_tensor(mmap_obj: mmap.mmap, file_offset: int,
     return out.reshape(dims)
 
 
+def _gguf_n_elems(dims: list) -> int:
+    """Element count of a tensor from its declared dims (capped upstream)."""
+    n = 1
+    for d in dims:
+        n *= d
+    return n
+
+
+def _gguf_tensor_nbytes(dtype: int, dims: list) -> int:
+    """Declared on-disk byte size of a GGUF tensor from its metadata.
+
+    Mirrors the size math in get_tensor/_dequant_gguf_tensor so a corrupt
+    header can be rejected before any mmap read or allocation.
+    """
+    n_elems = _gguf_n_elems(dims)
+    _, elem_size = GGML_DTYPE_MAP.get(dtype, (None, 0))
+    if elem_size:
+        return n_elems * elem_size
+    block_size = _GGUF_BLOCK_SIZE.get(dtype, 32)
+    block_bytes = _GGUF_BLOCK_BYTES.get(dtype, 0)
+    if block_bytes == 0:
+        return n_elems  # unknown type — raw path reads one byte per elem
+    return (n_elems // block_size) * block_bytes
+
+
 class GGUFInfo:
     """Parsed GGUF file metadata (no tensor data loaded)."""
 
@@ -353,6 +432,7 @@ class GGUFInfo:
         self._mmap_obj = None
         self._data = None
         self._data_section_offset = 0
+        self._file_size = 0
         self._parse()
 
     def _parse(self):
@@ -368,6 +448,7 @@ class GGUFInfo:
             kv_count = struct.unpack("<Q", f.read(8))[0]
 
             file_size = os.path.getsize(self.path)
+            self._file_size = file_size
             self._mmap_obj = mmap.mmap(f.fileno(), file_size, access=mmap.ACCESS_READ)
         finally:
             f.close()
@@ -389,10 +470,19 @@ class GGUFInfo:
             name, offset = _read_string(data, offset)
             n_dims = struct.unpack_from("<I", data, offset)[0]
             offset += 4
+            if n_dims > _GGUF_MAX_DIMS:
+                raise ValueError(
+                    f"GGUF tensor {name!r}: n_dims={n_dims} exceeds "
+                    f"cap {_GGUF_MAX_DIMS} (corrupt header)")
             dims = []
             for _ in range(n_dims):
                 dims.append(struct.unpack_from("<Q", data, offset)[0])
                 offset += 8
+            n_elems = _gguf_n_elems(dims)
+            if n_elems > _GGUF_MAX_ELEMS:
+                raise ValueError(
+                    f"GGUF tensor {name!r}: n_elems={n_elems} exceeds "
+                    f"cap {_GGUF_MAX_ELEMS} (corrupt header)")
             dtype = struct.unpack_from("<I", data, offset)[0]
             offset += 4
             tensor_offset = struct.unpack_from("<Q", data, offset)[0]
@@ -412,6 +502,21 @@ class GGUFInfo:
                 data_section_offset += self.alignment - remainder
         self._data_section_offset = data_section_offset
 
+        # Corrupt-GGUF guard: every declared tensor extent must fit inside
+        # the file, or later mmap slices read out of bounds / force huge
+        # allocations. Fail the whole load rather than one tensor at a time.
+        for t in self.tensors:
+            n_bytes = _gguf_tensor_nbytes(t["dtype"], t["dims"])
+            if n_bytes > file_size:
+                raise ValueError(
+                    f"GGUF tensor {t['name']!r}: declared size {n_bytes} "
+                    f"> file size {file_size} (corrupt header)")
+            end = data_section_offset + t["offset"] + n_bytes
+            if end > file_size:
+                raise ValueError(
+                    f"GGUF tensor {t['name']!r}: extent end {end} past "
+                    f"file size {file_size} (corrupt header)")
+
     def get_tensor(self, name: str, dequantize: bool = True) -> torch.Tensor:
         """Get a tensor via mmap. Quantized GGUF types are dequantized to float16.
 
@@ -423,23 +528,34 @@ class GGUFInfo:
             if t["name"] == name:
                 torch_dtype, elem_size = GGML_DTYPE_MAP.get(t["dtype"], (None, 0))
                 file_offset = self._data_section_offset + t["offset"]
+                n_elems = _gguf_n_elems(t["dims"])
+                if n_elems > _GGUF_MAX_ELEMS:
+                    raise ValueError(
+                        f"GGUF tensor {name!r}: n_elems={n_elems} exceeds "
+                        f"cap {_GGUF_MAX_ELEMS} (corrupt header)")
+                # Declared extent must fit in the file — checked at parse
+                # too, but assert here so a stale/mutated tensor entry can
+                # never drive an out-of-bounds mmap read.
+                n_bytes = _gguf_tensor_nbytes(t["dtype"], t["dims"])
+                if file_offset + n_bytes > self._file_size:
+                    raise ValueError(
+                        f"GGUF tensor {name!r}: extent end "
+                        f"{file_offset + n_bytes} past file size "
+                        f"{self._file_size} (corrupt header)")
                 if torch_dtype is None:
                     # Quantized type — dequantize or return raw
                     if not dequantize:
-                        total_elements = 1
-                        for d in t["dims"]:
-                            total_elements *= d
-                        raw = self._mmap_obj[file_offset:file_offset + total_elements]
+                        if file_offset + n_elems > self._file_size:
+                            raise ValueError(
+                                f"GGUF tensor {name!r}: raw extent end "
+                                f"{file_offset + n_elems} past file size "
+                                f"{self._file_size} (corrupt header)")
+                        raw = self._mmap_obj[file_offset:file_offset + n_elems]
                         return torch.frombuffer(bytearray(raw), dtype=torch.uint8).reshape(t["dims"])
                     return _dequant_gguf_tensor(
                         self._mmap_obj, file_offset, t["dtype"], t["dims"])
 
-                total_bytes = 1
-                for d in t["dims"]:
-                    total_bytes *= d
-                total_bytes *= elem_size
-
-                raw = self._mmap_obj[file_offset:file_offset + total_bytes]
+                raw = self._mmap_obj[file_offset:file_offset + n_bytes]
                 tensor = torch.frombuffer(bytearray(raw), dtype=torch_dtype)
                 return tensor.reshape(t["dims"])
 
@@ -573,8 +689,20 @@ class ForgeLoader:
         return model, cfg
 
     def _load_huggingface(self, model_id: str, config_name: str,
-                          device: str = "cuda", **kwargs):
-        """Download from HuggingFace Hub, cache locally, then load."""
+                          device: str = "cuda", revision: str | None = None,
+                          **kwargs):
+        """Download from HuggingFace Hub, cache locally, then load.
+
+        ``revision`` pins a branch/tag/commit; ``None`` falls back to the
+        ``FORGE_HF_REVISION`` env var, then ``main``.  Honors
+        ``HF_HUB_OFFLINE=1``/``TRANSFORMERS_OFFLINE=1`` — raises
+        ``ValueError`` without any network access.
+        """
+        if _hf_offline():
+            raise ValueError(
+                f"offline mode: HF hub downloads disabled "
+                f"(HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE) — cannot fetch "
+                f"'{model_id}'")
         from research.paths import HF_CACHE_DIR
         HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -584,7 +712,8 @@ class ForgeLoader:
             local_path = HF_CACHE_DIR / model_id.replace("/", "_")
             if not local_path.exists():
                 logger.info("Downloading %s from HuggingFace...", model_id)
-                self._download_hf_file(model_id, local_path)
+                self._download_hf_file(model_id, local_path,
+                                       revision=revision)
             return self._load_gguf(local_path, device=device)
         else:
             # Try safetensors via transformers
@@ -593,7 +722,8 @@ class ForgeLoader:
                 logger.info("Loading %s via transformers...", model_id)
                 model = AutoModelForCausalLM.from_pretrained(
                     model_id, torch_dtype=torch.bfloat16, device_map=device,
-                    trust_remote_code=True)
+                    trust_remote_code=True,
+                    revision=_resolve_hf_revision(revision))
                 from forge.config import ModelConfig
                 cfg = ModelConfig(name=model_id.replace("/", "_"))
                 return model, cfg
@@ -601,7 +731,9 @@ class ForgeLoader:
                 logger.warning("Transformers load failed (%s), trying GGUF...", e)
                 # Try GGUF variant
                 gguf_id = model_id.rstrip("/") + "-GGUF"
-                return self._load_huggingface(gguf_id, config_name, device=device, **kwargs)
+                return self._load_huggingface(
+                    gguf_id, config_name, device=device,
+                    revision=revision, **kwargs)
 
     def _load_modelyaml(self, path: str | Path, config_name: str,
                         device: str = "cuda", **kwargs):
@@ -624,20 +756,105 @@ class ForgeLoader:
 
         raise ValueError(f"No loadable source found in {path}")
 
+    def download_hf_checkpoint(self, repo_id: str,
+                               revision: str | None = None,
+                               dest_dir: str | Path | None = None) -> Path:
+        """Download an HF repo's checkpoint files into the local cache.
+
+        Lists the repo's top-level files (``huggingface_hub.list_repo_files``,
+        with a conventional-name fallback when listing fails), pulls the
+        weights + tokenizer/config assets via :meth:`_download_hf_file`,
+        and returns the local path suitable for
+        ``ForgeEngine.from_checkpoint`` — a directory for safetensors
+        repos, or the single ``.gguf`` file for GGUF-only repos.
+
+        Honors ``HF_HUB_OFFLINE=1``/``TRANSFORMERS_OFFLINE=1`` (raises
+        ``ValueError`` before any network access) and the
+        ``FORGE_HF_REVISION`` env default when ``revision`` is None.
+        """
+        if _hf_offline():
+            raise ValueError(
+                f"offline mode: HF hub downloads disabled "
+                f"(HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE) — cannot fetch "
+                f"'{repo_id}'")
+        from research.paths import HF_CACHE_DIR
+
+        rev = _resolve_hf_revision(revision)
+        if dest_dir is not None:
+            dest_root = Path(dest_dir)
+        else:
+            base = repo_id.replace("/", "_")
+            dest_root = HF_CACHE_DIR / (base if rev == "main"
+                                        else f"{base}-{rev}")
+        dest_root.mkdir(parents=True, exist_ok=True)
+
+        files = self._list_hf_files(repo_id, rev)
+        wanted = _hf_select_files(repo_id, files)
+        logger.info("HF pull %s@%s: %d file(s) → %s",
+                    repo_id, rev, len(wanted), dest_root)
+
+        weights = 0
+        for name in wanted:
+            dest_file = dest_root / name
+            if dest_file.exists():
+                weights += int(name.lower().endswith(
+                    (".safetensors", ".gguf", ".bin")))
+                continue
+            try:
+                self._download_hf_file(
+                    repo_id, dest_file, filename=name, revision=rev)
+                if name.lower().endswith((".safetensors", ".gguf", ".bin")):
+                    weights += 1
+            except Exception as e:
+                # Don't leave a partial download to poison later loads.
+                dest_file.unlink(missing_ok=True)
+                logger.warning("HF download failed for %s: %s", name, e)
+        if weights == 0:
+            raise ValueError(
+                f"no weight files downloaded for '{repo_id}'@{rev} "
+                f"(tried: {wanted})")
+
+        ggufs = sorted(dest_root.glob("*.gguf"))
+        if ggufs and not list(dest_root.glob("*.safetensors")):
+            return ggufs[0]  # single-GGUF repo → the file itself
+        return dest_root
+
+    def _list_hf_files(self, repo_id: str, rev: str) -> list[str] | None:
+        """Repo file listing via huggingface_hub; None when unavailable."""
+        try:
+            from huggingface_hub import list_repo_files
+            return list(list_repo_files(repo_id, revision=rev))
+        except Exception as e:
+            logger.info("HF repo listing for %s failed (%s); "
+                        "guessing standard file names", repo_id, e)
+            return None
+
     @staticmethod
-    def _download_hf_file(model_id: str, dest: Path, filename: str | None = None):
-        """Download a single file from HuggingFace Hub."""
+    def _download_hf_file(model_id: str, dest: Path, filename: str | None = None,
+                          revision: str | None = None):
+        """Download a single file from HuggingFace Hub.
+
+        ``revision`` pins a branch/tag/commit; ``None`` falls back to the
+        ``FORGE_HF_REVISION`` env var, then ``main``.
+        """
         import ipaddress
         import socket
         import urllib.parse
         import urllib.request
+
+        if _hf_offline():
+            raise ValueError(
+                f"offline mode: HF hub downloads disabled "
+                f"(HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE) — cannot fetch "
+                f"'{model_id}'")
 
         if filename is None:
             # Try to resolve the default GGUF filename
             filename = model_id.split("/")[-1] + ".gguf"
 
         repo_id = model_id.replace(".gguf", "") if model_id.endswith(".gguf") else model_id
-        url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
+        rev = _resolve_hf_revision(revision)
+        url = f"https://huggingface.co/{repo_id}/resolve/{rev}/{filename}"
 
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme not in ("http", "https"):

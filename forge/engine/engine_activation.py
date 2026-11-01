@@ -109,7 +109,8 @@ class _ActivationMixin:
         """Activate with optimal settings for max VRAM efficiency + speed.
 
         Picks the best combination of strategies for the current hardware:
-          - RotorQuant KV cache (Givens rotation + Lloyd-Max, ~8x compression)
+          - KV cache bookkeeping object (RotorQuant name kept for QuaRot
+            wiring; dormant — decode KV is unquantized past_kv, A2)
           - torch.compile (1.3-2x decode speedup)
           - Fused QK-Norm+RoPE+Cache-Write (5-10% decode speedup)
           - Triton conv kernel (89% conv bottleneck cut)
@@ -177,7 +178,7 @@ class _ActivationMixin:
                                 kv_bits=config.kv_bits,
                                 kv_v_bits=config.kv_v_bits)
         self._activate_decoding(config.decoding)
-        self._activate_acceleration(config.acceleration)
+        self._activate_acceleration(config.acceleration, feature_flags)
         self._activate_compile_runtime(feature_flags)
         self._apply_feature_registry(feature_flags)
         self._finalize_activation(feature_flags)
@@ -490,15 +491,20 @@ class _ActivationMixin:
         self.decoding = build_decoding(decoding, **decode_kwargs)
         self._log(f"Decoding: {self.decoding.name}")
 
-    def _activate_acceleration(self, acceleration):
+    def _activate_acceleration(self, acceleration, feature_flags=None):
         if acceleration == "cuda_graph" and self.device.type == "cuda":
-            from forge.runtime.cuda_graph import CudaGraphRunner
-            self._graph_runner = CudaGraphRunner(
-                self.model, batch_size=1, seq_len=1,
-                device=str(self.device), use_cache=True)
-            self._graph_runner.capture()
-            self.acceleration = "cuda_graph"
-            self._log("CUDA graphs: active")
+            # AUDIT A2: the legacy CudaGraphRunner captured a decode step
+            # with NO past_kv and generation never invoked it — a placebo.
+            # Redirect to the live static-KV bucketed graph system
+            # (feature_registry._h_breakable_cuda_graph) instead of
+            # silently keeping a runner nothing calls.
+            if feature_flags is not None:
+                feature_flags["use_breakable_cuda_graph"] = True
+            self.acceleration = None
+            self._graph_runner = None
+            self._log("acceleration='cuda_graph' retired — redirected to "
+                      "use_breakable_cuda_graph (live static-KV graphs)",
+                      level="warn")
         elif acceleration == "megakernel" and self.device.type == "cuda":
             from forge.decoding.megakernel import CompiledMegakernelDecode
             self._megakernel = CompiledMegakernelDecode(
@@ -728,6 +734,16 @@ class _ActivationMixin:
                 return None  # leave model unquantized
             try:
                 self._apply_quantization_single(try_mode)
+                # A mode that "succeeds" but quantizes nothing is a silent
+                # degrade to bf16 — treat it as failure so the chain falls
+                # through (e.g. quamba2 on a model with no SSM blocks).
+                from forge.quant.protocol import is_quantized_linear
+                n_q = sum(1 for m in self.model.modules()
+                          if is_quantized_linear(m))
+                if n_q == 0:
+                    raise ValueError(
+                        f"Quantization '{try_mode}' produced 0 quantized "
+                        "linears")
                 if try_mode != mode:
                     self._log(
                         f"Quantization fallback: '{mode}' failed, "

@@ -9,7 +9,7 @@ import json
 import random
 from pathlib import Path
 
-HF_DATASETS = Path(r"D:\windsurf\ForgeAI\forge\distillation\hf_datasets")
+HF_DATASETS = Path(r"D:\windsurf\ForgeAI\data\hf_datasets")
 OUT = Path(r"D:\windsurf\ForgeAI\research\data\finetune\r31_v3_training.jsonl")
 
 TCS = "<|tool_call_start|>"

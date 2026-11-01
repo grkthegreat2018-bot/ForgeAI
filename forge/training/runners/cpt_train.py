@@ -26,11 +26,11 @@ Data mixing:
 
 Usage:
   python -m research.training.runners.cpt_train \\
-      --reasoning-data forge/distillation/hf_datasets/openr1_math.jsonl \\
-                       forge/distillation/hf_datasets/openthoughts_114k.jsonl \\
-                       forge/distillation/hf_datasets/dolphin_r1.jsonl \\
-      --general-data forge/distillation/hf_datasets/orca_math.jsonl \\
-                     forge/distillation/hf_datasets/metamath.jsonl \\
+      --reasoning-data data/hf_datasets/openr1_math.jsonl \\
+                       data/hf_datasets/openthoughts_114k.jsonl \\
+                       data/hf_datasets/dolphin_r1.jsonl \\
+      --general-data data/hf_datasets/orca_math.jsonl \\
+                     data/hf_datasets/metamath.jsonl \\
       --config forgelm_v2 \\
       --checkpoint research/checkpoints/forgelm_v2_Base.safetensors \\
       --save research/checkpoints/forgelm_v2_CPT.safetensors \\

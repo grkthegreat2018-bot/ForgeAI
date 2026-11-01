@@ -50,6 +50,10 @@ from forge.engine.batched_decoding import BatchedDecoding
 
 logger = logging.getLogger(__name__)
 
+# Backpressure cap: submit() rejects when the undispatched queue reaches
+# this depth (Phase 6b max_concurrent_requests equivalent).
+_MAX_PENDING = 256
+
 # ── Task Boot Config ─────────────────────────────────────────────────────────
 
 @dataclass
@@ -76,7 +80,6 @@ class TaskBootConfig:
     use_compile: bool = False  # torch.compile the model
     use_triton_conv: bool = False  # Fused Triton conv kernel
     use_prefix_cache: bool = False  # Cache KV for repeated prefixes
-    use_spec_attn: bool = False  # L1 Speculative Attention
     warmup: bool = True  # Pre-run dummy token to init CUDA kernels
 
     def differs_from(self, engine) -> bool:
@@ -134,7 +137,6 @@ class TaskBootConfig:
             "use_compile": self.use_compile,
             "use_triton_conv": self.use_triton_conv,
             "use_prefix_cache": self.use_prefix_cache,
-            "use_spec_attn": self.use_spec_attn,
             "warmup": self.warmup,
         }
 
@@ -380,6 +382,23 @@ class PendingRequest:
     stream_queue: asyncio.Queue | None = None
     loop: asyncio.AbstractEventLoop | None = None
     created_at: float = field(default_factory=time.time)
+    # Phase 6b scheduling: LOWER priority number = dispatched first,
+    # ties keep FIFO order (enqueued_at).  timeout_s is a queue-wait
+    # bound — a request still undispatched after it is dropped with a
+    # timeout error.  cancelled is the cooperative-abort flag.
+    priority: int = 0
+    timeout_s: float | None = None
+    enqueued_at: float = field(default_factory=time.time)
+    cancelled: bool = False
+
+    def cancel(self) -> bool:
+        """Mark the request cancelled and cancel its pending future.
+
+        Returns True when the future was still undelivered (i.e. the
+        request had not already completed).  Safe to call twice.
+        """
+        self.cancelled = True
+        return self.future.cancel()
 
 
 class BatchQueue:
@@ -405,6 +424,9 @@ class BatchQueue:
 
         self._pending: list[PendingRequest] = []
         self._lock = threading.Lock()
+        # Backpressure cap — instance copy so tests/servers can override
+        # without touching the module constant.
+        self._max_pending = _MAX_PENDING
 
         # Feather prefix-homogeneity scheduler (2-10x for prefix-sharing workloads)
         self._feather = None
@@ -455,7 +477,9 @@ class BatchQueue:
                seed: int | None = None,
                stop: list[str] | None = None,
                stream: bool = False,
-               stream_queue: asyncio.Queue | None = None) -> Future:
+               stream_queue: asyncio.Queue | None = None,
+               priority: int = 0,
+               timeout_s: float | None = None) -> Future:
         """Submit a request to the batch queue.
 
         Returns a Future that will be resolved with the generated text
@@ -471,6 +495,15 @@ class BatchQueue:
                 to the event loop the caller is running on — the loop is
                 captured here because the dispatcher thread cannot call
                 ``asyncio.get_event_loop()``.
+            priority: dispatch priority — LOWER numbers run first, ties
+                keep FIFO order (Phase 6b per-request priority).
+            timeout_s: max seconds the request may sit undispatched
+                before it is dropped with a TimeoutError (queue timeout).
+
+        Raises:
+            RuntimeError: when the queue is full (``_MAX_PENDING``
+                undispatched requests) — backpressure for the caller to
+                map to a 503.
         """
         future: Future = Future()
         loop = None
@@ -496,9 +529,20 @@ class BatchQueue:
             future=future,
             stream_queue=stream_queue,
             loop=loop,
+            priority=priority,
+            timeout_s=timeout_s,
         )
         with self._cv:
+            if len(self._pending) >= self._max_pending:
+                raise RuntimeError(
+                    f"BatchQueue full ({self._max_pending} pending "
+                    f"requests) — try again later")
             self._pending.append(req)
+            # Keep the queue sorted by (priority, enqueued_at): lower
+            # priority numbers are dispatched first, equal priorities
+            # stay FIFO.  The dispatcher's per-model grouping preserves
+            # this order within each batch slice.
+            self._pending.sort(key=lambda r: (r.priority, r.enqueued_at))
             self._cv.notify()
         return future
 
@@ -529,6 +573,14 @@ class BatchQueue:
                 if not self._pending:
                     continue
 
+                # Queue sweep (Phase 6b): drop cancelled requests and
+                # requests whose queue-wait exceeded timeout_s BEFORE
+                # batch assembly — a timed-out request must never burn
+                # a decode slot.
+                self._sweep_expired(time.time())
+                if not self._pending:
+                    continue
+
                 # Group ALL pending by (model_id, boot config) — requests
                 # with different per-task boot configs CANNOT share one
                 # batched pass, since the engine reconfigures (KV cache,
@@ -554,6 +606,57 @@ class BatchQueue:
                     for req in reqs:
                         if not req.future.done():
                             req.future.set_exception(e)
+
+    def _sweep_expired(self, now: float):
+        """Drop cancelled/timed-out requests from ``self._pending``.
+
+        Caller must hold ``self._cv``.  Terminates each victim's future
+        (``Future.cancel`` for explicit cancels, ``TimeoutError`` for
+        queue timeouts) and pushes the stream sentinel so SSE consumers
+        never wait on a dead request.
+        """
+        expired = [
+            r for r in self._pending
+            if r.cancelled
+            or (r.timeout_s is not None
+                and now - r.enqueued_at >= r.timeout_s)
+        ]
+        if not expired:
+            return
+        dead = {id(r) for r in expired}
+        self._pending = [r for r in self._pending if id(r) not in dead]
+        for r in expired:
+            if r.stream_queue is not None:
+                self._push_stream(r, None)
+            if r.future.done():
+                continue
+            if r.cancelled:
+                r.future.cancel()
+            else:
+                r.future.set_exception(TimeoutError(
+                    f"request timed out after {r.timeout_s}s in queue"))
+
+    def abort(self, model_id: str | None = None) -> int:
+        """Cancel queued (undispatched) requests.
+
+        ``model_id=None`` sweeps the whole queue; otherwise only requests
+        bound for that model.  In-flight batches are the registry's job
+        (``ModelRegistry.abort`` signals the engine decode loops).
+
+        Returns the number of queued requests cancelled.
+        """
+        with self._cv:
+            victims = [r for r in self._pending
+                       if model_id is None or r.model_id == model_id]
+            victim_ids = {id(r) for r in victims}
+            self._pending = [r for r in self._pending
+                             if id(r) not in victim_ids]
+            self._cv.notify_all()
+        for r in victims:
+            if r.stream_queue is not None:
+                self._push_stream(r, None)
+            r.cancel()
+        return len(victims)
 
     def _boot_key(self, req: PendingRequest) -> tuple:
         """Hashable boot-config key for batching.  Requests with equal
@@ -588,6 +691,9 @@ class BatchQueue:
 
     def _run_batch(self, model_id: str, requests: list[PendingRequest]):
         """Run a batch of requests through BatchedDecoding."""
+        # Requests cancelled between the queue sweep and dispatch never
+        # reach the engine.
+        requests = [r for r in requests if not r.cancelled]
         if not requests:
             return
 

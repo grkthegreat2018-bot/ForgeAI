@@ -289,9 +289,9 @@ class MechSearch(BaseDomain):
             probe = _pairs_stream(live_map, reps=1).to(dev)
             val_idx = torch.arange(probe.numel()) % 3 == 2
 
-            def fact_loss() -> float:
+            def fact_loss(s) -> float:
                 with torch.no_grad():
-                    logits = model(probe[:-1].unsqueeze(0))[0]
+                    logits = s.model(probe[:-1].unsqueeze(0))[0]
                     if s.sparse is not None:
                         logits = logits + s.sparse.lift(probe[:-1].unsqueeze(0))
                     ce = F.cross_entropy(logits[0].float(), probe[1:],
@@ -308,7 +308,7 @@ class MechSearch(BaseDomain):
 
             # Live-learning measurement
             s.reset()
-            loss_before = fact_loss()
+            loss_before = fact_loss(s)
             if dev == "cuda":
                 torch.cuda.synchronize()
             t0 = time.time()
@@ -319,7 +319,7 @@ class MechSearch(BaseDomain):
                 torch.cuda.synchronize()
             ingest_tps = learn_ids.numel() / max(time.time() - t0, 1e-9)
             s.reset()
-            loss_after = fact_loss()
+            loss_after = fact_loss(s)
             live_gain = loss_before - loss_after
 
             # bs=1 decode speed

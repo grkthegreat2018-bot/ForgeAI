@@ -85,6 +85,7 @@ if _TRITON_AVAILABLE:
         head_dim,       # D (compile-time constant via tl.constexpr)
         n_heads,        # number of heads in this tensor
         T,              # sequence length
+        table_len,      # cos/sin position-table extent (row count)
         x_stride_b, x_stride_h, x_stride_t, x_stride_d,
         out_stride_b, out_stride_h, out_stride_t, out_stride_d,
         cos_stride_t, cos_stride_d,
@@ -135,9 +136,14 @@ if _TRITON_AVAILABLE:
         negate_mask = d_idx < half
         x_rotated = tl.where(negate_mask, -x_rotated, x_rotated)
 
-        # Load cos[t, :] and sin[t, :]
-        cos_ptrs = cos_ptr + t * cos_stride_t + tl.arange(0, BLOCK_D) * cos_stride_d
-        sin_ptrs = sin_ptr + t * sin_stride_t + tl.arange(0, BLOCK_D) * sin_stride_d
+        # Load cos[t, :] and sin[t, :]. t derives from x's T, not from the
+        # table extent — a short table would silently read out of bounds
+        # (OOB "future-token" read into whatever follows the table in HBM).
+        # The wrapper asserts T <= table_len; this clamp is the in-kernel
+        # bound for the same read.
+        t_idx = tl.minimum(t, table_len - 1)
+        cos_ptrs = cos_ptr + t_idx * cos_stride_t + tl.arange(0, BLOCK_D) * cos_stride_d
+        sin_ptrs = sin_ptr + t_idx * sin_stride_t + tl.arange(0, BLOCK_D) * sin_stride_d
         cos_val = tl.load(cos_ptrs).to(tl.float32)
         sin_val = tl.load(sin_ptrs).to(tl.float32)
 
@@ -166,22 +172,38 @@ if _TRITON_AVAILABLE:
             [B, n_heads, T, head_dim] — normed + rotated tensor
         """
         B, n_heads, T, head_dim = x.shape
-        out = torch.empty_like(x)
 
         # head_dim must be power of 2 for Triton
         assert head_dim & (head_dim - 1) == 0, \
             f"head_dim must be power of 2, got {head_dim}"
 
-        # Ensure contiguous
+        # Ensure contiguous (pointer args are walked by raw strides below)
         x = x.contiguous()
         cos = cos.contiguous()
         sin = sin.contiguous()
         weight = weight.contiguous()
+        out = torch.empty_like(x)
+
+        # Bounds: the kernel reads the cos/sin position tables at row t for
+        # t in [0, T) — a table shorter than T is an out-of-bounds read of
+        # "future tokens" past the table end. weight must cover head_dim
+        # and the tables must be [>=T, head_dim].
+        table_len = cos.shape[0]
+        assert cos.dim() == 2 and sin.dim() == 2, \
+            f"cos/sin must be [T, head_dim], got {cos.shape}/{sin.shape}"
+        assert T <= table_len, \
+            f"T={T} exceeds cos table length {table_len}"
+        assert T <= sin.shape[0], \
+            f"T={T} exceeds sin table length {sin.shape[0]}"
+        assert cos.shape[1] >= head_dim and sin.shape[1] >= head_dim, \
+            f"cos/sin head_dim mismatch: {cos.shape}/{sin.shape} vs {head_dim}"
+        assert weight.numel() >= head_dim, \
+            f"weight has {weight.numel()} elems < head_dim {head_dim}"
 
         grid = (B * n_heads * T,)
         _fused_norm_rope_kernel[grid](
             x, out, weight, cos, sin,
-            eps, head_dim, n_heads, T,
+            eps, head_dim, n_heads, T, table_len,
             x.stride(0), x.stride(1), x.stride(2), x.stride(3),
             out.stride(0), out.stride(1), out.stride(2), out.stride(3),
             cos.stride(0), cos.stride(1),

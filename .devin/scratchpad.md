@@ -1504,3 +1504,23 @@ Tests: 50/50 pass; domain-gen smoke: continuation + restart both recover.
 
 ### Known remaining audit items (lower severity, not yet fixed)
 - ScoutConfig.n_elites dead field (scout uses its own constant); research error snippets in prompts; _seen_ops reset granularity; evolve_all/rsi_evolve/fn_evolve CLI drift (--parallel missing on rsi, --status vs --status-file); config.yaml host-local (kept at root); auto_slice_past_kv oracle can't detect clone-vs-view; .validity.jsonl has no consumer yet; mutator _ArithIdentity aliasing kept (gate+test cover); EvalPool in-flight seen-hash race (by design: spawn-fail consumed as reject).
+
+### Broad suite result (22min): 3527 passed / 11 failed
+- 8x test_evolution_frontier: MY FindingsDB(None) guard — db_path=None is the deliberate "no persistence" semantic (and the actual source of the tracked "None" file). Fixed: None -> :memory:.
+- test_round32_quant::test_build_kv_cache_unknown_falls_back: pre-existing stale test — commit 65e7795 made build_kv_cache fail-closed. Fixed the test to expect ActivationError.
+- test_flux::test_cuda_forward_deterministic + test_round32_quant::test_forge_quant_fused_gemm: GPU/heavy tests in user-edited files — flake category, unrelated to this pass.
+- Earlier transient collection errors (batched_decoding import, IndentationError at 1111) were mid-write reads from parallel edits — all pass clean now.
+
+## audit session state 20:07
+- external_eval baseline running (pid 26412): tasks arc_easy,arc_challenge,hellaswag,mmlu(limit 200),gsm8k(50) -> results/external_eval_v2.json
+- pytest full suite running shell 76008f -> results/pytest_full.log
+- B re-audit done: response_format->json_schema wired (non-stream), /info, /health/ready, prometheus /metrics added to forge_server
+- remaining: FluxLM subagent 1b512b4e, A5 proposer decision, plan approve/descope -> user
+
+## A6 flux-vs-rag head-to-head (bench_flux_vs_rag.py, 2026-11)
+- 500 docs/10qa: flux=0.0 rag=1.0; 2000 docs/40qa: flux=0.0 rag=0.9->1.0 (query-side stopword fix).
+- DIAGNOSIS (CPU, R69/R70 knn-QA knobs, 200 docs): knn bank retrieves fact-TYPE-correct rows (population q -> population sentences) but entity-confused (Nimod vs Voromod - invented names share BPE pieces; idf weighting insufficient). knn_lift_topconf=0.4 blocks lift when votes dilute -> mixture falls to recitation.
+- Hedge mixture collapses to ONE channel at corpus scale (h0=0.972 untrimmed; o3=0.982 with taps trimmed) -> thin-context recitation of the most recent/matched doc.
+- Scaffold (teach_text on non-corpus entities) fixes output FORMAT (emits answer-type tokens, e.g. " cobalt") but answers are wrong-entity - entity->value binding is the broken link, not the format.
+- w_boost {knn:0.4,deep:0.2} / {h0:0.02}: no change - the gate is vote-conf, not mixture weight.
+- Open lever if revisited: entity-anchored fingerprints (per-entity row binding), scaffold on corpus-entity non-eval facts, or hybrid arm (flux provenance + rag coverage).

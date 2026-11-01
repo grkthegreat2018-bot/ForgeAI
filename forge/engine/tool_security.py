@@ -111,6 +111,30 @@ PROTECTED_ENGINE_FILES = [
     "forge/checkpoint_io.py",
     "forge/config.py",
     "research/paths.py",
+    # A18: the self-improvement surface — model-facing tools can READ the
+    # evolution stack but must never rewrite the eval machinery or the
+    # promotion gate (that is the part an RSI loop is most motivated to
+    # modify). sandbox.json grants forge/evolution read_only; these are
+    # the files where a silent rewrite would corrupt every future eval.
+    "forge/evolution/code_evolve.py",
+    "forge/evolution/eval_pool.py",
+    "forge/evolution/mutator.py",
+    "forge/evolution/database.py",
+    "forge/evolution/best_configs.py",
+    # The promotion gate's output file — a forged best_configs.json would
+    # inject attacker-chosen "evolved" values into sft_train defaults.
+    "forge/evolution/best_configs.json",
+]
+
+# Protected engine file GLOBS — same rule as PROTECTED_ENGINE_FILES
+# (read allowed, write/delete refused) but matched with fnmatch so whole
+# generated-file families can be covered without enumerating them.
+# Threat model (A18/EC-027): forge/evolution/targets/*.py are the eval
+# targets — canonical implementations AND auto-generated challengers.
+# Rewriting a target rewrites what every future candidate is measured
+# against, which is the cheapest way to fake a "verified promotion".
+PROTECTED_ENGINE_GLOBS = [
+    "forge/evolution/targets/*.py",
 ]
 
 # ── Risky command patterns ───────────────────────────────────────────────────
@@ -215,7 +239,13 @@ DEFAULT_SANDBOX_CONFIG = {
         "research/results": ACCESS_READ_WRITE,
         "forge/data": ACCESS_READ_WRITE,
         "forge/results": ACCESS_READ_WRITE,
-        "forge/evolution": ACCESS_READ_WRITE,
+        # A18: forge/evolution is read_only for model-facing tools — it
+        # holds the eval machinery + promotion gate (code_evolve,
+        # eval_pool, mutator, targets/) that a self-improvement loop is
+        # most motivated to rewrite. Evolution outputs are written by
+        # internal engine code (not the tool layer) so no writable
+        # carve-out is needed; forge/results stays the results drop.
+        "forge/evolution": ACCESS_READ_ONLY,
         "sandbox": ACCESS_READ_WRITE,
         ".devin": ACCESS_READ_WRITE,
         # Read-only dirs (model can read but not modify)
@@ -508,16 +538,21 @@ class ToolSecurityManager:
         return SecurityDecision(allowed=True, details={"access_level": access})
 
     def _is_protected_engine_file(self, rel_path: str) -> str | None:
-        """Return the matching PROTECTED_ENGINE_FILES entry, else None.
+        """Return the matching PROTECTED_ENGINE_FILES/_GLOBS entry, else None.
 
         Exact repo-relative match only — the previous ``endswith`` match
         refused writes to *any* ``config.py``/``paths.py``/``myconfig.py``
-        anywhere in the tree (EC-027).
+        anywhere in the tree (EC-027). Globs use fnmatch against the
+        normalized relative path (A18: covers generated file families
+        like forge/evolution/targets/auto_*.py).
         """
         norm = rel_path.replace("\\", "/")
         for protected in PROTECTED_ENGINE_FILES:
             if norm == protected:
                 return protected
+        for pattern in PROTECTED_ENGINE_GLOBS:
+            if self._match_glob(norm, pattern):
+                return pattern
         return None
 
     def check_file_write(self, path: str, content: str = "") -> SecurityDecision:
@@ -1093,4 +1128,5 @@ class ToolSecurityManager:
             "refusal_pattern_count": len(self.refusal_patterns),
             "dangerous_import_count": len(DANGEROUS_IMPORTS),
             "protected_engine_files": list(PROTECTED_ENGINE_FILES),
+            "protected_engine_globs": list(PROTECTED_ENGINE_GLOBS),
         }
