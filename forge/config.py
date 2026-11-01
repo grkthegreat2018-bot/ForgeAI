@@ -1183,6 +1183,56 @@ MODEL_CONFIGS["lfm3_1p7b"] = ModelConfig(
     min_lr=2e-5,
 )
 
+# ──────────────────────────────────────────────────────────────────────────────
+# LFM3-1.7B-D1: first zero-init graft round on the CC checkpoint.
+#
+# Derived from lfm3_1p7b (same checkpoint — lfm3_1p7b_cc). All grafts are
+# gate=0 / skipped at init, so the forward pass is BIT-EXACT vs the base
+# (verified: scripts/test_lfm3_d1_parity.py max|dlogit|=0.0 on the real
+# ckpt, CPU fp32). 1.7288B -> 1.8029B (+73.9M dormant params).
+#
+# Grafts (all NEW keys, strictly additive):
+#   GDN2 side-paths on conv layers i%4==1 [1,5,9,13,17,21] — each sits
+#     immediately BEFORE a full-attn layer (2,6,10,14,18,22), so the
+#     delta-rule global-memory consult lands right before each global read.
+#     n_heads=8/head_dim=64 (budget ~30M total, vs 44M at inherit).
+#   ValueResidual + LearnedSink + AttnRes on attention layers (gate=0).
+#   CopySpan edit head + Verifier head (work-acceleration, gate=0).
+#
+# Hone plan: open gates early (~80% expand point, WSD schedule), muP-scaled
+# LR on graft params. Known open items recorded in .devin/scratchpad.md
+# (GDN2 pad_mask on x0 writes, AttnRes fixed k-buffer for capture, v0 donor).
+# ──────────────────────────────────────────────────────────────────────────────
+MODEL_CONFIGS["lfm3_1p7b_d1"] = ModelConfig(
+    **{
+        **MODEL_CONFIGS["lfm3_1p7b"].__dict__,
+        "parent": "lfm3_1p7b",
+        "dropped_keys": (  # D1 divergences from base (all NEW, gate=0)
+            "use_gdn2",
+            "gdn2_n_heads",
+            "gdn2_head_dim",
+            "gdn2_layers",
+            "use_value_residual",
+            "use_learned_sink",
+            "use_attn_residual",
+            "use_edit_head",
+            "use_verifier_head",
+        ),
+        # ── D1 NEW: GDN2 side-paths before each full-attn layer ──
+        "use_gdn2": True,
+        "gdn2_n_heads": 8,
+        "gdn2_head_dim": 64,
+        "gdn2_layers": [1, 5, 9, 13, 17, 21],
+        # ── D1 NEW: attention-side grafts (all zero-gated at init) ──
+        "use_value_residual": True,
+        "use_learned_sink": True,
+        "use_attn_residual": True,
+        # ── D1 NEW: RSI work-acceleration heads ──
+        "use_edit_head": True,
+        "use_verifier_head": True,
+    }
+)
+
 
 def get_config(name: str | None = None, **overrides) -> ModelConfig:
     """Fetch a named config and apply optional overrides.
