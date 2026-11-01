@@ -41,6 +41,13 @@ def _resolve_hf_revision(revision: str | None) -> str:
     return revision or os.environ.get("FORGE_HF_REVISION") or "main"
 
 
+def _hf_cache_dir() -> Path:
+    """Local HF download cache — same path research.paths.HF_CACHE_DIR
+    defines, computed here so forge/ code doesn't import the legacy
+    research.* layout (import-ratchet)."""
+    return Path(__file__).resolve().parents[2] / ".devin" / "hf_cache"
+
+
 def _hf_select_files(repo_id: str, files: list[str] | None) -> list[str]:
     """Pick the checkpoint files worth downloading from a repo file list.
 
@@ -703,13 +710,13 @@ class ForgeLoader:
                 f"offline mode: HF hub downloads disabled "
                 f"(HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE) — cannot fetch "
                 f"'{model_id}'")
-        from research.paths import HF_CACHE_DIR
-        HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        hf_cache = _hf_cache_dir()
+        hf_cache.mkdir(parents=True, exist_ok=True)
 
         # Check if model_id has a specific file extension
         if model_id.endswith(".gguf"):
             # Direct GGUF download from HF
-            local_path = HF_CACHE_DIR / model_id.replace("/", "_")
+            local_path = hf_cache / model_id.replace("/", "_")
             if not local_path.exists():
                 logger.info("Downloading %s from HuggingFace...", model_id)
                 self._download_hf_file(model_id, local_path,
@@ -777,15 +784,15 @@ class ForgeLoader:
                 f"offline mode: HF hub downloads disabled "
                 f"(HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE) — cannot fetch "
                 f"'{repo_id}'")
-        from research.paths import HF_CACHE_DIR
+        hf_cache = _hf_cache_dir()
 
         rev = _resolve_hf_revision(revision)
         if dest_dir is not None:
             dest_root = Path(dest_dir)
         else:
             base = repo_id.replace("/", "_")
-            dest_root = HF_CACHE_DIR / (base if rev == "main"
-                                        else f"{base}-{rev}")
+            dest_root = hf_cache / (base if rev == "main"
+                                    else f"{base}-{rev}")
         dest_root.mkdir(parents=True, exist_ok=True)
 
         files = self._list_hf_files(repo_id, rev)
