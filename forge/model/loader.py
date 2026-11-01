@@ -551,6 +551,31 @@ class ModelLoader:
         return state
 
     @staticmethod
+    def _warm_start_conv(state: dict, config: ModelConfig) -> dict:
+        """Zero-pad depthwise conv kernels to config.conv_kernel_size (d2).
+
+        Causal conv pads the INPUT left by K-1; taps index oldest->newest,
+        so widening K_ckpt->K_cfg keeps the original taps on the LAST
+        positions and zeroes the new leading ones — the extended lookback
+        contributes exactly nothing (function-exact). Only DoubleGated
+        keys (``attn.conv.weight``, 3-D) are touched.
+        """
+        target = getattr(config, 'conv_kernel_size', 0) or 0
+        if not state or target <= 0:
+            return state
+        padded = 0
+        for k, w in list(state.items()):
+            if (k.endswith("attn.conv.weight") and w.ndim == 3
+                    and w.shape[-1] < target):
+                state[k] = torch.nn.functional.pad(
+                    w, (target - w.shape[-1], 0))
+                padded += 1
+        if padded:
+            print(f"  [FastBuild] conv K->{target} zero-pad "
+                  f"({padded} layers, lossless)")
+        return state
+
+    @staticmethod
     def _warm_start_mamba3(state: dict, config: ModelConfig) -> dict:
         """Convert Mamba-2 real SSM states to Mamba-3 complex states (lossless).
 
@@ -1012,6 +1037,7 @@ class ModelLoader:
             # GQA -> diff/GTA/GLA warm start + Mamba-2 -> Mamba-3 + FFN compression
             state = ModelLoader._warm_start_attention(state, config)
             state = ModelLoader._warm_start_mamba3(state, config)
+            state = ModelLoader._warm_start_conv(state, config)
             state = ModelLoader._apply_ffn_compression(state, config)
 
             t_weights = time.time() - t_weights
@@ -1182,6 +1208,7 @@ class ModelLoader:
             # Lossless GQA -> diff/GTA/GLA warm start + Mamba-2 -> Mamba-3 + FFN compression.
             state = ModelLoader._warm_start_attention(state, config)
             state = ModelLoader._warm_start_mamba3(state, config)
+            state = ModelLoader._warm_start_conv(state, config)
             state = ModelLoader._apply_ffn_compression(state, config)
 
             t_weights = time.time() - t_weights
