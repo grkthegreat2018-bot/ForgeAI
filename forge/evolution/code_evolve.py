@@ -442,12 +442,15 @@ class OvEngine:
 class LLMProposer:
     """Brand-new implementations from a coder model.
 
-    Default: research/checkpoints/lfm3_1p7b_cc_fq (LFM3-1.7B Claude-Code
-    finetune, ForgeQuant int4-packed, ~1.4GB) with lfm3_1p7b_cc as the
-    non-quantized fallback — chat-template prompts with a code-fence
-    prefill (`<think></think>```python`) so output is verbatim code.
-    The old Qwen proposer ports are ARCHIVED (verbatim-copy + parse-
-    failure history) — see _model_id for the resolution order.
+    Default: Qwen/Qwen2.5-Coder-3B-Instruct when in the HF cache — the
+    A5 gate-rate head-to-head (results/proposer_bench*.json) measured
+    100% valid / 100% syntax vs LFM3-fq's 33% / 50%. Fallback order:
+    research/checkpoints/lfm3_1p7b_cc_fq then lfm3_1p7b_cc (LFM3-1.7B
+    Claude-Code finetune, ForgeQuant int4-packed, ~1.4GB) — chat-
+    template prompts with a code-fence prefill (`<think></think>
+    ```python`) so output is verbatim code. The old ported-Qwen dirs
+    are ARCHIVED (verbatim-copy + parse-failure history) — see
+    _model_id for the resolution order.
 
     Local checkpoint dirs try ForgeEngine first (same arch → batched
     generate_batch ~4x); other archs fall back to transformers
@@ -633,21 +636,29 @@ class LLMProposer:
     def _model_id(self) -> str:
         if self.cfg.model_id:
             return self.cfg.model_id
-        # Default proposer: the LFM3-1.7B Claude-Code community finetune
-        # (mondk/LFM3-1.7B-Claude-Code-Safetensors — R1 tool-use + R2
-        # benchmark + R3 self-RL over LiquidAI/LFM3-1.7B). _fq is the
-        # forge_quant variant — same weights at ~1.4GB, the batch path
-        # was token-equality verified on it (AGENTS R66). The Qwen port
-        # is ARCHIVED — do not re-add it as a fallback; a model that
-        # can't parse its own prompts produced 0% valid in smoke.
+        # Default proposer: Qwen2.5-Coder-3B-Instruct — the A5 gate-rate
+        # head-to-head (results/proposer_bench*.json) measured 100%
+        # valid / 100% syntax on the 12-prompt grid vs LFM3-fq's
+        # 33% / 50%.  Preferred ONLY when already in the HF cache
+        # (snap_dir is a pure local check — no implicit download); the
+        # local LFM3 checkpoints stay the offline fallback, and the old
+        # ported-Qwen dir stays ARCHIVED (verbatim-copy + parse-failure
+        # history — do not re-add it as a fallback).
+        qwen = "Qwen/Qwen2.5-Coder-3B-Instruct"
+        try:
+            from forge.exp.harness import snap_dir
+            snap_dir(qwen)
+            return qwen
+        except Exception:
+            pass
         for d in ("lfm3_1p7b_cc_fq", "lfm3_1p7b_cc"):
             p = ROOT / "research" / "checkpoints" / d
             if (p / "forge_convert.json").exists():
                 return str(p)
         raise FileNotFoundError(
-            "no LFM3 proposer checkpoint found at "
-            "research/checkpoints/lfm3_1p7b_cc_fq (or lfm3_1p7b_cc) — "
-            "pass --model <dir|hf-id> or convert one first")
+            "no proposer model found: cache Qwen/Qwen2.5-Coder-3B-"
+            "Instruct, convert research/checkpoints/lfm3_1p7b_cc_fq, "
+            "or pass --model <dir|hf-id>")
 
     def _engine(self):
         """(kind, obj, lock) — cached across LLMProposer instances so all
