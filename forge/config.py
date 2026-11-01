@@ -97,6 +97,11 @@ class ModelConfig:
     # "sliding_attention" / "swa"): each token attends to itself + the
     # previous sliding_window-1 keys (HF LFM3/Gemma3 semantics).
     sliding_window: int | None = None
+    # D2 strict-lossless: cap SWA layer KV buffers at sliding_window and
+    # store position p at slot p % W (ring). Output-identical — the window
+    # mask never reads older keys — but decode length is no longer bounded
+    # by SWA-layer VRAM and long-context KV shrinks on those layers.
+    swa_ring_kv: bool = False
     # Per-layer-type RoPE overrides, keyed by normalized layer type
     # ("attention", "attention_swa"): {"rope_theta": float,
     # "partial_rotary_factor": float}. Mirrors HF rope_parameters.

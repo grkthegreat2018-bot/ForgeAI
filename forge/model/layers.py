@@ -342,9 +342,32 @@ class GroupedQueryAttention(nn.Module):
                 preallocated_cache.append_t(layer_idx, k, v)
                 k, v = preallocated_cache.kv_view(layer_idx)
             else:
-                preallocated_cache.append(layer_idx, k, v)
-                k = preallocated_cache.k_caches[layer_idx][:, :, :past_len + T]
-                v = preallocated_cache.v_caches[layer_idx][:, :, :past_len + T]
+                ring_c = preallocated_cache.ring_cap(layer_idx)
+                if ring_c is not None:
+                    # This forward needs the last (C-1)+T keys — more than
+                    # the C-slot buffer. Read the held window in position
+                    # order, then cat the new (just-computed) keys; the
+                    # append below retains only the last C for later steps.
+                    n_past = min(past_len, ring_c)
+                    if n_past and past_len >= ring_c:
+                        s = past_len % ring_c
+                        pk = torch.cat([preallocated_cache.k_caches[layer_idx][:, :, s:],
+                                        preallocated_cache.k_caches[layer_idx][:, :, :s]], dim=2)
+                        pv = torch.cat([preallocated_cache.v_caches[layer_idx][:, :, s:],
+                                        preallocated_cache.v_caches[layer_idx][:, :, :s]], dim=2)
+                    elif n_past:
+                        pk = preallocated_cache.k_caches[layer_idx][:, :, :n_past]
+                        pv = preallocated_cache.v_caches[layer_idx][:, :, :n_past]
+                    else:
+                        pk = pv = None
+                    preallocated_cache.append(layer_idx, k, v)
+                    if pk is not None:
+                        k = torch.cat([pk, k], dim=2)
+                        v = torch.cat([pv, v], dim=2)
+                else:
+                    preallocated_cache.append(layer_idx, k, v)
+                    k = preallocated_cache.k_caches[layer_idx][:, :, :past_len + T]
+                    v = preallocated_cache.v_caches[layer_idx][:, :, :past_len + T]
         elif past_key_value is not None and not _use_fused:
             k = torch.cat([past_key_value[0], k], dim=-2)
             v = torch.cat([past_key_value[1], v], dim=-2)
@@ -380,20 +403,41 @@ class GroupedQueryAttention(nn.Module):
         # Combines additively with any incoming attention_bias (pad masks
         # and pos_t future-slot masks keep working).
         if self.sliding_window is not None:
-            if (preallocated_cache is not None
-                    and preallocated_cache.pos_t is not None and T == 1):
+            ring_c = (preallocated_cache.ring_cap(layer_idx)
+                      if preallocated_cache is not None else None)
+            pos_t_path = (preallocated_cache is not None
+                          and preallocated_cache.pos_t is not None and T == 1)
+            if pos_t_path:
                 # pos_t (CUDA-graph decode): position lives on-device —
                 # bake the mask from the live tensor so each replay sees
                 # the CURRENT position, not the capture-time int.
                 q_pos = preallocated_cache.pos_t.reshape(1)
             else:
                 q_pos = _past_len + torch.arange(T, device=q.device)
-            k_pos = torch.arange(total_len, device=q.device)
-            allow = (k_pos[None, :] <= q_pos[:, None]) & \
-                    ((q_pos[:, None] - k_pos[None, :]) < self.sliding_window)
+            if pos_t_path and ring_c is not None:
+                # Ring buffer: every resident key is in-window by
+                # construction. Slots > q_pos are stale only before the
+                # ring fills (slot == position while pos < C).
+                k_pos = torch.arange(total_len, device=q.device)
+                allow = k_pos[None, :] <= q_pos.clamp(max=ring_c - 1)[:, None]
+                # The shared bucket bias encodes POSITION-based validity —
+                # wrong (and wrong-sized) for a slot-indexed ring buffer.
+                attention_bias = None
+            else:
+                # Position-ordered read: the returned keys span positions
+                # P-total_len..P-1 for both linear buffers (P=total_len)
+                # and wrapped rings (last-total_len positions).
+                k_pos = torch.arange(_past_len + T - total_len,
+                                     _past_len + T, device=q.device)
+                allow = (k_pos[None, :] <= q_pos[:, None]) & \
+                        ((q_pos[:, None] - k_pos[None, :]) < self.sliding_window)
             swa = torch.zeros(T, total_len, device=q.device, dtype=q.dtype)
             swa = swa.masked_fill(~allow, float('-inf')).view(1, 1, T, total_len)
             if attention_bias is not None:
+                if attention_bias.shape[-1] != total_len:
+                    # Position-ordered ring read ↔ last-total_len columns of
+                    # a positional bias.
+                    attention_bias = attention_bias[..., -total_len:]
                 swa = swa + attention_bias
             if self.sinks is not None and self.sinks.abs().max().item() != 0.0:
                 swa = swa + self.sinks.view(1, self.n_heads, 1, 1).to(swa.dtype)

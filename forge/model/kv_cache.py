@@ -39,7 +39,8 @@ class PreAllocatedKVCache:
     def __init__(self, n_layers: int, batch: int, n_kv_heads: int,
                  max_seq_len: int, head_dim: int, dtype: torch.dtype,
                  device: torch.device, n_kv_heads_per_layer: list | None = None,
-                 quantize: str = "none"):
+                 quantize: str = "none",
+                 ring_windows: list[int | None] | None = None):
         self.max_seq_len = max_seq_len
         self.n_layers = n_layers
         self.position = 0  # current fill position (shared across layers)
@@ -52,6 +53,17 @@ class PreAllocatedKVCache:
 
         # Skip cache allocation for layers with 0 KV heads (conv layers)
         self.n_kv_heads_per_layer = n_kv_heads_per_layer
+
+        # SWA ring KV (d2 strict-lossless): a sliding-window layer only ever
+        # reads the last W keys, so its buffer is capped at min(max_seq_len, W)
+        # and position p writes to slot p % W. Attention is permutation-
+        # invariant over keys, so wrapped storage is mathematically identical
+        # to the masked full buffer. Unquantized path only — the int8 scales
+        # buffers would need the same wrap bookkeeping.
+        if ring_windows is None or quantize != "none":
+            ring_windows = [None] * n_layers
+        self.ring_caps = [
+            min(max_seq_len, w) if w else None for w in ring_windows]
 
         if quantize == "int8":
             # INT8 quantized cache: store int8 values + fp16 per-token scale
@@ -75,8 +87,9 @@ class PreAllocatedKVCache:
                 self.k_scales.append(None)
                 self.v_scales.append(None)
                 continue
-            k = torch.zeros(batch, nkvh, max_seq_len, head_dim, dtype=cache_dtype, device=device)
-            v = torch.zeros(batch, nkvh, max_seq_len, head_dim, dtype=cache_dtype, device=device)
+            cap = self.ring_caps[i] or max_seq_len
+            k = torch.zeros(batch, nkvh, cap, head_dim, dtype=cache_dtype, device=device)
+            v = torch.zeros(batch, nkvh, cap, head_dim, dtype=cache_dtype, device=device)
             self.k_caches.append(k)
             self.v_caches.append(v)
             if quantize == "int8":
@@ -89,11 +102,30 @@ class PreAllocatedKVCache:
                 self.k_scales.append(None)
                 self.v_scales.append(None)
 
+    def ring_cap(self, layer_idx: int) -> int | None:
+        """Ring-buffer capacity for a sliding-window layer, else None."""
+        return self.ring_caps[layer_idx]
+
     def get_layer(self, layer_idx: int) -> KVCache | None:
-        """Get the (k, v) view for a layer, or None if at position 0."""
+        """Get the (k, v) view for a layer, or None if at position 0.
+
+        Ring layers return the last min(pos, C) keys in POSITION ORDER —
+        a cat of the two buffer slices when the ring has wrapped (slot
+        p % C holds position p). Small copy once pos > C; W is tiny.
+        """
         if self.position == 0 or self.k_caches[layer_idx] is None:
             return None
         pos = self.position
+        ring_c = self.ring_caps[layer_idx]
+        if ring_c is not None and pos > ring_c:
+            s = pos % ring_c
+            k = torch.cat([self.k_caches[layer_idx][:, :, s:],
+                           self.k_caches[layer_idx][:, :, :s]], dim=2)
+            v = torch.cat([self.v_caches[layer_idx][:, :, s:],
+                           self.v_caches[layer_idx][:, :, :s]], dim=2)
+            return (k, v)
+        if ring_c is not None:
+            pos = min(pos, ring_c)
         if self.quantize == "int8":
             # Dequantize: int8 * scale → original dtype
             k = self.k_caches[layer_idx][:, :, :pos].to(self._dtype) * \
@@ -111,6 +143,17 @@ class PreAllocatedKVCache:
             return  # conv layer, no cache
         T = k_new.shape[-2]
         pos = self.position
+        ring_c = self.ring_caps[layer_idx]
+        if ring_c is not None:
+            # Ring write: position p lands in slot p % C. Only the last C
+            # tokens of a >C append are in-window — earlier writes would
+            # be overwritten anyway (dup index order is unspecified).
+            n = min(T, ring_c)
+            idx = torch.arange(pos + T - n, pos + T,
+                               device=k_new.device) % ring_c
+            self.k_caches[layer_idx].index_copy_(2, idx, k_new[..., -n:, :])
+            self.v_caches[layer_idx].index_copy_(2, idx, v_new[..., -n:, :])
+            return
         if pos + T > self.max_seq_len:
             raise ValueError(
                 f"KV cache overflow: pos={pos} + T={T} > max_seq_len={self.max_seq_len}. "
@@ -171,8 +214,14 @@ class PreAllocatedKVCache:
         """Device-indexed write at pos_t — capturable inside a CUDA graph."""
         if self.k_caches[layer_idx] is None or self.pos_t is None:
             return
-        self.k_caches[layer_idx].index_copy_(2, self.pos_t, k_new)
-        self.v_caches[layer_idx].index_copy_(2, self.pos_t, v_new)
+        ring_c = self.ring_caps[layer_idx]
+        if ring_c is not None:
+            # Ring write stays tensor-driven: slot = pos_t % C.
+            idx = self.pos_t % ring_c
+        else:
+            idx = self.pos_t
+        self.k_caches[layer_idx].index_copy_(2, idx, k_new)
+        self.v_caches[layer_idx].index_copy_(2, idx, v_new)
 
     def kv_view(self, layer_idx: int):
         """k/v read view honoring view_len (pos_t path only)."""
@@ -233,11 +282,25 @@ def create_kv_cache(model: nn.Module, max_total: int, batch: int = 1,
     else:
         n_kv_heads_per_layer = None
 
+    # SWA ring KV: sliding-window layers cap their buffer at the window —
+    # decode length is then bounded only by the full-attention layers.
+    ring_windows = None
+    if getattr(cfg, "swa_ring_kv", False) and layer_types is not None:
+        win = getattr(cfg, "sliding_window", None)
+        if win:
+            swa = ("attention_swa", "sliding_attention", "swa", "attn_swa")
+            ring_windows = [
+                win if (i < len(layer_types)
+                        and str(layer_types[i]) in swa) else None
+                for i in range(cfg.n_layers)
+            ]
+
     return PreAllocatedKVCache(
         n_layers=cfg.n_layers, batch=batch, n_kv_heads=n_kv_heads,
         max_seq_len=min(cfg.max_seq_len, max_total),
         head_dim=head_dim, dtype=dtype, device=device,
         n_kv_heads_per_layer=n_kv_heads_per_layer,
+        ring_windows=ring_windows,
     )
 
 
