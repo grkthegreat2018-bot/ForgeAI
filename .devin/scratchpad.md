@@ -1698,3 +1698,17 @@ CEILING: ~13% single-shot valid on strict target oracles; LoRA=3.8%
 
 MEM-SAFE: all runs serialized GPU<->API; 4.3GB train / 5.4GB bench /
   0GB API proposer. No OOM events after serialization rule.
+
+## ~11:00 — LLM-GENERATED GOALS SOLVED THE SATURATION WALL
+- gen_llm_targets.py: teacher invents goals from 3 channels —
+  code (real forge/ fn bodies scanned+injected), web (Tavily search
+  snippets), topics (26x3x3 seed grid). Each JSON spec is AST-gated,
+  subprocess-validated (determinism, runtime), self-oracle checked,
+  written as llm_<name>.py in auto_targets format -> loads via the
+  standard Target path for fn_evolve/gen/merge with zero changes.
+- 111 llm_* targets live; evolve sweep auto-discovers llm_*.
+- codestral sweep on expanded pool: 2188 programs / 816 verified wins
+  across 66 distinct targets (was 171 wins / ~15 targets before)
+- v10 corpus: 969 verified rows (602 from evolve ledger) — the
+  diversity fix. Training now (500 steps, seq3072, cpu_offload).
+- Commit: e5352fa (generator+54 goals), 67161d8 (+57 goals)
