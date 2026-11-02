@@ -1524,3 +1524,111 @@ Tests: 50/50 pass; domain-gen smoke: continuation + restart both recover.
 - Scaffold (teach_text on non-corpus entities) fixes output FORMAT (emits answer-type tokens, e.g. " cobalt") but answers are wrong-entity - entity->value binding is the broken link, not the format.
 - w_boost {knn:0.4,deep:0.2} / {h0:0.02}: no change - the gate is vote-conf, not mixture weight.
 - Open lever if revisited: entity-anchored fingerprints (per-entity row binding), scaffold on corpus-entity non-eval facts, or hybrid arm (flux provenance + rag coverage).
+
+## 2026-10-31 LFM3-CC lossless-arch R&D (d1 graft VERIFIED bit-exact)
+- test_lfm3_d1_parity.py: base lfm3_1p7b vs grafted (GDN2@conv[1,5,9,13,17,21] H8/dk64 + ValueResidual + LearnedSink + AttnRes + CopySpan/Verifier heads) on REAL lfm3_1p7b_cc fp16 ckpt, CPU fp32 seq48: max|dlogit|=0.000e+00, 100% argmax. 1.7288B -> 1.8029B (+73.9M). PASS = lineage gate.
+- Placement theory: graft i%4==1 convs — each sits immediately BEFORE a full-attn layer (2,6,10,14,18,22) => delta-rule global-memory consult lands right before each global read. LFM3 motif is periodic-4: [conv,conv,FULL,conv,SWA].
+- MTPModule @d=2048,vocab=128k: adapter_heads=True = 21.0M; independent heads = 1052.8M (tied 128k makes independent heads absurd). adapter_heads only.
+- AttnRes gate=0: skips buffer entirely (attn_res_active=False) — zero compute, bit-exact.
+- NGramMemory: gate=0 inert; .draft() = ready suffix-spec proposer for copy-heavy evolve outputs.
+- Proposer bench verified (results/proposer_bench*): Qwen2.5-Coder-3B 100/100 vs lfm3_1p7b_cc 50/75 vs _fq 33/50. int4 costs ~17pts; LFM3-CC failure mode = verbose unterminated output (619-2367 chars vs Qwen 68-462) — partly behavioral, not just capability.
+- _cache_w already dequants int4->bf16 => fp16 dir = SAME VRAM, no quant tax. _fq has NO fq_rotation flag (plain absmax RTN) => repack w/ --rotate or run fp16.
+- NOT lossless (checked): sandwich-gamma folding (rms(gamma*z)!=rms(z)), conv->delta port (FIR != low-rank recurrence), SWA widening, vocab append, zero_init_residual.
+- Open work items when gates open: GDN2 needs pad_mask on x0 writes (left-pad batches corrupt state) + static-graph-safe T==1 state write; AttnRes needs fixed k-buffer for capture; v0 donor fix (capture layer2 not conv layer0); SWA ring needs pos-mod write arithmetic under pos_t.
+
+## 2026-10-31 LFM3-CC arch R&D round 2 — online research digest
+- Kimi Linear (arXiv 2510.26692): 3:1 KDA:MLA ratio beats full-attn fair-compare; KDA = channel-wise decay delta rule = what our GDN2 graft adds. VALIDATES direction.
+- Qwen3-Next: 3:1 GDN:GatedAttn, fused QKV+gate in ONE GEMM (qkv_proj emits (1+gate) query features — validates fused-QKV+gate idea), zero-centered RMSNorm (w->w-1 reparam = EXACT function-preserving, better WD behavior in hone), partial RoPE, MTP head.
+- Falcon-H1/Hymba: PARALLEL SSM+attn within one block (concat before out_proj) — validates side-path graft topology; Hymba adds 128 meta tokens (learned KV init, fixes 'forced-to-attend') — our LearnedSink bias = the lossless equivalent (virtual register).
+- Peri-LN (ICML'25, arXiv 2502.02732): norm before AND after module + embed norms = LFM3's sandwich_norm_mode='pre_residual' IS Peri-LN — already at norm-placement SOTA, nothing to add.
+- Sparse upcycling (arXiv 2212.05055): identical expert copies => ANY routing gives same output => strictly function-preserving MoE-ify; cost FFN xE — thin-MoE graft (dense FFN + small zero-init routed experts) is the param-cheap variant.
+- Zero/one-layer expansion (arXiv 2511.04981): random+copying best inits; ZERO-INIT SUBLAYER BLOCKS FEATURE LEARNING -> use LLaMA-PRO pattern: copy graft INTERNALS from neighbor layer, zero only exit (out_proj/gate). Expand at ~80% of sched, WSD.
+- OT-DUS (arXiv 2508.08011): insert new layers at HIGHER positions = better perf + efficiency => capstone-block graft goes at END (before ln_f), not middle.
+- DSA lightning indexer (DeepSeek V3.2) + GLM cross-layer top-k sharing: tiny FP8 indexer selects top-k keys; one indexer shared across layers — for CSA/long-ctx only, low priority at <=4k prompts.
+- Model Stock (arXiv 2403.19522): principled 2-ckpt averaging formula for CC<->stock merge (non-lossless, documented-delta option).
+- LFM3 vendor notes: head-wise out-gate suppresses activation outliers => quantization-friendly (int4 tax partly self-mitigated); conv K=3->K=7 was tuned => K=11 zero-pad graft continues their own direction losslessly; partial-RoPE unrotated half = position-agnostic content-matching dims.
+
+## 2026-11-01 ForgeEngine proposer double-engine OOM (CONFIRMED BUG, open)
+- bench_proposer.py on research/checkpoints/qwen25_coder_3b_mla_moe_fq dies at generation start EVERY time (3 repros): engine A init ok at 6.18GB -> generation begins -> a SECOND engine init block appears (paged KV, low-VRAM hotswap) while A stays resident -> 12.05GB -> silent native death, no traceback.
+- Mechanism (from log): a full SECOND ForgeEngine activation block appears mid-run (paged KV, all 5 graph buckets recaptured) DURING/after eng.generate begins — engine-internal low-VRAM hotswap re-activation, NOT a second _ENGINES entry. Old config's buffers coexist with the new during the swap -> 12.05GB spike -> native OOM. The 3B-fq engine init alone (~6.2GB dequanted + KV/graph pools) sits close enough to the limit that ANY re-activation transients over.
+- _fq notes confirmed: dequant-cached to bf16 at load -> fq dir saves DISK only, zero runtime-VRAM benefit. 12GB card cannot host two dequanted 3B engines.
+- Production default UNAFFECTED: _model_id resolves to HF repo id 'Qwen/Qwen2.5-Coder-3B-Instruct' -> transformers path (~6GB, 100% valid). Bug only hits local converted dirs through ForgeEngine.
+- ALSO: FastBuild on a device='cpu' config still runs a GPU staging pass ('GPU transfer: 248.8s' during a CPU fp32 load) — CPU loads must not run concurrently with GPU jobs.
+
+## 2026-11-01 d2 strict-lossless progress (5/6 landed)
+- share_rope (1d90891): dedupe identical RotaryEmbedding tables; exact-type check skips learnable variants. 11 copies -> 2 on LFM3.
+- _warm_start_conv (abd09ca): conv_kernel_size>K_ckpt left-pads attn.conv.weight; bit-exact prefill + incremental decode.
+- zero_centered_norm (fc54275): RMSNorm stores gamma-1, forward adds 1 (Qwen3-Next); _warm_start_zero_center ports by enumerating built-model zc modules; _scan_qk_norm_identity treats w==0 as identity under zc.
+- fused QKV+gate + gate-up (5765c3d): use_fused_gemm was DEAD CODE (matrices built, never consumed, ctor init perturbed RNG). Forward reads them now; loader._refresh_fused_qkv re-packs post-load; fork_rng on ctors. Function-exact (fp32 kernel noise only).
+- NGramMemory/use_suffix_spec: ALREADY EXISTS (ngram_mem.py, gate=0 + .draft() ready).
+- REMAINING: SWA ring KV (ring-buffer sliding-window cache; touches PreAllocatedKVCache indexing + pos_t decode + bucket graphs — needs full-session care). Then zero-init grafts beyond d1 (capstone, thin-MoE FFN, AttnRes-open, MTP-4 adapter, EAGLE-3 3-depth).
+
+## 2026-11-01 — Qwen-teacher distill + d2 strict-lossless complete
+
+### Route (user-approved): Qwen teacher -> LoRA 'qwen_distill' on lfm3_1p7b_cc
+- gen_qwen_distill.py: ~212 prompts (200 real logged code_programs prompts
+  stratified per-target + 12 target-template) -> Qwen HF completions,
+  compile-filtered. ~2.8 rows/min on RTX 5070, 100% usable rate.
+- GOTCHA fixed mid-run: '`python' prefill means raw output lacks the
+  fence opener — script now re-prepends it; existing rows need post-patch.
+- Train: finetune_proposer --mode lora --data results/qwen_distill.jsonl
+  --base research/checkpoints/lfm3_1p7b_cc --lora-root forge/evolution/loras_lfm3
+  (bf16 cc base; _fq dequants anyway). alpha=32 (=rank, scale 1.0 — 64/32
+  scale-2 + 17-row adapters are both quarantined in the manifest for babble).
+- Eval: bench_proposer --lora-tag qwen_distill (new flags) vs Qwen 100% /
+  LFM3-cc 50% baselines. Gate to flip back: >=90% of Qwen valid-rate.
+
+### d2 strict-lossless set — ALL SIX LANDED
+share_rope 1d90891 | conv K=7->11 zero-pad abd09ca | zero-centered norm
+fc54275 | fused QKV+gate+gate-up 5765c3d+767d38a | NGramMemory/suffix-spec
+(pre-existing, gate=0, .draft() ready) | swa_ring_kv 25bd153.
+
+### Found en route
+- use_fused_gemm was DEAD CODE: fused qkv_proj/gate_up built at init, never
+  consumed in forward, and its un-forked ctor RNG shifted every later
+  layer's init. Now wired + loader _refresh_fused_gemm repacks ckpt rows.
+- SWA ring KV: keys are permutation-invariant -> slot=pos%W works; pos_t
+  path uses pos_t%C index_copy_ (graph-safe); eager path cats the held
+  window position-ordered. NOT bitwise vs linear (SDPA sees 9 vs 19 keys,
+  ~5e-7 kernel tiling) — gate is argmax-trajectory equality.
+- T>C forward caveat: a T>1 step needs last-(C-1)+T keys — more than the
+  buffer. Solution: read held window + cat the new in-flight keys.
+
+## 2026-11-01b — Round-1 poison found + Groq teacher path
+
+### Semantic filter result: 51% of v1 teacher rows were BROKEN
+- filter_distill_semantics.py: matches row -> target via keep-public-names,
+  execs code, runs target's own test(ns) oracle.
+- 212 rows -> 101 kept (99 ok + 2 no_target); 109 semantic_fail + 2 exec.
+  Qwen-3B local teacher produced compilable-but-wrong code ~half the time.
+- CONSEQUENCE: qwen_distill adapter trained on ~52% poisoned data ->
+  DELETED (files + manifest + merged ckpt). Explains round-1 no-gain.
+- LESSON: bench valid% = format only. The eval pool's test(ns) is the real
+  semantic gate — teacher outputs must pass it before becoming SFT rows.
+
+### Groq backend (gen_qwen_distill --backend groq)
+- Teacher: openai/gpt-oss-120b (Apache-2.0 — distill-legal; avoid
+  Llama-family: Llama license bars outputs improving other models).
+- curl.exe transport REQUIRED: python urllib gets Cloudflare error 1010
+  (browser-signature ban); curl works.
+- gpt-oss is a reasoning model: reasoning_effort=low to skip the think.
+- Org rate cap ~6-7 req/min on 4K-tok prompts -> 429 backoffs pace it.
+- Inline oracle + feedback retry (teacher sees failure detail, 1 retry).
+
+## Overnight distill run (2026-11-01)
+
+CORRECTED BASELINE: on real evolve-format prompts LFM3-cc = 0% valid / 61.5% syntax
+(the old 50% was a 3-seed-grid artifact). Failure axis = name-keeping.
+Adapters v3 (think+code, 163 rows, 135 st): 3.8% / 46% â€” canary-quarantined on
+raw-completion probes but real-path output just = base. v4 (code-only, 105 st):
+3.8% / 38.5%. LoRA-r32 on ~150 rows does NOT install codegen capability.
+Root confound found+fixed: bench prompts now emit real _build_prompt format.
+
+IN FLIGHT: r2 corpus (deepseek-v4-pro, reasoning captured) ~110/400 kept;
+3 API-proposer evolves (min_k/top_p/dry_penalties) harvesting verified
+reasoning traces -> results/api_proposer_traces.jsonl + forge_evolve_api.db;
+evolve gens logged via --log-gens.
+
+NEXT: merge v5 corpus -> LoRA v5 (r=32/400st) -> bench; if flat try
+full-FT w/ --optimizer cpu_offload (memory-guarded), else document
+substrate ceiling.

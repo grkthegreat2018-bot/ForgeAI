@@ -19,6 +19,7 @@ valid-rate on the same prompts.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -52,8 +53,9 @@ _PROPOSALS = [
 
 
 def _target_prompts(reps: int = 1) -> list:
-    """One prompt per real evolution target — the actual distribution
-    the proposer gates on, not 3 seeds cycled."""
+    """One prompt per real evolution target in the EXACT non-primed
+    evolve format the distill corpus teaches — matching
+    CodeEvolve._build_prompt's field order."""
     import importlib.util
     out = []
     tdir = REPO / "forge" / "evolution" / "targets"
@@ -65,12 +67,27 @@ def _target_prompts(reps: int = 1) -> list:
         except Exception:
             continue
         seed = getattr(mod, "SEED_CODE", "")
-        req = getattr(mod, "REQUIRED", [])
-        instr = getattr(mod, "PROMPT", "")
+        req = list(getattr(mod, "REQUIRED", []) or [])
+        extra = getattr(mod, "PROMPT", "")
+        metric = getattr(mod, "METRIC", "score")
+        goal = getattr(mod, "GOAL", "min")
+        budgets = getattr(mod, "BUDGETS", None) or {}
         if not seed or not req:
             continue
-        instr = (f"{instr} Keep public names ({', '.join(req)}); "
-                 "identical semantics.")
+        bud = json.dumps(budgets) if budgets else "none"
+        cand = hashlib.md5(seed.encode()).hexdigest()[:8]
+        instr = (
+            "# Rewrite this Python program to be much better.\n"
+            f"# Candidate: {cand}\n"
+            f"# Direction: {metric} "
+            f"{'MINIMIZE' if goal == 'min' else 'MAXIMIZE'}\n"
+            f"# Hard budgets (must satisfy): {bud}\n"
+            f"# Rules: keep public names ({', '.join(req)}); "
+            "stdlib+numpy+torch only;\n"
+            "# output ONLY one python code block; identical semantics.\n"
+            f"# Extra: {extra}\n#\n"
+            f"# Current best ({metric}=1.0, metrics={{\"{metric}\": 1.0}}):"
+        )
         for _ in range(reps):
             out.append((instr, seed, list(req)))
     return out

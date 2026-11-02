@@ -124,12 +124,23 @@ def main() -> int:
                     help="stop after N evals with no verified promotion")
     ap.add_argument("--hop-after", type=int, default=12)
     ap.add_argument("--proposer", choices=["mut", "mix", "llm", "basin",
-                                         "none"],
+                                         "api", "none"],
                     default="mut",
                     help="mut=free AST mutations (default, no model), "
                          "mix=mutations + LLM leap every --llm-every, "
                          "llm=coder model only, basin=async LLM parents "
-                         "+ deterministic mutator fan-out, none=seed only")
+                         "+ deterministic mutator fan-out, api=remote "
+                         "teacher via OpenAI-compatible endpoint "
+                         "(zero VRAM; reasoning captured to "
+                         "api_proposer_traces.jsonl), none=seed only")
+    ap.add_argument("--api-model", default="deepseek-flash",
+                    help="api proposer: remote model id")
+    ap.add_argument("--api-url", default="",
+                    help="api proposer: chat endpoint (default deepseek)")
+    ap.add_argument("--api-key-env", default="DEEPSEEK_API_KEY",
+                    help="api proposer: env var / .env key name")
+    ap.add_argument("--api-workers", type=int, default=4,
+                    help="api proposer: parallel requests")
     ap.add_argument("--llm-every", type=int, default=6,
                     help="mix mode: LLM proposal every Nth cycle")
     ap.add_argument("--basin-batch", type=int, default=8,
@@ -222,6 +233,8 @@ def main() -> int:
         evals_budget=args.evals, reps=args.reps, islands=args.islands,
         patience=args.patience, hop_after=args.hop_after,
         proposer=args.proposer, llm_every=args.llm_every,
+        api_url=args.api_url, api_model=args.api_model,
+        api_key_env=args.api_key_env, api_workers=args.api_workers,
         basin_batch=args.basin_batch, fanout=args.fanout,
         eval_pool=args.eval_pool,
         resume=not args.fresh,

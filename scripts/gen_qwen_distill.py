@@ -239,10 +239,12 @@ def _api_gen(url: str, api_key: str, model_name: str, prompt: str,
                 raise RuntimeError(str(d["error"])[:150])
             msg = d["choices"][0]["message"]
             content = msg.get("content") or ""
+            reasoning = msg.get("reasoning_content") or ""
             # reasoning models: fall back to reasoning if content empty
-            if not content.strip() and msg.get("reasoning_content"):
-                content = msg["reasoning_content"]
-            return content
+            if not content.strip() and reasoning:
+                content = reasoning
+                reasoning = ""
+            return content, reasoning
         except json.JSONDecodeError:
             wait = 20 * (attempt + 1)
             _log(f"[api] bad response (status={status}), retry {wait}s")
@@ -325,6 +327,7 @@ def main() -> int:
     def work(item):
         i, p = item
         raw = None
+        reasoning = ""
         try:
             for attempt in range(args.retries + 1):
                 if args.backend == "hf":
@@ -337,14 +340,12 @@ def main() -> int:
                               f"{last_detail}. Reply with ONLY one "
                               "```python code block containing the "
                               "corrected complete implementation.")
-                    raw = _api_gen(api_url, api_key, model_name, p,
-                                   args.max_new,
-                                   temperature=(args.temperature
-                                                if attempt == 0
-                                                else max(0.3,
-                                                         args.temperature)),
-                                   extra_user=fb,
-                                   extra_body=extra_body)
+                    raw, reasoning = _api_gen(
+                        api_url, api_key, model_name, p, args.max_new,
+                        temperature=(args.temperature
+                                     if attempt == 0
+                                     else max(0.3, args.temperature)),
+                        extra_user=fb, extra_body=extra_body)
                 code = _extract_code(raw)
                 if not code.strip():
                     last_detail = "no code block in output"
@@ -354,7 +355,15 @@ def main() -> int:
                 if status in ("ok", "no_target"):
                     break
             if status in ("ok", "no_target"):
-                row = {"prompt": p, "response": _fence(raw),
+                think = reasoning
+                if not think:
+                    # models that reason in-content: prose outside the
+                    # code fence is the reasoning channel
+                    think = re.sub(r"```.*?```", "", raw, flags=re.S).strip()
+                resp = ((f"<think>\n{think}\n</think>\n" if think else "")
+                        + "```python\n" + code.rstrip() + "\n```\n")
+                row = {"prompt": p, "response": resp,
+                       "reasoning": think,
                        "target": "qwen_distill",
                        "verified": status == "ok",
                        "semantic": status}

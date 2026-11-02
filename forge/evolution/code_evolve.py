@@ -1665,6 +1665,10 @@ class APIProposer:
 
     _TRACE_LOCK = threading.Lock()
 
+    @property
+    def primed(self) -> bool:
+        return False    # chat API: always complete fenced programs
+
     def __init__(self, cfg, db=None, tag_sig: str = ""):
         self.cfg = cfg
         self.db = db
@@ -1725,6 +1729,9 @@ class APIProposer:
                 last_err = str(e)[:100]
             time.sleep(20 * (attempt + 1))
         raise RuntimeError(f"api proposer retries exhausted: {last_err}")
+
+    def __call__(self, prompt: str) -> str:
+        return self.propose_batch([prompt])[0]
 
     def propose_batch(self, prompts: list[str]) -> list[str]:
         """One API call per prompt, threaded — no GPU involved."""
