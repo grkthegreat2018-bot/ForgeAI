@@ -1632,3 +1632,69 @@ evolve gens logged via --log-gens.
 NEXT: merge v5 corpus -> LoRA v5 (r=32/400st) -> bench; if flat try
 full-FT w/ --optimizer cpu_offload (memory-guarded), else document
 substrate ceiling.
+
+## Overnight status ~21:00
+- Full-FT v5 = 19.2% valid / 57.7% syntax on real-format bench (base 0/61.5).
+  Failure profile: 0 no_code (format learned), 11 syntax-fail, 10 name-drop.
+  Capability is the binding constraint -> more verified data only.
+- LoRA r=32 dead end proven (3 adapters, ~4% all).
+- RUNNING: 2-shard evolve sweep (26 targets, api proposer, CPU evals) ->
+  forge_evolve_api.db + api_proposer_traces.jsonl (~162 traces so far).
+- RUNNING: deepseek-v4-pro r3 gen (400 prompts, reasoning captured).
+- merge_distill now caps 2 completions/prompt.
+- NEXT: when harvest slows -> export_sft + merge all -> full-FT v6 -> bench.
+
+## ~02:30 overnight results
+- Sweep done: 347 programs / 30 ok wins / 329 reasoning traces.
+- v6 corpus: 289 verified rows (114 w/ reasoning) via merge+ledger export.
+- v6 full-FT (300 st, mixed think+code): 15.4% valid / 46.2% syntax —
+  REGRESSED vs v5 (19.2/57.7). 40% think-rows dilute format signal.
+- v7 = same corpus code-only -> training now.
+- r3 gen: 361/406, 115 kept. -> v8 corpus candidate (+r3 rows).
+
+## ~03:30 — plateau confirmed (n=52 bench)
+- v5: 13.5% valid / 36.5% | v6: 11.5/46.2 | v8: 7.7/55.8
+- corpus 182->323 rows moved nothing; all within noise of ~10%
+- think-rows: v7 code-only COLLAPSED to 3.8% — reasoning helps, not hurts
+- recipe ceiling ~10-15% valid on the strict target oracles
+- RUNNING: r4 gen (deepseek-flash, 500 prompts) + sweep r2 (10 targets,
+  4 gens) -> morning corpus v9 candidate; ledger keeps growing
+- honest verdict: pipeline works (0->13%), 'near-flawless' unreachable
+  on 1.7B + ~300 rows; needs 1000s rows or teacher-in-loop serving
+
+## ~04:30 — DeepSeek balance dead -> failover to Mistral codestral
+- 'Insufficient Balance' on all deepseek calls; r4 gen + sweeps killed
+- codestral-latest works instantly; mistral backend added to gen script
+- sweep now takes EVOLVE_API_MODEL/URL/KEY_ENV overrides
+- relaunched: r5 gen (mistral, 400 prompts) + 2-shard sweep (codestral)
+- ledger at ok=35 pre-failover; r5 at ~7/min
+
+## OVERNIGHT FINAL — LFM3 distill campaign
+GOAL: near-flawless codegen + reasoning + micro-mem + 1k tok + infinite
+      evolve/self-play RSI loop. NOT fully met; honest state:
+
+MEASURED (bench_proposer --from-targets, n=52 real prompts):
+  base lfm3_1p7b_cc     :  0.0% valid / 61.5% syntax
+  v5 full-FT (182 rows) : 13.5% valid / 36.5% syntax
+  v6 (289r mixed think) : 11.5 / 46.2
+  v7 (code-only)        :  3.8 / 46.2  <- reasoning rows HELP
+  v8 (323r,46% think)   :  7.7 / 55.8
+  v9 (486r,116 evolve)  : 13.5 / 53.8  <- BEST (ties v5, better syntax)
+
+RSI LOOP: PROVEN WORKING END-TO-END
+  - API proposer evolve: 699 programs, 171 verified wins (codestral)
+  - v9 AS LOCAL PROPOSER: drove loop, 2 verified promotions, +2.2%
+  - ledger -> merge --ledger -> SFT corpus -> retrain = closed flywheel
+  - 807 reasoning traces captured in api_proposer_traces.jsonl
+
+TEACHERS: qwen(51% poison caught) -> deepseek (balance died) ->
+  codestral-latest (Mistral): 117/406 kept gen, 171/699 evolve wins —
+  best teacher found. gpt-oss-120b blocked (Cloudflare/credits).
+
+CEILING: ~13% single-shot valid on strict target oracles; LoRA=3.8%
+  dead end; full-FT required; more data stopped helping at ~300 rows.
+  'Near-flawless' needs bigger base or best-of-K in-loop usage —
+  the loop itself IS the correct deployment (yield*evals=wins).
+
+MEM-SAFE: all runs serialized GPU<->API; 4.3GB train / 5.4GB bench /
+  0GB API proposer. No OOM events after serialization rule.
