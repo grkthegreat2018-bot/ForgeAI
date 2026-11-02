@@ -1719,3 +1719,11 @@ MEM-SAFE: all runs serialized GPU<->API; 4.3GB train / 5.4GB bench /
 - v10 corpus: 969 verified rows, 602 from evolve ledger, 66 win-targets
 - sweep still running on remaining llm targets -> v11 candidate ~1.5k rows
 - next: keep harvesting -> v11 -> rebench; codestral remains best teacher
+
+## ~12:30 stall + recovery
+- 2 fn_evolve procs hung >40min on llm targets (0 CPU, API healthy) —
+  killed; sweep resumed on the 60 unprocessed targets via
+  EVOLVE_TARGET_LIST; +112 wins within 5min of restart.
+- ledger: 2400 programs / 928 wins / 66+ targets and climbing
+- v10 = 34.3% valid / 65.0% syntax on the SAME 137-prompt suite —
+  LLM-goal diversity broke the ~13% plateau (v5 19.7 -> v9 27.0 -> v10 34.3)
