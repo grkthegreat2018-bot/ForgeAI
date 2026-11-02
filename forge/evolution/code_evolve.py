@@ -1628,13 +1628,17 @@ class LLMProposer:
         if tok.pad_token_id is None:
             tok.pad_token = tok.eos_token
         try:
+            import random as _rnd
+            torch.manual_seed(_rnd.randrange(1 << 60))
             enc = tok(texts, return_tensors="pt", padding=True,
                       add_special_tokens=False).to(model.device)
             with torch.no_grad():
                 out = model.generate(
                     enc.input_ids, attention_mask=enc.attention_mask,
                     max_new_tokens=self.cfg.max_gen_tokens,
-                    do_sample=True, temperature=self.cfg.temperature,
+                    do_sample=True,
+                    temperature=max(0.2, self.cfg.temperature)
+                    + _rnd.uniform(-0.1, 0.1),
                     top_p=0.95, top_k=80, pad_token_id=tok.eos_token_id)
             start = enc.input_ids.shape[1]   # left-padded: gen starts here
             raws = [tok.decode(o[start:], skip_special_tokens=True)

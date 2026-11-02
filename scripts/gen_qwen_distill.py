@@ -232,6 +232,39 @@ def _hf_gen(model, tok, prompt: str, max_new: int) -> str:
                       skip_special_tokens=True)
 
 
+def _hf_gen_batch(model, tok, prompts: list, max_new: int,
+                  temperature: float = 0.7, seed: int | None = None,
+                  top_p: float = 0.95, top_k: int = 80) -> list:
+    """Batched decode — left-pad so new tokens align right; one
+    generate() per N prompts. HF shares one seed/temp per call, so the
+    caller passes a different seed + jittered temp per chunk — every
+    row still samples independently inside the call."""
+    import random
+    import torch
+    if seed is None:
+        seed = random.randrange(1 << 60)
+    torch.manual_seed(seed)
+    texts = [tok.apply_chat_template(
+        [{"role": "user", "content": p}], tokenize=False,
+        add_generation_prompt=True) + "```python\n" for p in prompts]
+    prev = tok.padding_side
+    tok.padding_side = "left"
+    if tok.pad_token_id is None:
+        tok.pad_token = tok.eos_token
+    ids = tok(texts, return_tensors="pt", padding=True).to(model.device)
+    do_sample = temperature > 0.05
+    out = model.generate(
+        **ids, max_new_tokens=max_new,
+        do_sample=do_sample,
+        temperature=temperature if do_sample else 1.0,
+        top_p=top_p if do_sample else 1.0,
+        top_k=top_k if do_sample else 0,
+        pad_token_id=tok.eos_token_id)
+    tok.padding_side = prev
+    n = ids["input_ids"].shape[1]
+    return [tok.decode(o[n:], skip_special_tokens=True) for o in out]
+
+
 def _api_gen(url: str, api_key: str, model_name: str, prompt: str,
              max_new: int, temperature: float = 0.0,
              extra_user: tuple | None = None,
@@ -409,6 +442,14 @@ def main() -> int:
                                           "mistral", "cf", "or",
                                           "poll", "llm7", "ovh"],
                     default="hf")
+    ap.add_argument("--hf-model", default=None,
+                    help="HF id for --backend hf (default "
+                         "Qwen/Qwen2.5-Coder-3B-Instruct)")
+    ap.add_argument("--hf-batch", type=int, default=1,
+                    help="batched prompts per generate call on --backend hf")
+    ap.add_argument("--hf-quant", default=None, choices=["int4"],
+                    help="bnb quantization for --backend hf (int4 lets a "
+                         "7B fit alongside a big KV batch)")
     ap.add_argument("--api-model", default=None,
                     help="override the backend's default model id")
     ap.add_argument("--workers", type=int, default=6)
@@ -437,10 +478,34 @@ def main() -> int:
         import os
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        tok = AutoTokenizer.from_pretrained(MODEL_ID)
+        hf_id = args.hf_model or MODEL_ID
+        kw = {}
+        cache_dir = None
+        if args.hf_quant == "int4":
+            # Quantize once, then load the serialized 4-bit weights —
+            # bnb quantization on load is ~10min here; the cache makes
+            # subsequent loads seconds.
+            safe = re.sub(r"[^A-Za-z0-9_.-]", "_", hf_id)
+            cache_dir = REPO / "research" / "hf_quant_cache" / safe
+            from transformers import BitsAndBytesConfig
+            kw["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16)
+            if cache_dir.exists():
+                hf_id = str(cache_dir)
+        else:
+            kw["dtype"] = torch.bfloat16
+        tok = AutoTokenizer.from_pretrained(hf_id)
         model = AutoModelForCausalLM.from_pretrained(
-            MODEL_ID, dtype=torch.bfloat16, device_map="cuda")
+            hf_id, device_map="cuda", **kw)
+        if cache_dir is not None and not cache_dir.exists():
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            model.save_pretrained(cache_dir)
+            tok.save_pretrained(cache_dir)
+            _log(f"[gen] quant cache saved -> {cache_dir}")
         model.eval()
+        _log(f"[gen] hf: {hf_id} batch={args.hf_batch} "
+             f"quant={args.hf_quant}")
     else:
         import os
         api_url, key_env, model_name, extra_body = BACKENDS[args.backend]
@@ -465,13 +530,15 @@ def main() -> int:
              "exec_fail": 0, "no_target": 0, "gen_err": 0}
     done = [0]
 
-    def work(item):
+    def work(item, raw0=None):
         i, p = item
-        raw = None
+        raw = raw0
         reasoning = ""
         try:
             for attempt in range(args.retries + 1):
-                if args.backend == "hf":
+                if raw is not None:
+                    pass                # pre-generated (hf batch)
+                elif args.backend == "hf":
                     raw = _hf_gen(model, tok, p, args.max_new)
                 else:
                     fb = None
@@ -534,6 +601,17 @@ def main() -> int:
                               "cf", "or", "poll", "llm7", "ovh"):
             with ThreadPoolExecutor(max_workers=args.workers) as ex:
                 list(ex.map(work, items))
+        elif args.hf_batch > 1:
+            import random as _rnd
+            for j in range(0, len(items), args.hf_batch):
+                grp = items[j:j + args.hf_batch]
+                raws = _hf_gen_batch(
+                    model, tok, [p for _, p in grp], args.max_new,
+                    temperature=max(0.2, args.temperature or 0.7)
+                    + _rnd.uniform(-0.1, 0.1),
+                    seed=_rnd.randrange(1 << 60))
+                for (i, p), raw in zip(grp, raws):
+                    work((i, p), raw0=raw)
         else:
             for item in items:
                 work(item)
