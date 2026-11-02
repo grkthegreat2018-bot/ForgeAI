@@ -71,6 +71,12 @@ BACKENDS = {
            "@cf/qwen/qwen2.5-coder-32b-instruct", {}),
     "or": (OR_URL, "OPENROUTER_API_KEY",
            "nvidia/nemotron-3-ultra-550b-a55b:free", {}),
+    "poll": ("https://text.pollinations.ai/openai", "",
+             "openai-fast", {}),
+    "llm7": ("https://api.llm7.io/v1/chat/completions", "",
+             "codestral-latest", {}),
+    "ovh": ("https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat"
+            "/completions", "", "gpt-oss-120b", {}),
 }
 
 _print_lock = threading.Lock()
@@ -242,11 +248,12 @@ def _api_gen(url: str, api_key: str, model_name: str, prompt: str,
             "temperature": temperature, "max_tokens": max_new}
     body.update(extra_body or {})
     data = json.dumps(body).encode()
+    auth = (["-H", f"Authorization: Bearer {api_key}"]
+            if api_key else [])
     for attempt in range(8):
         try:
             r = subprocess.run(
-                ["curl.exe", "-s", "-X", "POST", url,
-                 "-H", f"Authorization: Bearer {api_key}",
+                ["curl.exe", "-s", "-X", "POST", url] + auth + [
                  "-H", "Content-Type: application/json",
                  "--data-binary", "@-", "--max-time", "300",
                  "-w", "\nHTTPSTATUS:%{http_code}"],
@@ -399,7 +406,8 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-new", type=int, default=900)
     ap.add_argument("--backend", choices=["hf", "groq", "deepseek",
-                                          "mistral", "cf", "or"],
+                                          "mistral", "cf", "or",
+                                          "poll", "llm7", "ovh"],
                     default="hf")
     ap.add_argument("--api-model", default=None,
                     help="override the backend's default model id")
@@ -438,17 +446,19 @@ def main() -> int:
         api_url, key_env, model_name, extra_body = BACKENDS[args.backend]
         api_url = api_url or _cf_url()
         model_name = args.api_model or model_name
-        api_key = os.environ.get(key_env)
-        if not api_key:
-            # fall back to the repo .env
-            env = REPO / ".env"
-            if env.exists():
-                for line in env.read_text().splitlines():
-                    if line.startswith(key_env + "="):
-                        api_key = line.split("=", 1)[1].strip()
-        if not api_key:
-            print(f"{key_env} not set", file=sys.stderr)
-            return 2
+        api_key = ""
+        if key_env:
+            api_key = os.environ.get(key_env, "")
+            if not api_key:
+                # fall back to the repo .env
+                env = REPO / ".env"
+                if env.exists():
+                    for line in env.read_text().splitlines():
+                        if line.startswith(key_env + "="):
+                            api_key = line.split("=", 1)[1].strip()
+            if not api_key:
+                print(f"{key_env} not set", file=sys.stderr)
+                return 2
         _log(f"[gen] {args.backend}: {model_name} @ {api_url}")
 
     stats = {"ok": 0, "semantic_fail": 0, "compile_fail": 0,
@@ -521,7 +531,7 @@ def main() -> int:
                            args.max_new, oracles, stats, out_f,
                            timeout_h=args.batch_timeout_h)
         elif args.backend in ("groq", "deepseek", "mistral",
-                              "cf", "or"):
+                              "cf", "or", "poll", "llm7", "ovh"):
             with ThreadPoolExecutor(max_workers=args.workers) as ex:
                 list(ex.map(work, items))
         else:
