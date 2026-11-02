@@ -30,6 +30,15 @@ _llm_dir = REPO / "forge" / "evolution" / "targets"
 TARGETS += sorted(p.stem for p in _llm_dir.glob("llm_*.py"))
 
 
+def _targets() -> list[str]:
+    import os
+    lst = os.environ.get("EVOLVE_TARGET_LIST", "")
+    if lst and Path(lst).exists():
+        return [t.strip() for t in Path(lst).read_text().splitlines()
+                if t.strip()]
+    return TARGETS
+
+
 def main() -> int:
     import os
     shard = int(sys.argv[1]) if len(sys.argv) > 1 else 0
@@ -37,7 +46,7 @@ def main() -> int:
     model = os.environ.get("EVOLVE_API_MODEL", "deepseek-v4-pro")
     url = os.environ.get("EVOLVE_API_URL", "")
     keyenv = os.environ.get("EVOLVE_API_KEY_ENV", "DEEPSEEK_API_KEY")
-    mine = [t for i, t in enumerate(TARGETS) if i % shards == shard]
+    mine = [t for i, t in enumerate(_targets()) if i % shards == shard]
     log = (REPO / "results" / f"evolve_sweep_{shard}.log").open(
         "a", encoding="utf-8")
     extra = (["--api-url", url] if url else []) + [
