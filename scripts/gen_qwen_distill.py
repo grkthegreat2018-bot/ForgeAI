@@ -26,6 +26,7 @@ import argparse
 import json
 import re
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -42,6 +43,23 @@ MODEL_ID = "Qwen/Qwen2.5-Coder-3B-Instruct"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
+OR_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+def _cf_url():
+    """Workers AI OpenAI-compat endpoint — acct id from env/.env."""
+    import os
+    acct = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+    if not acct:
+        env = REPO / ".env"
+        if env.exists():
+            for line in env.read_text().splitlines():
+                if line.startswith("CLOUDFLARE_ACCOUNT_ID="):
+                    acct = line.split("=", 1)[1].strip()
+    return ("https://api.cloudflare.com/client/v4/accounts/"
+            f"{acct}/ai/v1/chat/completions")
+
+
 BACKENDS = {
     "groq": (GROQ_URL, "GROQ_API_KEY", "openai/gpt-oss-120b",
              {"reasoning_effort": "low"}),
@@ -49,6 +67,10 @@ BACKENDS = {
                  {}),
     "mistral": (MISTRAL_URL, "MISTRAL_API_KEY", "codestral-latest",
                 {}),
+    "cf": (None, "CLOUDFLARE_API_TOKEN",
+           "@cf/qwen/qwen2.5-coder-32b-instruct", {}),
+    "or": (OR_URL, "OPENROUTER_API_KEY",
+           "nvidia/nemotron-3-ultra-550b-a55b:free", {}),
 }
 
 _print_lock = threading.Lock()
@@ -376,7 +398,8 @@ def main() -> int:
     ap.add_argument("--per-target", type=int, default=25)
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-new", type=int, default=900)
-    ap.add_argument("--backend", choices=["hf", "groq", "deepseek", "mistral"],
+    ap.add_argument("--backend", choices=["hf", "groq", "deepseek",
+                                          "mistral", "cf", "or"],
                     default="hf")
     ap.add_argument("--api-model", default=None,
                     help="override the backend's default model id")
@@ -413,6 +436,7 @@ def main() -> int:
     else:
         import os
         api_url, key_env, model_name, extra_body = BACKENDS[args.backend]
+        api_url = api_url or _cf_url()
         model_name = args.api_model or model_name
         api_key = os.environ.get(key_env)
         if not api_key:
@@ -496,7 +520,8 @@ def main() -> int:
             _mistral_batch(api_url, api_key, model_name, prompts,
                            args.max_new, oracles, stats, out_f,
                            timeout_h=args.batch_timeout_h)
-        elif args.backend in ("groq", "deepseek", "mistral"):
+        elif args.backend in ("groq", "deepseek", "mistral",
+                              "cf", "or"):
             with ThreadPoolExecutor(max_workers=args.workers) as ex:
                 list(ex.map(work, items))
         else:
