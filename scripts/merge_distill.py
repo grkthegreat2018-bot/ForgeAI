@@ -71,13 +71,15 @@ def _think_of(raw: str, stored: str) -> str:
 def main() -> int:
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("files", nargs="+")
+    ap.add_argument("files", nargs="*")
+    ap.add_argument("--ledger", default="",
+                    help="evolve api db; exports ok=1 code_programs rows")
     ap.add_argument("--out", required=True)
     ap.add_argument("--tag", default="qwen_distill_v3")
     args = ap.parse_args()
 
     oracles = _load_targets(REPO / "forge" / "evolution" / "targets")
-    seen = set()
+    seen = {}
     kept, dropped = [], []
     for f in args.files:
         p = Path(f)
@@ -91,9 +93,9 @@ def main() -> int:
                 continue
             key = hashlib.md5(
                 r["prompt"][:400].encode()).hexdigest()
-            if key in seen:
-                continue
-            seen.add(key)
+            if seen.get(key, 0) >= 2:
+                continue            # cap 2 completions per prompt
+            seen[key] = seen.get(key, 0) + 1
             code = _extract_code(r["response"])
             if not code.strip():
                 dropped.append({"why": "no_code", "src": p.name})
@@ -110,6 +112,31 @@ def main() -> int:
                          "reasoning": think, "target": args.tag,
                          "verified": status == "ok",
                          "semantic": status})
+
+    if args.ledger:
+        import sqlite3
+        con = sqlite3.connect(args.ledger)
+        rows = con.execute(
+            "select prompt, code from code_programs where ok=1"
+        ).fetchall()
+        lseen = 0
+        for prompt, code in rows:
+            if not prompt or not code.strip():
+                continue
+            key = hashlib.md5(prompt[:400].encode()).hexdigest()
+            if seen.get(key, 0) >= 2:
+                continue
+            status, _ = _check(code, prompt, oracles)
+            if status not in ("ok", "no_target"):
+                continue
+            seen[key] = seen.get(key, 0) + 1
+            resp = "```python\n" + code.rstrip() + "\n```\n"
+            kept.append({"prompt": prompt, "response": resp,
+                         "reasoning": "", "target": args.tag,
+                         "verified": status == "ok",
+                         "semantic": status})
+            lseen += 1
+        print(f"[merge] ledger kept={lseen}")
 
     out = Path(args.out)
     out.write_text(
