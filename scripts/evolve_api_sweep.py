@@ -26,6 +26,9 @@ TARGETS = [
     "stop_matcher", "suffix_mem", "top_p_filter", "top_p_probs",
 ]
 
+_llm_dir = REPO / "forge" / "evolution" / "targets"
+TARGETS += sorted(p.stem for p in _llm_dir.glob("llm_*.py"))
+
 
 def main() -> int:
     import os
