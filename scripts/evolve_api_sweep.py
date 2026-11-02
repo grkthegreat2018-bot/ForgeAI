@@ -54,15 +54,21 @@ def main() -> int:
     for t in mine:
         log.write(f"\n=== {t} ===\n")
         log.flush()
-        r = subprocess.run(
-            [str(VENV_PY), str(REPO / "scripts" / "fn_evolve.py"),
-             "--target", t, "--proposer", "api",
-             "--api-model", model, "--api-workers", "3",
-             "--evals", "60", "--workers", "3", "--patience", "15",
-             "--db", "forge_evolve_api.db", "--log-gens", "--fresh",
-             "--quiet"] + extra,
-            stdout=log, stderr=subprocess.STDOUT)
-        log.write(f"=== {t} rc={r.returncode} ===\n")
+        try:
+            r = subprocess.run(
+                [str(VENV_PY), str(REPO / "scripts" / "fn_evolve.py"),
+                 "--target", t, "--proposer", "api",
+                 "--api-model", model, "--api-workers", "3",
+                 "--evals", "60", "--workers", "3", "--patience", "15",
+                 "--db", "forge_evolve_api.db", "--log-gens", "--fresh",
+                 "--quiet"] + extra,
+                stdout=log, stderr=subprocess.STDOUT,
+                timeout=int(os.environ.get("EVOLVE_TARGET_TIMEOUT",
+                                           "1500")))
+            rc = r.returncode
+        except subprocess.TimeoutExpired:
+            rc = 124                     # watchdog: hung target skipped
+        log.write(f"=== {t} rc={rc} ===\n")
         log.flush()
     return 0
 

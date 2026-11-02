@@ -260,6 +260,105 @@ def _api_gen(url: str, api_key: str, model_name: str, prompt: str,
     raise RuntimeError("api retries exhausted")
 
 
+def _mistral_batch(url_base: str, api_key: str, model_name: str,
+                   prompts: list, max_new: int, oracles,
+                   stats: dict, out_f, poll_s: int = 60,
+                   timeout_h: float = 8.0) -> None:
+    """Bulk path: one batch job for the whole prompt set.
+
+    Mistral batch jobs run server-side (up to 1M requests, NOT counted
+    against real-time rate limits) — the right lane for overnight bulk
+    corpus work. Verify + write rows exactly like the live path."""
+    import tempfile
+    base = url_base.rsplit("/chat/completions", 1)[0]
+    req_file = Path(tempfile.mkstemp(suffix=".jsonl")[1])
+    with req_file.open("w", encoding="utf-8") as f:
+        for i, p in enumerate(prompts):
+            f.write(json.dumps({
+                "custom_id": str(i),
+                "body": {"max_tokens": max_new,
+                         "messages": [{"role": "user",
+                                       "content": p}]}}) + "\n")
+    def _curl(args2, data=None):
+        cmd = ["curl.exe", "-s", "-X", "POST"] + args2 + [
+            "-H", f"Authorization: Bearer {api_key}"]
+        r = subprocess.run(
+            cmd + (["--data-binary", "@-"] if data is not None else []),
+            input=data, capture_output=True, timeout=300)
+        return json.loads(r.stdout.decode("utf-8", errors="replace"))
+
+    up = _curl([f"{base}/files",
+                "-F", "purpose=batch", "-F",
+                f"file=@{req_file};type=application/jsonl"])
+    fid = up.get("id")
+    if not fid:
+        raise RuntimeError(f"batch upload failed: {str(up)[:200]}")
+    job = _curl([f"{base}/batch/jobs",
+                 "-H", "Content-Type: application/json"],
+                json.dumps({"input_files": [fid],
+                            "endpoint": "/v1/chat/completions",
+                            "model": model_name,
+                            "timeout_hours": timeout_h}).encode())
+    jid = job.get("id")
+    if not jid:
+        raise RuntimeError(f"batch create failed: {str(job)[:200]}")
+    _log(f"[batch] job {jid} submitted ({len(prompts)} requests)")
+    t0 = time.time()
+    while True:
+        time.sleep(poll_s)
+        r = subprocess.run(
+            ["curl.exe", "-s", f"{base}/batch/jobs/{jid}",
+             "-H", f"Authorization: Bearer {api_key}"],
+            capture_output=True, timeout=60)
+        st = json.loads(r.stdout.decode())
+        status = st.get("status", "?")
+        _log(f"[batch] {status} "
+             f"({st.get('succeeded_requests', 0)}/"
+             f"{st.get('total_requests', '?')})")
+        if status in ("SUCCESS", "FAILED", "CANCELLED",
+                      "TIMEOUT_EXCEEDED"):
+            break
+        if time.time() - t0 > timeout_h * 3600:
+            raise RuntimeError("batch poll exceeded timeout")
+    ofid = st.get("output_file")
+    if not ofid:
+        _log(f"[batch] no output file ({status})")
+        return
+    r = subprocess.run(
+        ["curl.exe", "-s", f"{base}/files/{ofid}/content",
+         "-H", f"Authorization: Bearer {api_key}"],
+        capture_output=True, timeout=300)
+    for line in r.stdout.decode("utf-8", errors="replace").splitlines():
+        try:
+            row = json.loads(line)
+            i = int(row["custom_id"])
+            msg = row["response"]["body"]["choices"][0]["message"]
+            raw = msg.get("content") or ""
+            reasoning = msg.get("reasoning_content") or ""
+        except Exception:
+            stats["gen_err"] += 1
+            continue
+        code = _extract_code(raw)
+        if not code.strip():
+            stats["compile_fail"] += 1
+            continue
+        status, _ = _semantic_check(code, prompts[i], oracles)
+        if status in ("ok", "no_target"):
+            think = reasoning or re.sub(
+                r"```.*?```", "", raw, flags=re.S).strip()
+            resp = ((f"<think>\n{think}\n</think>\n" if think else "")
+                    + "```python\n" + code.rstrip() + "\n```\n")
+            out_f.write(json.dumps({
+                "prompt": prompts[i], "response": resp,
+                "reasoning": think, "target": "qwen_distill",
+                "verified": status == "ok",
+                "semantic": status}) + "\n")
+            out_f.flush()
+        stats["ok" if status == "ok" else status] = \
+            stats.get(status, 0) + (1 if status != "ok" else 0) \
+            + (1 if status == "ok" else 0)
+
+
 def _fence(resp: str) -> str:
     if not resp.lstrip().startswith("```"):
         resp = "```python\n" + resp
@@ -285,6 +384,11 @@ def main() -> int:
     ap.add_argument("--retries", type=int, default=1,
                     help="semantic-fail feedback retries per prompt")
     ap.add_argument("--temperature", type=float, default=0.0)
+    ap.add_argument("--batch", action="store_true",
+                    help="mistral backend only: submit all prompts as one "
+                         "server-side batch job (up to 1M requests, off "
+                         "real-time rate limits) instead of live calls")
+    ap.add_argument("--batch-timeout-h", type=float, default=8.0)
     args = ap.parse_args()
 
     prompts = _real_prompts(args.db, args.per_target, args.rows)
@@ -388,7 +492,11 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8") as out_f:
         items = list(enumerate(prompts))
-        if args.backend in ("groq", "deepseek"):
+        if args.batch and args.backend == "mistral":
+            _mistral_batch(api_url, api_key, model_name, prompts,
+                           args.max_new, oracles, stats, out_f,
+                           timeout_h=args.batch_timeout_h)
+        elif args.backend in ("groq", "deepseek", "mistral"):
             with ThreadPoolExecutor(max_workers=args.workers) as ex:
                 list(ex.map(work, items))
         else:
