@@ -1712,3 +1712,10 @@ MEM-SAFE: all runs serialized GPU<->API; 4.3GB train / 5.4GB bench /
 - v10 corpus: 969 verified rows (602 from evolve ledger) — the
   diversity fix. Training now (500 steps, seq3072, cpu_offload).
 - Commit: e5352fa (generator+54 goals), 67161d8 (+57 goals)
+
+## ~12:00 — v10 BREAKS THE PLATEAU (same 137-prompt suite)
+- v5: 19.7% valid / 43.1% | v9: 27.0 / 62.0 | v10: 34.3 / 65.0
+- LLM-goal expansion (26 -> 137 targets) = the fix for corpus saturation
+- v10 corpus: 969 verified rows, 602 from evolve ledger, 66 win-targets
+- sweep still running on remaining llm targets -> v11 candidate ~1.5k rows
+- next: keep harvesting -> v11 -> rebench; codestral remains best teacher
