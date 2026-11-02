@@ -28,21 +28,27 @@ TARGETS = [
 
 
 def main() -> int:
+    import os
     shard = int(sys.argv[1]) if len(sys.argv) > 1 else 0
     shards = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+    model = os.environ.get("EVOLVE_API_MODEL", "deepseek-v4-pro")
+    url = os.environ.get("EVOLVE_API_URL", "")
+    keyenv = os.environ.get("EVOLVE_API_KEY_ENV", "DEEPSEEK_API_KEY")
     mine = [t for i, t in enumerate(TARGETS) if i % shards == shard]
     log = (REPO / "results" / f"evolve_sweep_{shard}.log").open(
         "a", encoding="utf-8")
+    extra = (["--api-url", url] if url else []) + [
+        "--api-key-env", keyenv]
     for t in mine:
         log.write(f"\n=== {t} ===\n")
         log.flush()
         r = subprocess.run(
             [str(VENV_PY), str(REPO / "scripts" / "fn_evolve.py"),
              "--target", t, "--proposer", "api",
-             "--api-model", "deepseek-v4-pro", "--api-workers", "3",
+             "--api-model", model, "--api-workers", "3",
              "--evals", "60", "--workers", "3", "--patience", "15",
              "--db", "forge_evolve_api.db", "--log-gens", "--fresh",
-             "--quiet"],
+             "--quiet"] + extra,
             stdout=log, stderr=subprocess.STDOUT)
         log.write(f"=== {t} rc={r.returncode} ===\n")
         log.flush()

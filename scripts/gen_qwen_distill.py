@@ -41,11 +41,14 @@ from forge.evolution.code_evolve import _extract_code  # noqa: E402
 MODEL_ID = "Qwen/Qwen2.5-Coder-3B-Instruct"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
 BACKENDS = {
     "groq": (GROQ_URL, "GROQ_API_KEY", "openai/gpt-oss-120b",
              {"reasoning_effort": "low"}),
     "deepseek": (DEEPSEEK_URL, "DEEPSEEK_API_KEY", "deepseek-flash",
                  {}),
+    "mistral": (MISTRAL_URL, "MISTRAL_API_KEY", "codestral-latest",
+                {}),
 }
 
 _print_lock = threading.Lock()
@@ -274,7 +277,7 @@ def main() -> int:
     ap.add_argument("--per-target", type=int, default=25)
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-new", type=int, default=900)
-    ap.add_argument("--backend", choices=["hf", "groq", "deepseek"],
+    ap.add_argument("--backend", choices=["hf", "groq", "deepseek", "mistral"],
                     default="hf")
     ap.add_argument("--api-model", default=None,
                     help="override the backend's default model id")
