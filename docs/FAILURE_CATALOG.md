@@ -157,3 +157,16 @@ Each entry: what it tried â†’ what it proved/disproved â†’ what to salvage.
   sync onto `model.config` + drop uniform sample_weights.
   Pattern: *mutate the config the model actually holds, and treat
   "no-op" weights as absent â€” presence-based dispatch bites silently*.
+
+## 2026-11-04 - 'OOM' load crashes on dense + ForgeQuant checkpoints were a compile hard-crash
+
+Symptom: ForgeEngine.from_checkpoint on a 7GB merged distill save (and its packed _fq variant) died mid-load or right after activation — looked like OOM (GPU ~7.8-12.8GB at death), no Python traceback.
+
+Root causes (two, layered):
+1. _auto_activate_optimal ran OUTSIDE the OOM-guarded load try — activation extras (quant repack, KV prealloc, graph capture, warmup) could push a successfully-loaded model past free VRAM and crash with no fallback. Fixed: staged-degrade guard (drops graph/fusion/prefix extras, then quantize).
+2. torch.compile (reduce-overhead) hard-crashes tracing the ForgeQuantLinear dequant path — native crash, no exception, bisected: compile alone kills generate on the packed ckpt; breakable CUDA graphs alone work. Fixed: _forgequant_prequant models now get use_compile/use_compile_autotune/use_block_fusion=False at auto-activate (same guard class as Int4TilePackedTo4dTensor); the vram_ratio>0.5 block no longer re-enables guarded-off features.
+
+Lesson: 'OOM crash' claims need bisection — the actual OOM exception path was guarded; the killer was an inductor-generated kernel on packed weights. Diagnose by disabling features one at a time, not by reading the VRAM number.
+
+Artifact note: 7GB dense merged saves OOM-pressure a 12GB card at activation; scripts/prequant_forge_quant.py converts to a packed _fq dir (distill250: 7.09GB -> 1.52GB) that loads in ~2-4GB with graphs still working.
+
