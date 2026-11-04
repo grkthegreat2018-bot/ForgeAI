@@ -28,11 +28,13 @@ from .engine_common import (  # noqa: F401
     _checkpoint_size_cache,
     _ckpt_cache_lock,
     _dry_penalties,
+    _hash_multinomial,
     _is_memory_model,
     _map_gguf_to_forge,
     _min_k_filter,
     _ScalingModelAdapter,
     _StopMatcher,
+    _repeat_cycle_period,
     _tokenizer_for_vocab,
     _truncate_at_stop,
     logger,
@@ -44,6 +46,12 @@ from .prefix_cache import (
 )
 from .prefix_cache import (
     generate_from_prefix_cache as _generate_from_prefix_cache,
+)
+from .decoding import (
+    _MUTABLE_RECURRENT_ATTRS,
+    _defer_restore_recurrent,
+    _spec_snapshot_recurrent,
+    _spec_state_holders,
 )
 from .test_time_scaling import (
     BeamSearch,
@@ -122,7 +130,9 @@ class _GenerationMixin:
                  return_logprobs: bool = False,
                  learn: bool | None = None,
                  mem_bias: float | None = None,
-                 suffix_gate: float | None = None) -> str | dict:
+                 suffix_gate: float | None = None,
+                 seed: int | None = None,
+                 loop_detect: bool = True) -> str | dict:
         """Generate text from a prompt using active strategies.
 
         Args:
@@ -183,7 +193,8 @@ class _GenerationMixin:
             dry_allowed_length=dry_allowed_length,
             dry_penalty_last_n=dry_penalty_last_n, stop=stop,
             skip_special_tokens=skip_special_tokens, learn=learn,
-            mem_bias=mem_bias, suffix_gate=suffix_gate)
+            mem_bias=mem_bias, suffix_gate=suffix_gate, seed=seed,
+            loop_detect=loop_detect)
         with self._gen_lock:
             # Memory-model request overrides.  learn=False and mem_bias
             # must compose: the old two-if layout applied only the FIRST
@@ -353,6 +364,7 @@ class _GenerationMixin:
                     stop=params.stop, tokenizer=self.tokenizer,
                     kv_compact=self._maybe_compact_past_kv,
                     suffix_mem=self._suffix_mem_for(params),
+                    seed=params.seed,
                     # Seam for strategy loops: honored by decoders that
                     # support cooperative abort, harmlessly **_ignored
                     # by the rest — engine-side loops check the flag
@@ -1106,7 +1118,9 @@ class _GenerationMixin:
                            generated_ids: list[int],
                            min_p: float = 0.0,
                            min_k: float = 0.0,
-                           dry_penalties: dict[int, float] | None = None
+                           dry_penalties: dict[int, float] | None = None,
+                           seed: int | None = None,
+                           sample_pos: int | None = None
                            ) -> torch.Tensor:
         """Sample the next token from logits with top-k / top-p / rep-penalty.
 
@@ -1197,8 +1211,17 @@ class _GenerationMixin:
             remove[..., 0] = False
             candidate_logits = candidate_logits.masked_fill(
                 remove, float("-inf"))
-        sampled = torch.multinomial(
-            torch.softmax(candidate_logits, dim=-1), num_samples=1)
+        probs = torch.softmax(candidate_logits, dim=-1)
+        if seed is not None:
+            # DeepInfer seq_seed path — position-keyed hash draw,
+            # reproducible across runs and chunkings (bs=1 batch
+            # invariance without RNG-order bookkeeping).
+            pos = torch.tensor(
+                [0 if sample_pos is None else sample_pos],
+                dtype=torch.int64, device=probs.device)
+            sampled = _hash_multinomial(probs, seed, pos)
+        else:
+            sampled = torch.multinomial(probs, num_samples=1)
         return candidate_ids.gather(-1, sampled)
 
     def _eos_token_ids(self, custom_ids=None) -> set[int]:
@@ -1249,6 +1272,19 @@ class _GenerationMixin:
             _StopMatcher(self.tokenizer, params.stop,
                          params.skip_special_tokens)
             if params.stop and check_stop else None)
+        _loop_last = 0
+        # Zero-overhead scheduling (plan 4.6 + DeepInfer ZOS): each
+        # step's forward launches BEFORE the .item() sync, so stop
+        # checks/observers overlap GPU work.  Hybrid models snapshot
+        # their mutable recurrent buffers per step so a stop can undo
+        # the speculative forward (see StandardDecoding for the same
+        # pattern); pure-attention and dict-presents (mamba) models
+        # need no snapshot — the pending results are just discarded.
+        _defer_snap = self.model is not None and any(
+            callable(getattr(h, "snapshot_state", None))
+            or any(getattr(h, a, None) is not None
+                   for a in _MUTABLE_RECURRENT_ATTRS)
+            for h in _spec_state_holders(self.model))
         try:
             for _ in range(params.max_new_tokens):
                 # Cooperative abort (Phase 6b): request_cancel() sets the
@@ -1275,11 +1311,38 @@ class _GenerationMixin:
                 next_token = self._sample_next_token(
                     next_logits, params.temperature, params.top_k,
                     params.top_p, params.repetition_penalty, generated_ids,
-                    params.min_p, params.min_k, dry_penalties=dry_pen)
+                    params.min_p, params.min_k, dry_penalties=dry_pen,
+                    seed=params.seed,
+                    sample_pos=len(dry_ctx) + len(generated_ids))
+
+                # Launch forward(N+1) BEFORE the .item() sync — the
+                # D2H + bookkeeping below overlaps this GPU step.  A
+                # break discards _pend_* and restores _snap.
+                _snap = _spec_snapshot_recurrent(self.model) \
+                    if _defer_snap else None
+                with torch.inference_mode():
+                    kw = {"past_key_values": past_kv, "use_cache": True}
+                    if hidden_observer is not None:
+                        kw["return_hidden"] = True
+                    _pend = self.model(next_token, **kw)
+                    _pend_logits, _pend_kv = unpack_output_with_kv(_pend)
+
                 token_id = next_token.item()
                 generated_ids.append(token_id)
                 if suffix_mem is not None:
                     suffix_mem.feed_one(token_id)
+                # Verbatim-loop detection: checked every 16 tokens past
+                # 64 generated; ~O(49k) int compares amortized — free.
+                if (params.loop_detect
+                        and len(generated_ids) >= 64
+                        and len(generated_ids) - _loop_last >= 16):
+                    _loop_last = len(generated_ids)
+                    _p = _repeat_cycle_period(generated_ids)
+                    if _p is not None:
+                        self._log(
+                            f"[loop-stop] verbatim cycle period={_p} "
+                            f"after {len(generated_ids)} tokens")
+                        break
                 if step_observer is not None:
                     # Raw (pre-processor, pre-temperature) logits + the
                     # actually-sampled id — logprobs capture needs both.
@@ -1293,8 +1356,13 @@ class _GenerationMixin:
                 # output (post-hoc find() trims the full stop text —
                 # dropping the completing token would orphan its head);
                 # EOS tokens are dropped to match StandardDecoding.
-                yield next_token, should_stop, is_eos
+                try:
+                    yield next_token, should_stop, is_eos
+                except GeneratorExit:
+                    _defer_restore_recurrent(_snap)
+                    raise
                 if should_stop:
+                    _defer_restore_recurrent(_snap)
                     break
 
                 # Crash recovery: checkpoint generation + KV snapshot.
@@ -1310,23 +1378,20 @@ class _GenerationMixin:
                             "", partial, n_gen)  # prompt filled by caller
                     self._recovery.snapshot_kv_cache(n_gen)
 
-                with torch.inference_mode():
-                    kw = {"past_key_values": past_kv, "use_cache": True}
-                    if hidden_observer is not None:
-                        kw["return_hidden"] = True
-                    out = self.model(next_token, **kw)
-                    logits, past_kv = unpack_output_with_kv(out)
-                    # R60 live bridge: give the active KV strategy a
-                    # chance to compact the per-layer (k, v) tuples
-                    # (throttled inside the helper — ~zero cost when the
-                    # cache is under its watermark).
-                    past_kv = self._maybe_compact_past_kv(past_kv)
-                    if hidden_observer is not None:
-                        # hidden of the just-consumed token (the state that
-                        # will produce the next logits); generated_ids
-                        # already includes it — ForgeGate conv/doom probes
-                        # score exactly this per-step hidden.
-                        hidden_observer(out[-1][0, -1], generated_ids)
+                # Commit the already-finished forward — logits/KV were
+                # produced while the CPU did the stop checks above.
+                logits = _pend_logits
+                # R60 live bridge: give the active KV strategy a
+                # chance to compact the per-layer (k, v) tuples
+                # (throttled inside the helper — ~zero cost when the
+                # cache is under its watermark).
+                past_kv = self._maybe_compact_past_kv(_pend_kv)
+                if hidden_observer is not None:
+                    # hidden of the just-consumed token (the state that
+                    # will produce the next logits); generated_ids
+                    # already includes it — ForgeGate conv/doom probes
+                    # score exactly this per-step hidden.
+                    hidden_observer(_pend[-1][0, -1], generated_ids)
             completed = True
         finally:
             # Only publish last-KV/logits on normal completion — an
@@ -1532,6 +1597,7 @@ class _GenerationMixin:
         dry_allowed_length: int = 2,
         dry_penalty_last_n: int = 512,
         json_schema: dict | None = None,
+        seed: int | None = None,
     ) -> str:
         """Generate text with raw control — for self-play / agentic loops.
 
@@ -1578,7 +1644,7 @@ class _GenerationMixin:
             min_k=min_k, dry_multiplier=dry_multiplier, dry_base=dry_base,
             dry_allowed_length=dry_allowed_length,
             dry_penalty_last_n=dry_penalty_last_n,
-            skip_special_tokens=skip_special_tokens)
+            skip_special_tokens=skip_special_tokens, seed=seed)
         self._validate_generation_params(prompt, params)
         self._check_vram_and_offload_if_needed()
         self.hotswap.apply_pending()
@@ -1628,6 +1694,8 @@ class _GenerationMixin:
         dry_penalty_last_n: int = 512,
         stop: list[str] | None = None,
         hidden_observer=None,
+        seed: int | None = None,
+        loop_detect: bool = True,
     ) -> Iterator[str]:
         """Token-by-token streaming generator.
 
@@ -1659,7 +1727,8 @@ class _GenerationMixin:
             min_k=min_k, dry_multiplier=dry_multiplier, dry_base=dry_base,
             dry_allowed_length=dry_allowed_length,
             dry_penalty_last_n=dry_penalty_last_n, stop=stop,
-            skip_special_tokens=skip_special_tokens)
+            skip_special_tokens=skip_special_tokens, seed=seed,
+            loop_detect=loop_detect)
         self._validate_generation_params(prompt, params)
         self._check_vram_and_offload_if_needed()
         self.hotswap.apply_pending()

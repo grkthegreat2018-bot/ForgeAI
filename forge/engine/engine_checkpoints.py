@@ -25,6 +25,7 @@ from .engine_common import (  # noqa: F401
     _min_k_filter,
     _ScalingModelAdapter,
     _tokenizer_for_vocab,
+    _tokenizer_from_meta,
     logger,
 )
 from .errors import CheckpointError
@@ -121,6 +122,13 @@ class _CheckpointLoadingMixin:
             ckpt_dir_tok = Path(checkpoint)
             if (ckpt_dir_tok / "tokenizer.json").exists():
                 tok_path = str(ckpt_dir_tok)
+        elif tokenizer_path is None:
+            # Saved file checkpoints carry no sibling tokenizer.json; the
+            # trainer records the tokenizer source in the .meta.json
+            # sidecar so a bare .safetensors stays self-describing.
+            _meta_tok = _tokenizer_from_meta(checkpoint)
+            if _meta_tok is not None:
+                tok_path = _meta_tok
 
         # GGUF-embedded tokenizer: "gguf:<path>" asks for the tekken/BPE
         # tables embedded in a GGUF file (llama_cpp vocab-only wrapper).

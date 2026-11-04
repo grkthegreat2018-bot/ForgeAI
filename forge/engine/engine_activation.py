@@ -488,6 +488,22 @@ class _ActivationMixin:
             # repair covers rollback correctness without it.
             decode_kwargs.setdefault(
                 "replay_ssm_cache", getattr(self, "_replay_ssm", None))
+        elif decoding == "suffix_draft":
+            # Zero-VRAM speculative draft: the SuffixMemory sidecar is
+            # the draft model — it proposes tokens from its exact-suffix
+            # tables and the main model verifies them. Requires
+            # enable_suffix_memory() first (the drafter IS the sidecar;
+            # a per-request suffix_gate view doesn't affect it).
+            mem = getattr(self, "_suffix_mem", None)
+            if mem is None:
+                raise ActivationError(
+                    "decoding='suffix_draft' requires "
+                    "engine.enable_suffix_memory() first — the sidecar "
+                    "is the draft model")
+            from forge.model.ngram_mem import SuffixDraftModel
+            decode_kwargs["draft_model"] = SuffixDraftModel(mem)
+            decode_kwargs.setdefault("draft_length", 4)
+            decoding = "external_draft_speculative"
         self.decoding = build_decoding(decoding, **decode_kwargs)
         self._log(f"Decoding: {self.decoding.name}")
 

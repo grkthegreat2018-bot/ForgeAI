@@ -161,6 +161,74 @@ def apply_recurrent_state_prefix(model, snap) -> None:
             gdn2.set_state_prefix(st["gdn2"])
 
 
+def _reset_live_recurrent(model) -> None:
+    """Zero every live recurrent buffer — the same new-sequence reset
+    ``ConfigurableResearchLLM.forward`` applies when
+    ``past_key_values is None``, but callable for bounded replay (which
+    passes a non-None replay KV so the model's own reset never fires).
+
+    Without this the replayed tokens would keep advancing whatever
+    conv/SSM state the previous request left behind — stale cross-request
+    contamination, the bug bounded replay exists to remove.
+    """
+    from .decoding import _spec_state_holders
+    for h in _spec_state_holders(model):
+        for flag in ("_conv_state_reset", "_state_reset"):
+            if hasattr(h, flag):
+                setattr(h, flag, True)
+        for attr in ("_conv_state_prefix", "_ssm_state",
+                     "_ssm_state_real", "_ssm_state_imag"):
+            if getattr(h, attr, None) is not None:
+                setattr(h, attr, None)
+
+
+def _bounded_replay_recurrent(model, ids: torch.Tensor, matched_len: int,
+                              cached_kv, replay_len: int):
+    """DeepInfer SWA bounded replay: rebuild recurrent boundary state at
+    ``matched_len`` by re-forwarding only the last ``replay_len`` prefix
+    tokens from a zeroed recurrent state.
+
+    A partial ChunkedPrefixCache hit stores a conv/SSM snapshot that is
+    position-correct only at the entry's own end — and dict-carried
+    recurrent presents in the KV are likewise pinned to the entry end.
+    Rather than trusting either (or falling back to the previous
+    request's stale live state), replay a bounded recent suffix:
+
+      * attention KV is seq-indexed → the slice to ``replay_start`` is
+        exact, and the replayed span re-appends bit-identical KV (same
+        tokens, same history) so the returned cache covers
+        ``[0, matched_len)`` exactly;
+      * conv state carries only ``kernel_size - 1`` hidden positions →
+        replay is EXACT once ``replay_len >= kernel``;
+      * SWA is served by the KV itself → exact;
+      * long-memory SSM dicts are rebuilt from zero over the window —
+        bounded approximation error, the same contract DeepInfer ships
+        (replay window ≥ window + max backtrack).
+
+    Returns ``(repaired_kv, conv_snap)`` — a full-length cache for the
+    suffix forward plus the captured boundary snapshot.
+    """
+    replay_start = max(0, matched_len - replay_len)
+    # Slice attention KV back to the replay start; dict recurrent
+    # presents encode the entry-end position (wrong for us) — drop them,
+    # the replay rebuilds fresh ones over the window.  replay_start == 0
+    # → None past, which also fires the model's own new-sequence reset
+    # (and avoids handing it zero-length attention tuples).
+    replay_kv = None
+    if replay_start > 0:
+        replay_kv = [None if isinstance(e, dict) else e
+                     for e in _slice_past_kv(cached_kv, replay_start)]
+    _reset_live_recurrent(model)
+    with torch.inference_mode():
+        out = model(ids[:, replay_start:matched_len],
+                    past_key_values=replay_kv, use_cache=True,
+                    logits_last_only=True)
+        _, repaired_kv = unpack_output_with_kv(out)
+    # Live conv/SSM buffers now sit exactly at matched_len — captured so
+    # the caller can install them via the normal prefix mechanism.
+    return repaired_kv, capture_recurrent_state(model)
+
+
 def get_cached_prefix(prefix_cache, ids: torch.Tensor):
     """Look up a cached prefix KV for ``ids``.
 
@@ -262,6 +330,15 @@ def generate_from_prefix_cache(
     cached_len, cached_past_kv, conv_snap = cached
     suffix_ids = ids[:, cached_len:]
     if suffix_ids.shape[1] > 0 and cached_past_kv is not None:
+        if conv_snap is None:
+            # Partial hit: DeepInfer SWA bounded replay — rebuild the
+            # conv/SSM boundary state by re-forwarding only a bounded
+            # recent suffix instead of trusting stale/zero context.
+            cfg = getattr(engine.model, "config", None)
+            replay_len = max(
+                128, int(getattr(cfg, "sliding_window", 0) or 0))
+            cached_past_kv, conv_snap = _bounded_replay_recurrent(
+                engine.model, ids, cached_len, cached_past_kv, replay_len)
         # Restore conv boundary context so the suffix prefill doesn't
         # zero-pad the first kernel-1 positions.
         apply_recurrent_state_prefix(engine.model, conv_snap)

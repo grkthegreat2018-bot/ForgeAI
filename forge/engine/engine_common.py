@@ -6,9 +6,12 @@ working.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 from dataclasses import dataclass, fields
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -41,6 +44,59 @@ def _fast_load_vram_required(ckpt_size: int) -> int:
 #   Hermes-3 (ChatML on Llama-3.1 vocab): 128039 (im_start), 128040 (im_end)
 _DEFAULT_EOS_TOKEN_IDS = frozenset(
     {2, 7, 519, 151643, 151645, 128001, 128009, 128039, 128040})
+
+
+# ── DeepInfer deterministic sampling (seq_seed port) ─────────────────────
+# deepseek-ai/DeepInfer tilelang_ops/random_sampling.py: each token's draw
+# is a SplitMix64 hash of (seq_seed, sample_position, sample_case) — the
+# uniform depends only on (seed, position), never on batch composition or
+# how many samples preceded it.  Batch-invariant and chunk-invariant by
+# construction.  case: 0 = main sampling (their nextn/reject cases are 1/2).
+
+_SPLITMIX_PHI = 0x9E3779B97F4A7C15
+
+
+def _lsr64(x: torch.Tensor, n: int) -> torch.Tensor:
+    """Logical (unsigned) right shift for int64 tensors."""
+    return (x >> n) & ((1 << (64 - n)) - 1)
+
+
+def _seed_i64(seed: int) -> int:
+    """Fold a uint64-range seed into int64 for tensor math."""
+    s = int(seed) & 0xFFFFFFFFFFFFFFFF
+    return s - (1 << 64) if s >= (1 << 63) else s
+
+
+def _hash_sample_positions(positions: torch.Tensor, seed: int,
+                           case: int = 0) -> torch.Tensor:
+    """Deterministic uniforms u ∈ [0,1) per (seed, position, case).
+
+    Mirrors DeepInfer ``_hash_to_uniform(seed_block ^ ((pos*3+case)*φ))``
+    on int64 tensors — wrapping two's-complement multiply is exact for
+    the 64-bit mix.
+    """
+    seq = (positions.to(torch.int64) * 3 + int(case)) * _SPLITMIX_PHI
+    z = _seed_i64(seed) + (seq ^ (seq << 13))
+    z = z + _SPLITMIX_PHI
+    z = (z ^ _lsr64(z, 30)) * 0xBF58476D1CE4E5B9
+    z = (z ^ _lsr64(z, 27)) * 0x94D049BB133111EB
+    z = z ^ _lsr64(z, 31)
+    return _lsr64(z, 11).to(torch.float64) * (1.0 / 2**53)
+
+
+def _hash_multinomial(probs: torch.Tensor, seed: int,
+                      positions: torch.Tensor, case: int = 0) -> torch.Tensor:
+    """Deterministic sampling: invert the CDF at the hashed uniform.
+
+    ``probs``: (B, V) probability rows.  ``positions``: (B,) absolute
+    sequence positions of the tokens being sampled.  Returns (B, 1)
+    sampled indices — identical to DeepInfer's ``random_sampling``
+    pick semantics (cdf > u*total → argmax).
+    """
+    u = _hash_sample_positions(positions, seed, case).to(probs.device)
+    cdf = probs.to(torch.float64).cumsum(-1)
+    return (cdf > (u.unsqueeze(-1) * cdf[:, -1:])).to(torch.int64).argmax(
+        -1, keepdim=True)
 
 
 def _is_memory_model(model) -> bool:
@@ -86,6 +142,18 @@ class SamplingParams:
     # (KV-cache models).  None = engine default; <=0 disables the lift
     # for this request; >0 scales it.
     suffix_gate: float | None = None
+    # DeepInfer-style deterministic sampling (seq_seed): when set and
+    # temperature > 0, the token draw is SplitMix64(seed, 3*pos+case)
+    # inverted through the probability CDF — a pure function of
+    # (seed, position, filtered probs), identical across chunk
+    # boundaries and batch composition.  None = torch.multinomial.
+    seed: int | None = None
+    # Verbatim-cycle detection stop (vllm repetition_detection analogue):
+    # when the generated tail is an exact repeating cycle (>=3 copies,
+    # >=48 tokens covered, period <=128) the request finishes as a stop —
+    # the only mechanism that ENDS an attractor loop, since penalties
+    # forbid token forms, not behaviours.
+    loop_detect: bool = True
 
     @classmethod
     def from_kwargs(cls, **kw) -> SamplingParams:
@@ -284,6 +352,40 @@ def _min_k_filter(logits: torch.Tensor, sensitivity: float) -> torch.Tensor:
     return logits.masked_fill(mask, float("-inf"))
 
 
+def _repeat_cycle_period(ids: list[int], min_copies: int = 3,
+                         min_cover: int = 48, max_period: int = 128,
+                         window: int = 512) -> int | None:
+    """Verbatim-cycle detector (vllm repetition_detection analogue).
+
+    Returns the period p if the tail of ``ids`` is an exact repeating
+    cycle — >=min_copies consecutive copies covering >=min_cover tokens,
+    p <= max_period, scanned over the last ``window`` tokens. Rotation-
+    invariant (compared from the end) so a mid-cycle stop still triggers.
+    Pure CPU int compares; intended to run every ~16 decode steps.
+    """
+    n = len(ids)
+    if n < min_copies:
+        return None
+    span = min(n, window)
+    lim = min(max_period, span // min_copies)
+    for p in range(1, lim + 1):
+        # strictness scales inversely with period: p=1 needs min_cover
+        # identical tokens; p>=min_cover//min_copies needs 3 copies
+        copies = max(min_copies, -(-min_cover // p))
+        cover = copies * p
+        if cover > span:
+            break
+        base = n - 1
+        ok = True
+        for k in range(cover - p):
+            if ids[base - k] != ids[base - k - p]:
+                ok = False
+                break
+        if ok:
+            return p
+    return None
+
+
 def _dry_penalties(
     context_ids: list[int],
     last_n: int,
@@ -380,6 +482,29 @@ def _tokenizer_for_vocab(vocab_size: int | None) -> str:
     if vocab_size == _QWEN_VOCAB:
         return _QWEN_TOKENIZER_PATH
     return _DEFAULT_TOKENIZER_PATH
+
+
+def _tokenizer_from_meta(checkpoint) -> str | None:
+    """Read ``tokenizer_path`` from a ``<ckpt>.meta.json`` sidecar.
+
+    ``save_training_checkpoint`` writes the sidecar next to every
+    .safetensors save; the trainer records the tokenizer source it actually
+    used. For a bare saved file this beats the vocab-size dispatch —
+    otherwise a 128000-vocab LFM3 save silently gets the canonical
+    65536-vocab tokenizer and mis-tokenizes every prompt (degenerate
+    whitespace output even though the weights are fine).
+    """
+    try:
+        meta_path = str(checkpoint) + ".meta.json"
+        if not os.path.exists(meta_path):
+            return None
+        tok = json.loads(Path(meta_path).read_text(encoding="utf-8")).get(
+            "tokenizer_path")
+        if tok and Path(tok).is_dir() and (Path(tok) / "tokenizer.json").exists():
+            return str(tok)
+    except Exception:
+        pass
+    return None
 
 
 if TYPE_CHECKING:

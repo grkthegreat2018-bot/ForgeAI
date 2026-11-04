@@ -21,6 +21,7 @@ from forge.engine.engine_common import (
     _DEFAULT_EOS_TOKEN_IDS,
     _apply_dry,
     _dry_penalties,
+    _hash_multinomial,
 )
 from forge.engine.engine_common import (
     _min_k_filter as _min_k_filter_logits,
@@ -41,6 +42,8 @@ def _sample_from_logits(
     min_k: float,
     dry_penalties: dict[int, float] | None,
     top_p_fn,
+    seed: int | None = None,
+    sample_pos: int | None = None,
 ) -> torch.Tensor:
     """Shared sampling chain: rep-penalty → temp → DRY → min-p →
     min-k → top-k → top-p → multinomial (argmax at temperature==0).
@@ -85,7 +88,17 @@ def _sample_from_logits(
         next_logits.masked_fill_(indices_to_remove, float('-inf'))
     if top_p < 1.0:
         next_logits = top_p_fn(next_logits, top_p)
-    return torch.multinomial(F.softmax(next_logits, dim=-1), num_samples=1)
+    probs = F.softmax(next_logits, dim=-1)
+    if seed is not None:
+        # DeepInfer seq_seed path: the draw is a SplitMix64 hash of
+        # (seed, absolute position) inverted through the CDF — a pure
+        # function of the filtered distribution, reproducible across
+        # runs/chunkings without RNG-order bookkeeping.
+        pos = torch.tensor(
+            [0 if sample_pos is None else sample_pos],
+            dtype=torch.int64, device=probs.device)
+        return _hash_multinomial(probs, seed, pos)
+    return torch.multinomial(probs, num_samples=1)
 
 
 class DecodingStrategy(ABC):
@@ -261,7 +274,8 @@ class StandardDecoding(DecodingStrategy):
                  dry_allowed_length: int = 2, dry_penalty_last_n: int = 512,
                  stop=None, tokenizer=None,
                  kv_compact=None, suffix_mem=None,
-                 cancel_check=None, **_ignored):
+                 cancel_check=None, seed: int | None = None,
+                 **_ignored):
         ids = input_ids.clone()
         # EOS detection: check model attr, config, then known defaults
         eos = getattr(model, "eos_token_id", None)
@@ -277,6 +291,7 @@ class StandardDecoding(DecodingStrategy):
             eos_set.add(eos)
         # Track generated token ids for repetition penalty + degeneration.
         # DRY operates on prompt + generated context (llama.cpp semantics).
+        plen = input_ids.shape[1]
         prompt_ids = input_ids[0].tolist()
         generated_ids: list[int] = []
         # Collect generated token tensors for a single final cat (O(n) vs O(n²))
@@ -324,7 +339,7 @@ class StandardDecoding(DecodingStrategy):
                     temperature, top_p, top_k, repetition_penalty,
                     min_p, min_k, dry_multiplier, dry_base,
                     dry_allowed_length, dry_penalty_last_n, prompt_ids,
-                    suffix_mem, stop_matcher, cancel_check)
+                    suffix_mem, stop_matcher, cancel_check, seed=seed)
             except Exception:
                 import logging
                 logging.getLogger(__name__).warning(
@@ -344,13 +359,18 @@ class StandardDecoding(DecodingStrategy):
             if kv_compact is not None:
                 past_kv = kv_compact(past_kv, force=True)
 
-        # Deferred readback (plan 4.6) is only correct when all recurrent
-        # state lives in past_kv — module-resident conv/SSM banks mutate
-        # in place and can't be un-advanced on a break without rollback.
+        # Deferred readback (plan 4.6 + DeepInfer zero-overhead
+        # scheduling): the next forward launches BEFORE the .item() sync,
+        # so CPU bookkeeping overlaps GPU work — the DeepInfer pipeline
+        # shape "launch_forward(N+1) → post-process(N)" on one request.
+        # Hybrid models snapshot their mutable recurrent buffers first:
+        # on a break the speculative step is discarded and the buffers
+        # rolled back (clone cost ≪ the per-step sync it removes — for
+        # LFM3's 13 conv layers ≈ 320KB vs ~0.5-2ms of CPU latency).
         # Checked AFTER prefill so lazily-created state attrs exist.
         # (_v0 capture fires only on the non-cached prefill; _conv_state_
         # reset/prefix are one-shot flags, not per-token buffers.)
-        _defer_sync = not any(
+        _defer_snap = any(
             callable(getattr(h, "snapshot_state", None))
             or any(getattr(h, a, None) is not None
                    for a in _MUTABLE_RECURRENT_ATTRS)
@@ -390,43 +410,46 @@ class StandardDecoding(DecodingStrategy):
                 generated_ids=generated_ids,
                 min_p=min_p, min_k=min_k,
                 dry_penalties=dry_pen,
-                top_p_fn=self._top_p)
+                top_p_fn=self._top_p,
+                seed=seed,
+                sample_pos=plen + len(generated_ids))
 
-            # Plan 4.6 async readback — only on models whose state lives
-            # entirely in past_kv (fresh (k,v) tuples per step). Hybrid
-            # models mutate module-resident conv/SSM banks in place, so a
-            # speculatively-launched step can't be discarded on break
-            # without a full recurrent rollback (costlier than the sync).
-            _next = None
-            if _defer_sync:
-                with torch.inference_mode():
-                    out = model(next_token, past_key_values=past_kv,
-                                use_cache=True)
-                    _nl, _nk = unpack_output_with_kv(out)
-                    if needs_kv_clone:
-                        _nl = _nl.clone()
-                        _nk = _clone_state_tree(_nk)
-                    if kv_compact is not None:
-                        _nk = kv_compact(_nk)
-                    _next = (_nl, _nk)
+            # Snapshot mutable recurrent state BEFORE the speculative
+            # launch — any break below discards the step and restores.
+            _snap = _spec_snapshot_recurrent(model) if _defer_snap else None
+            with torch.inference_mode():
+                out = model(next_token, past_key_values=past_kv,
+                            use_cache=True)
+                _nl, _nk = unpack_output_with_kv(out)
+                if needs_kv_clone:
+                    _nl = _nl.clone()
+                    _nk = _clone_state_tree(_nk)
+                if kv_compact is not None:
+                    _nk = kv_compact(_nk)
+                _next = (_nl, _nk)
 
             # Single GPU->CPU sync per token: .item() brings the id over,
             # then the EOS check runs on the CPU scalar (no second sync).
+            # The D2H wait overlaps the speculative forward already in
+            # flight — DeepInfer's post-process(N) under forward(N+1).
             tok_id = next_token.item()
             generated_ids.append(tok_id)
             if suffix_mem is not None:
                 suffix_mem.feed_one(tok_id)
             if tok_id in eos_set:
+                _defer_restore_recurrent(_snap)
                 break
 
             # Degeneration guard: detect repetitive garbage and stop early.
             # Critical for base models that haven't learned to emit EOS.
-            if len(generated_ids) >= MAX_REPEAT and all(g == tok_id for g in generated_ids[-MAX_REPEAT:]):
-                break  # same token repeated 8x = degenerate
-            if len(generated_ids) >= 20:
-                recent = generated_ids[-20:]
-                if len(set(recent)) / len(recent) < 0.4:
-                    break  # <40% unique tokens = degenerate
+            _stop = (
+                (len(generated_ids) >= MAX_REPEAT
+                 and all(g == tok_id for g in generated_ids[-MAX_REPEAT:]))
+                or (len(generated_ids) >= 20
+                    and len(set(generated_ids[-20:])) / 20 < 0.4))
+            if _stop:
+                _defer_restore_recurrent(_snap)
+                break
 
             # Collect tokens for final cat (avoids O(n²) torch.cat per step)
             _generated_tokens.append(next_token)
@@ -436,20 +459,9 @@ class StandardDecoding(DecodingStrategy):
             # can trim the full stop text (earlier chunks of the match were
             # already emitted in prior steps).
             if stop_matcher is not None and stop_matcher.push(tok_id):
+                _defer_restore_recurrent(_snap)
                 break
-            if _next is not None:
-                logits, past_kv = _next
-            else:
-                with torch.inference_mode():
-                    out = model(next_token, past_key_values=past_kv, use_cache=True)
-                    logits, past_kv = unpack_output_with_kv(out)
-                    if needs_kv_clone:
-                        logits = logits.clone()
-                        past_kv = _clone_state_tree(past_kv)
-                    # R65: keep the KV window bounded (throttled inside the
-                    # engine helper — ~zero cost under the watermark).
-                    if kv_compact is not None:
-                        past_kv = kv_compact(past_kv)
+            logits, past_kv = _next
 
         # Expose final KV cache state + next-position logits for the
         # _finish_to_stop fast path (the last emitted token is already
@@ -465,7 +477,8 @@ class StandardDecoding(DecodingStrategy):
                          temperature, top_p, top_k, repetition_penalty,
                          min_p, min_k, dry_multiplier, dry_base,
                          dry_allowed_length, dry_penalty_last_n, prompt_ids,
-                         suffix_mem, stop_matcher, cancel_check=None):
+                         suffix_mem, stop_matcher, cancel_check=None,
+                         seed: int | None = None):
         """Decode via a replayed CUDA graph over static KV.
 
         Prefill runs eagerly into the persistent PreAllocatedKVCache
@@ -515,12 +528,14 @@ class StandardDecoding(DecodingStrategy):
                         return graphs[tag], buffers[tag]
             return None
 
-        # Deferred readback (plan 4.6): on rewindable state — pure
-        # attention, all KV in the static cache — launch this token's
-        # replay BEFORE .item() so the D2H overlaps the replay. A break
-        # then rewinds position/mask (cheap). Conv/SSM/Titan banks can't
-        # be rewound, so hybrids keep the original sync-first order.
-        _defer_sync = not any(
+        # Deferred readback (plan 4.6 + DeepInfer zero-overhead
+        # scheduling): launch this token's replay BEFORE .item() so the
+        # D2H overlaps the replay.  A break rewinds position/mask — and
+        # for hybrids (conv/SSM/Titan banks) also restores a per-step
+        # recurrent snapshot taken before the replay.  Dict-carried
+        # presents (mamba) are functional — the speculative replay's new
+        # entries are simply discarded, no rollback needed.
+        _defer_snap = any(
             callable(getattr(h, "snapshot_state", None))
             or any(getattr(h, a, None) is not None
                    for a in _MUTABLE_RECURRENT_ATTRS)
@@ -550,14 +565,19 @@ class StandardDecoding(DecodingStrategy):
                 generated_ids=generated_ids,
                 min_p=min_p, min_k=min_k,
                 dry_penalties=dry_pen,
-                top_p_fn=self._top_p)
+                top_p_fn=self._top_p,
+                seed=seed,
+                sample_pos=plen + len(generated_ids))
 
             _replayed = None
             _pos = cache.position
             _step = (_step_bufs(_pos + 1)
-                     if _defer_sync and _pos < cache.max_seq_len
+                     if _pos < cache.max_seq_len
                      else None)
+            _snap = None
             if _step is not None:
+                _snap = (_spec_snapshot_recurrent(model)
+                         if _defer_snap else None)
                 _prev_logits = logits.clone()  # graph overwrites the buf
                 graph, bufs = _step
                 mask_buf[:, _pos] = 1
@@ -589,6 +609,7 @@ class StandardDecoding(DecodingStrategy):
                     _, _p, logits = _replayed
                     cache.position = _p
                     mask_buf[:, _p] = 0
+                _defer_restore_recurrent(_snap)
                 break
             if _replayed is not None:
                 logits = _replayed[0]
@@ -768,17 +789,34 @@ class ExternalDraftSpeculativeDecoding(DecodingStrategy):
     The main model verifies them in a single forward pass.
     """
 
-    def __init__(self, draft_model, draft_length: int = 4):
+    def __init__(self, draft_model, draft_length: int = 4,
+                 confidence_tau: float = 0.0):
         self.draft_model = draft_model
         self.draft_length = draft_length
+        # DeepInfer confidence-scheduled verification, bs=1 form: the
+        # draft's own softmax probability proxies the acceptance rate;
+        # the cumprod prefix-survival falling below ``confidence_tau``
+        # ends the confident draft span — positions past it are neither
+        # produced nor verified (DeepSeek trims the verify subset at a
+        # global budget; on a single request a threshold prefix is the
+        # same cut and also saves the doomed draft forwards).  0 =
+        # classic fixed-length verify.
+        self.confidence_tau = confidence_tau
 
     def generate(self, model, input_ids, max_new_tokens=100,
                  temperature=0.0, top_p=1.0,
                  top_k=80, repetition_penalty=1.05,
-                 **kwargs):
+                 suffix_mem=None, **kwargs):
         ids = input_ids.clone()
         device = input_ids.device
         generated = 0
+
+        # R65: when the draft IS the suffix sidecar (SuffixDraftModel),
+        # the sidecar's tail must see the prompt before its first
+        # proposal — its _tail is the committed-context source of truth.
+        if suffix_mem is not None:
+            suffix_mem.reset_state()
+            suffix_mem.feed(ids[0].tolist())
 
         with torch.inference_mode():
             # Prefill both models
@@ -796,16 +834,32 @@ class ExternalDraftSpeculativeDecoding(DecodingStrategy):
             draft_snap = _spec_snapshot_recurrent(self.draft_model)
             draft_tokens = []
             cur_logits = draft_logits[:, -1, :]
+            survival = 1.0
             for _ in range(self.draft_length):
                 if temperature == 0:
                     tok = cur_logits.argmax(-1, keepdim=True)
+                    conf = F.softmax(cur_logits, dim=-1).gather(
+                        -1, tok) if self.confidence_tau > 0 else None
                 else:
                     probs = F.softmax(cur_logits / max(temperature, 1e-5), dim=-1)
                     tok = torch.multinomial(probs.view(-1), 1).unsqueeze(0)
-                draft_tokens.append(tok.squeeze().item())
+                    conf = probs.view(-1).gather(
+                        0, tok.view(-1)) if self.confidence_tau > 0 else None
+                if conf is not None:
+                    # One sync for (token, draft-prob): cumprod prefix
+                    # survival ends the round early below the tau floor.
+                    tok_p = torch.stack(
+                        [tok.float().view(-1)[0], conf.view(-1)[0]]).tolist()
+                    survival *= float(tok_p[1])
+                    if survival < self.confidence_tau:
+                        break
+                    draft_tokens.append(int(tok_p[0]))
+                else:
+                    draft_tokens.append(tok.squeeze().item())
                 with torch.inference_mode():
                     draft_out = self.draft_model(tok, past_key_values=draft_past_kv, use_cache=True)
                     draft_logits, draft_past_kv = unpack_output_with_kv(draft_out)
+                    cur_logits = draft_logits[:, -1, :]
 
             # Main model generates next token
             main_token = (logits[:, -1, :] / max(temperature, 1e-5)).argmax(-1, keepdim=True)
@@ -868,6 +922,11 @@ class ExternalDraftSpeculativeDecoding(DecodingStrategy):
                 for tok in new_tokens:
                     ids = torch.cat([ids, torch.tensor([[tok]], device=device)], dim=-1)
                     generated += 1
+                    if suffix_mem is not None:
+                        # Committed tokens feed the sidecar BEFORE the
+                        # draft resync below — SuffixDraftModel predicts
+                        # next-round proposals from mem._tail.
+                        suffix_mem.feed_one(tok)
                     if generated >= max_new_tokens:
                         break
 
@@ -895,6 +954,8 @@ class ExternalDraftSpeculativeDecoding(DecodingStrategy):
             else:
                 ids = torch.cat([ids, main_token], dim=-1)
                 generated += 1
+                if suffix_mem is not None:
+                    suffix_mem.feed_one(int(main_token.item()))
                 with torch.inference_mode():
                     out = model(main_token, past_key_values=past_kv, use_cache=True)
                     logits, past_kv = unpack_output_with_kv(out)
@@ -1694,6 +1755,48 @@ def _spec_restore_recurrent(snap) -> None:
         else:
             setattr(obj, attr,
                     val.clone() if torch.is_tensor(val) else val)
+
+
+def _defer_restore_recurrent(snap) -> None:
+    """Undo a speculatively-launched decode step on a hybrid model.
+
+    Same restore surface as :func:`_spec_restore_recurrent` but writes
+    back IN PLACE when the live attr is a same-shaped tensor —
+    ``_conv_state`` aliases the persistent ``_conv_state_buf`` storage
+    and ``_state`` banks can be captured inside CUDA graphs, so a plain
+    ``setattr`` would orphan the recorded storage pointer and let the
+    graph keep mutating a buffer the module no longer reads.
+    ``None`` snaps are a no-op (pure-attention / dict-presents models).
+    """
+    if not snap:
+        return
+    for obj, attr, val in snap:
+        if attr == "__snap__":
+            cur = getattr(obj, "_state", None)
+            s = val.get("state")
+            if torch.is_tensor(cur) and torch.is_tensor(s) \
+                    and cur.shape == s.shape:
+                cur.copy_(s)
+            else:
+                obj._state = s.clone() if torch.is_tensor(s) else s
+            for ck in ("conv_q", "conv_k", "conv_v"):
+                cv = getattr(obj, ck, None)
+                if cv is not None:
+                    sv = val.get(ck)
+                    cst = getattr(cv, "state", None)
+                    if torch.is_tensor(cst) and torch.is_tensor(sv) \
+                            and cst.shape == sv.shape:
+                        cst.copy_(sv)
+                    else:
+                        cv.state = sv.clone() if torch.is_tensor(sv) else sv
+        else:
+            cur = getattr(obj, attr, None)
+            if torch.is_tensor(cur) and torch.is_tensor(val) \
+                    and cur.shape == val.shape:
+                cur.copy_(val)
+            else:
+                setattr(obj, attr,
+                        val.clone() if torch.is_tensor(val) else val)
 
 
 def _spec_has_recurrent_state(snap) -> bool:

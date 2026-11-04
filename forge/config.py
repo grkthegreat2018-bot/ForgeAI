@@ -987,6 +987,36 @@ MODEL_CONFIGS["qwen25_coder_3b_mla_moe"] = ModelConfig(
     tie_word_embeddings=True,
 )
 
+# Same mla_moe recipe at Qwen2.5-Coder-7B scale: GQA 28Q/4KV -> GLA
+# latent-KV (512), dense FFN 18944 -> 8 experts of 2368 (dense-bypass =
+# lossless init). Differs from the 3B preset: vocab 152064 and UNTIED
+# embeddings (7B has separate embed/head). Local-teacher port target:
+# latent-KV shrinks per-token cache -> bigger decode batches on 12GB.
+MODEL_CONFIGS["qwen25_coder_7b_mla_moe"] = ModelConfig(
+    vocab_size=152064,
+    d_model=3584,
+    n_layers=28,
+    n_heads=28,
+    n_kv_heads=4,
+    intermediate_size=18944,
+    attn_type="gla",
+    gla_latent_dim=512,
+    attn_bias=True,
+    ffn_type="swiglu",
+    use_moe=True,
+    moe_n_experts=8,
+    moe_top_k=8,
+    moe_d_ff=2368,                 # 18944/8
+    moe_shared_expert=False,
+    moe_dense_bypass=True,
+    moe_noisy_gating=False,
+    norm_type="rmsnorm",
+    norm_eps=1e-6,
+    rope_base=1_000_000.0,
+    max_seq_len=32768,
+    tie_word_embeddings=False,
+)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Qwen3-4B-Instruct-2507 family (HF compat, R50) — native shapes for
 # HF-style checkpoints.

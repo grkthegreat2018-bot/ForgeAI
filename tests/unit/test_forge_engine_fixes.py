@@ -741,3 +741,63 @@ class TestCapturesClearedAtRequestEnd:
         assert eng.model._forge_last_kv is None
         assert eng.model._forge_prefill_kv is None
         assert eng.model._forge_last_logits is None
+
+
+class TestRepeatCyclePeriod:
+    """Verbatim-loop detector (loop_detect) - the only mechanism that
+    ENDS an attractor cycle; penalties forbid forms, not behaviours."""
+
+    def test_no_cycle(self):
+        import random
+        from forge.engine.engine_common import _repeat_cycle_period
+        random.seed(0)
+        assert _repeat_cycle_period(
+            [random.randrange(200) for _ in range(100)]) is None
+
+    def test_period_20(self):
+        from forge.engine.engine_common import _repeat_cycle_period
+        ids = list(range(50)) + list(range(7, 27)) * 4
+        assert _repeat_cycle_period(ids) == 20
+
+    def test_period_1_needs_48_copies(self):
+        from forge.engine.engine_common import _repeat_cycle_period
+        assert _repeat_cycle_period(list(range(50)) + [5] * 60) == 1
+        assert _repeat_cycle_period(list(range(50)) + [5] * 30) is None
+
+    def test_under_cover_ignored(self):
+        from forge.engine.engine_common import _repeat_cycle_period
+        ids = list(range(50)) + [1, 2, 3] * 8   # 24 tokens, below cover
+        assert _repeat_cycle_period(ids) is None
+
+    def test_rotation_invariant(self):
+        from forge.engine.engine_common import _repeat_cycle_period
+        ids = list(range(50)) + list(range(10, 30)) * 3 + list(range(10, 15))
+        assert _repeat_cycle_period(ids) == 20
+
+    def test_loop_detect_halts_verbatim_cycle_e2e(self, tiny_model):
+        # Engine-path check: a model forced to emit token 5 forever must be
+        # stopped by loop_detect, not by max_new_tokens.  Detector arms at
+        # 64 generated tokens and checks every 16 -> stop in (64, 80].
+        from forge.engine.forge_engine import ForgeEngine
+        tok = MagicMock()
+        tok.eos_token_id = 0
+        tok.return_value.input_ids = torch.tensor([[1, 2, 3]])
+        tok.decode = MagicMock(side_effect=lambda ids, *a, **k:
+                                 "x" * len(ids))
+        eng = ForgeEngine(tiny_model, tok, device="cpu")
+        eng._library_enabled = False
+        eng._recovery.enabled = False
+        force = torch.zeros(1, tiny_model.config.vocab_size)
+        force[0, 5] = 1.0
+        def proc(logits, ids):
+            return force
+        n = sum(1 for _ in eng.generate_stream(
+            "hi", max_new_tokens=200, temperature=0.0,
+            logits_processor=proc, eos_token_ids=[255], loop_detect=True))
+        assert 63 <= n <= 80, n
+        # detection off: runs past the 64-token arm point to the
+        # tiny model's 128-token context ceiling (prompt 3 + gen 120)
+        n_off = sum(1 for _ in eng.generate_stream(
+            "hi", max_new_tokens=120, temperature=0.0,
+            logits_processor=proc, eos_token_ids=[255], loop_detect=False))
+        assert n_off >= 100

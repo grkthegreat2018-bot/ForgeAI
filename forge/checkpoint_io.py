@@ -208,7 +208,7 @@ def load_safetensors_pipelined(path: str, device,
                         cs, ce = max(s, off), min(e, off + n)
                         if cs >= ce:
                             continue
-                        flat = state[k].view(torch.uint8).view(-1)
+                        flat = state[k].reshape(-1).view(torch.uint8)
                         flat[cs - s:ce - s].copy_(
                             pinned[cs - off:ce - off], non_blocking=True)
                     ev = torch.cuda.Event()

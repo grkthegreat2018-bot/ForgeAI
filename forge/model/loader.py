@@ -891,11 +891,18 @@ class ModelLoader:
                             else (w.shape[1] if w is not None
                                   else state[dk].shape[1] * 2))
                     has_bias = f"{name}.bias" in state
+                    # ForgeQ-R residual patch: <mod>.res_a (out, r) self-
+                    # describes the rank — no forge_convert flag needed.
+                    _res_r = 0
+                    _ra = state.get(f"{name}.res_a")
+                    if _ra is not None and _ra.dim() == 2:
+                        _res_r = _ra.shape[1]
                     fq = ForgeQuantLinear(
                         in_f, out_f, bias=has_bias,
                         group_size=getattr(config, 'forge_quant_group_size', 128),
                         sparse_ratio=getattr(config, 'forge_quant_sparse_ratio', 0.10),
-                        use_rotation=_fq_rot)
+                        use_rotation=_fq_rot,
+                        residual_rank=_res_r)
                     # Prequant = memory-bounded path: keep weights packed and
                     # dequant per forward (plain ops → still graph-capturable).
                     fq._cache_w = False
