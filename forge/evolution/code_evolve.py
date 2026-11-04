@@ -661,7 +661,10 @@ class LLMProposer:
         c = getattr(self, "_spark_cached", None)
         if c is not None:
             return c
-        mid = self._model_id or ""
+        try:
+            mid = self._model_id or ""
+        except Exception:
+            mid = ""
         c = "spark" in mid.lower()
         p = Path(mid)
         if not c and p.is_dir():

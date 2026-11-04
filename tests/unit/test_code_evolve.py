@@ -1561,3 +1561,41 @@ def test_wrap_lfm3_official_template():
     # non-LFM3 stays on generic ChatML - no BOS, no think
     p._lfm3_cached = False
     assert p._wrap("x") == A + "user\nx" + E + "\n" + A + "assistant\n"
+
+
+def test_spark_wrap(tmp_path):
+    """Spark-X2.6 uses DeepSeek-style sentence markers + User/Bot turns —
+    NOT ChatML (the generic wrap is an untrained format for it)."""
+    p = LLMProposer.__new__(LLMProposer)
+    p.cfg = type("C", (), {"proposer_think": False})()
+    p._spark_cached = True
+    p._lfm3_cached = False
+    p._primed_cached = False
+    sos = "\x3c｜start▁of▁sentence｜>"
+    eos = "\x3c｜end▁of▁sentence｜>"
+    out = p._wrap("Do the thing.")
+    assert out == (sos + "\x3c|User|>Do the thing." + eos + sos
+                   + "\x3c|Bot|>\x3c/think>```python\n")
+    # think mode opens the reasoning tag instead of the fence
+    p.cfg.proposer_think = True
+    out = p._wrap("x")
+    assert out.endswith("\x3c|Bot|>\x3cthink>")
+    # non-Spark models never get the sentence markers
+    p._spark_cached = False
+    assert "sentence" not in p._wrap("x")
+
+
+def test_spark_detects_via_tokenizer_config(tmp_path):
+    """A renamed local checkpoint still detects Spark via bos_token."""
+    import json as _json
+    d = tmp_path / "renamed_ckpt"
+    d.mkdir()
+    bos = "\x3c｜start▁of▁sentence｜>"
+    (d / "tokenizer_config.json").write_text(
+        _json.dumps({"bos_token": bos}), encoding="utf-8")
+    p = LLMProposer.__new__(LLMProposer)
+    p.cfg = type("C", (), {"model_id": str(d)})()
+    assert p._spark is True
+    p2 = LLMProposer.__new__(LLMProposer)
+    p2.cfg = type("C", (), {"model_id": "Qwen/Qwen2.5-Coder-3B-Instruct"})()
+    assert p2._spark is False
