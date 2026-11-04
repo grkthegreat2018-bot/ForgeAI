@@ -1277,6 +1277,9 @@ MODEL_CONFIGS["spark_x26_1p7b"] = ModelConfig(
     ],
     sliding_window=512,
     use_attn_out_gate=True,
+    use_fused_gemm=True,           # q/k/v + out-gate → one GEMM per layer
+    swa_ring_kv=True,              # 21 SWA layers cap KV at window (512)
+    share_rope=True,               # 21 identical SWA tables → dedup
     rope_layer_params={
         "attention":       {"rope_theta": 5_000_000.0,
                             "partial_rotary_factor": 0.25,

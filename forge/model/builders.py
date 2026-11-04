@@ -281,6 +281,14 @@ def refresh_fused_qkv(attn: nn.Module) -> None:
     fused = getattr(attn, 'qkv_proj', None)
     if fused is None or not getattr(attn, '_fused_qkv', False):
         return
+    if not all(isinstance(getattr(attn, p), nn.Linear)
+               for p in ('q_proj', 'k_proj', 'v_proj')):
+        # Packed/quantized projections (ForgeQuantLinear et al.) have no
+        # dense .weight to concat — drop back to the per-projection path.
+        # Dequantizing into a dense fused GEMM would lose the packed
+        # kernel's speed and double the resident weights.
+        attn._fused_qkv = False
+        return
     parts = [attn.q_proj.weight, attn.k_proj.weight, attn.v_proj.weight]
     if fused.g_dim:
         parts.append(attn.gate_proj.weight)
@@ -300,6 +308,11 @@ def refresh_fused_gate_up(ffn: nn.Module) -> None:
     """Re-pack ffn.gate_up_proj from the loaded w_gate/w_up weights."""
     fused = getattr(ffn, 'gate_up_proj', None)
     if fused is None or not getattr(ffn, '_fused_gate_up', False):
+        return
+    if not (isinstance(ffn.w_gate, nn.Linear)
+            and isinstance(ffn.w_up, nn.Linear)):
+        # Packed/quantized projections — same fallback as refresh_fused_qkv.
+        ffn._fused_gate_up = False
         return
     with torch.no_grad():
         fused.weight.copy_(
