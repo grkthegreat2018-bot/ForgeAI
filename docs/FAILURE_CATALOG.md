@@ -237,3 +237,13 @@ Measured on RTX 5070 (bench_spark_port.py): _fq packed (1.42GB, 196 linears) loa
 - suffix_draft on Spark thinking text: 21.8 tok/s vs 62-76 standard —
   still not worth it (acceptance too low for the round overhead; same
   rejection class as LFM3). StandardDecoding stays default.
+
+### Spark proposer: unbounded <	hink> starves code budget (fixed)
+Spark thinks 2-4k tokens open-ended; inside evolve's max_gen_tokens the
+reasoning never closes so _extract_code finds no fence - 0/10 gated on
+fast_softmax (stages: missing 7, syntax 3). Fix: think_budget (default
+512) two-pass generation - bound the think, force </think>+` ` `python
+continuation, return tagged raw so extraction strips reasoning.
+Bounded: 8/14 gated (57%%); think-off: 6/9 (67%%); both produce REAL
+gate rejects (dup/incomplete) not extraction failures.
+
