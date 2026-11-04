@@ -330,3 +330,42 @@ def test_build_decoding_passes_confidence_tau():
     strat = build_decoding("speculative", draft_model=object(),
                            draft_length=4, confidence_tau=0.25)
     assert strat.confidence_tau == 0.25
+
+
+def test_spec_stats_acceptance_telemetry():
+    """spec_stats must count proposed/accepted/rounds so accept_rate
+    honestly reports whether a draft source pays for itself."""
+    from forge.engine.decoding import ExternalDraftSpeculativeDecoding
+
+    # Accept-all target: every proposed token verifies.
+    draft = _ScriptedDraft([10, 11, 12, 13], [0.9] * 4)
+    target = _AcceptAllTarget([10, 11, 12, 13])
+    strat = ExternalDraftSpeculativeDecoding(
+        draft_model=draft, draft_length=4)
+    strat.generate(target, torch.tensor([[1, 2, 3]]),
+                   max_new_tokens=8, eos_token_ids={999})
+    rep = strat.spec_report()
+    assert rep["rounds"] >= 1
+    assert rep["proposed"] > 0
+    assert rep["accepted"] > 0
+    assert 0.0 < rep["accept_rate"] <= 1.0
+
+    # Reject-everything target: propose but never accept.
+    class _RejectAll(_AcceptAllTarget):
+        def __call__(self, ids, past_key_values=None, use_cache=False,
+                     **kw):
+            T = ids.shape[1]
+            logits = torch.full((1, T, self.vocab), -20.0)
+            logits[0, :, 7] = 20.0  # always predicts 7, never a draft
+            return logits, (past_key_values or [])
+
+    strat2 = ExternalDraftSpeculativeDecoding(
+        draft_model=_ScriptedDraft([10, 11, 12, 13], [0.9] * 4),
+        draft_length=4)
+    strat2.generate(_RejectAll([10, 11, 12, 13]),
+                    torch.tensor([[1, 2, 3]]), max_new_tokens=8,
+                    eos_token_ids={999})
+    rep2 = strat2.spec_report()
+    assert rep2["proposed"] > 0
+    assert rep2["accepted"] == 0
+    assert rep2["accept_rate"] == 0.0

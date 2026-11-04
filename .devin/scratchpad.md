@@ -2104,3 +2104,17 @@ beat another hour of code reading.
   test_livet 17/17.
 - Lesson banked: raw-logits probe FIRST before blaming training — decode-path
   artifacts (tokenizer, offload, templates) mimic degradation.
+
+## 2026-11-04 late - consolidate_pairs() engine API + spec telemetry
+- ExternalDraftSpeculativeDecoding.spec_stats {proposed,accepted,rounds} + spec_report() accept_rate (commit 25ff1f3).
+- engine.consolidate_pairs() = productized L2: L1-gated pair filter + LoRA fit + held-out ctrl drift metric + save_adapter/merge. E2E on lfm3: 6 facts 4.35->0.0 CE.
+- Operating point finding: held-out control is the REAL drift metric (replay rows are trained, cannot serve as ctrl). lr5e-4x60steps+2 replay = +2.17 drift; lr2e-4x20 = +0.80 with facts still memorized. Replay SIZE bounds drift more than lr.
+- Scorer relaunched (PID 23292) after download stall; HF resume works, both shards active.
+
+
+## suffix_draft telemetry findings (2026-11-04)
+- spec_stats on repetitive code: 96 proposed / 0 accepted / 24 rounds at tau=0 -> proposals were TOKEN-0 SPAM: mem.draft() returns [] on BPE tails with varying digits; shim emits uniform -20 logits -> argmax = vocab 0.
+- Fix shipped (cdb72cb): activation defaults confidence_tau=0.3 -> shim's honest successor-p gates no-opinion rounds. Result: 36 proposed/9 rounds, 1.86x speedup (1.33s vs 2.47s), bit-identical.
+- IMPORTANT: the 1.86x speedup at accept_rate=0 comes from AMORTIZED PYTHON OVERHEAD (2 commits/round via main+resample; ~35ms/tok python in StandardDecoding), NOT acceptance. Suffix draft pays when token-level recurrence is high; on varied-digit patterns accept stays ~0 but spec still wins on overhead amortization.
+- consolidate_pairs E2E verified twice: lr5e-4x60 -> post_ce 0.0, held-out ctrl drift +2.17 (too hot); lr2e-4x20 -> post_ce 0.0001, drift +0.80. Replay count bounds drift more than lr.
+

@@ -2013,8 +2013,24 @@ Measured on `research/checkpoints/lfm3_1p7b_cc_fq` (int4, ~1.4B):
   `suffix_mem` (prompt at prefill, `feed_one` per committed token) so
   `mem._tail` is the committed-context source of truth; the shim rolls
   only a virtual proposal chain (T==1 calls matching its last argmax;
-  T>1 calls end the round). E2E: bit-identical greedy output, 1.46x on
-  repetitive code (92-token mem, ~30-80 cells/order).
+  T>1 calls end the round). `confidence_tau=0.3` is REQUIRED at
+  activation — without it, no-opinion rounds emit uniform logits →
+  argmax token-0 spam burns verify forwards (measured: 96 proposals,
+  0 accepts → 36/9 with tau). Telemetry: `spec_stats`/`spec_report()`
+  on the strategy. E2E: bit-identical greedy output, 1.86x on
+  repetitive code — note the speedup at accept_rate≈0 comes from
+  amortized per-token Python overhead (2 commits/round), not
+  acceptance; suffix drafts pay off when token-level recurrence is
+  high, so check `spec_report()['accept_rate']` before crediting it.
+- **`engine.consolidate_pairs()`** (engine_lora.py) — the L2 loop as an
+  engine API: L1-gated (mem_filter drops pairs the sidecar can't
+  replay) → in-engine LoRA fit (frozen base, AdamW) → honest metrics
+  incl. held-out `control` CE drift (replay rows are TRAINED — they
+  can never serve as the forgetting control). Options: `merge` folds
+  into base weights; `save_adapter` writes a load_lora-compatible
+  safetensors. Operating point on lfm3 1.7B: lr2e-4×20 steps → facts
+  CE 4.35→0.0001, ctrl drift +0.80 (lr5e-4×60 → +2.17, too hot);
+  replay SIZE bounds drift more than lr.
 - **distill60 run record**: `research/checkpoints/lfm3_1p7b_cc.distill60.safetensors`
   — 60 steps, 29 packed seqs (37 usable conv of 39 / 150 scored rows),
   seq 2048, batch4×accum4, BitNet-everywhere + manual-LoRA(143 adapters,
