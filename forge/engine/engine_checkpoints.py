@@ -474,7 +474,44 @@ class _CheckpointLoadingMixin:
 
         self._log(f"Auto-activating optimal strategies "
                   f"(overrides: {list(overrides.keys()) or 'none'})")
-        self.activate_optimal(**overrides)
+        # OOM-staged activation: the fast-load fit check only covers the
+        # weights — activation extras (quant repack, KV prealloc, CUDA
+        # graph capture, warmup forwards) can still push past free VRAM,
+        # and this call sits outside from_checkpoint's OOM-guarded load
+        # try. Rather than crash a successfully loaded model, degrade
+        # features in rounds: drop capture/compile/prefix extras first,
+        # then quantization last (the quant transient spike is usually
+        # the actual killer).
+        _heavy_off = {"use_block_fusion": False,
+                      "use_breakable_cuda_graph": False,
+                      "use_compile": False,
+                      "use_compile_autotune": False,
+                      "use_corun": False,
+                      "use_foundry": False,
+                      "use_learned_prefix_cache": False,
+                      "use_hotprefix": False,
+                      "use_hybrid_prefill": False}
+        for stage, drop in (
+                (1, ("use_block_fusion", "use_breakable_cuda_graph",
+                     "use_learned_prefix_cache", "use_hotprefix",
+                     "use_hybrid_prefill")),
+                (2, ("quantize",))):
+            try:
+                self.activate_optimal(**overrides)
+                break
+            except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                if not (isinstance(e, torch.cuda.OutOfMemoryError)
+                        or "out of memory" in str(e).lower()):
+                    raise
+                self._log(f"Auto-activate stage-{stage} OOM'd "
+                          f"({e}) — degrading features", level="warning")
+                for k in drop:
+                    overrides[k] = _heavy_off.get(k)
+                torch.cuda.empty_cache()
+        else:
+            self._log("Auto-activate OOM'd at every stage — engine "
+                      "continues with whatever features attached "
+                      "before failure", level="warning")
 
     def _auto_select_quantization(self) -> str | None:
         """Pick the highest quantization level that fits available VRAM.
