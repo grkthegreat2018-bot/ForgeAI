@@ -555,9 +555,85 @@ class _ActivationMixin:
             self._graph_runner = None
             self.acceleration = None
 
+    @staticmethod
+    def _patch_inductor_utf8() -> None:
+        """Windows inductor fix: ``codecache.write_atomic`` writes the
+        generated wrapper source through ``Path.open`` with the locale
+        default (cp1252) and crashes on non-ASCII chars in our docstrings
+        (U+2192 arrows are all over forge/). Python source is UTF-8 by
+        spec — replace the function with a UTF-8 equivalent (same
+        tmp-file + os.replace atomicity, same signature)."""
+        try:
+            from torch._inductor import codecache as _cc
+            if getattr(_cc, "_forge_utf8_patched", False):
+                return
+            import os
+            import tempfile
+            from pathlib import Path
+
+            def _write_atomic_utf8(path_, content, make_dirs=False):
+                path_ = Path(path_)
+                if make_dirs:
+                    path_.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(
+                    dir=str(path_.parent), prefix=f".{path_.stem}_",
+                    suffix=".tmp")
+                try:
+                    mode = "wb" if isinstance(content, bytes) else "w"
+                    kw = {} if mode == "wb" else {"encoding": "utf-8"}
+                    with os.fdopen(fd, mode, **kw) as f:
+                        f.write(content)
+                    os.replace(tmp, str(path_))
+                except BaseException:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    raise
+
+            _cc.write_atomic = _write_atomic_utf8
+
+            # Read side: ``_reload_python_module`` loads cached wrapper
+            # source via plain ``open()`` (cp1252) and exec's into a
+            # loader-less ModuleType that breaks triton's
+            # inspect.getsourcelines. Bound in both modules that use it.
+            import sys
+
+            def _reload_utf8(key, path, set_sys_modules=True):
+                # Stale cache entries written before the patch are
+                # locale-encoded — re-encode to UTF-8 so the loader
+                # (PEP 263) can read them.
+                raw = Path(path).read_bytes()
+                try:
+                    raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    import locale
+                    Path(path).write_bytes(raw.decode(
+                        locale.getpreferredencoding(False)).encode("utf-8"))
+                # A real SourceFileLoader (not ModuleType+exec) — triton's
+                # @jit inspects getsourcelines() at exec time, which needs
+                # a proper loader + sys.modules entry.
+                import importlib.util
+                name = f"torch._inductor.runtime.compile_tasks.{key}"
+                spec = importlib.util.spec_from_file_location(name, path)
+                mod = importlib.util.module_from_spec(spec)
+                mod.key = key
+                if set_sys_modules:
+                    sys.modules[name] = mod
+                spec.loader.exec_module(mod)
+                return mod
+
+            _cc._reload_python_module = _reload_utf8
+            from torch._inductor.runtime import compile_tasks as _ct
+            _ct._reload_python_module = _reload_utf8
+            _cc._forge_utf8_patched = True
+        except Exception:
+            pass
+
     def _activate_compile_runtime(self, feature_flags):
         # torch.compile
         if feature_flags["use_compile"] and self.device.type == "cuda":
+            self._patch_inductor_utf8()
             try:
                 # reduce-overhead MINUS cudagraph trees: the engine's decode
                 # loops feed functional past_kv (outputs of run N) back as
