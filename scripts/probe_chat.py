@@ -20,23 +20,13 @@ OR = "https://openrouter.ai/api/v1/chat/completions"
 ORK = KEYS.get("OPENROUTER_API_KEY")
 
 TESTS = [
-    ("cf-qwen-coder-32b", CF, CFK, "@cf/qwen/qwen2.5-coder-32b-instruct"),
-    ("cf-qwq-32b", CF, CFK, "@cf/qwen/qwq-32b"),
-    ("cf-glm-5.2", CF, CFK, "@cf/zai-org/glm-5.2"),
-    ("cf-glm-5.3-flash", CF, CFK, "@cf/zai-org/glm-5.3-flash"),
-    ("cf-gpt-oss-120b", CF, CFK, "@cf/openai/gpt-oss-120b"),
-    ("cf-llama-3.3-70b", CF, CFK,
-     "@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
-    ("cf-ds-r1-qwen-32b", CF, CFK,
-     "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b"),
-    ("cf-mistral-small", CF, CFK,
-     "@cf/mistralai/mistral-small-3.1-24b-instruct"),
-    ("cf-qwen3-30b", CF, CFK, "@cf/qwen/qwen3-30b-a3b-fp8"),
-    ("or-nemotron-ultra", OR, ORK,
-     "nvidia/nemotron-3-ultra-550b-a55b:free"),
-    ("or-north-mini-code", OR, ORK, "cohere/north-mini-code:free"),
-    ("or-nemotron-lightning", OR, ORK,
-     "nvidia/nemotron-3.5-lightning:free"),
+    ("cf-qwen3.8-27b", CF, CFK, "@cf/qwen/qwen3.8-27b"),
+    ("cf-qwen3-30b-a3b", CF, CFK, "@cf/qwen/qwen3-30b-a3b-fp8"),
+    ("cf-nemotron-120b", CF, CFK, "@cf/nvidia/nemotron-3-120b-a12b"),
+    ("cf-kimi-k2.6", CF, CFK, "@cf/moonshotai/kimi-k2.6"),
+    ("cf-gemma4-26b", CF, CFK, "@cf/google/gemma-4-26b-a4b-it"),
+    ("cf-llama4-scout", CF, CFK,
+     "@cf/meta/llama-4-scout-17b-16e-instruct"),
 ]
 
 for name, url, key, model in TESTS:

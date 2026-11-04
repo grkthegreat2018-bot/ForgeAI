@@ -1380,12 +1380,12 @@ _evidence: the "95% missing" failures were PIPELINE bugs, not model quality:_
 
 ## Static-graph verdict (equality-harness verified)
 - conv_state reuse fix killed the OOV panic; graphs now emit clean-but-drifted output at B=8/16
-- Graph decode SLOWER than functional at short ctx: 567 vs 740 tok/s B=16 (full 512-bucket attention tax > launch savings). Kept OFF in code_evolve — revisit only if ctx >2k
-- Remaining drift: argmax flips (~1 token), NOT corruption — replay picks diff SDPA/cuBLAS backends
+- Graph decode SLOWER than functional at short ctx: 567 vs 740 tok/s B=16 (full 512-bucket attention tax > launch savings). Kept OFF in code_evolve ï¿½ revisit only if ctx >2k
+- Remaining drift: argmax flips (~1 token), NOT corruption ï¿½ replay picks diff SDPA/cuBLAS backends
 - NPU path real: OpenVINO/LFM3-1.7B-int4-ov + LLMPipeline(path,'NPU'), needs OV 2026.5 nightly + optimum-intel PR#2087. Intel AI Boost 15.9GB shared. Offload = free whole GPU for evals
 - LFM3 KV win queued: 5 SWA layers window=256 -> ring-buffer KV saves ~40% KV mem
 - Live: B=16 cuBLAS functional ~740tok/s bench decode-side; prefill (1.5k-prompt x 16) now the wall
-- Vendor sampling: temp=0.1/top_k=50 — our 0.7-1.25 sweep far hotter than spec
+- Vendor sampling: temp=0.1/top_k=50 ï¿½ our 0.7-1.25 sweep far hotter than spec
 - PID 6848 campaign rebooted with verified stack
 
 ## 2026-10-30 LFM3 static-decode FIXED + verified (supersedes "graph decode SLOWER/drift" above)
@@ -1527,33 +1527,33 @@ Tests: 50/50 pass; domain-gen smoke: continuation + restart both recover.
 
 ## 2026-10-31 LFM3-CC lossless-arch R&D (d1 graft VERIFIED bit-exact)
 - test_lfm3_d1_parity.py: base lfm3_1p7b vs grafted (GDN2@conv[1,5,9,13,17,21] H8/dk64 + ValueResidual + LearnedSink + AttnRes + CopySpan/Verifier heads) on REAL lfm3_1p7b_cc fp16 ckpt, CPU fp32 seq48: max|dlogit|=0.000e+00, 100% argmax. 1.7288B -> 1.8029B (+73.9M). PASS = lineage gate.
-- Placement theory: graft i%4==1 convs — each sits immediately BEFORE a full-attn layer (2,6,10,14,18,22) => delta-rule global-memory consult lands right before each global read. LFM3 motif is periodic-4: [conv,conv,FULL,conv,SWA].
+- Placement theory: graft i%4==1 convs ï¿½ each sits immediately BEFORE a full-attn layer (2,6,10,14,18,22) => delta-rule global-memory consult lands right before each global read. LFM3 motif is periodic-4: [conv,conv,FULL,conv,SWA].
 - MTPModule @d=2048,vocab=128k: adapter_heads=True = 21.0M; independent heads = 1052.8M (tied 128k makes independent heads absurd). adapter_heads only.
-- AttnRes gate=0: skips buffer entirely (attn_res_active=False) — zero compute, bit-exact.
+- AttnRes gate=0: skips buffer entirely (attn_res_active=False) ï¿½ zero compute, bit-exact.
 - NGramMemory: gate=0 inert; .draft() = ready suffix-spec proposer for copy-heavy evolve outputs.
-- Proposer bench verified (results/proposer_bench*): Qwen2.5-Coder-3B 100/100 vs lfm3_1p7b_cc 50/75 vs _fq 33/50. int4 costs ~17pts; LFM3-CC failure mode = verbose unterminated output (619-2367 chars vs Qwen 68-462) — partly behavioral, not just capability.
+- Proposer bench verified (results/proposer_bench*): Qwen2.5-Coder-3B 100/100 vs lfm3_1p7b_cc 50/75 vs _fq 33/50. int4 costs ~17pts; LFM3-CC failure mode = verbose unterminated output (619-2367 chars vs Qwen 68-462) ï¿½ partly behavioral, not just capability.
 - _cache_w already dequants int4->bf16 => fp16 dir = SAME VRAM, no quant tax. _fq has NO fq_rotation flag (plain absmax RTN) => repack w/ --rotate or run fp16.
 - NOT lossless (checked): sandwich-gamma folding (rms(gamma*z)!=rms(z)), conv->delta port (FIR != low-rank recurrence), SWA widening, vocab append, zero_init_residual.
 - Open work items when gates open: GDN2 needs pad_mask on x0 writes (left-pad batches corrupt state) + static-graph-safe T==1 state write; AttnRes needs fixed k-buffer for capture; v0 donor fix (capture layer2 not conv layer0); SWA ring needs pos-mod write arithmetic under pos_t.
 
-## 2026-10-31 LFM3-CC arch R&D round 2 — online research digest
+## 2026-10-31 LFM3-CC arch R&D round 2 ï¿½ online research digest
 - Kimi Linear (arXiv 2510.26692): 3:1 KDA:MLA ratio beats full-attn fair-compare; KDA = channel-wise decay delta rule = what our GDN2 graft adds. VALIDATES direction.
-- Qwen3-Next: 3:1 GDN:GatedAttn, fused QKV+gate in ONE GEMM (qkv_proj emits (1+gate) query features — validates fused-QKV+gate idea), zero-centered RMSNorm (w->w-1 reparam = EXACT function-preserving, better WD behavior in hone), partial RoPE, MTP head.
-- Falcon-H1/Hymba: PARALLEL SSM+attn within one block (concat before out_proj) — validates side-path graft topology; Hymba adds 128 meta tokens (learned KV init, fixes 'forced-to-attend') — our LearnedSink bias = the lossless equivalent (virtual register).
-- Peri-LN (ICML'25, arXiv 2502.02732): norm before AND after module + embed norms = LFM3's sandwich_norm_mode='pre_residual' IS Peri-LN — already at norm-placement SOTA, nothing to add.
-- Sparse upcycling (arXiv 2212.05055): identical expert copies => ANY routing gives same output => strictly function-preserving MoE-ify; cost FFN xE — thin-MoE graft (dense FFN + small zero-init routed experts) is the param-cheap variant.
+- Qwen3-Next: 3:1 GDN:GatedAttn, fused QKV+gate in ONE GEMM (qkv_proj emits (1+gate) query features ï¿½ validates fused-QKV+gate idea), zero-centered RMSNorm (w->w-1 reparam = EXACT function-preserving, better WD behavior in hone), partial RoPE, MTP head.
+- Falcon-H1/Hymba: PARALLEL SSM+attn within one block (concat before out_proj) ï¿½ validates side-path graft topology; Hymba adds 128 meta tokens (learned KV init, fixes 'forced-to-attend') ï¿½ our LearnedSink bias = the lossless equivalent (virtual register).
+- Peri-LN (ICML'25, arXiv 2502.02732): norm before AND after module + embed norms = LFM3's sandwich_norm_mode='pre_residual' IS Peri-LN ï¿½ already at norm-placement SOTA, nothing to add.
+- Sparse upcycling (arXiv 2212.05055): identical expert copies => ANY routing gives same output => strictly function-preserving MoE-ify; cost FFN xE ï¿½ thin-MoE graft (dense FFN + small zero-init routed experts) is the param-cheap variant.
 - Zero/one-layer expansion (arXiv 2511.04981): random+copying best inits; ZERO-INIT SUBLAYER BLOCKS FEATURE LEARNING -> use LLaMA-PRO pattern: copy graft INTERNALS from neighbor layer, zero only exit (out_proj/gate). Expand at ~80% of sched, WSD.
 - OT-DUS (arXiv 2508.08011): insert new layers at HIGHER positions = better perf + efficiency => capstone-block graft goes at END (before ln_f), not middle.
-- DSA lightning indexer (DeepSeek V3.2) + GLM cross-layer top-k sharing: tiny FP8 indexer selects top-k keys; one indexer shared across layers — for CSA/long-ctx only, low priority at <=4k prompts.
+- DSA lightning indexer (DeepSeek V3.2) + GLM cross-layer top-k sharing: tiny FP8 indexer selects top-k keys; one indexer shared across layers ï¿½ for CSA/long-ctx only, low priority at <=4k prompts.
 - Model Stock (arXiv 2403.19522): principled 2-ckpt averaging formula for CC<->stock merge (non-lossless, documented-delta option).
 - LFM3 vendor notes: head-wise out-gate suppresses activation outliers => quantization-friendly (int4 tax partly self-mitigated); conv K=3->K=7 was tuned => K=11 zero-pad graft continues their own direction losslessly; partial-RoPE unrotated half = position-agnostic content-matching dims.
 
 ## 2026-11-01 ForgeEngine proposer double-engine OOM (CONFIRMED BUG, open)
 - bench_proposer.py on research/checkpoints/qwen25_coder_3b_mla_moe_fq dies at generation start EVERY time (3 repros): engine A init ok at 6.18GB -> generation begins -> a SECOND engine init block appears (paged KV, low-VRAM hotswap) while A stays resident -> 12.05GB -> silent native death, no traceback.
-- Mechanism (from log): a full SECOND ForgeEngine activation block appears mid-run (paged KV, all 5 graph buckets recaptured) DURING/after eng.generate begins — engine-internal low-VRAM hotswap re-activation, NOT a second _ENGINES entry. Old config's buffers coexist with the new during the swap -> 12.05GB spike -> native OOM. The 3B-fq engine init alone (~6.2GB dequanted + KV/graph pools) sits close enough to the limit that ANY re-activation transients over.
+- Mechanism (from log): a full SECOND ForgeEngine activation block appears mid-run (paged KV, all 5 graph buckets recaptured) DURING/after eng.generate begins ï¿½ engine-internal low-VRAM hotswap re-activation, NOT a second _ENGINES entry. Old config's buffers coexist with the new during the swap -> 12.05GB spike -> native OOM. The 3B-fq engine init alone (~6.2GB dequanted + KV/graph pools) sits close enough to the limit that ANY re-activation transients over.
 - _fq notes confirmed: dequant-cached to bf16 at load -> fq dir saves DISK only, zero runtime-VRAM benefit. 12GB card cannot host two dequanted 3B engines.
 - Production default UNAFFECTED: _model_id resolves to HF repo id 'Qwen/Qwen2.5-Coder-3B-Instruct' -> transformers path (~6GB, 100% valid). Bug only hits local converted dirs through ForgeEngine.
-- ALSO: FastBuild on a device='cpu' config still runs a GPU staging pass ('GPU transfer: 248.8s' during a CPU fp32 load) — CPU loads must not run concurrently with GPU jobs.
+- ALSO: FastBuild on a device='cpu' config still runs a GPU staging pass ('GPU transfer: 248.8s' during a CPU fp32 load) ï¿½ CPU loads must not run concurrently with GPU jobs.
 
 ## 2026-11-01 d2 strict-lossless progress (5/6 landed)
 - share_rope (1d90891): dedupe identical RotaryEmbedding tables; exact-type check skips learnable variants. 11 copies -> 2 on LFM3.
@@ -1561,24 +1561,24 @@ Tests: 50/50 pass; domain-gen smoke: continuation + restart both recover.
 - zero_centered_norm (fc54275): RMSNorm stores gamma-1, forward adds 1 (Qwen3-Next); _warm_start_zero_center ports by enumerating built-model zc modules; _scan_qk_norm_identity treats w==0 as identity under zc.
 - fused QKV+gate + gate-up (5765c3d): use_fused_gemm was DEAD CODE (matrices built, never consumed, ctor init perturbed RNG). Forward reads them now; loader._refresh_fused_qkv re-packs post-load; fork_rng on ctors. Function-exact (fp32 kernel noise only).
 - NGramMemory/use_suffix_spec: ALREADY EXISTS (ngram_mem.py, gate=0 + .draft() ready).
-- REMAINING: SWA ring KV (ring-buffer sliding-window cache; touches PreAllocatedKVCache indexing + pos_t decode + bucket graphs — needs full-session care). Then zero-init grafts beyond d1 (capstone, thin-MoE FFN, AttnRes-open, MTP-4 adapter, EAGLE-3 3-depth).
+- REMAINING: SWA ring KV (ring-buffer sliding-window cache; touches PreAllocatedKVCache indexing + pos_t decode + bucket graphs ï¿½ needs full-session care). Then zero-init grafts beyond d1 (capstone, thin-MoE FFN, AttnRes-open, MTP-4 adapter, EAGLE-3 3-depth).
 
-## 2026-11-01 — Qwen-teacher distill + d2 strict-lossless complete
+## 2026-11-01 ï¿½ Qwen-teacher distill + d2 strict-lossless complete
 
 ### Route (user-approved): Qwen teacher -> LoRA 'qwen_distill' on lfm3_1p7b_cc
 - gen_qwen_distill.py: ~212 prompts (200 real logged code_programs prompts
   stratified per-target + 12 target-template) -> Qwen HF completions,
   compile-filtered. ~2.8 rows/min on RTX 5070, 100% usable rate.
 - GOTCHA fixed mid-run: '`python' prefill means raw output lacks the
-  fence opener — script now re-prepends it; existing rows need post-patch.
+  fence opener ï¿½ script now re-prepends it; existing rows need post-patch.
 - Train: finetune_proposer --mode lora --data results/qwen_distill.jsonl
   --base research/checkpoints/lfm3_1p7b_cc --lora-root forge/evolution/loras_lfm3
-  (bf16 cc base; _fq dequants anyway). alpha=32 (=rank, scale 1.0 — 64/32
+  (bf16 cc base; _fq dequants anyway). alpha=32 (=rank, scale 1.0 ï¿½ 64/32
   scale-2 + 17-row adapters are both quarantined in the manifest for babble).
 - Eval: bench_proposer --lora-tag qwen_distill (new flags) vs Qwen 100% /
   LFM3-cc 50% baselines. Gate to flip back: >=90% of Qwen valid-rate.
 
-### d2 strict-lossless set — ALL SIX LANDED
+### d2 strict-lossless set ï¿½ ALL SIX LANDED
 share_rope 1d90891 | conv K=7->11 zero-pad abd09ca | zero-centered norm
 fc54275 | fused QKV+gate+gate-up 5765c3d+767d38a | NGramMemory/suffix-spec
 (pre-existing, gate=0, .draft() ready) | swa_ring_kv 25bd153.
@@ -1590,11 +1590,11 @@ fc54275 | fused QKV+gate+gate-up 5765c3d+767d38a | NGramMemory/suffix-spec
 - SWA ring KV: keys are permutation-invariant -> slot=pos%W works; pos_t
   path uses pos_t%C index_copy_ (graph-safe); eager path cats the held
   window position-ordered. NOT bitwise vs linear (SDPA sees 9 vs 19 keys,
-  ~5e-7 kernel tiling) — gate is argmax-trajectory equality.
-- T>C forward caveat: a T>1 step needs last-(C-1)+T keys — more than the
+  ~5e-7 kernel tiling) ï¿½ gate is argmax-trajectory equality.
+- T>C forward caveat: a T>1 step needs last-(C-1)+T keys ï¿½ more than the
   buffer. Solution: read held window + cat the new in-flight keys.
 
-## 2026-11-01b — Round-1 poison found + Groq teacher path
+## 2026-11-01b ï¿½ Round-1 poison found + Groq teacher path
 
 ### Semantic filter result: 51% of v1 teacher rows were BROKEN
 - filter_distill_semantics.py: matches row -> target via keep-public-names,
@@ -1604,10 +1604,10 @@ fc54275 | fused QKV+gate+gate-up 5765c3d+767d38a | NGramMemory/suffix-spec
 - CONSEQUENCE: qwen_distill adapter trained on ~52% poisoned data ->
   DELETED (files + manifest + merged ckpt). Explains round-1 no-gain.
 - LESSON: bench valid% = format only. The eval pool's test(ns) is the real
-  semantic gate — teacher outputs must pass it before becoming SFT rows.
+  semantic gate ï¿½ teacher outputs must pass it before becoming SFT rows.
 
 ### Groq backend (gen_qwen_distill --backend groq)
-- Teacher: openai/gpt-oss-120b (Apache-2.0 — distill-legal; avoid
+- Teacher: openai/gpt-oss-120b (Apache-2.0 ï¿½ distill-legal; avoid
   Llama-family: Llama license bars outputs improving other models).
 - curl.exe transport REQUIRED: python urllib gets Cloudflare error 1010
   (browser-signature ban); curl works.
@@ -1727,3 +1727,380 @@ MEM-SAFE: all runs serialized GPU<->API; 4.3GB train / 5.4GB bench /
 - ledger: 2400 programs / 928 wins / 66+ targets and climbing
 - v10 = 34.3% valid / 65.0% syntax on the SAME 137-prompt suite â€”
   LLM-goal diversity broke the ~13% plateau (v5 19.7 -> v9 27.0 -> v10 34.3)
+
+## 2026-11-03 Ã¢â‚¬â€ Research: weight-space programming + faster distill (LFM3-CC -> 7B goal)
+
+- WSP (MIT CSAIL, Takehi/Teoh/Zhang/Khattab, 2026-11-02): GPT-6 Astra edited Qwen3.5-0.8B
+  weights directly. Removed a repetition direction from MLP down-proj layers 15+19 (64 cols ea,
+  131072 w = 0.016%) -> MATH-500 7.9->48.1, GSM8K 13.8->67.1, IFEval 21->62.3. Model REPAIR not
+  capability injection: failed on Gemma-3-270M (no loop defect). Baseline-sensitive (indep re-eval
+  scored base ~44 under diff sampling). Tooling: weightspace pypi pkg + openwsp/openwsp GH
+  (versioned sparse edit format, probe-budget harness, checkpoint/rollback).
+- OUR failure mode (verbose unterminated output, 619-2367 chars) is same defect class ->
+  scripted direction-ablation on MLP down-projs via contrastive acts (probe_lfm3_loops.py) is a
+  cheap post-train complement; no frontier editor needed.
+- Thinking Machines on-policy distill: student rollouts scored per-token by teacher logprobs,
+  advantage = -reverseKL, IS-loss update. 9-30x cheaper than more SFT/RL for same gain (Qwen3 TR:
+  AIME24 74.4 vs 67.6 at 1/10 GPU-hours). SEQUENCE-LEVEL => tokenizer-agnostic (sidesteps LFM3
+  128K vs Qwen 151K vocab mismatch that makes top-k logit-KD impractical).
+- CompactifAI (arXiv 2608.03796): cache teacher top-100 logits once -> same loss as online KD,
+  ~29% faster iter, ~41% more tput; fused chunked-KL never materializes [B,T,V]. Megatron-LM
+  cached_logits_loss.py is a ref impl. chunked_ce.py pattern extends to chunked-KL.
+- sft_train --distill args are DEAD STUBS (963-975). Real impl plan: student rollouts via engine
+  static-KV batch (1270 tok/s measured) -> teacher scores logprobs (forward-only, batched) ->
+  per-token weights into compute_loss (sample_weights path exists). rlvr_train.py is a
+  one-line-change distance from TM's method.
+- Data: Magpie-style pre-query instruction extraction for diversity (diversity>size broke the
+  v9->v10 plateau); AdvDistill reward-weighted multi-sample (k gens + rule-verifier weights ->
+  --sample-weighting). Local teacher: qwen25_coder_7b preset exists + dl_qwen7b.py; int4 ~5.5GB
+  fits w/ GPU<->API serialization rule; run via ForgeEngine not HF generate (2.8 rows/min HF).
+- Qwen2.5-7B-Instruct targets: MMLU-Pro 56.3 / GSM8K ~91.6 / MATH ~75.5 / HumanEval ~84.8 /
+  IFEval 71.2. Full parity unrealistic on 1.7B (knowledge capacity); scope = match on the
+  CC/evolve suite (specialist > generalist in-domain per TM thesis).
+
+
+## DeepInfer port plan (2026-11-03)
+Source: deepseek-ai/DeepInfer (production engine for V4.1-Flash), cloned to D:\windsurf\deepinfer_ref.
+Already in ForgeAI: DSpark paper impl (dspark.py confidence_schedule), _defer_sync launch-before-item (pure-attn only), ChunkedPrefixCache, xgrammar SO.
+
+Deltas to port:
+1. BOUNDED REPLAY on partial prefix hits: replay last R tokens of cached prefix to rebuild conv/SSM/dict state at hit boundary. Fixes: partial hits drop conv_snap -> zero-pad conv; dict presents keep state at entry_end (wrong position). R = sliding_window else 128.
+2. CONFIDENCE-SCHEDULED VERIFY on ExternalDraftSpeculativeDecoding: draft softmax prob as c_k; survival cumprod; trim verify prefix + early draft stop.
+3. ASYNC DECODE for hybrids: _defer_sync extended via _spec_snapshot_recurrent before speculative fwd + restore on break.
+4. seq_seed deterministic sampling: SamplingParams.seed -> SplitMix64 hash -> CDF inversion.
+
+## 2026-11-03 Ã¢â‚¬â€ DESIGN: quant-loss patch + real distillation (model-agnostic)
+
+### A. "Patch the loss out" Ã¢â‚¬â€ chosen design: ForgeQ-R (residual-patched int4)
+
+Honest info-theory first (measured literature, Qwen2.5-7B):
+- bf16 weights, true lossless ceiling ~= 1.49x (Rotem IJCA 2026; ANS tile-decomp arXiv 2606.15789)
+- already-quantized streams (Q4_K): ceiling ~= 1.04-1.08x Ã¢â‚¬â€ int4 output is near its entropy
+  bound ALREADY -> "lossless codec at int4 size" is impossible. Drop it.
+- Quant error is NOT low-rank (dense bounded noise) BUT the *functional* error concentrates on
+  salient channels (AWQ result). So: low-rank residual + optional sparse-outlier set recovers
+  ~all measurable loss at ~4-6% size overhead.
+
+ForgeQ-R per-matrix plan:
+  W_exact = dequant(int4 Q) + A@B  (+ optional fp16 sparse outlier set S)
+  - A [r, in], B [out, r] fp16 from truncated SVD of E = W - dequant(Q), r=16 default
+  - LoftQ-style alternating: re-quantize (W - A@B), recompute E, re-SVD, 2-3 iters (cheap, CPU ok)
+  - Runtime: y = fq_gemm(x,Q) + (x@A.T)@B.T Ã¢â‚¬â€ rank-r GEMV ~= free at decode (r/din ~ 1%)
+  - Size: r*(in+out)*2B vs 0.5*in*out B for int4 => +4-6% total (1.43GB -> ~1.5GB)
+  - Optional stage-2: short QAT calib training ONLY A,B with quantized base in forward
+    (bitnet_int8_training machinery exists) -> pushes to eval-parity ("effectively lossless")
+  - Verify: max-abs logit diff + valid-rate re-bench _fq vs _fqr
+
+### B. Real distillation Ã¢â‚¬â€ OFFLINE on-policy (sequence-level, tokenizer-agnostic)
+
+Why sequence-level not top-k logits: LFM3 128K vs Qwen 151K vocab mismatch makes logit-KD
+impractical; sequence scoring needs NO vocab alignment and works for ForgeLM custom students too.
+Also matches TM result (9-30x compute-efficiency vs more SFT).
+
+Loss (Thinking Machines / Agarwal on-policy distill):
+  A_t = stopgrad(teacher_logp_t - student_logp_t)   # per response token
+  L = sum_t w_t * CE_t,  w_t = clip(A_t, -clip, +clip) * alpha  (+1.0 base CE keeps floor)
+  => reinforces tokens teacher likes more than student; suppresses student-overconfident tokens.
+  Implementation: ChunkedDistillCE in chunked_ce.py (per-chunk student_logp = -ce_chunk;
+  weight applied to (softmax-onehot) grad like entropy-weight does). Rides through
+  model.config like entropy_alpha (pattern at llm.py:765 + sft_train.py:658) Ã¢â‚¬â€ zero signature
+  changes. Manual-logits path gets same math for sample_weights compat.
+
+Data flow (all model-agnostic):
+  1. scripts/gen_student_rollouts.py: student samples k rollouts/prompt via ForgeEngine
+     batched decode (~1270 tok/s measured on _fq) OR reuse evolve-ledger wins (they ARE
+     on-policy verified rollouts Ã¢â‚¬â€ free data).
+  2. scripts/score_teacher_logprobs.py: teacher (HF AutoModel int4 7B OR ForgeEngine port)
+     forward-only scoring of the detokenized student text; teacher-token logps mapped back to
+     student tokens by char-offset overlap (mean pool). Output row adds:
+       teacher_logp: [float fp16-rounded, len = response tokens]
+  3. sft_train --distill: dataset passes teacher_logp through collate -> per-token weights.
+     --distill-alpha (default 1.0), --distill-clip (default 5.0), --distill-mix (CE floor 0-1).
+  4. evolve export_sft: add "weight" = f(delta) -> collate reward path already consumes it
+     (ex.get("reward")) Ã¢â‚¬â€ wire field name 'reward' directly.
+
+### C. Application order (build -> verify)
+  1. ChunkedDistillCE + sft_train --distill wiring   [core]
+  2. score_teacher_logprobs.py                        [data]
+  3. export_sft reward field                          [ForgeEvolve glue]
+  4. ForgeQ-R: scripts/quant_resid_patch.py + runtime A@B in quantized Linear  [format]
+  5. tests/unit for each; AGENTS.md + scratchpad update
+
+ForgeEvolve note: evolve wins are already on-policy + oracle-verified; scoring them with the
+teacher adds per-token dense signal on TOP of the binary win Ã¢â‚¬â€ strictly better data than the
+current binary-valid SFT rows. DPO near-miss pairs stay on the export_pairs path.
+
+## 2026-11-04 - Offline distill + ForgeQ-R residual: IMPLEMENTED & TESTED
+All pytest-green (8 new in tests/unit/test_distill_quant_patch.py; sweep: 102 + 40 clean).
+- ChunkedDistillCE (training/losses/chunked_ce.py): w = floor + (1-floor)*clip(alpha*(tlp-slp), -clip, clip); MISSING=-99 -> w=1. chunked_distill_ce(x, W, target, tlp, chunk_size, alpha, clip, floor). llm.py dispatches via config.teacher_logp + distill_alpha/clip/floor (entropy_alpha convention).
+- sft_train: teacher_logp flows load_examples(jsonl+parquet) -> tokenize -> collate (per-completion list -> non--100 positions, -99 fill, 5-tuple) -> compute_loss. --distill gates at unpack; --distill-alpha/clip/floor live; packing path carries tlp.
+- scripts/score_teacher_logprobs.py (~349 lines): HF int4/int8/bf16 or Forge-native (--teacher-forge); render_single_turn boundary; teacher logp -> student tokens via char-offset overlap (tokenizer-agnostic, LFM3<->Qwen works).
+- code_evolve.export_sft: reward = 1-exp(-delta) per verified-improving row -> reward_weights.
+- ForgeQ-R: ForgeQuantLinear(residual_rank=r) -> res_a[O,r]/res_b[r,I] fp16 params; _residual_apply after quant+LoRA in BOTH fused & dequant branches (original basis); merge_lora() refits via SVD. Loader reads rank from <mod>.res_a shape (self-describing). prequant_forge_quant.py --residual-rank/--residual-iters/--residual-max-elems; prints rel-Frobenius err before/after. LOSS-REDUCED, not mathematically lossless.
+NOT DONE / next:
+- No end-to-end distill run yet (scorer untested on a real checkpoint; needs GPU serial slot).
+- Rank sweep r=8/16/32/64 dNLL on real lfm3_fq pack - needs GPU.
+- engine public score() API (scorer script covers standalone for now).
+- agentic_distill.py reward path still broken (tool_use_loop removed earlier).
+- Tokenizer decision: reuse gigatoken base + PRIVATE special-token names (no im_/eot/tool_call conventions -> protects external harnesses/agents from parsing our markers as structure; reserved-ID block, never BPE-merged from text).
+## 2026-11-04 - FluxLM v2 direction experiments (scripts/exp_live_v2.py)
+KEY: v2 skeleton already exists - forge/model/live.py LiveSession (frozen substrate
++ GDN2 + TitanMemory + NGramMemory sidecar, journaled/revertible). Old flux/ =
+hedged ngram mixture = the failure; do NOT resurrect.
+Measured (micro d128L4 V256, CUDA): exact NGramMemory carries recall (verb 3.7-5.0,
+survives 512-tok distractor). TitanMemory fuzzy learns almost nothing cold (0.42-2.0)
+- needs bootstrap. OVERWRITE BROKEN: ngram stores old+new equally (2.35/2.36).
+NO surface generalizes (alt-separator CE = base). Zero false memory (unseen=base).
+VRAM <0.5G, ingest 450-3000tps. Design: docs/FLUXLM_V2_DESIGN.md - L1=episodic
+scratchpad (exact+fuzzy), L2=LoRA consolidation (ONLY path to generalization -
+verbatim-bound memory cannot transfer by tuning). Build order: ngram overwrite
+fix -> L1 on real ckpt -> L2 loop -> titan bootstrap check.
+## 2026-11-04 - Gold-spec research (rival all local on 5070)
+Local field on 12GB: resident 7-8B int4 ~60-100tps; offloaded MoE GPT-OSS-20B ~35-42tps,
+Qwen3-30B-A3B ~36-50tps (VRAM follows TOTAL params, speed follows ACTIVE - expert path
+crosses ~50GB/s RAM bus every token).
+Evidence: R1-Distill-Qwen-1.5B = MATH-500 83.9 (>GPT-4o 74.6) via verified long-CoT SFT -
+domain-specialist distill works at small scale; breadth does not transfer (LCB 16.9).
+cons@64 >> pass@1 (28.9->52.7 AIME) = test-time compute is the real sub-7B equalizer.
+SmolLM3/MiniCPM4 quality = 8-11T tokens datacenter scale - NOT replicable; BitCPM proves
+ternary production-grade. dense->MoE upcycle = trap at single-GPU scale (moe-upcycle
+measured strictly worse; Sparse Upcycling pays at ~40-50% orig pretraining cost).
+CONCLUSION: ternary ~2-2.5B dense backbone (BitNet-class) + distill + verifier loop +
+L1/L2. Rival = in-domain + speed + live-learn axes, never breadth.
+## 2026-11-04 - FLINT indie-model research
+Recursive Flint (RecursiveSI): 40B/2.5B-active MoE, small team + agents, <4mo from scratch.
+Claims: best <50B MoE on SWE-Bench Pro v2/Terminal-Bench 2.1/SWE-Verified; rivals dense
+25-40B coding at >5x speed. ~18GB int4 = still RAM-offload on 5070.
+STEALABLE: (1) Eureka Machine = ForgeEvolve thesis vindicated - automated search found
+arch+quant recipe. (2) QUANT RECIPE: quantize lm_head 4-bit too, recover via OFFLINE
+SELF-DISTILL (quantized student trains on own samples, bf16 teacher, self-discovered
+coreset) - ~half QAT steps, within 0.7pt. Our score_teacher_logprobs+chunked_distill_ce
+IS this pipeline - add self-distill recovery stage to ForgeQuant flow. (3) Native-MoE
+template: 256 fine-grained experts x512, top-6 sigmoid, shared expert, sinks, QK-norm,
+SWA-513+NoPE hybrid.
+tekkmaven/flint-1.2B: TAP (Thought-Action Pretraining) - think/tool_call as BASE
+objective from step 0; wide-shallow 22Lx5504 (1.5-Pints: wider MLP = more
+knowledge/param at small scale); pretrained on FREE Kaggle TPU v5e-8 40h/15B tok.
+## 2026-11-04 - Indie-model sweep #2 (all findings)
+LEADERBOARD TRUTH (localaistats): LFM3-1.7B Q4_K_M IS the <=4B Pareto leader on
+LiveCodeBench v6 (73.46 @ 1.1GB, best score/GB) - backbone choice confirmed.
+Competition: K2 Horizon (0.9/3.7B), MiniCPM5-2B, Granite-4.2-3B, Qwen3.5-2B.
+TRAJECTORY DISTILL = the proven small-agentic recipe: ricdomolm/mini-coder-4b
+(400k mini-swe-agent trajectories + SWE-smith -> beats gpt-oss-120B on SWE-Verified
+Bash, 26.8 vs 26.0; 1.7b variant 18.6/50.4 pass@100). Trains on ONE 80GB GPU.
+OpenThinker3-7B: SFT-only on OpenThoughts3-1.2M (QwQ-32B traces, 850k math/250k code/
+100k sci) -> +15-20pts over R1-Distill-7B. SmolTalk recipe = Magpie-Ultra 400k +
+constraints/rewrite subsets ablated at 1.7B.
+AGENTIC SPECIALISTS: xLAM-2-1b/3b-fc-r + Katanemo Arch-Function-1.5B = GPT-4-class
+BFCL at 1-3B, ~12x faster; Arch uses sub-1B models for routing/jailbreak roles.
+CHEAP REASONING: s1K (1,000 curated + budget-forcing "Wait" injection -> o1-preview
+level at 32B, 26min train); TinyZero <$30 RL self-verification at 3B; Sky-T1 $450
+BUT warns <32B loops on long-CoT (never-loops spec matters).
+ARCH INGREDIENTS: Zamba2 (shared-attention x2 ABAB + LoRA on shared MLP + concat
+embeddings; 6x less KV); RWKV-7 Goose = TRUE test-time-training RNN (in-context GD
+per token, state only 1.6M params L24-D1024 - bounded fast-weight memory exists!);
+nanochat: value-embeddings (zero-FLOP params), ReLU^2, QK-norm-post-RoPE, softcap,
+vanilla REINFORCE works; Transformer2 (Sakana): SVD task-vectors + router dispatch
+= self-adaptive experts, same math as ForgeQ-R.
+COMPUTE UNLOCK: Kaggle TPU v5e-8 (flint-1.2B 40h/15Btok); INTELLECT-1 10Bx1T over
+14 community nodes (DiLoCo+int8); Nous DisTrO/DeMo trained 15B+40B over internet.
+CAUTION: OrionLLM GRM2-3b claims 3B>Qwen3-32B - unverified, low adoption.
+## 2026-11-04 - Failure catalog (docs/FAILURE_CATALOG.md)
+VERIFIED via sources: ROME/MEMIT at scale = progressive un-editability + gradual-then-
+CATASTROPHIC forgetting; RippleEdits: in-context baseline BEAT all editing methods
+(facts don't belong in weights - L1/L2 split confirmed). TTT: MLP IO-bound/slow, linear
+viable at <=1.3B, ParaTTT fixed parallelism 32x. False-Promise-of-Imitation: teacher
+text teaches style not capability - VERIFIED-scored distill (our pipeline) is the
+documented fix. Sky-T1: <32B loops on long-CoT SFT (loop-guard is prerequisite).
+KNOWN failures recorded: Tay/BlenderBot3 (unverified writes=poison), RWKV recall
+(bounded state needs exact backup - our ngram choice), Hyena>KAN>prefix-tuning>sparse-
+attn>PETALS>posthoc-ternary>MoE-upcycle graves, Galactica (specialist w/o grounding),
+OPT logbook, Falcon-180B/BLOOM (curation>scale), BabyLM floor (distill not pretrain).
+META: all failures = unverified writes, missing exact-recall backup, style-vs-capability
+confusion, facts-in-weights, single-mechanism designs. Our stack already encodes 4/5.
+## 2026-11-04 - AirLLM+MoE verdict (user's old idea - vindicated)
+AirLLM alive: v3+ hook-based (transformers drives fwd -> new archs auto-work), does MoE
+(671B on ~12GB) + streamed-LoRA train <6GB. Lane is now standard: MoE-Infinity (hot-expert
+cache + activation-trace prefetch, bs=1 usage skews, 3-17x), Fiddler (cold-expert: send
+KB activation to CPU, compute there - never stream cold weights), kTransformers
+(arithmetic-intensity split: attn+shared-expert GPU, routed experts CPU).
+ForgeAI edge: domain-specialist routing concentrates (better hit rates), ternary experts
+= 0.2B/param (~250tps ceiling even uncached), load_safetensors_pipelined IS prefetch I/O.
+Spec reframe: <=1GB VRAM != <=1GB weights - 8-12B ternary MoE total, 1.5B resident,
+experts in RAM. CAPACITY lane - below backbone distill; if V15 goes MoE: streaming-native
+design (mappable packed experts, domain-clustered layout, router-lookahead prefetch,
+Fiddler CPU-exec fallback).
+## 2026-11-04 - NGramMemory overwrite fix DONE (step 1 of build order)
+Bug: pure +=1 accumulate -> rewrite blends 50/50 forever (ow=2.35/stale=2.36).
+Attempt 1 (raw *=decay) REGRESSED ow to 2.86: smoothing floor adds ~28 absolute
+mass; small counts dilute lift. FIX: EMA successor rows (row=(1-a)row+a*onehot,
+normalized) + row_mass=8.0 effective-count in lift(). SuffixMemory same EMA +
+overflow prune for float masses. write_decay=1.0 = last-write-wins.
+Probe (exp_live_v2): ngram-only ow 2.35->1.69, dist 2.92->4.23, verb 3.24->4.29;
+full ow 0.89->0.52, dist 3.36->4.51. stale==ow is CORRECT (different-suffix=
+different-fact under exact semantics). 15/15 livet tests pass incl 3 new.
+Research: "Sleeping LLM" (vbario) = our L2 design on consumer hw (wake-log ->
+curate -> LoRA -> validation gate + rollback + spaced replay); failure modes:
+catastrophic forgetting at high LR, over-aggressive curation -> empty trains.
+fla-org ships production gated-delta-rule Triton kernels (GDN2 family reference).
+## 2026-11-04 - Step 2 DONE: L1 suffix memory on REAL backbone (exp_l1_real.py)
+LFM3-1.7B-CC int4 (1.4GB weights, 2.2GB vram): recall CE 5.10->2.45, hit
+0.25->0.50; distractor-immune (3261tok zero change); unseen-suffix lift=0;
+cost 0.12ms/step (~0.3%). THREE BUGS FIXED: (1) SuffixMemory.lift_last sign
+inverted (log p + uniform floor suppresses observed vs unseen) -> LLR vs
+unigram+uniform prior; (2) order_weight**(max_o-o) rank-vs-value bug ->
+**(len(orders)-1-i) in BOTH classes (was masking shallow orders at 5e-5);
+(3) deployment rule: ingest sentence/segment-level so BPE boundaries match
+fresh queries (doc-as-one-string merges across boundaries -> 0 key matches).
+EMA note: single overwrite = 50/50 row; dominance needs 2-3 rewrites.
+
+## 2026-11-03 ï¿½ LLM memory/capability probes (R&D exploration)
+
+Scripts added: `scripts/probe_llm_memory_math.py`, `scripts/probe_exact_decode_tradeoff.py`, `scripts/probe_weight_entropy.py`, `scripts/probe_kv_manifold.py`
+
+### Measured results
+- Memory accounting (1.5B-class): AdamW = 8x weights (fp16w+g + fp32 m,v,master). KV = 48KiB/tok (24L x 2kvh x 64hd); KV > weights at T=62k.
+- Chinchilla: halving loss-excess = x7.68 params -> memory ~ loss^-2.94.
+- softmax rank inflation: rank(QK^T)=64 -> rank(softmax)=512 (T=512, dh=64). Attention matrix can't be exactly low-rank; O=PV has rank<=dh.
+- Exact decode tradeoff (fp16 cuda, T=2048, mini 4L model): KV 16.78MB->0MB linear in kept-fraction; latency 1.52->3.48ms (2.3x at f=0). Teacher-forced: max_dlogit=1.95e-3, argmax 126-127/128 on RANDOM init (worst case). fp64 CPU: frac=0 vs 1 = bitwise logits (torch.equal=True), K recompute bitwise. => recompute-for-memory is mathematically exact; fp16 noise = kernel reduction order only.
+- Weights (proposer_mla_moe 994MB bf16): byte-entropy 6.29/8 -> lossless floor 1.27x; lzma 1.27-1.64x; mantissa 6.97/7 bits (99.6% max = near-random); H(first-diff)=8.0/8 (decorrelated, delta coding useless); zeros 0.2%. => ~30% lossless savings is ALL that exists on weights.
+- KV (real model, real text, 24 GLA layers): stored 512B/pos/layer (post n_kv=2 dedup; latent+rope would be 640B = LARGER here). H(K)=H(V)~6.25-6.33/8 -> ~1.3x lossless. H(dK)~6.0 (delta ~5% gain). cos(K_t,K_{t-1})=0.73-0.99. rank99(K)~64-90/128, rank99(V)~65-120/128. int8 past-KV E2E: cos=0.9995, argmax same; int4: cos=0.953, argmax same (1 sample).
+- GLA note: gla_key.py:247 caches reconstructed K,V not latent; for THIS cfg (nkv=2,dc=256) reconstructed is smaller. Latent-caching only wins for large n_heads*n_kv*hd.
+
+### Interpretations
+- "identical output" tiers: bit-exact (recompute only / reduction-order control) > argmax-exact (int8/int4 KV easily, ~4-8x smaller) > distribution-exact (lossy zoo).
+- Three exact-relief axes: (a) time<->space: recompute/vT-checkpoint (linear for attn, sqrt for sequential state); (b) architecture-time factorization (GLA/GQA/MLA latents ï¿½ must be trained in, not discovered); (c) entropy coding (~1.3x, weak everywhere).
+- Novel direction: per-layer memory-type optimizer ï¿½ conv/SSM O(1) already, SWA O(W), GQA gets fractional-cache+recompute; plus top-attended-position fp16 residual correction over int4 base for argmax-exactness at ~4x.
+## Step 4 verdict (2026-11-04): fuzzy fast-weights FAIL the recall gate
+titan+gdn2 gain plateaus ~2.0n at reps 5/50/200 (vs ngram ~4.3); gdn2-only
+= 0.00 at ALL reps. Exact-suffix EMA memory is the L1 mechanism; titan
+dropped for fact-recall role (recorded dead end; may revisit for fuzzy
+context matching, but alt-ctx also showed ~0 transfer).
+## Loop research: detection-as-stop is the ONLY zero-cost loop ender ï¿½
+penalties/DRY forbid forms not behaviors (vllm-mlx verified live). Ref impl:
+exllamav3 LoopDetector (circular buf, per-period streaks, heap). Budget-
+forcing = suppress end-token + append "Wait" to extend / force close-tag.
+## Step 3 DONE (2026-11-04): L2 consolidation works E2E on real 1.7B
+exp_l2_consolidate.py: ingest->SuffixMemory->draft-reconstruct->LoRA(r8,
+q/o/gate/up/down, 360K params)->QA retention eval. Operating point found:
+lr5e-4 + replay buffer(4 rows): fact CE 7.22->5.42 (-1.8), ctrl drift
++0.31 (vs lr3e-3 no-replay: -1.5 but +3.86 CATASTROPHIC forgetting =
+Sleeping-LLM failure mode reproduced+fixed). 134s/fit, VRAM 11.8GB(tight).
+Draft hit-rate was LOW (mem draft reconstructs only ~1-2/8 fact answers ï¿½
+exact store carries continuation not QA-form; rows fell back to doc pairs).
+NEXT: consolidation loop needs multi-fact docs + more steps/rank for full
+recall; periodic (sleep-cycle) schedule.
+## 2026-11-04 overnight batch results
+SCORER: fixed cuda/cpu gather bug (tgt.to(lp.device)); E2E run 6 rows,
+0 unmapped, 2.6s scoring (Qwen2.5-Coder-3B int4 teacher -> LFM3 student,
+char-offset mapping works).
+AGENTIC_DISTILL: tool_use_loop.compute_reward was deleted in AZR merge ->
+implemented _local_compute_reward heuristic (answered .30/tool_use .25/
+clean_stop .20/substance .15/novelty .10); path functional again.
+FORGEQ-R r=16 pack (lfm3_1p7b_cc_fqr16, 1.46GB): rel Frobenius
+0.1164->0.1149 = ~1% reduction. VERDICT: int4-groupwise error is
+near-white -> rank-16 SVD captures ~9% flat spectrum. Residual patching
+is the wrong repair for diffuse error; prefer FLINT self-distill recovery.
+(Device-mismatch bug in residual path also fixed.)
+TERNARY KERNELS (V15 ammo): bitnet-tc = ternaryxINT8 tensor-core GEMM,
+4.8-9.4x decode GEMMs, ~150TFLOPS; TernaInfer true-1.58b @1.53x; spbitnet
+adds 2:4 sparsity on Ampere consumer. MoE offload practice confirmed:
+llama.cpp --cpu-moe/--override-tensor "ffn_.*_exps" - validates the
+streaming-native expert-packing design.
+
+## 2026-11 session 2 (post-summary continuation)
+
+### Research findings banked
+- MEGa (arXiv 2504.21239): per-memory gated LoRA adapters â€” QA 0.98,
+  MMLU preserved (61.8 vs 62.5 base), recall cosine 0.95 on fictional-
+  char + Wikipedia-event datasets. Weakness: top-1 gate rate 85-88% +
+  softmax dilution blends all adapters; per-memory adapters grow
+  linearly. ForgeAI takeaway: L2 could shard per-document gated LoRA
+  instead of one consolidated adapter â€” better isolation; middle ground
+  = one adapter per sleep-cycle batch (current design) + replay.
+- ParaTTT (arXiv 2610.38255): fixed-point iteration parallelizes deep
+  TTT â€” 2 iters suffice, 32x faster inner trajectory at 4K ctx, 340M
+  model trains 4.9x faster, matches GDN/Mamba2 with better recall.
+  Deep-memory TTT is a viable L1-upgrade lane (GDN2 kernel already
+  exists via fla-org reference).
+- Sleeping-LLM failure confirmed live in exp_l2_consolidate: lr 3e-3
+  gave +3.86 ctrl drift; lr 5e-4 + replay -> +0.31. Documented fix works.
+
+### Shipped this session
+- SuffixMemory.save/load: pickle persistence, version-tagged, exact
+  state parity (test_suffixmem_save_load_parity â€” 16/16 livet).
+- Loop detector verified end-to-end? NOT yet â€” lfm3_1p7b_cc_fq exits
+  via EOS too fast on generic loop-priming prompts (2-20 tok outputs).
+  Unit coverage is good; E2E still open.
+- Distill data-path: scorer 150/150 rows 0 unmapped ->
+  data/sft/evolve_sft_v3.scored.jsonl. tokenize_example drops are purely
+  seq_len overflow (1024->43/150, 2048->144, 4096->150).
+- AGENTS.md gained 'Live-Learning Stack Status' section.
+- sft_train smoke (earlier): 4-step --distill ran end-to-end, merged-
+  LoRA checkpoint saved, VRAM 7.79GB. MuonSFBlockwise auto-selected.
+
+### Running now
+- b762ed: 60-step --distill on 150 scored rows, seq2048, b4 ga4, lr1e-4
+  -> research/checkpoints/lfm3_cc_distill_v1.safetensors
+  SUPERSEDED: that run died on the cache-poison bug below; relaunched as
+  lfm3_1p7b_cc.distill60.safetensors on the fixed code.
+
+## Distill CUDA assert â€” RESOLVED (3 independent bugs, proven by instrumentation)
+
+Symptom: `Assertion 'ind >=0 && ind < ind_dim_size' vectorized gather` device
+assert; async-misreported at embed/rms_norm frames; every isolated component
+passed when probed directly.
+
+Bug 1 (THE crash): `_tokenize_cached` keyed DiskTokenCache under literal
+"default" â€” no tokenizer identity in the key. A prior Qwen-vocab run had
+cached rendered ChatML texts (im_start/im_end markers) as Qwen ids up to
+151645; the LFM3 run (128000-vocab embed) was served those ids -> embed
+gather OOB. Verified: 102 hits under "default", 65 with ids >= 128000.
+Fix: hash = class_vocabsize_eos_pad at BOTH the disk layer and the
+in-memory LRU (same collision existed there). sft_train.py:476-518.
+
+Bug 2 (silent wrong-vocab): `get_tokenizer()` default = ForgeLM V2 tokenizer
+(65536 vocab) whenever --tokenizer absent â€” wrong vocab for any foreign
+checkpoint (would silently garbage-tokenize, no crash). Fix: prefer
+args.checkpoint's own tokenizer.json; canonical only for from-scratch.
+sft_train.py:1310-1320.
+
+Bug 3 (chunked CE was dead code + distill silently dropped):
+  a) cfg.use_chunked_ce/mtp set on trainer cfg, but ForgeEngine builds its
+     own ModelConfig -> model.config never saw them. Synced post-build.
+     sft_train.py:1494-1505.
+  b) `sw = rw` unconditionally (reward_weights all-ones for reward-less
+     data) forced the manual [B,T,V] logits path every step â€” chunked CE
+     unreachable AND teacher_logp ignored there (distill degraded to plain
+     CE). Fix: uniform-1.0 sample_weights dropped to None. sft_train.py:669+.
+
+Permanent guard added: llm.py _forward_impl checks idx bounds vs
+num_embeddings when self.training -> readable RuntimeError instead of an
+async gather assert. Skipped in decode hot path.
+
+Verification: 4-step real run clean (loss 36.5 finite, VRAM 7.78GB, merged-
+LoRA ckpt saved+verified); 46/46 engine tests; 2/2 new regression tests
+(tests/unit/test_sft_tokenizer_namespace.py).
+
+Lesson learned: when every component passes in isolation but the assembled
+path asserts, the delta is in the GLUE â€” here, a cache layer no probe
+exercised. Runtime instrumentation (bounds-check at the asserting op)
+beat another hour of code reading.
+
+## Session: distill60 validated + tokenizer self-description (continuation)
+
+- distill60 ckpt VERIFIED: logits ~= base (top8 same, std 2.234); whitespace gen was
+  a wrong-tokenizer artifact, NOT training damage. from_checkpoint gave the bare
+  .safetensors the canonical 65536-vocab tokenizer (HFCompat eos=519) for a
+  128000-vocab model -> mis-tokenized prompt -> degenerate output.
+- Fix chain now complete: trainer meta records "tokenizer_path"; engine
+  _tokenizer_from_meta() resolves file ckpts before vocab dispatch. distill60
+  meta.json patched manually (tokenizer_path -> research/checkpoints/lfm3_1p7b_cc).
+- After fix: vocab 124893, eos 124900, generate('def add(a, b):') -> clean code
+  matching base style.
+- Pipelined loader fixed for 0-dim qscale scalars (reshape(-1) then uint8 view):
+  distill60 load 4.9s fallback -> 0.8s pipelined, total 2.2s.
+- Tests: test_sft_tokenizer_namespace.py now 3/3 (added _tokenizer_from_meta cases);
+  test_livet 17/17.
+- Lesson banked: raw-logits probe FIRST before blaming training â€” decode-path
+  artifacts (tokenizer, offload, templates) mimic degradation.

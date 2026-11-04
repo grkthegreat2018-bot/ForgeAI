@@ -4182,11 +4182,17 @@ def export_sft(db_path: str, out_path: str,
                         continue
             response = body if body else \
                 f"```python\n{code.strip()}\n```"
+            delta = float(s) - par[2]
+            # Reward-weighted SFT: monotone bounded map of the verified
+            # delta (sft_train normalizes reward weights to mean=1, so only
+            # the relative ordering matters). Small wins still count.
+            reward = max(0.05, 1.0 - math.exp(-max(delta, 0.0)))
             f.write(json.dumps({
                 "target": tgt, "prompt": prompt,
                 "response": response,
                 "completion": code,
-                "delta": float(s) - par[2]}) + "\n")
+                "delta": delta,
+                "reward": round(reward, 4)}) + "\n")
             n += 1
     os.replace(tmp, out_path)
     return n

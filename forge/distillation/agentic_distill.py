@@ -61,6 +61,47 @@ except ImportError:
     compute_reward = None  # type: ignore
 
 
+class _TrajectoryReward:
+    """Minimal stand-in for the removed tool_use_loop.compute_reward."""
+    __slots__ = ("total", "parts")
+
+    def __init__(self, total: float, parts: dict):
+        self.total = total
+        self.parts = parts
+
+    def to_dict(self) -> dict:
+        return dict(self.parts)
+
+
+def _local_compute_reward(task: str, tool_calls: list, final_answer,
+                          stopped_after_tools: bool,
+                          stopped_after_answer: bool,
+                          seen_outputs: set) -> _TrajectoryReward:
+    """Heuristic trajectory reward (0..1): answered (0.30), productive
+    tool use (0.25), clean stop (0.20), answer substance (0.15), novel
+    vs seen outputs (0.10). The verified/oracle gate still applies
+    downstream at export time."""
+    parts = {}
+    parts["answered"] = 0.30 if final_answer and str(final_answer).strip() \
+        else 0.0
+    n_tools = len(tool_calls or [])
+    parts["tool_use"] = 0.25 if n_tools >= 1 else 0.0
+    if stopped_after_tools and not stopped_after_answer:
+        parts["tool_use"] = 0.15
+    parts["clean_stop"] = 0.20 if (stopped_after_answer or
+                                   (final_answer and not stopped_after_tools)) \
+        else 0.0
+    alen = len(str(final_answer or ""))
+    parts["answer_substance"] = min(0.15, alen / 2000.0) if alen >= 40 else 0.0
+    novel = final_answer and final_answer[:200] not in (seen_outputs or set())
+    parts["novelty"] = 0.10 if novel else 0.0
+    return _TrajectoryReward(min(1.0, sum(parts.values())), parts)
+
+
+if compute_reward is None:
+    compute_reward = _local_compute_reward  # type: ignore
+
+
 # ── Tool schema conversion ───────────────────────────────────────────────
 
 def _schemas_to_openai_tools(schemas: list[dict]) -> list[dict]:

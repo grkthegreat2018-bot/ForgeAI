@@ -309,6 +309,17 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   (gating entropy 0.000): routed-k4 NLL +2.8, k2 +10.1, k1 +12.0 vs
   mean-of-4 baseline 3.41 — dense_bypass IS the semantics; cutting
   the 4x expert compute needs distillation, not a flag.
+- `forge/model/llm.py` — runtime loop dial (Dory-style latent
+  recurrence): `model._loop_iters/_loop_begin/_loop_end/_loop_reinject`
+  re-run `blocks[begin:end)` K times per forward with last-loop-KV +
+  conv/ssm state rollback on non-final passes (functional KV path only —
+  raises on preallocated/static caches). Default 1 = plain schedule,
+  zero overhead; train-time backprop flows through all passes (loop-FT
+  ready). Probe `scripts/probe_lfm3_loops.py` on lfm3_1p7b_cc: zero-shot
+  loops HURT — PPL 5.21→8.46@K2→45.7@K4 (reinject=1: 7.81/20.6), task
+  checks 6/6→2/6@K2→1/6@K4 (reinject=1: 5/6@K2), decode cost 1.8x@K2 /
+  3.1x@K4 per token. Verdict: needs Dory-style loop-sampled FT to pay
+  off; reinjection halves the damage and is the right starting shape.
 - `forge/aux_models.py` — generic non-LLM inference runner
   (`load_aux_model(manifest, ckpt)`): safetensors + manifest-declared
   `mlp`/`module` archs, VRAM-aware CUDA/CPU pick, `layer{i}` key remap.
@@ -1012,7 +1023,32 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   early-exit self-speculation R60-5 — greedy bit-identical to standard;
   DRY n-gram penalty R50-1 in the shared `_sample_from_logits` chain +
   all `engine_generation` paths, `dry_multiplier`/`dry_base`/
-  `dry_allowed_length`/`dry_penalty_last_n` params, 0=off)
+  `dry_allowed_length`/`dry_penalty_last_n` params, 0=off).
+  DeepInfer port (deepseek-ai/DeepInfer, R&D round 15): (1) `seed=`
+  on `SamplingParams`/`generate`/`generate_raw`/`generate_stream`/
+  `decoding.generate` — seq_seed deterministic sampling: SplitMix64
+  hash of (seed, absolute position) inverted through the filtered CDF
+  (`engine_common._hash_multinomial`), batch/chunk-invariant at bs=1,
+  opt-in only; (2) deferred readback now covers HYBRID models too —
+  the next forward launches before `.item()` and a per-step
+  `_spec_snapshot_recurrent` + `_defer_restore_recurrent` (in-place
+  copy_ so `_conv_state_buf`/graph-captured banks keep their storage)
+  rolls back on EOS/degen/stop breaks — DeepInfer ZOS
+  "launch(N+1) → post-process(N)" on one request, applies to both
+  `StandardDecoding.generate`/`_generate_static` and
+  `engine_generation._decode_tokens`; (3) `ExternalDraftSpeculative`
+  gained `confidence_tau` (build via `build_decoding("speculative",
+  confidence_tau=t)`) — draft-prob cumprod prefix-survival ends each
+  round at the confident prefix (DeepInfer varlen verify, bs=1 form;
+  also fixed a latent bug where `cur_logits` was never updated inside
+  the draft loop, so the draft re-proposed the first token every
+  iteration); (4) `prefix_cache._bounded_replay_recurrent` —
+  DeepInfer SWA bounded replay on prefix hits lacking a position-
+  correct conv_snap (legacy dict/LRU entries — the stale cross-request
+  `_conv_state` fallback): zeroes live recurrent state, re-forwards
+  only the last max(128, sliding_window) prefix tokens, returns a
+  full-length repaired KV (bit-exact attention, rebuilt conv/SSM
+  boundary). Tests: `tests/unit/test_deepinfer_ports.py`.
 - `forge/engine/gated.py` — ForgeGate three-probe gated generation
   (route/doom/convergence); `ForgeEngine.load_gate_probes()` +
   `generate_gated()`; probe bundle `research/checkpoints/gate_probes.pt`
@@ -1136,6 +1172,20 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   legacy `<|startofsegment|>`/`<|tool_call_start|>` markers are gone —
   they don't exist in the V2 tokenizer, so SFT was training a format
   inference never sees (fixed 2026-09-21; see BUG_LOG).
+  Offline on-policy distillation (R&D 2026-11): `scripts/score_teacher_
+  logprobs.py` scores each row's completion with an HF or Forge-native
+  teacher and writes a `teacher_logp` list (one float per completion
+  token, char-offset aligned back onto student tokens — tokenizer-
+  agnostic, works LFM3↔Qwen). `sft_train --distill` then trains those
+  rows with advantage-weighted CE: `w = floor + (1-floor)·clip(α·(tlp−slp))`
+  via `chunked_distill_ce` (`forge/training/losses/chunked_ce.py`,
+  never materializes [N,V]; sentinels `TEACHER_LOGP_MISSING=-99` →
+  neutral CE; rides `model.config.teacher_logp` per-batch like
+  `entropy_alpha`). Knobs: `--distill-alpha/clip/floor`; unscored rows
+  train as plain CE; `--teacher-checkpoint`/`--distill-topk` remain
+  reserved stubs. CodeEvolve `export_sft` now writes `reward` =
+  1−exp(−Δ) from the verified score delta → per-example
+  `reward_weights` in collate.
 - `forge/evolution/` — Evolutionary optimizer (ForgeEvolve); CLI: `python -m forge.evolution --domain <name> --steps <N>` (use `--list-domains` to see all domains). Domain specs + run/focus profiles live in `forge/evolution/configs/` (canonical; the legacy `tests/evolution/configs/` copy was removed — the tests/evolution harness scripts now point at the canonical dir). `--fixate` pins a run to one domain: no cross-domain transfer, no refinement spawning, plateaus re-diversify in place (`_fixate_rediversify`); `run_evolve.py --fixate` additionally kills auto-discover/revisit/parallel waves. `forge/evolution/domains/livet_domains.py` — `MicroLiveLM` (R64): the micro live-format search domain; REAL evaluator (builds ConfigurableResearchLLM+LiveSession on CUDA, measures fact-recall live_gain, bs=1 decode tps, ingest tps, params, revert parity — not synthetic). Structural grid via `discrete_choices` (240 cells) + 9 continuous dims. Focus topic: `--focus micro_format`. Results: conv+titan+ngram substrate dominates the micro frontier (d64-class ~0.2-0.5M params, gain ~5, ~250tps); see scratchpad R64. `forge/evolution/domains/flux_domains.py` — `FluxTune` (R65): FluxLM self-tuning domain; builds real FluxLM (cuda_primary, graphs+compile_dev off — concurrent captures/poisoned RNG state crash threaded evals) and measures held-out NLL, 1-hop + 2-hop chain recall, pred/ingest/gen tps, memory_report+VRAM, argmax diversity; score = weighted log2 ratios vs production defaults (baseline anchors at 25). `forge/evolution/domains/meta_domains.py` — `EvolverTune` (R65): meta-evolution — candidates are ForgeEvolveConfig knobs scored by real inner ForgeEvolve runs on SyntheticDomain (progress vs random-floor + eval efficiency); fixated+warm_start=False inner runs isolate proposal quality. Both set `eval_thread_safe=False` (engine opt-out of `_threaded_eval` side-stream pools — added in engine.py `_gpu_batch_eval`). Categories/focus topics: `fluxlm`, `evolver`. DBs: `forge_evolve_flux.db`, `forge_evolve_meta.db`, `forge_evolve_meta_inner.db` (scratch). R66 proposal frontier (engine.py): proposals are submitted to a pending frontier every gen and popped for eval later — submission is decoupled from eval throughput (`_submitted` counter in logs; measured ~2.1K unique proposals/s on synthetic). `ForgeEvolveConfig.propose_mult` (proposals/gen = n_generators×propose_mult, multi-sample grouped-einsum forward in `BatchedGenerator`), `frontier_cap` (evict lowest surrogate-scored pending), `quick_ratio` (multi-fidelity: pop quick_ratio×, domain `quick_eval` ranks, top fraction promotes to full eval). Domains may set `cpu_eval_ok=False` to opt out of the `parallel_eval` CPU pool (FluxTune/EvolverTune do — GPU-bound/nested-CUDA). Dedup is one D2H transfer + vectorized round for all candidates (was per-candidate `.cpu()`, ~100x). FluxTune quick_eval: ~1/3 corpus, 200 held positions, no decode probe, quality+mem terms only (tps is wall-clock noise at that fidelity), ~3x cheaper, deterministic prod=25.0 anchor. FluxTune hop2 probe is real chain recall (`#V>` -> V_next, the hop-1 value becomes the hop-2 key — measures association chaining, baseline ~2.35 nats). R66b literature fixes (AlphaEvolve/FunSearch/pyribs/MEMES parity): dedup keys on the DECODED config (discrete-bin domains were re-evaluating identical configs under different param vectors); per-generator archive-conditioned contexts (60% UCB elite / 15% random cell / 15% two-elite blend / 10% best — was one shared elite for all generators); rank-shaped scores for trainer+evolve (OpenAI-ES centered-rank fitness shaping — -1e9 failure spikes no longer poison fitness_ema); explore emitters (first 20% of generators credited on rank-shaped novelty, MEMES-style); crossover emitter (`crossover_frac`, blends two elite encodings + jitter as direct proposals, generator_idx=-2); islands (`n_islands` deme archives — generator g feeds island g%K, weakest half import global elites every `island_migrate_gens`).
 - `forge/evolution/scout.py` — Scout (OpenEvolve-lite): lightweight goal-driven discovery engine layered on the same domain specs + simulators + FindingsDB, replacing the 500-generator MLP population / gen-model manager / weight-BLOB storage with three small ML components: (1) numpy-only TPE proposer (Parzen l(x)/g(x) density-ratio over top-γ history + elite archive parents; per-dim bandwidths shrink where |corr(param,score)| is high — learned knob importance; `--mode random` = baseline), (2) Thompson-sampling Beta bandit over domains so cycles flow to whichever domain keeps paying off, (3) cross-domain param priors — `scout_param_stats` holds global per-(param-name, bin) Welford stats of within-domain z-scored evals, so a fresh domain inherits good regions for params shared with other domains (`transferable=false` specs neither leak nor receive). Promotion gate: candidate must beat the incumbent's re-measured mean by max(min_delta, rel_delta·|inc|, k·pooled SEM) over `--verify-reps` replicated evals of BOTH configs (fresh seeds; z-score recorded in metadata) — only then is it written to `discoveries`. Stagnation: domain retires after `--patience-dom` (40) dry cycles (basin hop at `--hop-after` 12 first), run stops after `--patience` (30) globally dry cycles or when all domains retire. Goal routing: `--focus memory|speed|quality|training` maps to spec categories (mirrors focus_profiles.json); `--require "metric>=v"` adds an end-result gate on promotions. CLI: `scripts/scout_loop.py` (e.g. `--focus memory --cycles 300`, `--report` for discoveries + cross-domain insights). ~20 evals/s on CPU, zero VRAM. Tests: `tests/unit/test_scout.py` (10). Measured smoke: 37 verified discoveries / 640 evals / 32s on `--focus memory`.
 - `forge/evolution/code_evolve.py` — CodeEvolve (OpenEvolve-style *program* evolution, the code-level sibling of Scout): evolves actual implementations, not just parameter values. A `Target` file declares `SEED_CODE` + `REQUIRED` names + `test(ns)` correctness gate + `bench(ns)` returning real metrics + `METRIC`/`GOAL`/`BUDGETS`/`TAGS`. Loop: proposer -> free syntax/required-name/dup gates -> `_candidate_eval.py` subprocess runs test+bench in isolation (invoked BY FILE PATH, pure-stdlib, never imports `forge.evolution.__init__` = ~0.2s not ~10s/eval; preamble injects `np`/`torch` only if referenced) -> score = sign*metric vs incumbent -> replicated verification re-benches challenger AND incumbent `reps` times (mean/SEM/z + min_delta + rel margin) -> promote only on verified win. Compares vs original seed, last best, AND the round's own candidates (per-island elite archives feed parent selection). Islands + Thompson arms + basin hop at `hop_after`; stagnation check sits at TOP of loop so every cheap-reject `continue` still counts — run stops after `patience` dry cycles. Proposers (`--proposer`): `mut` = `forge/evolution/mutator.py` AST mutation engine (default; no model, ~0ms/candidate — sort-reuse, `_ctor` ctor hoisting, diff/masked_fill/funcify swaps, literal perturb, elite crossover) with a **Thompson bandit per op persisted in `mutator_op_stats`** — every eval feeds credit back via `Mutator.note()`, so the policy literally resumes across runs and shares by target tag_sig; `mix` = mutations + LLM leap every `--llm-every`; `llm` = coder model via forge/exp harness (Qwen2.5-Coder-0.5B default — measured weak: 17/21 verbatim copies; any other `--model` routes through transformers AutoModel + chat template, e.g. cached Instruct variants); `none` = seed-eval only. **Resume** (default on, `--fresh` to disable): prior best program becomes incumbent (re-measured), last-2000 code hashes pre-seed dedup, top-24 programs repopulate island elites. `code_programs`/`code_insights`/`mutator_op_stats` all live in the same FindingsDB; `--export-pairs out.jsonl` writes DPO pairs (chosen=improved child, rejected=parent) for the future proposer fine-tune. `--emit-target pkg.mod:fn` scaffolds a target file from any codebase function. Targets: `forge/evolution/targets/` — ForgeEngine hot paths: `sample_pipeline` (`_sample_next_token`'s rep→temp→DRY→min_p→min_k→top_k→top_p→vocab-order chain, every decoded token), `suffix_mem` (SuffixMemory feed/lift/draft per-token sidecar), `radix_prefix` (RadixPrefixCache match/insert/evict, list-API so the surface is the tree logic), `stop_matcher` (`_StopMatcher` incremental stop-string matching), `prefix_hash` (blake2b rolling chain), `canon_key` (mutator's own canonicalizer — self-target), plus `min_k_filter` (mutator found +33% verified, ~+50% cumulative — the production win is wired into `engine_common`), `top_p_filter`, `top_p_probs`, `quantize_4bit`, `dequantize_4bit`, `dry_penalties`, `fast_softmax`. Tests: `tests/unit/test_code_evolve.py` (26). Fixed bugs: `continue`-paths skipped bottom-of-loop stagnation check (infinite reject loop); `_load_insights` SELECT missed the `target` col → resume-time KeyError; module-level `sqlite3` import missing (ALTER-race handler would NameError); `_promos` never incremented (status/watch reported 0); `_detect_cuda_target` body-only AST scan missed module-level `.to("cuda")` (VRAM-capped autoscaler); `LLMProposer._engine` waiters crashed unpacking on a failed builder's entry (now retries on a fresh entry so the real error surfaces); `_seed_signature` couldn't prime `class` targets (SuffixMem/RadixPrefixCache got `def SuffixMem(` primes → function proposals, guaranteed test-fail).
@@ -1309,6 +1359,17 @@ Config presets in `forge/config.py`:
   for ported models (ternary default is lossy); `--tokenize-workers 0`
   on Windows; NF4 merged saves need offline `weight_packed`→`.weight`
   dequant (one-liner in scratchpad 2026-10-27).
+  ForgeQ-R residual patch (R&D 2026-11): `prequant_forge_quant.py
+  --residual-rank N` fits an fp16 low-rank correction `res_a[O,r] @
+  res_b[r,I]` to each packed matrix's quant error (LoftQ-style
+  alternation, `--residual-iters`, skipped above
+  `--residual-max-elems`) — W ≈ deq(Q) + A@B, applied AFTER the
+  quantized output + LoRA in `ForgeQuantLinear.forward` (all branches,
+  original basis even under `--rotate`); `merge_lora()` refits it.
+  Self-describing: loader reads `res_a.shape[1]`, `forge_convert.json`
+  `fq_residual_rank` is informational. It is loss-REDUCED, NOT
+  mathematically lossless — r=16 ≈ 4-6% size overhead. Tests:
+  `tests/unit/test_distill_quant_patch.py`.
 - `forgelm_tiny` — 4-layer tiny conv+attention model for fast tests
   (no checkpoint, config-only).
 - `gen_model_tiny` — tiny generator config for evolution experiments.
@@ -1879,11 +1940,113 @@ D:\windsurf\ForgeAI\venv\Scripts\python.exe D:\windsurf\ForgeAI\scripts\bench_lo
   `/health/ready` 503-while-loading, Prometheus text `/metrics`
   (`?format=prometheus` or Accept: text/plain; JSON stays default).
 
+## Live-Learning Stack Status (2026-11 — L1/L2 validated on real backbone)
+
+Measured on `research/checkpoints/lfm3_1p7b_cc_fq` (int4, ~1.4B):
+
+- **L1 = exact suffix memory only.** `SuffixMemory`/`NGramMemory` rows
+  are EMA successor distributions (`row <- (1-a)*row + a*onehot`,
+  `row_mass` fixed so lift strength is write-count-independent);
+  `write_decay=1.0` = last-write-wins. Lift is a log-likelihood ratio
+  `w*log(p_mem/p_ref)` vs the unigram+uniform prior — unseen suffixes
+  give exactly 0. Order weights discount by RANK among configured
+  orders, not order value (the old `w**(max_order-o)` made order-4
+  ~5e-5 under orders (4,8,16,32)). Ingest rule: feed at sentence/doc
+  granularity — BPE suffix keys only match fresh-tokenized queries
+  when boundary tokens were ingested with matching left context.
+  Probe `scripts/exp_l1_real.py`: recall CE 5.10->2.45, hit-rate
+  0.25->0.50, immune to 3.2k distractor tokens, lift ~0.12ms (~0.3%
+  decode), +0 VRAM. Fuzzy Titan/GDN2 memory failed the fact-recall
+  gate (gain ~2.0n at 5/50/200 reps vs ngram ~4.3; GDN2-only 0.00) —
+  kept off the fact path.
+- **L2 = sleep-cycle LoRA consolidation.** `scripts/exp_l2_consolidate.py`:
+  doc ingest -> SuffixMemory traces -> reconstructed rows ->
+  LoRA(r8) fit on int4 backbone -> retention eval. Operating point:
+  lr 3e-3 forgets catastrophically (+3.86 ctrl drift); **lr 5e-4 +
+  replay buffer -> fact CE 7.22->5.42, drift +0.31**. Rollback path
+  required by design (Sleeping-LLM failure mode).
+- **Never-loops**: `SamplingParams.loop_detect` (default on) — verbatim
+  cycle detector in `_decode_tokens`, checks every 16 gen tokens past
+  64; stops when tail is >=3 copies covering >=48 tokens (period<=128,
+  copies = max(3, ceil(48/p))). Detection-as-stop is the only mechanism
+  that ENDS an attractor loop; DRY/penalties only deform it.
+- **Teacher-logprob distill data path validated**:
+  `scripts/score_teacher_logprobs.py` (char-offset teacher->student
+  token map) scored 150 rows, 0 unmapped, via Qwen2.5-Coder-3B int4
+  teacher -> `data/sft/evolve_sft_v3.scored.jsonl`; `sft_train.py
+  --distill*` consumes `teacher_logp`.
+- **ForgeQ-R residual verdict**: r16 patch on groupwise-int4 error cut
+  rel Frobenius 0.1164->0.1149 (~1%) — int4 error is near-white, skip
+  bigger ranks; FLINT-style self-distill recovery is the repair path.
+- `forge/distillation/agentic_distill.py` reward path restored
+  (`_local_compute_reward`; `compute_reward` was deleted in AZR merge).
+- **sft_train correctness fixes (distill CUDA assert, resolved)**:
+  `_tokenize_cached` now namespaces the disk/LRU token cache by
+  tokenizer identity (was shared `"default"` — cross-vocab poisoning
+  caused a device-side embed gather assert); tokenizer selection is
+  checkpoint-aware when `--tokenizer` absent (default canonical is
+  65536-vocab — wrong for foreign checkpoints); `use_chunked_ce`/
+  `ce_chunk_size`/`use_mtp` are synced onto `model.config` post-build
+  (ForgeEngine builds its own config — trainer-cfg mutations were lost);
+  uniform-1.0 `sample_weights` drop to None so the chunked-CE /
+  `teacher_logp` path actually engages (was dead code → `--distill`
+  silently ran plain weighted CE + full [B,T,V] logits). Training-gated
+  embed bounds check in `llm.py` turns this failure class into a
+  readable error. Regression tests:
+  `tests/unit/test_sft_tokenizer_namespace.py`.
+- **Checkpoint tokenizer self-description**: `save_training_checkpoint`
+  meta now records `"tokenizer_path"` (the tokenizer source sft_train
+  resolved); `from_checkpoint` reads it via `_tokenizer_from_meta` for
+  file checkpoints (bare `.safetensors` has no sibling tokenizer.json —
+  it silently got the canonical 65536-vocab tokenizer and generated
+  whitespace on the 128000-vocab distill60 save until fixed; weights
+  were always fine — discriminate weights-vs-wrapper with a raw-logits
+  probe). `_tokenizer_for_vocab` still covers no-meta saves.
+- **Pipelined loader 0-dim fix**: scalar tensors (BitNet `qscale`)
+  crashed `load_safetensors_pipelined` (`view(uint8)` needs dim>0);
+  `reshape(-1)` first — load fell back 4.9s → now 0.8s.
+- **`decoding="suffix_draft"`**: zero-VRAM speculative decoding — the
+  SuffixMemory sidecar IS the draft model (`SuffixDraftModel` shim,
+  `forge/model/ngram_mem.py`). Contract: `enable_suffix_memory()` FIRST,
+  then `activate(decoding="suffix_draft")` → builds
+  ExternalDraftSpeculativeDecoding on the shim. The spec loop feeds
+  `suffix_mem` (prompt at prefill, `feed_one` per committed token) so
+  `mem._tail` is the committed-context source of truth; the shim rolls
+  only a virtual proposal chain (T==1 calls matching its last argmax;
+  T>1 calls end the round). E2E: bit-identical greedy output, 1.46x on
+  repetitive code (92-token mem, ~30-80 cells/order).
+- **distill60 run record**: `research/checkpoints/lfm3_1p7b_cc.distill60.safetensors`
+  — 60 steps, 29 packed seqs (37 usable conv of 39 / 150 scored rows),
+  seq 2048, batch4×accum4, BitNet-everywhere + manual-LoRA(143 adapters,
+  ~36M params, merged), chunked distill CE w/ teacher_logp advantage
+  weighting. Loss oscillated 35.5–38.75 (advantage weights ≈3.8× CE at
+  clip — not comparable to plain CE). VRAM steady 7.78GB. Checkpoint
+  verified end-to-end: logits ≈ base delta-small, generation clean.
+
 ## Environment
 
 - OS: Windows 11, GPU: RTX 5070 12GB
 - Python venv: `D:\windsurf\ForgeAI\venv\`
 - Key packages: torch, transformers, safetensors, bitsandbytes, pytest
+
+## Memory/Information-Floor Probes (2026-11-03)
+
+Measured floors for identical-output memory reduction — see
+`.devin/scratchpad.md` (2026-11-03 entry) for full numbers:
+- `scripts/probe_llm_memory_math.py` — memory decomposition + Chinchilla
+  coupling (halving loss-excess = x7.68 params) + softmax rank inflation
+  (rank 64 -> 512: attention matrix is NOT exactly low-rank).
+- `scripts/probe_exact_decode_tradeoff.py` — fractional-KV + recompute
+  decode: bit-exact in fp64, argmax-identical ~98-99% fp16 on random init;
+  KV memory -> 0 at ~2.3x decode cost (T=2048 mini model).
+- `scripts/probe_weight_entropy.py` — trained weights are ~incompressible:
+  byte-entropy 6.29/8 (floor 1.27x), mantissa 6.97/7 bits, delta entropy
+  8.0/8, zeros 0.2%.
+- `scripts/probe_kv_manifold.py` — real KV on proposer_mla_moe: entropy
+  ~6.3/8, rank99(K)~64-90/128, int8 past-KV argmax-identical E2E.
+- Dormant exact-memory paths (not wired to decode): ResidualStreamCache,
+  CaptureKVCache, XQuantKVCache (rematerialize), HiSparseKVCache — all
+  registered in kv_backend but decode never calls them.
 
 ## Historical Notes
 R&D round documentation, refactor retrospectives, and historical notes

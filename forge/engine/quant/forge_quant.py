@@ -220,7 +220,8 @@ class ForgeQuantLinear(QuantizedLinearMixin):
 
     def __init__(self, in_features: int, out_features: int, bias: bool = False,
                  group_size: int = 128, sparse_ratio: float = 0.10,
-                 use_rotation: bool = False, rotation_seed: int = 0):
+                 use_rotation: bool = False, rotation_seed: int = 0,
+                 residual_rank: int = 0):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -279,6 +280,25 @@ class ForgeQuantLinear(QuantizedLinearMixin):
         self._fused_gemm_max_m = 32
         self._rot_cache: dict = {}               # device -> ±1 diag (K_pad,)
         self.lora_adapter: nn.Module | None = None
+        # FP16 low-rank residual patch (ForgeQ-R): W ≈ deq(Q) + res_a @ res_b,
+        # fitted at pack time by SVD of the quantization error (LoftQ-style).
+        # Stored fp16, applied in fp32 at forward — rank-r GEMV is ~free at
+        # decode. NOT folded into _dequantize_weight or merge_lora: it stays
+        # a separate additive correction so the int4 surface remains pure.
+        if residual_rank > 0:
+            self.residual_rank = residual_rank
+            self.res_a = nn.Parameter(
+                torch.zeros(out_features, residual_rank,
+                            dtype=torch.float16),
+                requires_grad=False)
+            self.res_b = nn.Parameter(
+                torch.zeros(residual_rank, in_features,
+                            dtype=torch.float16),
+                requires_grad=False)
+        else:
+            self.residual_rank = 0
+            self.res_a = None
+            self.res_b = None
 
     # ── Hadamard rotation helpers (use_rotation only) ──────────────────
 
@@ -367,7 +387,7 @@ class ForgeQuantLinear(QuantizedLinearMixin):
         else:
             xv = x2d
             if xv.shape[1] < K_pad:
-                xv = F.pad(xv, (0, 0, K_pad - xv.shape[1]))
+                xv = F.pad(xv, (0, K_pad - xv.shape[1]))
         xv = xv.contiguous()
         out = torch.empty(M, N, device=dev, dtype=torch.float32)
         if N >= 2048:
@@ -508,6 +528,21 @@ class ForgeQuantLinear(QuantizedLinearMixin):
             self._cached_weight_rot = w.to(torch.bfloat16)
         return w
 
+    def _residual_apply(self, x: torch.Tensor, out: torch.Tensor
+                        ) -> torch.Tensor:
+        """Add the FP16 low-rank quant-error patch: out += x @ res_b.T @ res_a.T.
+
+        Computed in fp32 (it exists to recover precision), then cast to
+        out's dtype. Cost is a rank-r matvec — negligible at decode.
+        """
+        if self.res_a is None:
+            return out
+        flat = x.reshape(-1, x.shape[-1]) if x.dim() > 1 \
+            else x.reshape(1, -1)
+        corr = (flat.float() @ self.res_b.data.t().float()
+                ) @ self.res_a.data.t().float()
+        return out + corr.reshape(out.shape).to(out.dtype)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         flat = x.reshape(-1, x.shape[-1]) if x.dim() > 1 \
             else x.reshape(1, -1)
@@ -526,7 +561,7 @@ class ForgeQuantLinear(QuantizedLinearMixin):
             if out is not None:
                 if self.lora_adapter is not None:
                     out = out + self.lora_adapter(x)
-                return out
+                return self._residual_apply(x, out)
         if self.use_rotation:
             # out = (xR)(WR)^T + W_s·x — dense contracts in the rotated
             # basis, the INT8 outlier rows contract in the original one.
@@ -544,7 +579,7 @@ class ForgeQuantLinear(QuantizedLinearMixin):
             out = F.linear(x, w, bias)
         if self.lora_adapter is not None:
             out = out + self.lora_adapter(x)
-        return out
+        return self._residual_apply(x, out)
 
     @torch.no_grad()
     def merge_lora(self) -> bool:
@@ -559,6 +594,22 @@ class ForgeQuantLinear(QuantizedLinearMixin):
         self.lora_adapter = None
         self._cached_weight = None
         self._cached_weight_rot = None
+        # Refit the ForgeQ-R residual to the merged weight's fresh quant
+        # error — the old patch was fitted to the pre-merge error and is
+        # stale (LoRA merge is rare; the SVD cost is fine).
+        if self.res_a is not None and self.residual_rank > 0:
+            resid = w - self._dequantize_weight(torch.float32)
+            try:
+                U, S, Vh = torch.linalg.svd(resid, full_matrices=False)
+                r = self.residual_rank
+                sq = S[:r].clamp_min(0).sqrt()
+                self.res_a.data.copy_((U[:, :r] * sq.unsqueeze(0)).half())
+                self.res_b.data.copy_((sq.unsqueeze(1) * Vh[:r]).half())
+            except RuntimeError:
+                # SVD failure (rare on CPU, NaN weights) -> zero patch is
+                # safer than a wrong one.
+                self.res_a.data.zero_()
+                self.res_b.data.zero_()
         return True
 
     def extra_repr(self) -> str:
@@ -568,6 +619,7 @@ class ForgeQuantLinear(QuantizedLinearMixin):
                 f"group_size={self.group_size}, "
                 f"sparse_ratio={self.sparse_ratio}, "
                 f"use_rotation={self.use_rotation}, "
+                f"residual_rank={self.residual_rank}, "
                 f"forge_quant=True")
 
 
