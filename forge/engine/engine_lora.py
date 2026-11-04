@@ -174,7 +174,10 @@ class _LoRAMixin:
                           mem_filter: bool = True,
                           merge: bool = False,
                           control: str | None = None,
-                          save_adapter: str | None = None) -> dict:
+                          save_adapter: str | None = None,
+                          min_fit_ce: float | None = None,
+                          replay_topk: int | None = None,
+                          replay_low_ce: bool = False) -> dict:
         """Fold verified (prompt, response) pairs into weights via a
         short in-engine LoRA fit — the L2 consolidation step of the
         live-learning loop (L1 sidecar → L2 weights).
@@ -198,6 +201,15 @@ class _LoRAMixin:
         rows are trained, so they cannot serve as the control).
         ``save_adapter`` writes the trained A/B tensors as a
         load_lora-compatible safetensors file.
+
+        ``min_fit_ce`` drops pairs whose answer CE is already below the
+        threshold — already-known pairs waste steps and add drift
+        pressure (TLM/VDS-TTT: high-perplexity samples are the
+        informative ones). ``replay_topk`` keeps only K replay rows,
+        ranked by CE: ``replay_low_ce=True`` anchors on the
+        BEST-learned rows (knowledge worth preserving — measured lower
+        drift), the default keeps the highest-CE rows (most informative
+        anchors when the fit set is large and well-mixed).
 
         Returns a metrics dict: pre/post answer CE on ``pairs``, control
         CE drift on ``replay[0]``, fitted/dropped counts, n_params.
@@ -265,8 +277,30 @@ class _LoRAMixin:
                            "Pack my box with five dozen liquor jugs.")
             ctrl_ids = _enc(control)
 
-            pre = sum(_answer_ce(q, a) for q, a in
-                      (r[1:] for r in rows)) / len(rows)
+            # Per-row answer CE — one forward each, reused for the
+            # pre-metric AND the fit/replay gates.
+            row_ce = [_answer_ce(q, a) for _p, q, a in rows]
+            skipped_known = 0
+            if min_fit_ce is not None:
+                keep = [i for i, c in enumerate(row_ce)
+                        if c >= min_fit_ce]
+                skipped_known = len(rows) - len(keep)
+                rows = [rows[i] for i in keep]
+                row_ce = [row_ce[i] for i in keep]
+                if not rows:
+                    return {"fitted": 0, "dropped": dropped,
+                            "skipped_known": skipped_known,
+                            "error": "no pairs survived the CE gate"}
+            if replay_topk is not None \
+                    and len(replay_rows) > replay_topk:
+                order = sorted(
+                    range(len(replay_rows)),
+                    key=lambda i: _answer_ce(*replay_rows[i][1:]),
+                    reverse=not replay_low_ce)
+                replay_rows = [replay_rows[i]
+                               for i in order[:replay_topk]]
+
+            pre = sum(row_ce) / len(row_ce)
             ctrl_pre = _text_ce(ctrl_ids)
 
             n_ad, lora_params = add_lora_adapters(
@@ -320,6 +354,8 @@ class _LoRAMixin:
                     "source": "consolidate_pairs"}
             result = {
                 "fitted": len(rows), "dropped": dropped,
+                "skipped_known": skipped_known,
+                "replay_kept": len(replay_rows),
                 "n_adapters": n_ad, "n_params": n_params,
                 "pre_ce": round(pre, 4), "post_ce": round(post, 4),
                 "ctrl_drift": round(ctrl_post - ctrl_pre, 4),
