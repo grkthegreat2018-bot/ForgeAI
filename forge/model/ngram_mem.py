@@ -464,7 +464,9 @@ class SuffixDraftModel(torch.nn.Module):
                     best_tok, best_p = k, (c / tot) if tot else 0.0
                     break
             if best_tok is not None:
-                p = min(max(best_p, 1e-3), 1.0)
+                # p==1.0 → logit=+inf → NaN probs downstream (multinomial
+                # crash on a 100%-confidence suffix row).
+                p = min(max(best_p, 1e-3), 1.0 - 1e-6)
                 logits[b, 0, best_tok] = float(
                     torch.logit(torch.tensor(p)))
                 if b == 0:

@@ -228,3 +228,12 @@ New arch support needed (all landed in shared code paths):
 - Tokenizer: gigatoken can't parse Spark's CJK Split pre-tokenizer regexes — `_load_hf_tokenizer` now returns plain HF tokenizer when the gigatoken wrap raises (was only catching ImportError).
 
 Measured on RTX 5070 (bench_spark_port.py): _fq packed (1.42GB, 196 linears) loads 2.5GB, decodes 65-76 tok/s with BCG+prefix+chunked; dense activation-quant path coherent too but ~4min inductor warmup on the dequant path. Coherent thinking-style output, official sampling temp1.0/top_p0.95.
+
+## 2026-11-04 - suffix_draft rejected on Spark too; SuffixDraftModel logit(1.0) inf crash
+
+- SuffixDraftModel._predict_logits emitted torch.logit(1.0)=+inf when a
+  suffix row hit 100% confidence ? NaN probs ? multinomial crash
+  (surfaced on spark_x26_1p7b_fq's first spec run). Clamped p to 1-1e-6.
+- suffix_draft on Spark thinking text: 21.8 tok/s vs 62-76 standard —
+  still not worth it (acceptance too low for the round overhead; same
+  rejection class as LFM3). StandardDecoding stays default.

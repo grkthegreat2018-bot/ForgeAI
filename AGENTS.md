@@ -1459,7 +1459,7 @@ Config presets in `forge/config.py`:
   slice-mode partial RoPE 0.25/θ5M on full layers (SWA θ10K full).
   Vocab 131072, bos=0 eos=1 pad=2, tied embeds.
   `research/checkpoints/spark_x26_1p7b` (HF dir + tokenizer/chat template)
-  and `spark_x26_1p7b_fq` (1.42GB packed — loads 2.5GB, 65-76 tok/s w/ BCG).
+  and `spark_x26_1p7b_fq` (1.42GB packed — loads 1.87GB w/ swa_ring_kv+fused GEMM+share_rope defaults, 62-76 tok/s w/ BCG).
   Parity `scripts/test_spark_port.py`: max|dlogit|=2.1e-5. Port required
   THREE new shared-code paths: slice-mode partial RoPE
   (`partial_rotary_mode`), GeGLU (`ffn_type="geglu"` → SwiGLUFFN
