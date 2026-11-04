@@ -1769,6 +1769,18 @@ def _spec_restore_recurrent(snap) -> None:
                     val.clone() if torch.is_tensor(val) else val)
 
 
+def _state_copy_back_(cur, val) -> None:
+    """In-place state restore that respects inference-tensor mode:
+    buffers created under ``torch.inference_mode`` (decode steps, graph
+    captures) may only be mutated inside it; normal buffers must not be
+    written inside it. Decided per-tensor so mixed state survives."""
+    if cur.is_inference():
+        with torch.inference_mode():
+            cur.copy_(val)
+    else:
+        cur.copy_(val)
+
+
 def _defer_restore_recurrent(snap) -> None:
     """Undo a speculatively-launched decode step on a hybrid model.
 
@@ -1788,7 +1800,7 @@ def _defer_restore_recurrent(snap) -> None:
             s = val.get("state")
             if torch.is_tensor(cur) and torch.is_tensor(s) \
                     and cur.shape == s.shape:
-                cur.copy_(s)
+                _state_copy_back_(cur, s)
             else:
                 obj._state = s.clone() if torch.is_tensor(s) else s
             for ck in ("conv_q", "conv_k", "conv_v"):
@@ -1798,14 +1810,14 @@ def _defer_restore_recurrent(snap) -> None:
                     cst = getattr(cv, "state", None)
                     if torch.is_tensor(cst) and torch.is_tensor(sv) \
                             and cst.shape == sv.shape:
-                        cst.copy_(sv)
+                        _state_copy_back_(cst, sv)
                     else:
                         cv.state = sv.clone() if torch.is_tensor(sv) else sv
         else:
             cur = getattr(obj, attr, None)
             if torch.is_tensor(cur) and torch.is_tensor(val) \
                     and cur.shape == val.shape:
-                cur.copy_(val)
+                _state_copy_back_(cur, val)
             else:
                 setattr(obj, attr,
                         val.clone() if torch.is_tensor(val) else val)
