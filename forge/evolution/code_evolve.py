@@ -207,11 +207,20 @@ class CodeEvolveConfig:
                                                # qwen25_05b default)
     proposer_quantize: str | None = None       # engine load_quantize mode
                                                # ("int4"/"fp8"/"int8"/None)
-    proposer_think: bool = False               # LFM3 only: open the think
+    proposer_think: bool = False               # LFM3/Spark: open the think
                                                # prefill (reason before
                                                # code) instead of the
                                                # template's empty think
                                                # pair. Costs gen tokens.
+    think_budget: int = 512                    # Spark: BUDGET-FORCED
+                                               # thinking — pass 1 thinks
+                                               # <=N tokens (unbounded
+                                               # thinking starved the
+                                               # code budget, 0/10 gated),
+                                               # pass 2 emits ```python
+                                               # code after a forced
+                                               # </think>. 0 disables the
+                                               # bound (old behavior).
     proposer_compile: bool = False             # torch.compile the proposer.
                                                # Decode replays bucketed
                                                # static-KV graphs, so compile
@@ -641,6 +650,31 @@ class LLMProposer:
             except Exception:
                 pass
         self._lfm3_cached = c
+        return c
+
+    @property
+    def _spark(self) -> bool:
+        """Spark-X2.6 proposer — DeepSeek-style sentence markers, not
+        ChatML; the generic _wrap's im_start/im_end is an untrained
+        format for it (fullwidth bars in the markers are \\uFF5C
+        escapes at the call site — this file is edited cp1252-safe)."""
+        c = getattr(self, "_spark_cached", None)
+        if c is not None:
+            return c
+        mid = self._model_id or ""
+        c = "spark" in mid.lower()
+        p = Path(mid)
+        if not c and p.is_dir():
+            # Corroborate via bos_token content — a renamed ckpt dir
+            # still carries the sentence-marker BOS.
+            try:
+                bos = json.loads(
+                    (p / "tokenizer_config.json").read_text(
+                        encoding="utf-8")).get("bos_token") or ""
+                c = "sentence" in str(bos)
+            except Exception:
+                pass
+        self._spark_cached = c
         return c
 
     @property
@@ -1140,6 +1174,19 @@ class LLMProposer:
         chat_template.jinja: startoftext BOS, im_start/im_end turns, and
         the empty think-prefill the enable_thinking=False path renders
         (proposer_think=True opens the think tag instead)."""
+        if self._spark:
+            # Spark template (its chat_template.jinja): fullwidth-pipe
+            # sentence markers (\uFF5C) around role tags + ▁ separators —
+            # NOT ChatML. Empty </think> prefill skips reasoning; the
+            # open ```python fence has it answer inside a code block
+            # (same trick as the LFM3 branch).
+            sos = "\x3c｜start▁of▁sentence｜>"
+            eos = "\x3c｜end▁of▁sentence｜>"
+            think = "\x3cthink>" if self.cfg.proposer_think else \
+                "\x3c/think>"
+            fence = "```python\n" if not self.cfg.proposer_think else ""
+            return (sos + "\x3c|User|>" + prompt + eos
+                    + sos + "\x3c|Bot|>" + think + fence)
         bos = "\x3c|startoftext|>" if self._lfm3 else ""
         if self._lfm3:
             think = "\x3cthink>" if self.cfg.proposer_think else \
@@ -1512,8 +1559,34 @@ class LLMProposer:
                 eos_id = getattr(eng.tokenizer, 'eos_token_id', None)
                 im_end = (eng.tokenizer.decode([eos_id])
                           if eos_id is not None else "<|im_end|>")
+                wrapped = self._wrap(self._with_hint(prompt, hint))
+                if (self._spark and self.cfg.proposer_think
+                        and getattr(self.cfg, "think_budget", 0)):
+                    # Budget-forced thinking: unbounded Spark reasoning
+                    # starves the code budget (0/10 gated at 1536). Two
+                    # passes — think <= cfg.think_budget (or a natural
+                    # </think>), then continue the SAME prefix with
+                    # </think>+```python so the answer lands in a fence.
+                    think_max = int(self.cfg.think_budget)
+                    t = eng.generate(
+                        wrapped, max_new_tokens=think_max,
+                        temperature=self.cfg.temperature, top_p=0.95,
+                        top_k=80, finish_sentence=False,
+                        stop=["</think>", im_end])
+                    think = t if isinstance(t, str) else t.get("text", "")
+                    think = think.split("</think>")[0]
+                    prefix = wrapped + think + "</think>\n```python\n"
+                    c = eng.generate(
+                        prefix, max_new_tokens=self.cfg.max_gen_tokens,
+                        temperature=self.cfg.temperature, top_p=0.95,
+                        top_k=80, finish_sentence=False,
+                        stop=[im_end])
+                    code = c if isinstance(c, str) else c.get("text", "")
+                    # Tag the think region so _extract_code strips it
+                    # before candidate selection.
+                    return "<think>" + think + "</think>\n```python\n" + code
                 out = eng.generate(
-                    self._wrap(self._with_hint(prompt, hint)),
+                    wrapped,
                     max_new_tokens=self.cfg.max_gen_tokens,
                     temperature=self.cfg.temperature, top_p=0.95,
                     top_k=80, finish_sentence=False,
@@ -1574,13 +1647,50 @@ class LLMProposer:
                     # batch shares one adapter; route its first prompt
                     # (all prompts in a batch share the target anyway).
                     self._ensure_lora(eng, prompts[0] if prompts else None)
-                    raws = eng.generate_batch(
-                        [self._wrap(p) for p in hinted],
-                        max_new_tokens=self.cfg.max_gen_tokens,
-                        temperature=self.cfg.temperature, top_p=0.95,
-                        top_k=80, temperatures=temps,
-                        repetition_penalties=reps, seeds=seeds,
-                        stops=[[im_end]] * n, skip_special_tokens=True)
+                    wrapped = [self._wrap(p) for p in hinted]
+                    if (self._spark and self.cfg.proposer_think
+                            and getattr(self.cfg, "think_budget", 0)):
+                        # Budget-forced thinking, batched: pass 1 thinks
+                        # <= think_budget (or a natural </think>), pass 2
+                        # continues each prefix with </think>+```python —
+                        # unbounded think starved the code budget (0/10
+                        # gated) even at 1536 max_new_tokens.
+                        thinks = eng.generate_batch(
+                            wrapped,
+                            max_new_tokens=int(self.cfg.think_budget),
+                            temperature=self.cfg.temperature, top_p=0.95,
+                            top_k=80, temperatures=temps,
+                            repetition_penalties=reps, seeds=seeds,
+                            stops=[["</think>", im_end]] * n,
+                            skip_special_tokens=True)
+                        thinks = [(t.split("</think>")[0] if t else "")
+                                  for t in thinks]
+                        seeds2 = [_rnd.randrange(1 << 60)
+                                  for _ in range(n)]
+                        codes = eng.generate_batch(
+                            [w + t + "</think>\n```python\n"
+                             for w, t in zip(wrapped, thinks)],
+                            max_new_tokens=self.cfg.max_gen_tokens,
+                            temperature=self.cfg.temperature, top_p=0.95,
+                            top_k=80,
+                            temperatures=[_rnd.uniform(0.7, 1.25)
+                                          for _ in range(n)],
+                            repetition_penalties=[
+                                1.0 + 0.25 * _rnd.random()
+                                for _ in range(n)],
+                            seeds=seeds2, stops=[[im_end]] * n,
+                            skip_special_tokens=True)
+                        raws = ["<think>" + t + "</think>\n```python\n"
+                                + (c or "")
+                                for t, c in zip(thinks, codes)]
+                    else:
+                        raws = eng.generate_batch(
+                            wrapped,
+                            max_new_tokens=self.cfg.max_gen_tokens,
+                            temperature=self.cfg.temperature, top_p=0.95,
+                            top_k=80, temperatures=temps,
+                            repetition_penalties=reps, seeds=seeds,
+                            stops=[[im_end]] * n, skip_special_tokens=True)
                     # SEARCH: rows get ONE batched regen — the extra
                     # round-trip is shared across all lookups.
                     return self._research_followup(
