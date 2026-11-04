@@ -198,3 +198,11 @@ Verdict after honest A/B (scripts/compare_distill250.py): base ≈ distill250 �
 
 Lesson: eval an instruct model through its template + its generation_config before concluding the weights are broken. Raw-prompt looping is a format artifact.
 
+## 2026-11-04 - Spec-decode and consolidation measurement findings
+
+- **specbound self-speculation rejected on lfm3**: early-exit draft + full-forward verify ran 8x SLOWER than standard (6.79s vs 0.82s for 64 tok) and DIVERGED from greedy output on the conv/attn hybrid — early-exit + state rollback doesn't pay on this arch. Do not enable.
+- **Dormant feature objects**: _adaptive_spec/_suffix_spec/_faser/_lookahead_gate/_hotprefix/_pod_attention attach at activation but are never consumed by the production decode loop (only debug/bench scripts touch them). "active" in activation logs means "attached", not "in the token path". Real spec speed must come via the `decoding=` strategy (suffix_draft/specbound/external), not these flags.
+- **compile matters on dense**: base eager 33.2 tok/s vs compiled+fused+graphed 48.4 tok/s (+46%). Packed int4 still fastest at 93 tok/s without compile.
+- **consolidate_pairs CE gating**: min_fit_ce + replay_topk shipped. Replay selection DIRECTION (high vs low CE anchors) is a wash at K=2 — replay SIZE remains the dominant drift control.
+- **post_ce>pre_ce on ForgeQuant-packed models**: consolidate fits on the _fq packed ckpt made the fit set WORSE (5.19→7.5) with 2-anchor replay — LoRA over ForgeQuantLinear dequant is unstable at these settings vs stable fits on int4-load models. Investigate before trusting consolidation on packed checkpoints.
+
