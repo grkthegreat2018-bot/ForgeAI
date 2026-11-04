@@ -503,6 +503,13 @@ class _ActivationMixin:
             from forge.model.ngram_mem import SuffixDraftModel
             decode_kwargs["draft_model"] = SuffixDraftModel(mem)
             decode_kwargs.setdefault("draft_length", 4)
+            # confidence_tau is NOT optional for this drafter: when the
+            # suffix tables have no row for the tail, the shim's logits
+            # are uniform and its argmax is garbage (token-0 spam that
+            # the verifier burns a forward rejecting). The shim emits
+            # the memory's real successor probability, so tau>0 ends
+            # no-opinion rounds before they propose.
+            decode_kwargs.setdefault("confidence_tau", 0.3)
             decoding = "external_draft_speculative"
         self.decoding = build_decoding(decoding, **decode_kwargs)
         self._log(f"Decoding: {self.decoding.name}")
