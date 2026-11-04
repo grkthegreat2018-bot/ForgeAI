@@ -30,11 +30,24 @@ _DEFAULT_CPU_MEMORY_BYTES = 32 * 1024**3
 # checkpoint and made every boot fail "not enough VRAM" on a 12GB card.
 _FAST_LOAD_VRAM_HEADROOM = 1.3
 
+# Dense checkpoints that pass the 1.3x fit check can still OOM at
+# activation — quant repack + KV prealloc + graph capture transiently
+# spike ~1.7-1.8x the file size (measured: 7.09GB save -> 12.79GB death
+# on a 12GB card). Below this multiplier the engine auto-loads packed
+# int4 weights instead: ~4x smaller resident, no spike, faster decode.
+_AUTO_PACK_VRAM_HEADROOM = 1.8
+
 
 def _fast_load_vram_required(ckpt_size: int) -> int:
     """Free-VRAM bytes the fast in-VRAM load path needs for a checkpoint of
     ``ckpt_size`` bytes."""
     return int(ckpt_size * _FAST_LOAD_VRAM_HEADROOM)
+
+
+def _auto_pack_vram_threshold(ckpt_size: int) -> int:
+    """Free-VRAM bytes below which a *fitting* dense checkpoint still
+    routes to the pre-packed ``load_quantize`` path."""
+    return int(ckpt_size * _AUTO_PACK_VRAM_HEADROOM)
 
 
 # EOS token IDs for all supported parent models:

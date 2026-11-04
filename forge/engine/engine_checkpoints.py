@@ -20,6 +20,7 @@ from .engine_common import (  # noqa: F401
     _checkpoint_metadata_cache,
     _checkpoint_size_cache,
     _ckpt_cache_lock,
+    _auto_pack_vram_threshold,
     _fast_load_vram_required,
     _map_gguf_to_forge,
     _min_k_filter,
@@ -226,10 +227,30 @@ class _CheckpointLoadingMixin:
             if is_prequant:
                 engine = cls._load_prequant(
                     cfg, checkpoint, _tokenizer(), device, metadata, **kwargs)
-            elif load_quantize:
-                engine = cls._load_quantized(
-                    cfg, checkpoint, _tokenizer(), device,
-                    mode=load_quantize, vram_free=vram_free, **kwargs)
+            elif load_quantize or (
+                    fits
+                    and vram_free < _auto_pack_vram_threshold(ckpt_size)):
+                # Dense weights fit on paper (1.3x) but activation extras
+                # spike ~1.8x — load pre-packed int4 instead of gambling
+                # the transient. mode="auto" picks the best packing that
+                # fits. Explicit load_quantize="none"/"" stays dense.
+                if load_quantize in ("none", ""):
+                    engine = cls._load_standard(
+                        cfg, checkpoint, _tokenizer(), device, **kwargs)
+                else:
+                    if load_quantize is None:
+                        logger.info(
+                            "Checkpoint fits but is VRAM-tight "
+                            "(%.1fGB free < %.1fGB activation-safe) — "
+                            "auto load_quantize='int4' (packed)",
+                            vram_free / 2**30,
+                            _auto_pack_vram_threshold(ckpt_size) / 2**30)
+                    # int4 is the proven pack on this stack — 'auto'
+                    # picks fp8 whose cublasLt heuristic fails on SM120.
+                    engine = cls._load_quantized(
+                        cfg, checkpoint, _tokenizer(), device,
+                        mode=load_quantize or "int4",
+                        vram_free=vram_free, **kwargs)
             elif fits:
                 engine = cls._load_standard(
                     cfg, checkpoint, _tokenizer(), device, **kwargs)
