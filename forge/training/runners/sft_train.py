@@ -105,6 +105,11 @@ _IM_START = "<|im_start|>"
 _IM_END = "<|im_end|>"
 
 
+def _turn_end() -> str:
+    """Turn terminator for the active chat format (Spark eos vs ChatML)."""
+    return _SPARK_EOS if _CHAT_FORMAT == "spark" else _IM_END
+
+
 # ── Chat-format rendering ────────────────────────────────────────────────────
 
 def _render_tool_call(tc: dict) -> str:
@@ -122,12 +127,47 @@ def _render_tool_call(tc: dict) -> str:
     return _TOOL_CALL_START + "\n" + call_json + "\n" + _TOOL_CALL_END
 
 
+_CHAT_FORMAT = "jamba"  # set from --chat-format; spark = DeepSeek markers
+
+_SPARK_SOS = "<｜start▁of▁sentence｜>"
+_SPARK_EOS = "<｜end▁of▁sentence｜>"
+
+
+def _spark_render(messages: list[dict], add_generation_prompt: bool) -> str:
+    """Spark-X2.6 chat format: user turns render as sos + USER + content
+    + eos; assistant turns as sos + BOT + body + eos; add_generation_prompt
+    appends sos + BOT. Tool results fold into a user turn as tool_response
+    tags (Spark template)."""
+    user_m = "<" + chr(0x7C) + "User" + chr(0x7C) + ">"
+    bot_m = "<" + chr(0x7C) + "Bot" + chr(0x7C) + ">"
+    out = []
+    for m in messages:
+        role = m.get("role")
+        if role == "user":
+            out.append(_SPARK_SOS + user_m + (m.get("content") or "")
+                       + _SPARK_EOS)
+        elif role == "assistant":
+            out.append(_SPARK_SOS + bot_m + _assistant_body(m)
+                       + _SPARK_EOS)
+        elif role == "tool":
+            body = "<tool_response>" + (m.get("content") or "") \
+                   + "</tool_response>"
+            out.append(_SPARK_SOS + user_m + body + _SPARK_EOS)
+    if add_generation_prompt:
+        out.append(_SPARK_SOS + bot_m)
+    return "".join(out)
+
+
 def _chat_render(messages: list[dict], add_generation_prompt: bool) -> str:
-    """Render via the canonical Jamba ChatML port (single source of truth —
+    """Render via the canonical Jamba ChatML port (single source of truth -
     forge/self_play/discovery/chat_template.py, a faithful port of the
     tokenizer's built-in Jinja template). thinking=False: SFT data carries
     direct answers; eval + the self-play solve path also render direct.
-    bos=False: the tokenizer adds BOS itself at encode time."""
+    bos=False: the tokenizer adds BOS itself at encode time.
+    --chat-format spark switches to the DeepSeek-style Spark markers so
+    SFT matches the proposer's inference-time wrap exactly."""
+    if _CHAT_FORMAT == "spark":
+        return _spark_render(messages, add_generation_prompt)
     from forge.self_play.discovery.chat_template import apply_chat_template
     return apply_chat_template(
         messages, add_generation_prompt=add_generation_prompt,
@@ -171,7 +211,7 @@ def render_single_turn(prompt: str, response: str) -> tuple[str, int]:
     """
     prompt_text = _chat_render(
         [{"role": "user", "content": prompt}], add_generation_prompt=True)
-    full = prompt_text + response + f"{_IM_END}\n"
+    full = prompt_text + response + f"{_turn_end()}\n"
     return full, len(prompt_text)
 
 
@@ -210,7 +250,7 @@ def split_multi_turn(messages: list[dict]) -> list[tuple[str, str]]:
         # Render the prefix through the canonical template so tool messages
         # group into user turns exactly as the model sees them at inference.
         prompt_text = _chat_render(messages[:i], add_generation_prompt=True)
-        completion_text = _assistant_body(m) + f"{_IM_END}\n"
+        completion_text = _assistant_body(m) + f"{_turn_end()}\n"
         examples.append((prompt_text, completion_text))
     return examples
 
@@ -469,6 +509,12 @@ def _tokenize_cached(tokenizer, text: str, max_seq_len: int) -> list[int] | None
             ids = enc["input_ids"] if isinstance(enc, dict) else enc
             if not isinstance(ids, list):
                 ids = list(ids)
+            if ids and not isinstance(ids[0], int):
+                if hasattr(ids[0], "ids"):
+                    ids = [i for e in ids for i in e.ids]
+                else:
+                    ids = tokenizer.encode(
+                        text, add_special_tokens=False)
             return ids
         except Exception:
             return None
@@ -494,6 +540,12 @@ def _tokenize_cached(tokenizer, text: str, max_seq_len: int) -> list[int] | None
     # Layer 2: disk cache
     disk = _get_disk_tok_cache()
     cached = disk.get(text, tok_hash)
+    if cached is not None and (
+            len(cached) < 4 or not isinstance(cached[0], int)):
+        # Self-heal poisoned entries: tokenizers returning non-int
+        # (Encoding objects) or degenerate ids were cached by earlier
+        # broken runs — treat as a miss and recompute.
+        cached = None
     if cached is not None:
         # Promote to in-memory cache
         if len(text) < 10000:
@@ -508,14 +560,26 @@ def _tokenize_cached(tokenizer, text: str, max_seq_len: int) -> list[int] | None
         ids = enc["input_ids"] if isinstance(enc, dict) else enc
         if not isinstance(ids, list):
             ids = list(ids)
+        # Some tokenizers (Spark's converted fast json) return raw
+        # tokenizers.Encoding objects under input_ids instead of int
+        # lists — every row then fails the len<4 check below and the
+        # whole dataset drops. .encode() returns a plain int list.
+        if ids and not isinstance(ids[0], int):
+            if hasattr(ids[0], "ids"):
+                ids = [i for e in ids for i in e.ids]
+            else:
+                ids = tokenizer.encode(
+                    text, add_special_tokens=False)
         if len(text) < 50000:
             # In-memory cache
             if len(text) < 10000:
                 while len(_tokenize_cache) >= _CACHE_MAX:
                     _tokenize_cache.popitem(last=False)
                 _tokenize_cache[lru_key] = ids
-            # Disk cache (persists across runs)
-            disk.put(text, ids, tok_hash)
+            # Disk cache (persists across runs) — never cache
+            # degenerate/non-int ids (they were the poison source).
+            if len(ids) >= 4 and isinstance(ids[0], int):
+                disk.put(text, ids, tok_hash)
         return ids
     except Exception:
         return None
@@ -916,6 +980,9 @@ def main():
     p = argparse.ArgumentParser(description="SFT for ForgeLM V10-1.2B")
     p.add_argument("--data", nargs="+", required=True,
                    help="Training data file(s) (JSONL or Parquet)")
+    p.add_argument("--chat-format", default="jamba",
+                   choices=["jamba", "spark"],
+                   help="chat template family for rendering prompt/response and messages rows; spark emits DeepSeek-style sentence/User/Bot markers matching the proposer wrap (default: jamba ChatML)")
     p.add_argument("--data-format", default="jsonl", choices=["jsonl", "parquet"],
                    help="Data format: 'jsonl' (default) or 'parquet'. "
                         "When 'parquet', files are read via ParquetDataset "
@@ -1249,6 +1316,9 @@ def main():
                         "--optimizer badam for BitNet int8 configs (auto-set).")
 
     args = p.parse_args()
+    global _CHAT_FORMAT
+    _CHAT_FORMAT = getattr(args, "chat_format", "jamba")
+
 
     # Evolution-discovered overrides: if --apply-best has been run, the
     # exported best_configs.json overrides argparse *defaults* for the
