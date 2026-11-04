@@ -39,8 +39,10 @@ def render(p: str) -> str:
 import os
 _plain = os.environ.get("PLAIN")
 ckpt = os.environ.get("CKPT", str(CKPT_DIR))
+_spec = os.environ.get("SPEC")
 eng = ForgeEngine.from_checkpoint(
     ckpt, config_name="spark_x26_1p7b", device="cuda",
+    auto_activate=not _spec,
     **({"load_quantize": "none", "quantize": False,
         "use_compile": False, "use_breakable_cuda_graph": False,
         "use_block_fusion": False, "use_prefix_cache": False,
@@ -52,6 +54,9 @@ eng = ForgeEngine.from_checkpoint(
        {"load_quantize": "none", "quantize": False,
         "use_block_fusion": False}
        if os.environ.get("NOF") else {}))
+if _spec:
+    eng.enable_suffix_memory()
+    eng.activate(decoding="suffix_draft")
 print(f"loaded: {torch.cuda.memory_allocated()/2**30:.2f}GB alloc, "
       f"{torch.cuda.memory_reserved()/2**30:.2f}GB reserved", flush=True)
 
