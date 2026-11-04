@@ -74,6 +74,7 @@ class DiskTokenCache:
         self._lock = threading.Lock()
         self._index: OrderedDict[str, str] = OrderedDict()  # hash -> filename
         self._total_bytes = 0
+        self._puts_since_save = 0
         self._load_index()
 
     def _load_index(self):
@@ -154,7 +155,16 @@ class DiskTokenCache:
             self._total_bytes += size
             # Evict if over limits
             self._evict_if_needed()
-            self._save_index()
+            # Batch index writes: serializing the whole index on every
+            # put() is O(n puts x index size) — on a ~60k-entry cache a
+            # full tokenize pass spent most of its wall-clock rewriting
+            # a ~5MB JSON file thousands of times. Flushing every 200
+            # puts costs at most 200 orphaned .bin files on a crash —
+            # the entries are unreachable but harmless.
+            self._puts_since_save += 1
+            if self._puts_since_save >= 200:
+                self._save_index()
+                self._puts_since_save = 0
 
     def _evict_if_needed(self):
         """Evict least recently used entries if over limits."""
@@ -169,6 +179,20 @@ class DiskTokenCache:
                 self._total_bytes -= size
             except Exception:
                 pass
+
+    def flush(self) -> None:
+        """Persist any pending index entries (batched saves leave up to
+        200 unflushed). Call at end of a tokenize pass / on shutdown."""
+        with self._lock:
+            if self._puts_since_save:
+                self._save_index()
+                self._puts_since_save = 0
+
+    def __del__(self):
+        try:
+            self.flush()
+        except Exception:
+            pass
 
     def tokenize(self, tokenizer, text: str, max_seq_len: int = 1024,
                  add_special_tokens: bool = False) -> list[int]:
