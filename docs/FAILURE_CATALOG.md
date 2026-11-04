@@ -211,21 +211,21 @@ Lesson: eval an instruct model through its template + its generation_config befo
 
 Symptom: Spark-X2.6-1.7B (21/28 sliding-window layers) generated ~40 coherent tokens then CJK garbage under breakable CUDA graphs; eager was perfect.
 
-Root cause: `GroupedQueryAttention.forward` SWA mask in pos_t (graph-replay) mode built `k_pos` from `_past_len = preallocated_cache.position` — a python int FROZEN at graph-capture time. `q_pos` correctly tracked the device pos_t tensor, so the window mask anchored at the capture position and drifted further off the live keys every step. LFM3 was hit too — its 5 SWA layers degraded subtly instead of garbageing (conv layers carried the output).
+Root cause: `GroupedQueryAttention.forward` SWA mask in pos_t (graph-replay) mode built `k_pos` from `_past_len = preallocated_cache.position` ï¿½ a python int FROZEN at graph-capture time. `q_pos` correctly tracked the device pos_t tensor, so the window mask anchored at the capture position and drifted further off the live keys every step. LFM3 was hit too ï¿½ its 5 SWA layers degraded subtly instead of garbageing (conv layers carried the output).
 
-Fix: pos_t path on a linear buffer now derives `k_pos = arange(total_len)` — slots are position-indexed, so the mask is fully device-derived and replays correctly. Spark _fq with BCG: coherent, 65-76 tok/s at 2.5GB.
+Fix: pos_t path on a linear buffer now derives `k_pos = arange(total_len)` ï¿½ slots are position-indexed, so the mask is fully device-derived and replays correctly. Spark _fq with BCG: coherent, 65-76 tok/s at 2.5GB.
 
-Lesson: any python int read inside a captured step is a capture-time constant — verify each position/length read is tensor-derived before trusting graph replay on a new arch.
+Lesson: any python int read inside a captured step is a capture-time constant ï¿½ verify each position/length read is tensor-derived before trusting graph replay on a new arch.
 
 ## 2026-11-04 - Spark-X2.6-1.7B port (spark2_5 arch)
 
-Port of XHToken/Spark-X2.6-1.7B into preset `spark_x26_1p7b`. Parity vs HF reference (bundled modeling_spark.py, fp32): max|dlogit| = 2.1e-5, identical top-5 — PASS.
+Port of XHToken/Spark-X2.6-1.7B into preset `spark_x26_1p7b`. Parity vs HF reference (bundled modeling_spark.py, fp32): max|dlogit| = 2.1e-5, identical top-5 ï¿½ PASS.
 
 New arch support needed (all landed in shared code paths):
-- Slice-mode partial RoPE (`partial_rotary_mode="slice"` on RotaryEmbedding): Spark rotates the FIRST rope_dim=64 head dims of 256 with freqs computed for rope_dim — pairs (j, j+32). LFM3's zero-tail layout pairs (j, j+dim/2) — NOT equivalent. Both modes coexist via rope_layer_params.
+- Slice-mode partial RoPE (`partial_rotary_mode="slice"` on RotaryEmbedding): Spark rotates the FIRST rope_dim=64 head dims of 256 with freqs computed for rope_dim ï¿½ pairs (j, j+32). LFM3's zero-tail layout pairs (j, j+dim/2) ï¿½ NOT equivalent. Both modes coexist via rope_layer_params.
 - GeGLU FFN (`ffn_type="geglu"` ? SwiGLUFFN act_mode="gelu", exact erf matching HF ACT2FN["gelu"]).
 - Keymap: `model.embedding.weight`?embed (not embed_tokens), fused `q_k_v_proj` split to q/k/v by row, `g_proj`?`gate_proj`.
-- Tokenizer: gigatoken can't parse Spark's CJK Split pre-tokenizer regexes — `_load_hf_tokenizer` now returns plain HF tokenizer when the gigatoken wrap raises (was only catching ImportError).
+- Tokenizer: gigatoken can't parse Spark's CJK Split pre-tokenizer regexes ï¿½ `_load_hf_tokenizer` now returns plain HF tokenizer when the gigatoken wrap raises (was only catching ImportError).
 
 Measured on RTX 5070 (bench_spark_port.py): _fq packed (1.42GB, 196 linears) loads 2.5GB, decodes 65-76 tok/s with BCG+prefix+chunked; dense activation-quant path coherent too but ~4min inductor warmup on the dequant path. Coherent thinking-style output, official sampling temp1.0/top_p0.95.
 
@@ -234,7 +234,7 @@ Measured on RTX 5070 (bench_spark_port.py): _fq packed (1.42GB, 196 linears) loa
 - SuffixDraftModel._predict_logits emitted torch.logit(1.0)=+inf when a
   suffix row hit 100% confidence ? NaN probs ? multinomial crash
   (surfaced on spark_x26_1p7b_fq's first spec run). Clamped p to 1-1e-6.
-- suffix_draft on Spark thinking text: 21.8 tok/s vs 62-76 standard —
+- suffix_draft on Spark thinking text: 21.8 tok/s vs 62-76 standard ï¿½
   still not worth it (acceptance too low for the round overhead; same
   rejection class as LFM3). StandardDecoding stays default.
 
@@ -246,4 +246,21 @@ fast_softmax (stages: missing 7, syntax 3). Fix: think_budget (default
 continuation, return tagged raw so extraction strips reasoning.
 Bounded: 8/14 gated (57%%); think-off: 6/9 (67%%); both produce REAL
 gate rejects (dup/incomplete) not extraction failures.
+
+## 2026-11-04 - sft_train --compile is NEUTRAL on the Forge path (Spark SFT)
+
+Restarted spark_sft_v1 LoRA run (bs4 x seq2048, ~14 TFLOP/s) with
+--compile expecting the AVA-reported 4x. Measured: ~2.8 steps/min both
+ways; loss bit-identical at same step. Root cause: AVA's win came from
+compiling an unfused attention impl; Forge's forward is already
+SDPA+chunked-CE+packed-seq, so Inductor had nothing left to fuse â€”
+matmuls dominate and matmul+matmul can't fuse. Do not restart runs for
+compile alone. Verified non-bottlenecks on this workload: bf16 native
+(default --dtype bf16), chunked CE on (vocab 131072 is 64-aligned â€”
+no pad tax), PackedSequenceDataset on (no padding waste), LoRA-only
+trainables (optimizer transfer negligible), SDPA attention, grad-ckpt
+correctly off at bs4x2048. Remaining levers for FUTURE runs (untested):
+larger batch (bs8 â€” better GEMM utilization, VRAM headroom exists at
+7.9/12GB), Liger-style fused elementwise kernels (~10%% est), shorter
+seq (marginal â€” attention is a small flop fraction at 2048).
 
