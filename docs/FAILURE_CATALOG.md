@@ -160,13 +160,41 @@ Each entry: what it tried → what it proved/disproved → what to salvage.
 
 ## 2026-11-04 - 'OOM' load crashes on dense + ForgeQuant checkpoints were a compile hard-crash
 
-Symptom: ForgeEngine.from_checkpoint on a 7GB merged distill save (and its packed _fq variant) died mid-load or right after activation � looked like OOM (GPU ~7.8-12.8GB at death), no Python traceback.
+Symptom: ForgeEngine.from_checkpoint on a 7GB merged distill save (and its packed _fq variant) died mid-load or right after activation � looked like OOM (GPU ~7.8-12.8GB at death), no Python traceback.
 
 Root causes (two, layered):
-1. _auto_activate_optimal ran OUTSIDE the OOM-guarded load try � activation extras (quant repack, KV prealloc, graph capture, warmup) could push a successfully-loaded model past free VRAM and crash with no fallback. Fixed: staged-degrade guard (drops graph/fusion/prefix extras, then quantize).
-2. torch.compile (reduce-overhead) hard-crashes tracing the ForgeQuantLinear dequant path � native crash, no exception, bisected: compile alone kills generate on the packed ckpt; breakable CUDA graphs alone work. Fixed: _forgequant_prequant models now get use_compile/use_compile_autotune/use_block_fusion=False at auto-activate (same guard class as Int4TilePackedTo4dTensor); the vram_ratio>0.5 block no longer re-enables guarded-off features.
+1. _auto_activate_optimal ran OUTSIDE the OOM-guarded load try � activation extras (quant repack, KV prealloc, graph capture, warmup) could push a successfully-loaded model past free VRAM and crash with no fallback. Fixed: staged-degrade guard (drops graph/fusion/prefix extras, then quantize).
+2. torch.compile (reduce-overhead) hard-crashes tracing the ForgeQuantLinear dequant path � native crash, no exception, bisected: compile alone kills generate on the packed ckpt; breakable CUDA graphs alone work. Fixed: _forgequant_prequant models now get use_compile/use_compile_autotune/use_block_fusion=False at auto-activate (same guard class as Int4TilePackedTo4dTensor); the vram_ratio>0.5 block no longer re-enables guarded-off features.
 
-Lesson: 'OOM crash' claims need bisection � the actual OOM exception path was guarded; the killer was an inductor-generated kernel on packed weights. Diagnose by disabling features one at a time, not by reading the VRAM number.
+Lesson: 'OOM crash' claims need bisection � the actual OOM exception path was guarded; the killer was an inductor-generated kernel on packed weights. Diagnose by disabling features one at a time, not by reading the VRAM number.
 
 Artifact note: 7GB dense merged saves OOM-pressure a 12GB card at activation; scripts/prequant_forge_quant.py converts to a packed _fq dir (distill250: 7.09GB -> 1.52GB) that loads in ~2-4GB with graphs still working.
+
+## 2026-11-04 - Windows torch.compile failures are encoding + loader bugs, not model bugs
+
+Symptom: inductor crashed `UnicodeEncodeError: 'charmap' ... '\u2192'` compiling the dense/base ckpt, and `OSError: could not get source code` on the packed one. Three layered bugs, all Windows-cp1252 / introspection:
+
+1. `codecache.write_atomic` writes generated wrapper .py via `Path.open()` with locale default (cp1252) — U+2192 arrows in forge docstrings land in the generated source. **Fix**: replaced with a UTF-8 tmp-file + `os.replace` equivalent (`_patch_inductor_utf8` in engine_activation). Upstream torch main already grew an `encode_utf_8` kwarg for this — our patch is the backport.
+2. `_reload_python_module` reads cached source via plain `open()` (cp1252 again) — decode side. And stale pre-patch files stay cp1252 → re-encode-on-miss fallback.
+3. Its `ModuleType`+`exec` has no real loader → triton's `@jit` calls `inspect.getsourcelines` at exec time → 'could not get source' (this was the silent _fq warmup killer too). **Fix**: load via `importlib.util.spec_from_file_location` + sys.modules registration BEFORE exec — a real SourceFileLoader makes introspection work and decodes PEP-263 UTF-8 for free.
+
+Lesson: three symptoms, one root class — Windows assumes locale encoding everywhere torch's internals don't. Patched once at compile-activation, covers codecache + all generated kernels.
+
+## 2026-11-04 - Multi-generate crash: inference-tensor restore outside InferenceMode
+
+Symptom: 2nd+ `generate()` died `RuntimeError: Inplace update to inference tensor outside InferenceMode` at `_defer_restore_recurrent`.
+
+Root cause: conv/SSM state buffers are created inside `torch.inference_mode` (decode steps, graph capture) — the in-place snapshot restore ran wherever the caller left off. In-place writes to inference tensors are only legal inside inference mode; a blanket `inference_mode()` wrap would break the opposite case (normal buffers can't be written inside it).
+
+Fix: `_state_copy_back_` decides per-tensor via `cur.is_inference()` — wraps the copy in inference_mode only for inference buffers.
+
+## 2026-11-04 - 'Degenerate model' was mostly decode-settings, not weights
+
+Symptom: base + distill250 both emitted verbatim loops ('arr: arr: arr:') on every prompt at temperature=0.
+
+Root cause: LFM3-1.7B is an INSTRUCT model — raw prompts on the base format loop; and official generation_config wants sampling (temp=0.1, top_k=50, rep_penalty=1.1), not greedy. With the shipped chat_template.jinja + official sampling, both ckpts emit think-tagged reasoning + code blocks + tool-call structure.
+
+Verdict after honest A/B (scripts/compare_distill250.py): base ≈ distill250 — no visible regression, no visible gain. 250 steps of r8 LoRA on 1412 rows is smoke-scale; the pipeline (score→train→merge→pack→load→generate) is what got validated. Quality deltas need a real run.
+
+Lesson: eval an instruct model through its template + its generation_config before concluding the weights are broken. Raw-prompt looping is a format artifact.
 
