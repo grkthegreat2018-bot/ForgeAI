@@ -85,7 +85,15 @@ def main() -> int:
                              mod.bias is not None)
     print(f"[pack] {len(linears)} linears to pack")
 
-    state = load_file(str(args.src / "model.safetensors"))
+    _idx = args.src / "model.safetensors.index.json"
+    if _idx.exists():
+        import json as _j
+        state = {}
+        for _sh in sorted(set(
+                _j.loads(_idx.read_text())["weight_map"].values())):
+            state.update(load_file(str(args.src / _sh)))
+    else:
+        state = load_file(str(args.src / "model.safetensors"))
     # HF-style sources (model.layers.N.*) must be remapped to Forge names
     # (blocks.N.*) before matching — unmapped linears silently pack 0.
     if any(k.startswith("model.") for k in state):
