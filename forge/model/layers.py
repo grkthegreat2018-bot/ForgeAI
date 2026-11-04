@@ -68,7 +68,8 @@ class RotaryEmbedding(nn.Module):
     """
 
     def __init__(self, dim: int, max_seq_len: int = 2048, base: float = 10000.0, rope_scaling=None,
-                 partial_rotary_factor: float = 1.0):
+                 partial_rotary_factor: float = 1.0,
+                 partial_rotary_mode: str = "zero_tail"):
         super().__init__()
         self.dim = dim
         self.base = base
@@ -78,11 +79,24 @@ class RotaryEmbedding(nn.Module):
         # partial_rotary_factor*dim//2 frequency entries keep the full-dim
         # progression and the tail is zeroed → cos=1/sin=0 there, leaving
         # those head dims unrotated (NOT a shrunk rotary dimension).
+        # Spark-X2.6 ("slice") instead uses the HF/GPT-NeoX layout: a real
+        # rope_dim = factor*dim rotary block on the FIRST rope_dim head dims
+        # (freqs computed for rope_dim, pairs (j, j+rope_dim/2)) with the
+        # tail passed through untouched. The two layouts are NOT equivalent.
         self.partial_rotary_factor = partial_rotary_factor
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
-        if partial_rotary_factor < 1.0:
-            rope_angles = int(partial_rotary_factor * dim) // 2
-            inv_freq[rope_angles:] = 0.0
+        self.partial_rotary_mode = partial_rotary_mode
+        self.rotary_dim = dim
+        if partial_rotary_factor < 1.0 and partial_rotary_mode == "slice":
+            rope_dim = int(partial_rotary_factor * dim)
+            rope_dim -= rope_dim % 2  # rotary needs an even width
+            self.rotary_dim = rope_dim
+            inv_freq = 1.0 / (base ** (
+                torch.arange(0, rope_dim, 2).float() / rope_dim))
+        else:
+            inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+            if partial_rotary_factor < 1.0:
+                rope_angles = int(partial_rotary_factor * dim) // 2
+                inv_freq[rope_angles:] = 0.0
 
         if rope_scaling:
             rope_type = rope_scaling.get("type") or rope_scaling.get("rope_type")
@@ -160,6 +174,17 @@ class RotaryEmbedding(nn.Module):
 
     _rotate_half = staticmethod(_rotate_half)
 
+    def _apply_rope(self, x: torch.Tensor, cos: torch.Tensor,
+               sin: torch.Tensor) -> torch.Tensor:
+        if self.rotary_dim < x.shape[-1]:
+            # Slice-mode partial rotary: rotate the first rotary_dim head
+            # dims (pairs within that block), pass the tail through.
+            x_rot = x[..., : self.rotary_dim]
+            x_pass = x[..., self.rotary_dim :]
+            x_rot = (x_rot * cos) + (self._rotate_half(x_rot) * sin)
+            return torch.cat((x_rot, x_pass), dim=-1)
+        return (x * cos) + (self._rotate_half(x) * sin)
+
     def forward(self, x: torch.Tensor, offset: int = 0,
                 position_ids: torch.Tensor | None = None) -> torch.Tensor:
         # x shape: (B, n_heads, seq_len, head_dim)
@@ -176,7 +201,7 @@ class RotaryEmbedding(nn.Module):
             # Broadcast: (B, seq_len, dim) -> (B, 1, seq_len, dim) for x (B, n_heads, seq_len, dim)
             cos = cos.unsqueeze(1)
             sin = sin.unsqueeze(1)
-            return (x * cos) + (self._rotate_half(x) * sin)
+            return self._apply_rope(x, cos, sin)
         # Scalar offset (original path — single sequence or uniform batch).
         if x.dtype == torch.bfloat16:
             cos = self.cos_cached_bf16[offset : offset + seq_len, :].unsqueeze(0).unsqueeze(0)
@@ -184,7 +209,7 @@ class RotaryEmbedding(nn.Module):
         else:
             cos = self.cos_cached[offset : offset + seq_len, :].unsqueeze(0).unsqueeze(0).to(x.dtype)
             sin = self.sin_cached[offset : offset + seq_len, :].unsqueeze(0).unsqueeze(0).to(x.dtype)
-        return (x * cos) + (self._rotate_half(x) * sin)
+        return self._apply_rope(x, cos, sin)
 
 
 class GroupedQueryAttention(nn.Module):
@@ -201,6 +226,7 @@ class GroupedQueryAttention(nn.Module):
                  sliding_window: int | None = None,
                  use_out_gate: bool = False,
                  rope_partial_factor: float = 1.0,
+                 rope_partial_mode: str = "zero_tail",
                  zero_centered_norm: bool = False):
         super().__init__()
         self.d_model = d_model
@@ -225,7 +251,8 @@ class GroupedQueryAttention(nn.Module):
         self.gate_proj = (nn.Linear(d_model, n_heads, bias=False)
                           if use_out_gate else None)
         self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len, base=base, rope_scaling=rope_scaling,
-                                    partial_rotary_factor=rope_partial_factor) if use_rope else None
+                                    partial_rotary_factor=rope_partial_factor,
+                                    partial_rotary_mode=rope_partial_mode) if use_rope else None
 
         # QK-norm: RMSNorm on Q and K before RoPE (LFM2 / Gemma3 / Qwen3 style).
         # When weights are identity (all 1.0), skip — it's a no-op.
@@ -423,6 +450,15 @@ class GroupedQueryAttention(nn.Module):
                 # The shared bucket bias encodes POSITION-based validity —
                 # wrong (and wrong-sized) for a slot-indexed ring buffer.
                 attention_bias = None
+            elif pos_t_path:
+                # pos_t (CUDA-graph decode) on a LINEAR buffer: slot index
+                # == position index — derive k_pos from arange, NOT
+                # _past_len (a python int frozen at capture time; anchoring
+                # the window there drifts the SWA mask off the live keys).
+                k_pos = torch.arange(total_len, device=q.device)
+                allow = (k_pos[None, :] <= q_pos[:, None]) & \
+                        ((q_pos[:, None] - k_pos[None, :])
+                         < self.sliding_window)
             else:
                 # Position-ordered read: the returned keys span positions
                 # P-total_len..P-1 for both linear buffers (P=total_len)
@@ -759,7 +795,8 @@ class SwiGLUFFN(nn.Module):
 
     def __init__(self, d_model: int = 768, hidden_dim: int | None = None,
                  use_clamp: bool = False, clamp_alpha: float = 1.702,
-                 clamp_limit: float = 7.0, use_triton: bool = False):
+                 clamp_limit: float = 7.0, use_triton: bool = False,
+                 act_mode: str = "silu"):
         super().__init__()
         if hidden_dim is None:
             hidden_dim = int(8 * d_model / 3)
@@ -770,6 +807,9 @@ class SwiGLUFFN(nn.Module):
         self.clamp_alpha = clamp_alpha
         self.clamp_limit = clamp_limit
         self._use_triton = use_triton
+        # act_mode "gelu" gives a GeGLU (Spark-X2.6: exact erf GELU on the
+        # gate path, matching HF ACT2FN["gelu"] / nn.GELU(approximate='none')).
+        self.act_mode = act_mode
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if getattr(self, '_fused_gate_up', False):
@@ -783,11 +823,12 @@ class SwiGLUFFN(nn.Module):
             up = up.clamp(min=-self.clamp_limit, max=self.clamp_limit)
             glu = gate * torch.sigmoid(self.clamp_alpha * gate)
             return self.w_down((up + 1) * glu)
-        if self._use_triton:
+        if self._use_triton and self.act_mode == "silu":
             from forge.decoding.triton_train_kernels import triton_swiglu_act
             act = triton_swiglu_act(gate, up)
             return self.w_down(act)
-        return self.w_down(F.silu(gate) * up)
+        act = F.gelu(gate) if self.act_mode == "gelu" else F.silu(gate)
+        return self.w_down(act * up)
 
 
 class ModularBlock(nn.Module):

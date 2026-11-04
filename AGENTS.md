@@ -1453,6 +1453,20 @@ Config presets in `forge/config.py`:
   `test_share_rope.py`, `test_fused_qkv_gate.py`, `test_conv_widen`,
   `test_zero_centered_norm`).
 
+- `spark_x26_1p7b` — ported Spark-X2.6-1.7B (XHToken spark2_5, pure-
+  attention hybrid): 28L (SWA512×3 + full, ×7), GQA 8Q/2KV head_dim 256,
+  fused HF q_k_v_proj split on remap, per-head sigmoid out-gate, GeGLU,
+  slice-mode partial RoPE 0.25/θ5M on full layers (SWA θ10K full).
+  Vocab 131072, bos=0 eos=1 pad=2, tied embeds.
+  `research/checkpoints/spark_x26_1p7b` (HF dir + tokenizer/chat template)
+  and `spark_x26_1p7b_fq` (1.42GB packed — loads 2.5GB, 65-76 tok/s w/ BCG).
+  Parity `scripts/test_spark_port.py`: max|dlogit|=2.1e-5. Port required
+  THREE new shared-code paths: slice-mode partial RoPE
+  (`partial_rotary_mode`), GeGLU (`ffn_type="geglu"` → SwiGLUFFN
+  act_mode), and the q_k_v_proj/g_proj/embedding keymap in
+  `_remap_hf_keys`. NOTE: Spark tokenizer needs the plain-HF fallback
+  (gigatoken can't parse its CJK pre-tokenizer).
+
 All legacy presets (`forgelm_v2_light`, `forgelm_v2_pro`, `forgelm_v12`,
 `forgelm_v10_1.2b`, `forgelm_v11_3b_vl`, `lfm25_tiny`, `lfm25_1.2b`, V3–V9)
 have been DELETED.

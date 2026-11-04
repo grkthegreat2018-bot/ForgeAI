@@ -206,3 +206,25 @@ Lesson: eval an instruct model through its template + its generation_config befo
 - **consolidate_pairs CE gating**: min_fit_ce + replay_topk shipped. Replay selection DIRECTION (high vs low CE anchors) is a wash at K=2 â€” replay SIZE remains the dominant drift control.
 - **post_ce>pre_ce on ForgeQuant-packed models**: consolidate fits on the _fq packed ckpt made the fit set WORSE (5.19â†’7.5) with 2-anchor replay â€” LoRA over ForgeQuantLinear dequant is unstable at these settings vs stable fits on int4-load models. Investigate before trusting consolidation on packed checkpoints.
 
+
+## 2026-11-04 - BCG decode graphs silently corrupted SWA layers (k_pos frozen at capture)
+
+Symptom: Spark-X2.6-1.7B (21/28 sliding-window layers) generated ~40 coherent tokens then CJK garbage under breakable CUDA graphs; eager was perfect.
+
+Root cause: `GroupedQueryAttention.forward` SWA mask in pos_t (graph-replay) mode built `k_pos` from `_past_len = preallocated_cache.position` — a python int FROZEN at graph-capture time. `q_pos` correctly tracked the device pos_t tensor, so the window mask anchored at the capture position and drifted further off the live keys every step. LFM3 was hit too — its 5 SWA layers degraded subtly instead of garbageing (conv layers carried the output).
+
+Fix: pos_t path on a linear buffer now derives `k_pos = arange(total_len)` — slots are position-indexed, so the mask is fully device-derived and replays correctly. Spark _fq with BCG: coherent, 65-76 tok/s at 2.5GB.
+
+Lesson: any python int read inside a captured step is a capture-time constant — verify each position/length read is tensor-derived before trusting graph replay on a new arch.
+
+## 2026-11-04 - Spark-X2.6-1.7B port (spark2_5 arch)
+
+Port of XHToken/Spark-X2.6-1.7B into preset `spark_x26_1p7b`. Parity vs HF reference (bundled modeling_spark.py, fp32): max|dlogit| = 2.1e-5, identical top-5 — PASS.
+
+New arch support needed (all landed in shared code paths):
+- Slice-mode partial RoPE (`partial_rotary_mode="slice"` on RotaryEmbedding): Spark rotates the FIRST rope_dim=64 head dims of 256 with freqs computed for rope_dim — pairs (j, j+32). LFM3's zero-tail layout pairs (j, j+dim/2) — NOT equivalent. Both modes coexist via rope_layer_params.
+- GeGLU FFN (`ffn_type="geglu"` ? SwiGLUFFN act_mode="gelu", exact erf matching HF ACT2FN["gelu"]).
+- Keymap: `model.embedding.weight`?embed (not embed_tokens), fused `q_k_v_proj` split to q/k/v by row, `g_proj`?`gate_proj`.
+- Tokenizer: gigatoken can't parse Spark's CJK Split pre-tokenizer regexes — `_load_hf_tokenizer` now returns plain HF tokenizer when the gigatoken wrap raises (was only catching ImportError).
+
+Measured on RTX 5070 (bench_spark_port.py): _fq packed (1.42GB, 196 linears) loads 2.5GB, decodes 65-76 tok/s with BCG+prefix+chunked; dense activation-quant path coherent too but ~4min inductor warmup on the dequant path. Coherent thinking-style output, official sampling temp1.0/top_p0.95.

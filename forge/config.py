@@ -1229,6 +1229,70 @@ MODEL_CONFIGS["lfm3_1p7b"] = ModelConfig(
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Spark-X2.6-1.7B port (XHToken) — pure-attention hybrid SWA+full, no convs.
+#
+# 28 layers: sliding_attention ×3 + full_attention, repeating (full at
+# 3,7,11,15,19,23,27). GQA 8Q/2KV heads, head_dim=256 (2048 = d_model).
+# Fused HF q_k_v_proj (split by _remap_hf_keys), per-head sigmoid output
+# gate (g_proj → attn.gate_proj, same semantics as LFM3's), GeGLU FFN
+# (gelu(gate)*up). SWA window=512 theta=10K full rotary; full-attn
+# theta=5M partial 0.25 in SLICE layout (rope_dim=64 on the FIRST head
+# dims, tail pass-through — differs from LFM3 zero-tail pairing).
+# Pre-norm RMSNorm eps=1e-6, final norm, NO embed norm, NO qk-norm,
+# NO sandwich norm, NO biases. Tied embeddings, vocab 131072,
+# bos=0 eos=1 pad=2. HF max_position 1M — RoPE tables clamp to 16384.
+#
+# Checkpoint: XHToken/Spark-X2.6-1.7B (spark2_5 arch, HF remote code).
+# Keys remap via ModelLoader._remap_hf_keys (q_k_v_proj split is the only
+# structural transform; everything else is a rename).
+# ──────────────────────────────────────────────────────────────────────────────
+MODEL_CONFIGS["spark_x26_1p7b"] = ModelConfig(
+    vocab_size=131_072,
+    d_model=2048,
+    n_layers=28,
+    n_heads=8,
+    n_kv_heads=2,
+    head_dim=256,
+    intermediate_size=6656,
+    attn_type="gqa",
+    attn_bias=False,
+    ffn_type="geglu",
+    norm_type="rmsnorm",
+    norm_eps=1e-6,
+    use_embed_norm=False,
+    use_final_norm=True,
+    use_rope=True,
+    rope_base=5_000_000.0,         # full-attention layers (SWA uses 10K)
+    max_seq_len=16_384,
+    use_qk_norm=False,
+    tie_word_embeddings=True,
+    layer_types=[
+        "attention_swa", "attention_swa", "attention_swa", "attention",
+        "attention_swa", "attention_swa", "attention_swa", "attention",
+        "attention_swa", "attention_swa", "attention_swa", "attention",
+        "attention_swa", "attention_swa", "attention_swa", "attention",
+        "attention_swa", "attention_swa", "attention_swa", "attention",
+        "attention_swa", "attention_swa", "attention_swa", "attention",
+        "attention_swa", "attention_swa", "attention_swa", "attention",
+    ],
+    sliding_window=512,
+    use_attn_out_gate=True,
+    rope_layer_params={
+        "attention":       {"rope_theta": 5_000_000.0,
+                            "partial_rotary_factor": 0.25,
+                            "partial_rotary_mode": "slice"},
+        "attention_swa":   {"rope_theta": 10_000.0,
+                            "partial_rotary_factor": 1.0},
+    },
+    batch_size=4,
+    seq_len=2048,
+    max_steps=500,
+    warmup_steps=50,
+    max_lr=2e-4,
+    min_lr=2e-5,
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
 # LFM3-1.7B-D1: first zero-init graft round on the CC checkpoint.
 #
 # Derived from lfm3_1p7b (same checkpoint — lfm3_1p7b_cc). All grafts are

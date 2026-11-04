@@ -361,7 +361,8 @@ class ModelLoader:
         new_state = {}
         for key, tensor in state.items():
             # model.embed_tokens.weight → embed.weight
-            if key == "model.embed_tokens.weight":
+            # (Spark-X2.6 names it model.embedding.weight)
+            if key in ("model.embed_tokens.weight", "model.embedding.weight"):
                 new_state["embed.weight"] = tensor
             # model.norm.weight → ln_f.weight
             elif key == "model.norm.weight" or key == "model.embedding_norm.weight":
@@ -389,13 +390,32 @@ class ModelLoader:
                 new_state[f"blocks.{m.group(1)}.post_attn_norm.{m.group(2)}"] = tensor
             elif m := re.match(r"model\.layers\.(\d+)\.post_ffn_norm\.(.+)", key):
                 new_state[f"blocks.{m.group(1)}.post_ffn_norm.{m.group(2)}"] = tensor
+            # Spark-X2.6 fused QKV: self_attn.q_k_v_proj packs
+            # [Q | K | V] rows → split into separate q/k/v_proj weights.
+            elif m := re.match(
+                    r"model\.layers\.(\d+)\.self_attn\.q_k_v_proj\.weight$", key):
+                layer = m.group(1)
+                hd = getattr(config, 'head_dim', None) or (
+                    config.d_model // config.n_heads)
+                q_dim = config.n_heads * hd
+                kv_dim = getattr(config, 'n_kv_heads', config.n_heads) * hd
+                new_state[f"blocks.{layer}.attn.q_proj.weight"] = \
+                    tensor[:q_dim]
+                new_state[f"blocks.{layer}.attn.k_proj.weight"] = \
+                    tensor[q_dim:q_dim + kv_dim]
+                new_state[f"blocks.{layer}.attn.v_proj.weight"] = \
+                    tensor[q_dim + kv_dim:]
             # model.layers.{i}.self_attn.{proj}.{weight|bias} → blocks.{i}.attn.{proj}.{weight|bias}
             elif m := re.match(r"model\.layers\.(\d+)\.self_attn\.(.+)", key):
                 layer = m.group(1)
                 rest = m.group(2)
-                # q_proj/k_proj/v_proj/gate_proj/q_norm/k_norm → same name
+                # q_proj/k_proj/v_proj/q_norm/k_norm → same name
+                # Spark g_proj (per-head out gate) → gate_proj
                 # o_proj → out_proj
-                rest = rest.replace("o_proj", "out_proj")
+                if rest.startswith("g_proj."):
+                    rest = "gate_proj." + rest[len("g_proj."):]
+                else:
+                    rest = rest.replace("o_proj", "out_proj")
                 new_state[f"blocks.{layer}.attn.{rest}"] = tensor
             # model.layers.{i}.input_layernorm.weight → blocks.{i}.ln1.weight
             elif m := re.match(r"model\.layers\.(\d+)\.input_layernorm\.(.+)", key):
@@ -432,12 +452,22 @@ class ModelLoader:
                                       module.cos_cached.shape[0])
                 rope_scaling = getattr(module, 'rope_scaling', None)
                 partial = getattr(module, 'partial_rotary_factor', 1.0)
-                inv_freq = 1.0 / (base ** (
-                    torch.arange(0, module.dim, 2, device=target_device,
-                                 dtype=torch.float32) / module.dim))
-                # LFM3 zero-tail partial rotation (see RotaryEmbedding).
-                if partial < 1.0:
-                    inv_freq[int(partial * module.dim) // 2:] = 0.0
+                rope_mode = getattr(module, 'partial_rotary_mode',
+                                    'zero_tail')
+                rope_dim = getattr(module, 'rotary_dim', module.dim)
+                if partial < 1.0 and rope_mode == 'slice':
+                    # Spark slice-mode: freqs computed for the shrunk
+                    # rotary_dim block (pairs within it, tail passes through).
+                    inv_freq = 1.0 / (base ** (
+                        torch.arange(0, rope_dim, 2, device=target_device,
+                                     dtype=torch.float32) / rope_dim))
+                else:
+                    inv_freq = 1.0 / (base ** (
+                        torch.arange(0, module.dim, 2, device=target_device,
+                                     dtype=torch.float32) / module.dim))
+                    # LFM3 zero-tail partial rotation (see RotaryEmbedding).
+                    if partial < 1.0:
+                        inv_freq[int(partial * module.dim) // 2:] = 0.0
                 if rope_scaling:
                     rope_type = (rope_scaling.get("type")
                                  or rope_scaling.get("rope_type"))

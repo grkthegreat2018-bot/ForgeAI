@@ -24,6 +24,7 @@ def build_attention(config: ModelConfig, layer_idx: int = 0) -> nn.Module:
 
     rope_base = config.rope_base
     rope_partial = 1.0
+    rope_partial_mode = "zero_tail"
     rope_layer_params = getattr(config, 'rope_layer_params', None)
     if rope_layer_params:
         lrp = rope_layer_params.get(ltype)
@@ -36,6 +37,7 @@ def build_attention(config: ModelConfig, layer_idx: int = 0) -> nn.Module:
         if lrp:
             rope_base = lrp.get("rope_theta", lrp.get("rope_base", rope_base))
             rope_partial = lrp.get("partial_rotary_factor", 1.0)
+            rope_partial_mode = lrp.get("partial_rotary_mode", "zero_tail")
 
     sliding_window = getattr(config, 'sliding_window', None) if is_swa else None
     use_out_gate = getattr(config, 'use_attn_out_gate', False)
@@ -54,6 +56,7 @@ def build_attention(config: ModelConfig, layer_idx: int = 0) -> nn.Module:
                                      sliding_window=sliding_window,
                                      use_out_gate=use_out_gate,
                                      rope_partial_factor=rope_partial,
+                                     rope_partial_mode=rope_partial_mode,
                                      zero_centered_norm=getattr(
                                          config, 'zero_centered_norm',
                                          False))
@@ -356,6 +359,14 @@ def build_ffn(config: ModelConfig) -> nn.Module:
     # V5: MoE FFN — replace dense FFN with shared expert + routed experts.
     if getattr(config, 'use_moe', False):
         return _build_moe_ffn(config)
+    if config.ffn_type == "geglu":
+        # Spark-X2.6 GeGLU: gelu(gate_proj(x)) * up_proj(x) → down_proj.
+        # Same three-matrix layout as SwiGLU — only the gate activation differs.
+        return SwiGLUFFN(
+            config.d_model,
+            hidden_dim=getattr(config, 'intermediate_size', None),
+            use_triton=getattr(config, 'use_triton_kernels', False),
+            act_mode="gelu")
     if config.ffn_type == "swiglu":
         # V5.2: FFN compression (Monarch/Kronecker/TT) — replaces dense linear
         # layers with factored versions. Conversion from dense checkpoint
