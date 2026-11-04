@@ -410,9 +410,17 @@ class _CheckpointLoadingMixin:
             overrides["quantize"] = None
         elif getattr(self.model, '_forgequant_prequant', False):
             # Checkpoint already stores ForgeQuant packed weights —
-            # a second pass would corrupt them. BCG/compile stay
-            # available: packed params are plain tensors on GPU.
+            # a second pass would corrupt them.
             overrides["quantize"] = None
+            # inductor traces the ForgeQuant dequant+forward and emits
+            # a kernel that hard-crashes (native, no Python traceback)
+            # on this stack — bisected: compile alone kills generate,
+            # breakable CUDA graphs alone work. block_fusion routes
+            # through compile for its fused path, so it goes too; BCG
+            # stays (proven on this arch).
+            overrides["use_compile"] = False
+            overrides["use_compile_autotune"] = False
+            overrides["use_block_fusion"] = False
         elif is_mamba_hybrid:
             # Quamba2 already quantizes SSM blocks in the mamba profile;
             # an extra whole-model quant pass is unvalidated there.
@@ -440,10 +448,15 @@ class _CheckpointLoadingMixin:
                 overrides.setdefault("kv_cache", "standard")
 
             if vram_ratio > 0.5 and not is_mamba_hybrid:
-                # Ample VRAM — enable aggressive speed features
-                overrides["use_block_fusion"] = True
-                overrides["use_breakable_cuda_graph"] = True
-                overrides["use_learned_prefix_cache"] = True
+                # Ample VRAM — enable aggressive speed features, but
+                # never re-enable a feature an earlier guard hard-off'd
+                # (e.g. prequant-packed models disable fusion+compile —
+                # inductor crashes on the dequant path).
+                for feat, on in (("use_block_fusion", True),
+                                 ("use_breakable_cuda_graph", True),
+                                 ("use_learned_prefix_cache", True)):
+                    if overrides.get(feat) is not False:
+                        overrides[feat] = on
             elif vram_ratio < 0.25:
                 # Tight VRAM — skip graph features, keep RotorQuant + 4-bit
                 overrides["use_block_fusion"] = False
