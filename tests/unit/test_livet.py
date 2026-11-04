@@ -238,3 +238,103 @@ def test_ngram_lift_novel_successor_finite():
     s.attach_sparse(mem)
     stats = s.ingest(torch.tensor([[1, 2, 3, 4, 200]]))
     assert math.isfinite(stats["mean_loss"])
+
+
+def test_ngram_overwrite_recency():
+    """decay-on-rewrite: retraining a suffix with a new successor makes
+    the latest value dominate the lift (was: permanent 50/50 stale blend
+    - measured ow=2.35/stale=2.36 in exp_live_v2)."""
+    from forge.model.ngram_mem import NGramMemory
+
+    mem = NGramMemory(64, orders=(2,), gate=1.0, write_decay=0.5)
+    ctx = torch.tensor([[9, 10]])
+    mem.update(torch.tensor([[9, 10, 30]] * 6))
+    assert float(mem.lift(ctx)[0, -1, 30]) > float(mem.lift(ctx)[0, -1, 31])
+    mem.update(torch.tensor([[9, 10, 31]] * 3))
+    lift = mem.lift(ctx)
+    assert float(lift[0, -1, 31]) > float(lift[0, -1, 30])
+
+
+def test_ngram_overwrite_decay_one_is_last_write_wins():
+    """write_decay=1.0 -> EMA rate 1 = row collapses to the latest successor."""
+    from forge.model.ngram_mem import NGramMemory
+
+    mem = NGramMemory(64, orders=(2,), gate=1.0, write_decay=1.0)
+    mem.update(torch.tensor([[9, 10, 30]] * 6))
+    mem.update(torch.tensor([[9, 10, 31]]))
+    lift = mem.lift(torch.tensor([[9, 10]]))
+    assert float(lift[0, -1, 31]) > float(lift[0, -1, 30]) + 1.0
+
+
+def test_suffixmem_overwrite_recency():
+    """Same decay-on-rewrite contract on the production streaming variant."""
+    from forge.model.ngram_mem import SuffixMemory
+
+    sm = SuffixMemory(64, orders=(2,), gate=1.0, write_decay=0.5)
+    for _ in range(6):
+        sm.feed([9, 10, 30])
+    sm.feed([9, 10])
+    assert float(sm.lift_last()[30]) > float(sm.lift_last()[31])
+    for _ in range(3):
+        sm.feed([9, 10, 31])
+    sm.feed([9, 10])
+    lift = sm.lift_last()
+    assert float(lift[31]) > float(lift[30])
+    assert sm.draft(1) == [31]
+
+def test_suffixmem_save_load_parity(tmp_path):
+    import numpy as np
+    from forge.model.ngram_mem import SuffixMemory
+    sm = SuffixMemory(64, orders=(4, 8), gate=1.0, write_decay=0.5)
+    sm.feed(list(range(1, 20)))
+    sm.feed([5, 6, 7, 8, 42])
+    sm.feed([5, 6, 7, 8])
+    lift_before = sm.lift_last().numpy().copy()
+    p = tmp_path / "mem.pkl"
+    sm.save(p)
+    sm2 = SuffixMemory.load(p)
+    lift_after = sm2.lift_last().numpy()
+    assert np.array_equal(lift_before, lift_after)
+    assert sm2.info()["cells"] == sm.info()["cells"]
+    # continued ingest works identically on both instances
+    sm.feed_one(9); sm2.feed_one(9)
+    assert np.array_equal(sm.lift_last().numpy(), sm2.lift_last().numpy())
+
+def test_suffix_draft_model_round_semantics():
+    # SuffixDraftModel follows the external_draft_speculative contract:
+    # committed tokens live in mem._tail (the strategy feeds them);
+    # T==1 calls roll only the virtual proposal chain.
+    import torch
+    from forge.model.ngram_mem import SuffixMemory, SuffixDraftModel
+    mem = SuffixMemory(64, orders=(4,), gate=1.0, write_decay=0.5)
+    seq = [10, 11, 12, 13, 42, 43, 10, 11, 12, 13, 42, 43]
+    d = SuffixDraftModel(mem)
+    # Strategy feeds the prompt BEFORE the T>1 prefill call.
+    mem.feed(seq)
+    logits, kv = d(torch.tensor([seq]), use_cache=True)
+    assert kv is None
+    # tail ends ..42,43 -> order-4 key (12,13,42,43) -> successor 10
+    t1 = int(logits[0, -1].argmax())
+    assert t1 == 10
+    # roll proposal 10 -> next prediction 11
+    logits, _ = d(torch.tensor([[t1]]), use_cache=True)
+    assert int(logits[0, -1].argmax()) == 11
+    # roll 11 -> 12
+    logits, _ = d(torch.tensor([[11]]), use_cache=True)
+    assert int(logits[0, -1].argmax()) == 12
+    # resync: verifier commits [10, 11] + corrected token 99 — the
+    # strategy feeds them, THEN the T>1 call ends the proposal chain.
+    for t in (10, 11, 99):
+        mem.feed_one(t)
+    logits, _ = d(torch.tensor([[10, 11, 99]]), use_cache=True)
+    # tail ends ..11,99 -> no learned successor -> uniform-ish logits
+    assert float(logits.max()) <= -19.0
+    # feed committed tokens completing a known suffix -> predict 10
+    for t in (12, 13, 42, 43):
+        mem.feed_one(t)
+    logits, _ = d(torch.tensor([[12, 13, 42, 43]]), use_cache=True)
+    assert int(logits[0, -1].argmax()) == 10
+    # a T==1 token that is NOT the last prediction is treated as an
+    # out-of-band commit (strategy's no-draft resync), not a proposal.
+    logits, _ = d(torch.tensor([[7]]), use_cache=True)
+    assert d._proposal == []

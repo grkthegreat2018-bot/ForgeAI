@@ -49,11 +49,14 @@ class NGramMemory:
     """
 
     def __init__(self, vocab_size: int, orders=(4, 8), gate: float = 0.0,
-                 order_weight: float = 0.5):
+                 order_weight: float = 0.5, write_decay: float = 0.5,
+                 row_mass: float = 8.0):
         self.vocab = vocab_size
         self.orders = tuple(sorted(orders))
         self.gate = gate                    # 0 = lossless sidecar at init
         self.order_weight = order_weight    # per-order discount
+        self.write_decay = float(write_decay)  # EMA rate: 1 = last-write-wins
+        self.row_mass = float(row_mass)     # effective count mass in lift()
         self.tables = {o: {} for o in self.orders}
         self.unigram = np.zeros(vocab_size, dtype=np.float64)
         self.total = 0
@@ -94,9 +97,16 @@ class NGramMemory:
                 key = self._key(ids1, t + 1, o)
                 row = tab.get(key)
                 if row is None:
-                    row = np.zeros(self.vocab, dtype=np.int32)
+                    row = np.zeros(self.vocab, dtype=np.float32)
                     tab[key] = row
-                row[int(ids1[t + 1])] += 1
+                # EMA successor distribution (normalized rows): recency-
+                # weighted so an overwritten fact's latest value dominates
+                # exponentially fast, while lift mass stays constant —
+                # raw count decay dilutes the smoothed lift uniformly
+                a = self.write_decay
+                row *= 1.0 - a
+                row[int(ids1[t + 1])] += a
+                row /= row.sum()
         for tok in ids1.tolist():
             self.unigram[int(tok)] += 1
             self.total += 1
@@ -111,13 +121,13 @@ class NGramMemory:
         out = torch.zeros(B, T, self.vocab, device=device)
         flat = ids.reshape(-1)
         uni = self.unigram / max(self.total, 1)
-        for o, tab in self.tables.items():
-            w = self.order_weight ** (self.orders[-1] - o)
+        for i, (o, tab) in enumerate(self.tables.items()):
+            w = self.order_weight ** (len(self.orders) - 1 - i)
             for t in range(flat.numel()):
                 row = tab.get(self._key(flat, t + 1, o))
                 if row is None or row.sum() == 0:
                     continue
-                p = (torch.from_numpy(row).float() +
+                p = (self.row_mass * torch.from_numpy(row).float() +
                      0.1 * self.vocab * torch.from_numpy(uni).float()
                      + 0.01)
                 p = p / p.sum()
@@ -158,13 +168,15 @@ class SuffixMemory:
                  order_weight: float = 0.7,
                  max_cells_per_order: int = 200_000,
                  unigram_mix: float = 0.1,
-                 uniform_floor: float = 0.01):
+                 uniform_floor: float = 0.01,
+                 write_decay: float = 0.5):
         self.vocab = int(vocab_size)
         self.orders = tuple(sorted(int(o) for o in orders))
         self.max_order = self.orders[-1]
         self.gate = float(gate)
         self.order_weight = float(order_weight)
         self.max_cells = int(max_cells_per_order)
+        self.write_decay = float(write_decay)  # EMA rate: 1 = last-write-wins
         self.unigram_mix = float(unigram_mix)
         self.uniform_floor = float(uniform_floor)
 
@@ -202,16 +214,27 @@ class SuffixMemory:
                     else:
                         row = {}
                         tab[key] = row
-                row[succ_tok] = row.get(succ_tok, 0) + 1
+                # EMA successor distribution: recency-weighted — an
+                # overwritten fact's latest value dominates exponentially
+                a = self.write_decay
+                if a < 1.0:
+                    for t in list(row.keys()):
+                        row[t] *= 1.0 - a
+                        if row[t] < 1e-3:
+                            del row[t]
+                    row[succ_tok] = row.get(succ_tok, 0.0) + a
+                else:
+                    row.clear()
+                    row[succ_tok] = 1.0
 
     def _decay(self, order: int) -> None:
-        """Halve every count in ``tables[order]``; drop rows that die."""
+        """Halve every mass in ``tables[order]``; drop rows that die."""
         tab = self.tables[order]
         for key in list(tab.keys()):
             row = tab[key]
             for tok in list(row.keys()):
-                row[tok] //= 2
-                if row[tok] == 0:
+                row[tok] *= 0.5
+                if row[tok] < 0.02:
                     del row[tok]
             if not row:
                 del tab[key]
@@ -263,29 +286,26 @@ class SuffixMemory:
         overrides must not write the shared sidecar's ``.gate``.
         """
         uni = self.unigram / max(self.total, 1)
-        floor = np.full(self.vocab, np.log(self.uniform_floor),
-                        dtype=np.float32)
         lift = np.zeros(self.vocab, dtype=np.float32)
-        max_o = self.orders[-1]
         matched = 0
-        for o in self.orders:
+        for i, o in enumerate(self.orders):
             probs, _cnt = self._row_probs(o)
             if probs is None:
                 continue
             matched += 1
-            w = self.order_weight ** (max_o - o)
+            w = self.order_weight ** (len(self.orders) - 1 - i)
             for tok, p in probs.items():
-                # p smoothed: count-prop + unigram backoff + uniform floor
+                # log-likelihood-ratio vs the smoothing prior: memorized
+                # successors get a POSITIVE boost proportional to how much
+                # the row beats the unigram/uniform reference; tokens the
+                # memory has no opinion on get exactly 0
                 p_s = p + self.unigram_mix * uni[tok] + self.uniform_floor
-                lift[tok] += w * np.log(p_s)
+                p_ref = self.unigram_mix * uni[tok] + self.uniform_floor
+                lift[tok] += w * np.log(p_s / p_ref)
         if matched == 0:
             return torch.zeros(self.vocab, dtype=dtype, device=device)
-        # Blend: matched successors keep their mixture lift; unseen tokens
-        # get a mild negative pull (scale the floor so a memory hit is
-        # always distinguishable but never a hard veto).
         g = self.gate if gate is None else float(gate)
-        out = g * (lift + 0.25 * floor)
-        return torch.from_numpy(out).to(device=device, dtype=dtype)
+        return torch.from_numpy(g * lift).to(device=device, dtype=dtype)
 
     def draft(self, n: int = 4) -> list[int]:
         """Greedy suffix continuation of the tail — the prompt-lookup
@@ -347,3 +367,132 @@ class SuffixMemory:
             "decays": self._decays,
             "tail_len": len(self._tail),
         }
+
+    # ── disk persistence ────────────────────────────────────────────────
+    # Pickle on purpose: a live-memory artifact is self-produced local
+    # state, same trust class as checkpoint .pt bundles (see AGENTS.md
+    # security notes — load only self-produced artifacts).
+
+    _PERSIST_VERSION = 1
+
+    def save(self, path) -> None:
+        """Persist config + full memory state to ``path``."""
+        import pickle
+        payload = {
+            "version": self._PERSIST_VERSION,
+            "vocab": self.vocab,
+            "orders": self.orders,
+            "gate": self.gate,
+            "order_weight": self.order_weight,
+            "max_cells": self.max_cells,
+            "write_decay": self.write_decay,
+            "unigram_mix": self.unigram_mix,
+            "uniform_floor": self.uniform_floor,
+            "state": self.snapshot_state(),
+        }
+        with open(path, "wb") as f:
+            pickle.dump(payload, f, protocol=4)
+
+    @classmethod
+    def load(cls, path) -> "SuffixMemory":
+        """Rebuild a SuffixMemory saved via ``save`` (exact state parity)."""
+        import pickle
+        with open(path, "rb") as f:
+            payload = pickle.load(f)
+        if payload.get("version") != cls._PERSIST_VERSION:
+            raise ValueError(
+                f"unsupported SuffixMemory version {payload.get('version')}")
+        mem = cls(payload["vocab"], orders=payload["orders"],
+                  gate=payload["gate"], order_weight=payload["order_weight"],
+                  max_cells_per_order=payload["max_cells"],
+                  unigram_mix=payload["unigram_mix"],
+                  uniform_floor=payload["uniform_floor"],
+                  write_decay=payload["write_decay"])
+        mem.restore_state(payload["state"])
+        return mem
+
+
+class SuffixDraftModel(torch.nn.Module):
+    """Draft-model-shaped shim over ``SuffixMemory`` — a zero-VRAM
+    prompt-lookup drafter for ``external_draft_speculative``.
+
+    The spec-decode draft contract is model-shaped: ``draft(ids,
+    past_key_values=None, use_cache=...) -> (logits, kv)``, one forward
+    per proposed token. This shim answers each call from the memory's
+    suffix tables instead of running weights:
+
+      * ``mem._tail`` is the committed context — the decoding strategy
+        feeds every committed token to the sidecar (``feed_one``), so
+        the shim never tracks committed tokens itself. T>1 calls
+        (prefill / post-verify resync) only end the in-round proposal
+        chain.
+      * T==1 calls roll the virtual tail: a token equal to the shim's
+        own last argmax is a mid-round proposal (folded into the
+        prediction context); anything else is an out-of-band committed
+        token (the strategy's no-draft resync), which ends the chain —
+        it already lives in ``mem._tail``.
+      * ``past_key_values`` is ignored — the memory state IS the draft
+        state; ``(logits, None)`` unpacks as stateless.
+      * Returned logits carry the memory's real successor probability
+        at the predicted token (uniform -20 elsewhere), so
+        ``confidence_tau`` scheduling sees an honest survival prior
+        instead of a fake 1.0 spike.
+    """
+
+    def __init__(self, mem: "SuffixMemory", device: str = "cpu"):
+        super().__init__()
+        self.mem = mem
+        self.device = device
+        self._proposal: list[int] = []      # in-round unverified drafts
+        self._last_pred: int | None = None  # argmax of last emitted logits
+
+    def _predict_logits(self, B: int) -> torch.Tensor:
+        tail = list(self.mem._tail) + self._proposal
+        logits = torch.full((B, 1, self.mem.vocab), -20.0,
+                            device=self.device, dtype=torch.float32)
+        self._last_pred = None
+        for b in range(B):
+            best_tok, best_p = None, 0.0
+            for o in reversed(self.mem.orders):
+                if len(tail) < o:
+                    continue
+                row = self.mem.tables[o].get(
+                    self.mem._suffix_key(tail, o))
+                if row:
+                    tot = sum(row.values())
+                    k, c = max(row.items(), key=lambda kv: kv[1])
+                    best_tok, best_p = k, (c / tot) if tot else 0.0
+                    break
+            if best_tok is not None:
+                p = min(max(best_p, 1e-3), 1.0)
+                logits[b, 0, best_tok] = float(
+                    torch.logit(torch.tensor(p)))
+                if b == 0:
+                    self._last_pred = best_tok
+        return logits
+
+    def forward(self, ids, past_key_values=None, use_cache: bool = False,
+                **_kw):
+        ids_t = (ids if torch.is_tensor(ids)
+                 else torch.tensor(ids, dtype=torch.long))
+        B = ids_t.shape[0] if ids_t.dim() else 1
+        if ids_t.dim() != 2:
+            return torch.zeros(B, 1, self.mem.vocab, device=self.device), None
+        if ids_t.shape[1] > 1:
+            # T>1: prompt prefill or post-verify resync — committed
+            # context lives in mem._tail (the caller feeds it); only
+            # the in-round proposal chain ends here.
+            self._proposal = []
+            self._last_pred = None
+        else:
+            tok = int(ids_t[0, -1].item())
+            if self._last_pred is not None and tok == self._last_pred:
+                # In-round proposal roll — virtual tail only.
+                self._proposal.append(tok)
+                self._proposal = self._proposal[-self.mem.max_order:]
+            else:
+                # Committed token the shim didn't propose (no-draft
+                # resync) — already fed into mem._tail; end the chain.
+                self._proposal = []
+                self._last_pred = None
+        return self._predict_logits(B), None
