@@ -793,6 +793,9 @@ class ExternalDraftSpeculativeDecoding(DecodingStrategy):
                  confidence_tau: float = 0.0):
         self.draft_model = draft_model
         self.draft_length = draft_length
+        # Acceptance telemetry: (proposed, accepted) across all rounds —
+        # the honest measure of whether a draft source pays for itself.
+        self.spec_stats = {"proposed": 0, "accepted": 0, "rounds": 0}
         # DeepInfer confidence-scheduled verification, bs=1 form: the
         # draft's own softmax probability proxies the acceptance rate;
         # the cumprod prefix-survival falling below ``confidence_tau``
@@ -879,6 +882,8 @@ class ExternalDraftSpeculativeDecoding(DecodingStrategy):
                 # Accept matching prefix
                 accepted = 0
                 new_tokens = [main_token.squeeze().item()]
+                self.spec_stats["proposed"] += len(draft_tokens)
+                self.spec_stats["rounds"] += 1
                 for i, draft_tok in enumerate(draft_tokens):
                     pred_tok = verify_logits[0, i, :].argmax()
                     if pred_tok.item() == draft_tok:
@@ -886,6 +891,7 @@ class ExternalDraftSpeculativeDecoding(DecodingStrategy):
                         new_tokens.append(draft_tok)
                     else:
                         break
+                self.spec_stats["accepted"] += accepted
 
                 # Roll the target KV back to the committed prefix
                 # (main + accepted drafts) — rejected draft positions
@@ -967,6 +973,12 @@ class ExternalDraftSpeculativeDecoding(DecodingStrategy):
                         draft_out)
 
         return ids
+
+    def spec_report(self) -> dict:
+        s = self.spec_stats
+        return {**s,
+                "accept_rate": (s["accepted"] / s["proposed"]
+                                if s["proposed"] else 0.0)}
 
 
 class MedusaDecoding(DecodingStrategy):

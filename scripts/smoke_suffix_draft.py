@@ -39,4 +39,5 @@ print("SPEC:", repr(out_spec)[:200])
 
 print(f"\nstd {t_std:.2f}s | spec {t_spec:.2f}s | "
       f"match={'YES' if out_spec == out_std else 'NO'}")
+print("spec:", eng.decoding.spec_report())
 print("mem:", mem.info())
