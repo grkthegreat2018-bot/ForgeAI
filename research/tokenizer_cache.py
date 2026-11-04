@@ -115,7 +115,9 @@ def _load_hf_tokenizer(path: str):
     try:
         import gigatoken as gt
         return gt.Tokenizer(hf_tok).as_hf()
-    except ImportError:
+    except Exception:
+        # gigatoken can't parse every tokenizer (e.g. Spark-X2.6's CJK
+        # Split pre-tokenizer regexes) — fall back to the plain HF tokenizer.
         return hf_tok
 
 
