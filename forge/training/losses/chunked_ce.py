@@ -201,9 +201,122 @@ class ChunkedEntropyWeightedCE(Function):
         return grad_input, grad_weight, None, None, None
 
 
+class ChunkedDistillCE(Function):
+    """Chunked linear + advantage-weighted CE for offline on-policy distillation.
+
+    Implements the Thinking Machines / Agarwal et al. on-policy distillation
+    update as a weighted cross-entropy, against *cached* per-token teacher
+    log-probs (sequence-level, so teacher and student may use different
+    tokenizers — the scorer detokenizes student text and re-scores it in the
+    teacher's own vocab).
+
+    Per response token t:
+        A_t = stopgrad(teacher_logp_t - student_logp_t)
+        w_t = floor + (1 - floor) * clip(alpha * A_t, -clip, +clip)
+        loss = sum(w_t * ce_t) / n_valid
+
+    A_t > 0 (teacher likes the token more than the student) reinforces it;
+    A_t < 0 suppresses it. floor keeps a plain-CE weight on every token so the
+    loss cannot collapse to zero signal when teacher and student already
+    agree; floor=1.0 reduces exactly to chunked_linear_cross_entropy.
+
+    Tokens with teacher_logp <= TEACHER_LOGP_MISSING are treated as unscored
+    and get weight 1.0 (neutral CE). Prompt/pad positions are masked by
+    target == -100 as usual.
+
+    Never materializes the full [N, V] logits tensor.
+    """
+
+    @staticmethod
+    def forward(ctx, x, weight, target, teacher_logp, chunk_size=512,
+                alpha=1.0, clip=5.0, floor=0.3):
+        N, _H = x.shape
+        device = x.device
+        ignore_index = -100
+        missing = ChunkedDistillCE.TEACHER_LOGP_MISSING
+        weight_cast = weight.to(x.dtype)
+        teacher_logp = teacher_logp.to(device=device, dtype=torch.float32)
+
+        grad_input = torch.zeros_like(x) if x.requires_grad else None
+        grad_weight = torch.zeros_like(weight) if weight.requires_grad else None
+        loss_total = torch.zeros((), device=device, dtype=torch.float32)
+        n_valid = 0
+
+        for start in range(0, N, chunk_size):
+            end = min(start + chunk_size, N)
+            x_chunk = x[start:end]
+            target_chunk = target[start:end]
+            tlp_chunk = teacher_logp[start:end]
+            valid_mask = target_chunk != ignore_index
+            n_valid += valid_mask.sum().item()
+
+            logits_chunk = x_chunk @ weight_cast.t()
+            logits_f = logits_chunk.float()
+
+            # Per-token CE (= -student_logp) and softmax for the gradient.
+            ce_chunk = F.cross_entropy(
+                logits_f, target_chunk, reduction="none"
+            )  # [cs]
+            with torch.no_grad():
+                probs = F.softmax(logits_f, dim=-1)
+                student_logp = -ce_chunk
+                adv = (tlp_chunk - student_logp) * alpha
+                w = floor + (1.0 - floor) * torch.clamp(adv, -clip, clip)
+                # Unscored tokens (or prompt/pad) fall back to neutral CE.
+                w = torch.where(tlp_chunk <= missing,
+                                torch.ones_like(w), w)
+
+            weighted_ce = ce_chunk * w * valid_mask.to(ce_chunk.dtype)
+            loss_total = loss_total + weighted_ce.sum()
+
+            if x.requires_grad:
+                with torch.no_grad():
+                    safe_target = target_chunk.clamp(min=0)
+                    probs.scatter_add_(
+                        1, safe_target.unsqueeze(1),
+                        torch.full_like(probs[:, :1], -1.0),
+                    )
+                    probs = probs * w.unsqueeze(1)
+                    probs = probs * valid_mask.unsqueeze(1).to(probs.dtype)
+
+                grad_input[start:end] = probs.to(x.dtype) @ weight_cast
+                if grad_weight is not None:
+                    grad_weight += probs.to(x.dtype).t() @ x_chunk
+
+        loss = loss_total / max(n_valid, 1)
+        ctx.save_for_backward(grad_input, grad_weight)
+        ctx.n_valid = max(n_valid, 1)
+        return loss.to(x.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_input, grad_weight = ctx.saved_tensors
+        scale = grad_output / ctx.n_valid
+        grad_input = grad_input * scale
+        if grad_weight is not None:
+            grad_weight = grad_weight * scale
+        return grad_input, grad_weight, None, None, None, None, None, None
+
+
+# Sentinel written by score_teacher_logprobs.py for student tokens it could
+# not map to teacher logprobs. Treated as "neutral CE weight" by ChunkedDistillCE.
+ChunkedDistillCE.TEACHER_LOGP_MISSING = -99.0
+
+
 def chunked_linear_cross_entropy(x, weight, target, chunk_size=512):
     """Functional interface for ChunkedLinearCrossEntropy."""
     return ChunkedLinearCrossEntropy.apply(x, weight, target, chunk_size)
+
+
+def chunked_distill_ce(x, weight, target, teacher_logp, chunk_size=512,
+                       alpha=1.0, clip=5.0, floor=0.3):
+    """Functional interface for ChunkedDistillCE (advantage-weighted CE).
+
+    teacher_logp: [N] float tensor aligned with target (flat). Entries <=
+    TEACHER_LOGP_MISSING are treated as unscored → neutral CE weight.
+    """
+    return ChunkedDistillCE.apply(x, weight, target, teacher_logp,
+                                  chunk_size, alpha, clip, floor)
 
 
 def chunked_entropy_weighted_ce(x, weight, target, chunk_size=512, entropy_alpha=0.5):

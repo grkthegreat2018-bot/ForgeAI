@@ -274,9 +274,16 @@ def load_examples(paths: list[str], strict_data: bool = False) -> list[dict]:
                     continue
                 seen.add(key)
                 resp = obj.get("response", obj.get("solution", ""))
-                examples.append({"type": "single_turn",
-                                 "prompt": obj["prompt"],
-                                 "response": resp})
+                ex = {"type": "single_turn",
+                      "prompt": obj["prompt"],
+                      "response": resp}
+                if "reward" in obj:
+                    ex["reward"] = float(obj["reward"])
+                # Cached per-completion-token teacher logprobs
+                # (score_teacher_logprobs.py) — consumed by --distill.
+                if "teacher_logp" in obj:
+                    ex["teacher_logp"] = obj["teacher_logp"]
+                examples.append(ex)
                 n_loaded += 1
             else:
                 n_skipped += 1
@@ -380,9 +387,14 @@ def load_examples_parquet(
                     continue
                 seen.add(key)
                 resp = row.get("response", row.get("solution", ""))
-                examples.append({"type": "single_turn",
-                                 "prompt": row["prompt"],
-                                 "response": resp})
+                ex = {"type": "single_turn",
+                      "prompt": row["prompt"],
+                      "response": resp}
+                if "reward" in row:
+                    ex["reward"] = float(row["reward"])
+                if "teacher_logp" in row:
+                    ex["teacher_logp"] = row["teacher_logp"]
+                examples.append(ex)
                 n_loaded += 1
             else:
                 n_skipped += 1
@@ -461,20 +473,33 @@ def _tokenize_cached(tokenizer, text: str, max_seq_len: int) -> list[int] | None
         except Exception:
             return None
 
+    # Cache key namespaces by tokenizer identity at BOTH layers. The bare
+    # "default" disk namespace let a Qwen-vocab run poison entries that a
+    # 128k-vocab model then consumed (ids > vocab → device-side embed
+    # assert). class+vocab+eos+pad distinguishes the tokenizers we ship.
+    tok_hash = getattr(tokenizer, "_tokenizer_hash", None)
+    if tok_hash is None:
+        tok_hash = "{}_{}_{}_{}".format(
+            type(tokenizer).__name__, getattr(tokenizer, "vocab_size", 0),
+            getattr(tokenizer, "eos_token_id", -1),
+            getattr(tokenizer, "pad_token_id", -1))
+        tokenizer._tokenizer_hash = tok_hash
+    lru_key = (tok_hash, text)
+
     # Layer 1: in-memory LRU
-    if text in _tokenize_cache:
-        _tokenize_cache.move_to_end(text)
-        return _tokenize_cache[text]
+    if lru_key in _tokenize_cache:
+        _tokenize_cache.move_to_end(lru_key)
+        return _tokenize_cache[lru_key]
 
     # Layer 2: disk cache
     disk = _get_disk_tok_cache()
-    cached = disk.get(text, getattr(tokenizer, "_tokenizer_hash", "default"))
+    cached = disk.get(text, tok_hash)
     if cached is not None:
         # Promote to in-memory cache
         if len(text) < 10000:
             while len(_tokenize_cache) >= _CACHE_MAX:
                 _tokenize_cache.popitem(last=False)
-            _tokenize_cache[text] = cached
+            _tokenize_cache[lru_key] = cached
         return cached
 
     # Layer 3: tokenize and cache in both layers
@@ -488,9 +513,9 @@ def _tokenize_cached(tokenizer, text: str, max_seq_len: int) -> list[int] | None
             if len(text) < 10000:
                 while len(_tokenize_cache) >= _CACHE_MAX:
                     _tokenize_cache.popitem(last=False)
-                _tokenize_cache[text] = ids
+                _tokenize_cache[lru_key] = ids
             # Disk cache (persists across runs)
-            disk.put(text, ids, getattr(tokenizer, "_tokenizer_hash", "default"))
+            disk.put(text, ids, tok_hash)
         return ids
     except Exception:
         return None
@@ -533,16 +558,25 @@ def tokenize_example(ex: dict, tokenizer, max_seq_len: int) -> list[dict]:
         while len(labels) < len(input_ids):
             labels.append(-100)
 
-        results.append({"input_ids": input_ids, "labels": labels,
-                        "n_comp": len(input_ids) - comp_start_tok,
-                        "reward": ex.get("reward", 1.0)})
+        out = {"input_ids": input_ids, "labels": labels,
+               "n_comp": len(input_ids) - comp_start_tok,
+               "reward": ex.get("reward", 1.0)}
+        # Cached teacher logprobs ride through aligned to the completion
+        # tokens (labels != -100 positions, in order). The scorer writes one
+        # float per completion token; mismatched lengths are reconciled at
+        # collate time via the TEACHER_LOGP_MISSING sentinel.
+        if ex.get("teacher_logp") is not None:
+            out["teacher_logp"] = ex["teacher_logp"]
+        results.append(out)
     return results
 
 
-def collate_batch(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def collate_batch(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Left-pad a batch of variable-length examples.
 
-    Returns (input_ids, labels, attention_mask, reward_weights) all [B, T] or [B].
+    Returns (input_ids, labels, attention_mask, reward_weights, teacher_logp)
+    — [B, T] tensors, [B] weights, and [B, T] teacher logprobs (or None when
+    no example in the batch carries them).
     Left-padding keeps the completion at the end so causal LM predicts correctly.
     Uses pin_memory when transferring to GPU for faster H2D copy.
 
@@ -557,6 +591,11 @@ def collate_batch(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Te
     labels = torch.full((b, max_len), -100, dtype=torch.long)
     attn_mask = torch.zeros((b, max_len), dtype=torch.long)
     reward_weights = torch.ones(b, dtype=torch.float32)
+    # Cached teacher logprobs for --distill: aligned to non--100 label
+    # positions in order; -99 (TEACHER_LOGP_MISSING) everywhere else.
+    has_tlp = any(ex.get("teacher_logp") is not None for ex in batch)
+    teacher_logp = (torch.full((b, max_len), -99.0, dtype=torch.float32)
+                    if has_tlp else None)
     for i, ex in enumerate(batch):
         ids = ex["input_ids"]
         labs = ex["labels"]
@@ -571,6 +610,15 @@ def collate_batch(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Te
             labels[i, offset:] = torch.tensor(labs, dtype=torch.long)
         attn_mask[i, offset:] = 1
         reward_weights[i] = ex.get("reward", 1.0)
+        if has_tlp:
+            tlp = ex.get("teacher_logp")
+            if tlp is None:
+                continue
+            comp_pos = (labels[i] != -100).nonzero(as_tuple=True)[0]
+            m = min(len(comp_pos), len(tlp))
+            if m > 0:
+                teacher_logp[i, comp_pos[:m]] = torch.as_tensor(
+                    tlp[:m], dtype=torch.float32)
     # Use pin_memory + non_blocking for faster CPU→GPU transfer.
     # R&D round 25: pin even when device="cpu" if CUDA is available —
     # supports the transfer-on-consume prefetcher path.
@@ -580,10 +628,14 @@ def collate_batch(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Te
         labels = labels.pin_memory()
         attn_mask = attn_mask.pin_memory()
         reward_weights = reward_weights.pin_memory()
+        if teacher_logp is not None:
+            teacher_logp = teacher_logp.pin_memory()
     return (input_ids.to(device, non_blocking=use_pin),
             labels.to(device, non_blocking=use_pin),
             attn_mask.to(device, non_blocking=use_pin),
-            reward_weights.to(device, non_blocking=use_pin))
+            reward_weights.to(device, non_blocking=use_pin),
+            teacher_logp.to(device, non_blocking=use_pin)
+            if teacher_logp is not None else None)
 
 
 # ── Training loop ────────────────────────────────────────────────────────────
@@ -593,7 +645,11 @@ def compute_loss(model, input_ids, labels, attn_mask,
                  sample_weights: torch.Tensor | None = None,
                  sigreg_weight: float = 0.0,
                  sigreg_threshold: float = 1.0,
-                 is_hf_model: bool = False) -> torch.Tensor:
+                 is_hf_model: bool = False,
+                 teacher_logp: torch.Tensor | None = None,
+                 distill_alpha: float = 1.0,
+                 distill_clip: float = 5.0,
+                 distill_floor: float = 0.3) -> torch.Tensor:
     """Completion-only cross-entropy loss with optional anti-regression techniques.
 
     The model's forward(targets=...) computes mean CE over ALL non-ignored
@@ -627,6 +683,14 @@ def compute_loss(model, input_ids, labels, attn_mask,
     _sigreg = SIGRegLoss(threshold=sigreg_threshold) if sigreg_weight > 0.0 else None
     _need_hidden = _sigreg is not None
 
+    # Uniform 1.0 weights multiply the loss by exactly 1.0 — but their mere
+    # presence forces the manual full-logits path below, which materializes
+    # [B,T,V] logits (OOM on 12GB) and bypasses chunked_distill_ce entirely
+    # (teacher_logp silently ignored). Drop them so the chunked fast path
+    # can engage.
+    if sample_weights is not None and bool((sample_weights == 1.0).all()):
+        sample_weights = None
+
     # ── HuggingFace model path: manual logits + CE (no targets= kwarg) ──
     if is_hf_model:
         with torch.autocast(
@@ -657,6 +721,19 @@ def compute_loss(model, input_ids, labels, attn_mask,
         # correct chunked CE variant.
         if hasattr(model, 'config') and hasattr(model.config, 'entropy_alpha'):
             model.config.entropy_alpha = entropy_alpha
+        # Offline on-policy distillation: cached per-token teacher logprobs
+        # ride through config like entropy_alpha; the model's chunked-CE path
+        # dispatches to chunked_distill_ce when set. teacher_logp is stored
+        # at label positions, so it takes the same shift.
+        if hasattr(model, 'config'):
+            if teacher_logp is not None:
+                model.config.teacher_logp = F.pad(
+                    teacher_logp[:, 1:], (0, 1), value=-99.0)
+                model.config.distill_alpha = distill_alpha
+                model.config.distill_clip = distill_clip
+                model.config.distill_floor = distill_floor
+            else:
+                model.config.teacher_logp = None
         with torch.autocast(
             device_type="cuda", dtype=torch.bfloat16,
             enabled=input_ids.is_cuda,
@@ -741,6 +818,17 @@ def compute_loss(model, input_ids, labels, attn_mask,
         # Apply entropy weights to per-token CE.
         ce_per_token = ce_per_token * entropy_weights
 
+    if teacher_logp is not None:
+        # Advantage-weighted CE (manual path): A_t = t_logp - s_logp
+        # = t_logp + ce_t; clip, floor-blend, then weight CE per token.
+        tlp = teacher_logp[:, 1:].float()  # align to shift_labels [B,T-1]
+        with torch.no_grad():
+            adv = (tlp + ce_per_token.detach()) * distill_alpha
+            tw = distill_floor + (1.0 - distill_floor) * torch.clamp(
+                adv, -distill_clip, distill_clip)
+            tw = torch.where(tlp <= -99.0, torch.ones_like(tw), tw)
+        ce_per_token = ce_per_token * tw
+
     # Per-example loss: mean over non-ignored tokens.
     per_example_loss = (ce_per_token * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1.0)  # [B]
 
@@ -808,7 +896,7 @@ def compute_sample_weights(model, dataset, pad_id, device, batch_size=1):
     with torch.inference_mode():
         for i in range(0, len(dataset), batch_size):
             batch = [dataset[j] for j in range(i, min(i + batch_size, len(dataset)))]
-            input_ids, labels, attn_mask, _rw = collate_batch(batch, pad_id, device)
+            input_ids, labels, attn_mask, _rw, _tlp = collate_batch(batch, pad_id, device)
             loss = compute_loss(model, input_ids, labels, attn_mask)
             # Per-example loss is the mean CE for this batch (batch_size=1 typically).
             w = 1.0 / (1.0 + loss.item())
@@ -961,12 +1049,28 @@ def main():
                         "dynamic, better zero-shot), 'dyt' = Dynamic Tanh (bounded, "
                         "compatible with Muon optimizers). Default 'rmsnorm'.")
     p.add_argument("--distill", action="store_true",
-                   help="Enable knowledge distillation from a teacher model. "
-                        "Uses offline top-K logits caching + chunked KL loss.")
+                   help="Enable offline on-policy distillation: rows carrying "
+                        "a cached 'teacher_logp' list (one float per completion "
+                        "token, from score_teacher_logprobs.py) are trained "
+                        "with advantage-weighted CE — reinforces tokens the "
+                        "teacher likes more than the student, suppresses "
+                        "student-overconfident tokens. Tokenizer-agnostic "
+                        "(sequence-level), works across vocab mismatches.")
     p.add_argument("--teacher-checkpoint", type=str, default=None,
-                   help="Teacher model checkpoint for distillation.")
+                   help="Teacher model checkpoint for ONLINE distillation "
+                        "(reserved — not yet implemented; scoring is offline "
+                        "via score_teacher_logprobs.py).")
     p.add_argument("--distill-topk", type=int, default=50,
-                   help="Top-K logits to cache from teacher (distillation).")
+                   help="Top-K logits for a future same-vocab cached-logits "
+                        "mode (reserved — sequence-level mode ignores this).")
+    p.add_argument("--distill-alpha", type=float, default=1.0,
+                   help="Scale on the per-token advantage "
+                        "(teacher_logp - student_logp) before clipping.")
+    p.add_argument("--distill-clip", type=float, default=5.0,
+                   help="Clamp |advantage| to this range (stability).")
+    p.add_argument("--distill-floor", type=float, default=0.3,
+                   help="Plain-CE weight floor blended into every token "
+                        "(1.0 = pure CE, 0.0 = pure advantage weighting).")
     p.add_argument("--distill-truncate", type=float, default=1.0,
                    help="Sequence truncation ratio for distillation (0.5 = first 50%% "
                         "of tokens, 91%% performance at 50%% FLOPs).")
@@ -1225,8 +1329,25 @@ def main():
         print(f"SYNPRO: generated {len(synthetic)} synthetic variants from {len(texts)} source texts")
 
     # ── Tokenize (or use pre-tokenized parquet data directly) ──
-    tokenizer = (get_tokenizer(args.tokenizer)
-                 if getattr(args, "tokenizer", None) else get_tokenizer())
+    # Tokenizer MUST match the model's vocab: get_tokenizer() defaults to
+    # the ForgeLM V2 tokenizer (Qwen 151936 vocab), which emits ids like
+    # 151644/151645 — out of range for a 128000-vocab LFM3 checkpoint and a
+    # silent device-side embed assert on CUDA. Prefer the checkpoint's own
+    # tokenizer.json; only fall back to the canonical default for
+    # from-scratch runs (which use the ForgeLM vocab anyway).
+    if getattr(args, "tokenizer", None):
+        tok_source = args.tokenizer
+    else:
+        _ckpt_dir = None
+        if args.checkpoint and args.checkpoint not in ("scratch", "none", ""):
+            _ckpt_dir = (args.checkpoint if os.path.isdir(args.checkpoint)
+                         else os.path.dirname(args.checkpoint))
+        tok_source = (_ckpt_dir
+                      if _ckpt_dir and os.path.isdir(_ckpt_dir)
+                      and os.path.exists(os.path.join(_ckpt_dir, "tokenizer.json"))
+                      else None)
+    tokenizer = (get_tokenizer(tok_source) if tok_source
+                 else get_tokenizer())
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
     # ── Disk tokenization cache info ──
@@ -1298,7 +1419,10 @@ def main():
         dataset = [{"input_ids": packed_ds[i]["input_ids"],
                      "labels": packed_ds[i]["labels"],
                      "n_comp": packed_ds[i]["n_comp"],
-                     "reward": 1.0} for i in range(len(packed_ds))]
+                     "reward": 1.0,
+                     **({"teacher_logp": packed_ds[i]["teacher_logp"]}
+                        if "teacher_logp" in packed_ds[i] else {})}
+                   for i in range(len(packed_ds))]
 
     # ── Validation split ──
     val_dataset = None
@@ -1404,6 +1528,19 @@ def main():
     except NotImplementedError:
         model = model.to_empty(device=device)
     model.train()
+
+    # Sync training-loss flags onto the actual model config. ForgeEngine
+    # builds its own ModelConfig internally, so mutations to `cfg` never
+    # reach `model.config` — without this, use_chunked_ce stays False and
+    # compute_loss falls through to materializing [B,T,V] logits, which
+    # OOMs on 12GB at seq_len>=2048.
+    if hasattr(model, "config"):
+        model.config.use_chunked_ce = cfg.use_chunked_ce
+        model.config.ce_chunk_size = cfg.ce_chunk_size
+        if getattr(cfg, "use_mtp", False):
+            model.config.use_mtp = True
+            model.config.mtp_loss_weight = cfg.mtp_loss_weight
+            model.config.mtp_n_heads = cfg.mtp_n_heads
 
     # ── From-scratch 8B init: NLRQ reset, BitNet QAT disable, kaiming init,
     #    logit scale normalization (mirrors train_8b_all.build_model) ──
@@ -1937,7 +2074,7 @@ def main():
                 if prefetcher is not None:
                     # Async prefetcher: batch is already collated and on device
                     try:
-                        input_ids, labels, attn_mask, reward_weights = next(batch_iter)
+                        input_ids, labels, attn_mask, reward_weights, tlp_batch = next(batch_iter)
                     except StopIteration:
                         break  # epoch exhausted
                 else:
@@ -1950,7 +2087,9 @@ def main():
                     # using a single background thread.
                     batch = [dataset[i] for i in batch_idx]
                     with log.time_phase("data_load"):
-                        input_ids, labels, attn_mask, reward_weights = collate_batch(batch, pad_id, device)
+                        input_ids, labels, attn_mask, reward_weights, tlp_batch = collate_batch(batch, pad_id, device)
+                if not args.distill:
+                    tlp_batch = None
 
                 # ── Training-time data augmentation ──
                 if args.augment:
@@ -2027,7 +2166,11 @@ def main():
                                                sample_weights=sw,
                                                sigreg_weight=args.sigreg_weight,
                                                sigreg_threshold=args.sigreg_threshold,
-                                               is_hf_model=args.hf_model is not None)
+                                               is_hf_model=args.hf_model is not None,
+                                               teacher_logp=tlp_batch,
+                                               distill_alpha=args.distill_alpha,
+                                               distill_clip=args.distill_clip,
+                                               distill_floor=args.distill_floor)
 
                     # ── L2-SP Anchor Regularization (NeurIPS 2024) ──
                     # Total loss = CE_loss + l2_lambda * l2_sp_loss (layer-wise lambda inside).
@@ -2070,13 +2213,17 @@ def main():
                             break  # not enough data for full mixup, use what we have
                         mixup_idx = indices[mixup_bs:mixup_bs + args.batch_size]
                         mixup_batch = [dataset[i] for i in mixup_idx]
-                        mi, ml, mm, _ = collate_batch(mixup_batch, pad_id, device)
+                        mi, ml, mm, _, mtlp = collate_batch(mixup_batch, pad_id, device)
                         msw = sample_weights[mixup_idx].to(device) if sample_weights is not None else None
                         mce = compute_loss(model, mi, ml, mm,
                                            entropy_alpha=args.entropy_alpha,
                                            sample_weights=msw,
                                            sigreg_weight=args.sigreg_weight,
-                                           sigreg_threshold=args.sigreg_threshold)
+                                           sigreg_threshold=args.sigreg_threshold,
+                                           teacher_logp=mtlp if args.distill else None,
+                                           distill_alpha=args.distill_alpha,
+                                           distill_clip=args.distill_clip,
+                                           distill_floor=args.distill_floor)
                         if anchor_named_params is not None:
                             mloss = mce + compute_l2_sp_loss(model, anchor_named_params, args.l2_lambda)
                         else:
@@ -2229,7 +2376,7 @@ def main():
                             vbatch = val_dataset[vi * args.batch_size:(vi + 1) * args.batch_size]
                             if not vbatch:
                                 continue
-                            vi_ids, vi_labels, vi_mask, _ = collate_batch(vbatch, pad_id, device)
+                            vi_ids, vi_labels, vi_mask, _, _ = collate_batch(vbatch, pad_id, device)
                             vloss = compute_loss(model, vi_ids, vi_labels, vi_mask,
                                                  entropy_alpha=0.0,  # plain CE for eval
                                                  is_hf_model=args.hf_model is not None)
@@ -2312,7 +2459,8 @@ def main():
             save_training_checkpoint(model, args.save, optimizer=optimizer,
                                      ema_state=ema_state, step=step,
                                      meta={"config": cfg.__dict__, "sft": True,
-                                           "n_examples": len(dataset)})
+                                           "n_examples": len(dataset),
+                                           "tokenizer_path": tok_source})
             print(f"\nSaved SFT model to {args.save}")
             print(f"  Trained {step} steps on {len(dataset)} examples")
 

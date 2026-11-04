@@ -530,6 +530,22 @@ class ConfigurableResearchLLM(nn.Module):
         embed_device = self._embed_device
         if idx.device != embed_device:
             idx = idx.to(embed_device)
+        # Training-only guard: an out-of-range id here otherwise surfaces as
+        # an inscrutable async "vectorized gather" device assert many frames
+        # later. Cheap sync once per batch; skipped in the decode hot path.
+        if self.training:
+            _n = getattr(self.embed, 'num_embeddings', None)
+            if _n is not None and idx.numel():
+                _mn, _mx = int(idx.min()), int(idx.max())
+                if _mn < 0 or _mx >= _n:
+                    _bad = idx[(idx < 0) | (idx >= _n)]
+                    raise RuntimeError(
+                        f"input_ids out of range for embedding "
+                        f"[{_mn},{_mx}] vs num_embeddings={_n} "
+                        f"(bad_count={int(_bad.numel())}, "
+                        f"sample={_bad[:20].tolist()}) — likely a "
+                        f"tokenizer/vocab mismatch between the data and "
+                        f"this checkpoint.")
         x = self.embed(idx)
         # LFM2.5: apply embedding norm after embedding, before layers
         if self.embed_norm is not None:
@@ -587,12 +603,43 @@ class ConfigurableResearchLLM(nn.Module):
                         block._forge_hybrid_ssm._ssm_state = None
                     if hasattr(block._forge_hybrid_ssm, '_conv_state'):
                         block._forge_hybrid_ssm._conv_state_reset = True
+        # Looped middle-block schedule (Dory-style latent recurrence):
+        # re-runs blocks[begin:end) _loop_iters times per forward. Runtime
+        # attrs set post-load: _loop_iters, _loop_begin, _loop_end,
+        # _loop_reinject. Non-last iterations get use_cache=False and
+        # preallocated_cache=None (last-loop KV semantics — only the final
+        # loop's KV is kept) and their conv/ssm state writes are rolled
+        # back so every loop reads the same left context. Defaults keep the
+        # plain layer order (zero overhead). Also the train-time path —
+        # backprop flows through all loop passes.
+        _loop_iters = int(getattr(self, '_loop_iters', 1) or 1)
+        _loop_b0 = int(getattr(self, '_loop_begin', 0) or 0)
+        _loop_b1 = int(getattr(self, '_loop_end', 0) or 0)
+        _loop_reinject = float(getattr(self, '_loop_reinject', 0.0) or 0.0)
+        _n_blocks = len(self.blocks)
+        _loop_active = (_loop_iters > 1
+                        and 0 <= _loop_b0 < _loop_b1 <= _n_blocks)
+        _loop_xinj = None
+        if _loop_active and preallocated_cache is not None:
+            raise RuntimeError(
+                "looped middle blocks (_loop_iters>1) do not support "
+                "preallocated/static KV caches yet — non-last loop passes "
+                "would overwrite the shared buffers. Use kv_cache='standard'.")
+        if _loop_active:
+            _sched = [(i, 0, True) for i in range(_loop_b0)]
+            for _it in range(_loop_iters):
+                _sched.extend((i, _it, _it == _loop_iters - 1)
+                              for i in range(_loop_b0, _loop_b1))
+            _sched.extend((i, 0, True) for i in range(_loop_b1, _n_blocks))
+        else:
+            _sched = [(i, 0, True) for i in range(_n_blocks)]
         # SIGReg: collect per-layer hidden states for spectral regularization.
         hidden_states_list: list[torch.Tensor] = [] if return_hidden_states else None
-        for i, block in enumerate(self.blocks):
+        for i, _it, _last_write in _sched:
+            block = self.blocks[i]
             # DiffusionBlocks: skip layers not in the active set
             if active_layers is not None and i not in active_layers:
-                if use_cache:
+                if use_cache and _last_write:
                     presents.append(past_key_values[i] if past_key_values is not None else None)
                 continue
             block_device = block_devices[i]
@@ -629,12 +676,38 @@ class ConfigurableResearchLLM(nn.Module):
                 else:
                     block._pad_mask = attention_mask[:, -idx.shape[1]:]
             past = past_key_values[i] if past_key_values is not None else None
-            x, present = block(x, past_key_value=past, use_cache=use_cache,
-                               preallocated_cache=preallocated_cache, layer_idx=i,
+            # Loop pass beyond the last: snapshot recurrent state so the
+            # conv/ssm write can be rolled back (last-loop state semantics).
+            _st_snap = _st_owner = None
+            if not _last_write:
+                _st_owner = getattr(block, 'attn', None)
+                if _st_owner is not None:
+                    _st_snap = {
+                        _a: getattr(_st_owner, _a, None)
+                        for _a in ('_conv_state', '_conv_state_prefix',
+                                   '_conv_state_reset', '_ssm_state',
+                                   '_ssm_state_real', '_ssm_state_imag')}
+                    _st_snap = {a: (v.clone() if torch.is_tensor(v) else v)
+                                for a, v in _st_snap.items() if v is not None}
+            # Dory-style input reinjection: each loop pass beyond the first
+            # re-adds the hidden that entered the middle region.
+            if _loop_active and i == _loop_b0:
+                if _it == 0:
+                    _loop_xinj = x
+                elif _loop_reinject != 0.0:
+                    x = x + _loop_reinject * _loop_xinj
+            x, present = block(x, past_key_value=past,
+                               use_cache=use_cache and _last_write,
+                               preallocated_cache=(preallocated_cache
+                                                   if _last_write else None),
+                               layer_idx=i,
                                attention_bias=attention_bias, position_ids=position_ids,
                                modulation=modulation, cu_seqlens=cu_seqlens, cond=cond)
+            if _st_snap:
+                for _a, _v in _st_snap.items():
+                    setattr(_st_owner, _a, _v)
             # SIGReg: collect hidden state after this block.
-            if hidden_states_list is not None:
+            if hidden_states_list is not None and _last_write:
                 hidden_states_list.append(x)
             # Capture V_0 from layer 0 after its first forward (for training).
             if self._use_value_residual and i == 0 and self._v0 is None and not use_cache:
@@ -644,8 +717,9 @@ class ConfigurableResearchLLM(nn.Module):
             # AttnRes: cross-layer retrieval (gates=0 → lossless at start).
             if attn_res_active:
                 x = x + self._attn_res(x, i, past_outputs)
-                past_outputs.append(x)
-            if use_cache:
+                if _last_write:
+                    past_outputs.append(x)
+            if use_cache and _last_write:
                 presents.append(present)
         # Snapshot per-layer recurrent state at the end of a fresh prefill
         # (past_key_values=None).  Decode steps mutate the live _conv_state
@@ -705,7 +779,23 @@ class ConfigurableResearchLLM(nn.Module):
         # saving ~2.8 GB at batch 2 / seq 1024 / vocab 151665.
         if self.config.use_chunked_ce and targets is not None and not use_cache:
             ent_alpha = getattr(self.config, 'entropy_alpha', 0.0)
-            if ent_alpha > 0.0:
+            teacher_logp = getattr(self.config, 'teacher_logp', None)
+            if teacher_logp is not None:
+                # Offline on-policy distillation: advantage-weighted CE against
+                # cached per-token teacher logprobs (set per-batch on config by
+                # sft_train — same convention as entropy_alpha).
+                from forge.training.losses.chunked_ce import chunked_distill_ce
+                loss = chunked_distill_ce(
+                    hidden.view(-1, hidden.size(-1)),
+                    self.head.weight,
+                    targets.view(-1),
+                    teacher_logp.reshape(-1),
+                    chunk_size=self.config.ce_chunk_size,
+                    alpha=getattr(self.config, 'distill_alpha', 1.0),
+                    clip=getattr(self.config, 'distill_clip', 5.0),
+                    floor=getattr(self.config, 'distill_floor', 0.3),
+                )
+            elif ent_alpha > 0.0:
                 from forge.training.losses.chunked_ce import chunked_entropy_weighted_ce
                 loss = chunked_entropy_weighted_ce(
                     hidden.view(-1, hidden.size(-1)),

@@ -422,6 +422,10 @@ class PackedSequenceDataset:
         self.pad_id = pad_id
         self.emit_cu_seqlens = emit_cu_seqlens
 
+        # Cached teacher logprobs (offline distillation): carried through
+        # packing as a per-position list parallel to labels (-99 = unscored).
+        self._has_tlp = any(ex.get("teacher_logp") is not None
+                            for ex in dataset)
         if pack_examples:
             self._packed = self._pack_sequences(dataset)
         else:
@@ -438,9 +442,26 @@ class PackedSequenceDataset:
         packed = []
         current_ids: list[int] = []
         current_labels: list[int] = []
+        current_tlp: list[float] = []
         # Track lengths of each example in the current packed sequence
         # (for cu_seqlens). Only the non-padding portion counts.
         current_ex_lens: list[int] = []
+
+        def _flush():
+            entry = {
+                "input_ids": current_ids[:self.seq_len],
+                "labels": current_labels[:self.seq_len],
+                "n_comp": sum(1 for l in current_labels[:self.seq_len] if l != -100),
+            }
+            if self._has_tlp:
+                entry["teacher_logp"] = current_tlp[:self.seq_len]
+            if self.emit_cu_seqlens:
+                entry["cu_seqlens"] = list(current_ex_lens)
+            packed.append(entry)
+            current_ids.clear()
+            current_labels.clear()
+            current_tlp.clear()
+            current_ex_lens.clear()
 
         for ex in dataset:
             ids = ex["input_ids"]
@@ -451,56 +472,44 @@ class PackedSequenceDataset:
                 ids = ids[:self.seq_len]
                 labels = labels[:self.seq_len]
 
+            # Expand completion-aligned teacher_logp to per-position form
+            # (sentinel -99 at non-completion positions) so it packs in
+            # lockstep with labels.
+            if self._has_tlp:
+                tlp_seq = [-99.0] * len(ids)
+                tlp = ex.get("teacher_logp")
+                if tlp is not None:
+                    comp = [i for i, l in enumerate(labels) if l != -100]
+                    for j, pos in enumerate(comp[:len(tlp)]):
+                        tlp_seq[pos] = float(tlp[j])
+
             # If adding this example would exceed seq_len, flush current
             while current_ids and len(current_ids) + len(ids) > self.seq_len:
                 # Fill remaining space with padding
                 remaining = self.seq_len - len(current_ids)
                 current_ids.extend([self.pad_id] * remaining)
                 current_labels.extend([-100] * remaining)
-                entry = {
-                    "input_ids": current_ids[:self.seq_len],
-                    "labels": current_labels[:self.seq_len],
-                    "n_comp": sum(1 for l in current_labels if l != -100),
-                }
-                if self.emit_cu_seqlens:
-                    entry["cu_seqlens"] = list(current_ex_lens)
-                packed.append(entry)
-                current_ids = []
-                current_labels = []
-                current_ex_lens = []
+                current_tlp.extend([-99.0] * remaining)
+                _flush()
 
             # Add example to current sequence
             current_ids.extend(ids)
             current_labels.extend(labels)
+            if self._has_tlp:
+                current_tlp.extend(tlp_seq)
             current_ex_lens.append(len(ids))
 
             # If current sequence is exactly seq_len, flush
             if len(current_ids) >= self.seq_len:
-                entry = {
-                    "input_ids": current_ids[:self.seq_len],
-                    "labels": current_labels[:self.seq_len],
-                    "n_comp": sum(1 for l in current_labels[:self.seq_len] if l != -100),
-                }
-                if self.emit_cu_seqlens:
-                    entry["cu_seqlens"] = list(current_ex_lens)
-                packed.append(entry)
-                current_ids = []
-                current_labels = []
-                current_ex_lens = []
+                _flush()
 
         # Flush remaining
         if current_ids and not self.drop_last_incomplete:
             remaining = self.seq_len - len(current_ids)
             current_ids.extend([self.pad_id] * remaining)
             current_labels.extend([-100] * remaining)
-            entry = {
-                "input_ids": current_ids[:self.seq_len],
-                "labels": current_labels[:self.seq_len],
-                "n_comp": sum(1 for l in current_labels if l != -100),
-            }
-            if self.emit_cu_seqlens:
-                entry["cu_seqlens"] = list(current_ex_lens)
-            packed.append(entry)
+            current_tlp.extend([-99.0] * remaining)
+            _flush()
 
         return packed
 
@@ -516,11 +525,20 @@ class PackedSequenceDataset:
             elif len(ids) < self.seq_len:
                 ids = ids + [self.pad_id] * (self.seq_len - len(ids))
                 labels = labels + [-100] * (self.seq_len - len(ids))
-            padded.append({
+            entry = {
                 "input_ids": ids,
                 "labels": labels,
                 "n_comp": sum(1 for l in labels if l != -100),
-            })
+            }
+            if self._has_tlp:
+                tlp_seq = [-99.0] * len(ids)
+                tlp = ex.get("teacher_logp")
+                if tlp is not None:
+                    comp = [i for i, l in enumerate(labels) if l != -100]
+                    for j, pos in enumerate(comp[:len(tlp)]):
+                        tlp_seq[pos] = float(tlp[j])
+                entry["teacher_logp"] = tlp_seq
+            padded.append(entry)
         return padded
 
     def __len__(self) -> int:
@@ -534,6 +552,13 @@ class PackedSequenceDataset:
             "n_comp": ex["n_comp"],
             "reward": 1.0,
         }
+        if "teacher_logp" in ex:
+            # Convert per-position (-99 sentinels) back to completion-aligned
+            # form — collate_batch maps it onto non--100 label positions.
+            item["teacher_logp"] = torch.tensor(
+                [v for v, l in zip(ex["teacher_logp"], ex["labels"])
+                 if l != -100],
+                dtype=torch.float32)
         if self.emit_cu_seqlens and "cu_seqlens" in ex:
             # cu_seqlens: list of per-example lengths → cumulative sum.
             # Format: [0, len_0, len_0+len_1, ...] (FA varlen convention).
