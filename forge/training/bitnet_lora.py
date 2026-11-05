@@ -225,6 +225,20 @@ def convert_to_bitnet_everywhere(model: nn.Module) -> tuple[int, int]:
                 convert(child, full_name)
 
     convert(model)
+    # Dead-path guard: converting q/k/v to BitNetLinear after the fused
+    # GEMM was packed leaves ``_fused_qkv=True`` pointing at stale fp
+    # weights while the BitNet modules (and any LoRA on them) never run.
+    # Drop back to the per-projection path so the converted layers are
+    # actually exercised.
+    for mod in model.modules():
+        if getattr(mod, '_fused_qkv', False) and any(
+                isinstance(getattr(mod, p, None), BitNetLinear)
+                for p in ('q_proj', 'k_proj', 'v_proj')):
+            mod._fused_qkv = False
+        if getattr(mod, '_fused_gate_up', False) and any(
+                isinstance(getattr(mod, p, None), BitNetLinear)
+                for p in ('w_gate', 'w_up')):
+            mod._fused_gate_up = False
     return n_converted, n_already
 
 
@@ -279,6 +293,46 @@ def add_lora_adapters(
         for name, child in module.named_children():
             full_name = f"{prefix}.{name}" if prefix else name
             has_weight = isinstance(getattr(child, 'weight', None), nn.Parameter)
+            # FusedQKVLinear-style modules: single .weight GEMM whose
+            # forward returns a split tuple — no in_features/out_features,
+            # so the generic branch below skips them. Adapt over the full
+            # out_dim and add the delta BEFORE the split.
+            _is_fused_qkv = (has_weight
+                             and hasattr(child, 'q_dim')
+                             and hasattr(child, 'k_dim')
+                             and hasattr(child, 'v_dim'))
+            if _is_fused_qkv:
+                is_target = True
+                if target_modules is not None:
+                    is_target = any(t in full_name for t in target_modules)
+                if is_target:
+                    _g = getattr(child, 'g_dim', 0)
+                    out_dim = child.q_dim + child.k_dim + child.v_dim + _g
+                    lora = LoRAAdapter(child.weight.shape[1], out_dim,
+                                       rank=rank, alpha=alpha)
+                    lora = lora.to(child.weight.device).to(
+                        child.weight.dtype if child.weight.dtype
+                        != torch.float32 else torch.bfloat16)
+                    child.lora_adapter = lora
+                    orig_forward = child.forward
+                    child._lora_orig_forward = orig_forward
+                    _dims = [child.q_dim, child.k_dim, child.v_dim] + (
+                        [_g] if _g else [])
+
+                    def make_fused_fwd(child_ref, lora_mod, dims):
+                        def new_forward(x):
+                            out = torch.nn.functional.linear(
+                                x, child_ref.weight, child_ref.bias)
+                            out = out + lora_mod(
+                                x.to(lora_mod.lora_A.dtype)).to(out.dtype)
+                            return out.split(dims, dim=-1)
+                        return new_forward
+                    child.forward = make_fused_fwd(child, lora, _dims)
+                    child.weight.requires_grad = False
+                    if getattr(child, 'bias', None) is not None:
+                        child.bias.requires_grad = False
+                    lora_params.extend([lora.lora_A, lora.lora_B])
+                    n_adapters += 1
             has_dims = hasattr(child, 'in_features') and hasattr(child, 'out_features')
             is_quant = is_quantized_linear(child)
 
@@ -376,6 +430,30 @@ def merge_lora_adapters(model: nn.Module) -> int:
             # Remove adapter
             del module.lora_adapter
             n_merged += 1
+    # Consistency pass: a fused QKV adapter merged above lands on
+    # attn.qkv_proj.weight, but checkpoints ALSO carry the separate
+    # q/k/v/gate projections (loaders may repack fused from them, which
+    # would silently drop the delta). Mirror the fused weight back into
+    # the separate projections so both representations agree.
+    for mod in model.modules():
+        fused = getattr(mod, 'qkv_proj', None)
+        if fused is None or not hasattr(fused, 'q_dim'):
+            continue
+        with torch.no_grad():
+            w = fused.weight
+            projs = [('q_proj', 0, fused.q_dim),
+                     ('k_proj', fused.q_dim, fused.k_dim),
+                     ('v_proj', fused.q_dim + fused.k_dim, fused.v_dim)]
+            off = fused.q_dim + fused.k_dim + fused.v_dim
+            if getattr(fused, 'g_dim', 0):
+                projs.append(('gate_proj', off, fused.g_dim))
+            for pname, start, length in projs:
+                proj = getattr(mod, pname, None)
+                if proj is not None and hasattr(proj, 'weight') \
+                        and isinstance(proj.weight, torch.Tensor) \
+                        and proj.weight.shape == w[start:start + length].shape:
+                    proj.weight.data.copy_(
+                        w[start:start + length].to(proj.weight.dtype))
     return n_merged
 
 
