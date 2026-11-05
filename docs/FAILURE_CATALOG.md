@@ -277,3 +277,23 @@ cache fills (the observed "10 MB/s" training phases). Not fixable in
 software: keep hot random I/O off D:; packed single-file token cache
 shipped as the mitigation; checkpoints/datasets are sequential and OK.
 SMART via SAT passthrough (CrystalDiskInfo / smartctl -d sat).
+## 2026-11-05 - SFT adapter destroys base (spark_x26_1p7b.sft1): dead-adapter + ternary-compensation
+
+**Symptom**: merged SFT checkpoint in ALL forms (dense, ForgeQuant repack, qscale-stripped) generated degenerate soup - empty code fences, repeated tool_call/think tokens, '1.' loops. Proposer bench 0% valid / 75% syntax vs base 50%/100%.
+
+**Investigation (controls)**:
+- Base ckpt through same harness: coherent - harness OK
+- Base + .lora at runtime: degraded-coherent (partial attach 336/394)
+- Weight audit vs HF orig: embed/head/ln_f/ln1/ln2/gate/q/k/v BIT-EXACT; only out_proj + FFN carry deltas (~0.7-4%)
+- Merge math verified: fused qkv_proj == cat(q,k,v)+gate bit-exact; scale = alpha/r = 2
+- Token cache verified: cached ids == fresh on sampled rows; markers -> real special ids (sos=0 eos=1 user=130973)
+- forge_convert.json weight_format is provenance-only; engine detects packed keys by name
+
+**Root cause (compound)**:
+1. DEAD ADAPTERS: model runs fused qkv_proj forward (layers.py:297 _fused_qkv); LoRA attached to separate q/k/v modules -> zero gradient -> lora_B stayed bit-zero. Only out_proj + 3xFFN adapters actually trained (4 of 7 targets live).
+2. TERNARY-COMPENSATION: bitnet_everywhere=True during training -> forward used ternary(qscale) weights; adapters learned to correct quantization noise. Merged onto clean fp weights, that 'correction' is destructive noise.
+3. Loss ~10 whole run (vs ~1-2 healthy): boundary-blind packing (emit_cu_seqlens never passed -> cross-doc attention, next-token = start of unrelated doc) + ternary noise => adapter fit mostly noise at lr 1e-4 scale 2.
+
+**Salvage**: sft1 NOT salvageable - .lora.safetensors is the same destructive deltas. Deltas are trained-in noise, not a merge artifact.
+
+**Fixes for next run**: (a) attach LoRA to fused qkv_proj or unfuse for training; (b) disable bitnet_everywhere for SFT (train on fp forward matching inference); (c) pass emit_cu_seqlens or disable packing; (d) lr <= 2e-5; (e) expect loss < 5 - abort early if ~10.
