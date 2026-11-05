@@ -1580,6 +1580,10 @@ def main():
             forge_engine = ForgeEngine.from_checkpoint(
                 args.checkpoint, config_name=args.config,
                 device=device, auto_activate=False,
+                # Training needs writable dense weights — the VRAM-tight
+                # auto-pack band would int4-pack a large --resume ckpt and
+                # BitNet/LoRA conversion then crashes on packed tensors.
+                load_quantize="none",
                 config_overrides=config_overrides)
             model = forge_engine.model
             print(f"  ForgeEngine loaded: {type(model).__name__}, "
@@ -1733,6 +1737,22 @@ def main():
                     _n_init += 1
             print(f"LoRA init: loaded {_n_init}/{len(_init_state)} adapter "
                   f"tensors from {args.lora_init}")
+        if args.resume:
+            # A periodic .stepN ckpt carries un-merged lora_adapter/qscale
+            # keys — the engine load drops them as "unexpected" because the
+            # adapters don't exist until add_lora_adapters runs above.
+            # Re-inject them here so resume actually continues the trained
+            # adapters instead of silently resetting them at start_step.
+            from safetensors import safe_open as _safe_open
+            with _safe_open(args.resume, framework="pt") as _rs:
+                _rs_keys = set(_rs.keys())
+                _n_rs = 0
+                for _n, _p in model.named_parameters():
+                    if ("lora_" in _n or "qscale" in _n) and _n in _rs_keys:
+                        _p.data.copy_(_rs.get_tensor(_n).to(_p.dtype))
+                        _n_rs += 1
+            print(f"Resume: restored {_n_rs} adapter/qscale tensors "
+                  f"from {args.resume}")
     elif args.lora:
         from peft import LoraConfig, get_peft_model
         lora_cfg = LoraConfig(
