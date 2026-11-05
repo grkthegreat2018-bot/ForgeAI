@@ -1320,4 +1320,9 @@ def add_safeguard_args(parser):
     parser.add_argument("--ram-limit-percent", type=float, default=90.0,
                         help="Throttle if system RAM exceeds this percent (default 90, 0=disabled). "
                              "Emergency abort at threshold+10 percent. Prevents OOMKilled / freezing.")
+    parser.add_argument("--stop-file", type=str, default=None,
+                        help="Poll this path every ~10 steps; when it exists, emergency-save a "
+                             "resumable .interrupt_stepN checkpoint and exit. Defaults to "
+                             "<save>.stop. This is the graceful interrupt for detached/"
+                             "console-less runs where Ctrl+C can't be delivered (Windows).")
     return parser

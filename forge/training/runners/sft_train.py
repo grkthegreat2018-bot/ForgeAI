@@ -2132,6 +2132,21 @@ def main():
                             gc.collect()
                             continue  # skip this batch, try next
 
+                    # ── Stop-file interrupt ──
+                    # Ctrl+C can't reach detached/console-less trainers on
+                    # Windows — "touch <save>.stop" is the graceful interrupt:
+                    # resumable .interrupt_stepN checkpoint, then exit.
+                    _stop_file = args.stop_file or (str(args.save) + ".stop")
+                    if os.path.exists(_stop_file):
+                        print(f"Stop file {_stop_file} found; emergency save + abort.")
+                        emergency_save(model, args.save, "interrupt", step, optimizer=optimizer)
+                        try:
+                            os.remove(_stop_file)
+                        except OSError:
+                            pass
+                        aborted = True
+                        break
+
                 # ── Periodic gc.collect() to prevent memory fragmentation ──
                 # R&D round 25: reduced from every 100 to every 200 steps.
                 # gc.collect() is expensive (can take 100ms+ on large heaps)
