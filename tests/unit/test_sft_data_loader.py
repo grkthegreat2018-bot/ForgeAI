@@ -16,7 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
 
-from forge.training.runners.sft_train import load_examples
+import torch
+
+from forge.training.runners.sft_train import collate_batch, load_examples
 
 
 @pytest.fixture
@@ -136,3 +138,31 @@ class TestMissingFile:
             examples = load_examples(["/nonexistent/path/file.jsonl"])
         assert len(examples) == 0
         assert any("not found" in rec.message for rec in caplog.records)
+
+
+def _ex(n, reward=None):
+    ex = {"input_ids": [1] * n, "labels": [1] * n}
+    if reward is not None:
+        ex["reward"] = reward
+    return ex
+
+
+class TestCollateRewardWeights:
+    """reward_weights is None for all-default batches — kills a per-step
+    GPU sync in the training loop."""
+
+    def test_all_default_returns_none(self):
+        batch = [_ex(4), _ex(6, reward=1.0)]
+        _, _, _, rw, _ = collate_batch(batch, pad_id=0, device="cpu")
+        assert rw is None
+
+    def test_missing_key_returns_none(self):
+        batch = [_ex(3), _ex(5)]
+        _, _, _, rw, _ = collate_batch(batch, pad_id=0, device="cpu")
+        assert rw is None
+
+    def test_non_default_returns_tensor(self):
+        batch = [_ex(4), _ex(6, reward=0.5)]
+        _, _, _, rw, _ = collate_batch(batch, pad_id=0, device="cpu")
+        assert isinstance(rw, torch.Tensor)
+        assert rw.tolist() == [1.0, 0.5]

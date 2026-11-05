@@ -654,7 +654,12 @@ def collate_batch(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Te
     input_ids = torch.full((b, max_len), pad_id, dtype=torch.long)
     labels = torch.full((b, max_len), -100, dtype=torch.long)
     attn_mask = torch.zeros((b, max_len), dtype=torch.long)
-    reward_weights = torch.ones(b, dtype=torch.float32)
+    # Only build the reward tensor when a non-default value exists —
+    # an all-1.0 batch normalizes to itself anyway, and the downstream
+    # "any rewards?" check then needs no GPU sync (R&D: .max()>0 on the
+    # device tensor was a per-step pipeline stall).
+    has_rw = any(ex.get("reward", 1.0) != 1.0 for ex in batch)
+    reward_weights = torch.ones(b, dtype=torch.float32) if has_rw else None
     # Cached teacher logprobs for --distill: aligned to non--100 label
     # positions in order; -99 (TEACHER_LOGP_MISSING) everywhere else.
     has_tlp = any(ex.get("teacher_logp") is not None for ex in batch)
@@ -673,7 +678,8 @@ def collate_batch(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Te
             input_ids[i, offset:] = torch.tensor(ids, dtype=torch.long)
             labels[i, offset:] = torch.tensor(labs, dtype=torch.long)
         attn_mask[i, offset:] = 1
-        reward_weights[i] = ex.get("reward", 1.0)
+        if has_rw:
+            reward_weights[i] = ex.get("reward", 1.0)
         if has_tlp:
             tlp = ex.get("teacher_logp")
             if tlp is None:
@@ -691,13 +697,15 @@ def collate_batch(batch: list[dict], pad_id: int, device: str) -> tuple[torch.Te
         input_ids = input_ids.pin_memory()
         labels = labels.pin_memory()
         attn_mask = attn_mask.pin_memory()
-        reward_weights = reward_weights.pin_memory()
+        if reward_weights is not None:
+            reward_weights = reward_weights.pin_memory()
         if teacher_logp is not None:
             teacher_logp = teacher_logp.pin_memory()
     return (input_ids.to(device, non_blocking=use_pin),
             labels.to(device, non_blocking=use_pin),
             attn_mask.to(device, non_blocking=use_pin),
-            reward_weights.to(device, non_blocking=use_pin),
+            reward_weights.to(device, non_blocking=use_pin)
+            if reward_weights is not None else None,
             teacher_logp.to(device, non_blocking=use_pin)
             if teacher_logp is not None else None)
 
@@ -2240,9 +2248,15 @@ def main():
                 # ── Reward-Weighted SFT ──
                 # Weight per-example loss by trajectory reward (if present).
                 # High-reward trajectories get more weight, low-reward get less.
-                # reward_weights is [B] with values in [0, 1]; normalize to mean=1.
+                # reward_weights is None unless the batch carries non-default
+                # rewards (collate decides on CPU — no per-step GPU sync).
                 rw = reward_weights
-                if rw.max() > 0:
+                if rw is not None:
+                    rw = rw / rw.mean().clamp(min=1e-8)  # normalize mean=1
+                    if sw is not None:
+                        sw = sw * rw  # combine with easy-sample weights
+                    else:
+                        sw = rw
                     rw = rw / rw.mean().clamp(min=1e-8)  # normalize mean=1
                     if sw is not None:
                         sw = sw * rw  # combine with easy-sample weights
