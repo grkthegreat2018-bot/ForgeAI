@@ -38,7 +38,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import struct
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -53,17 +57,28 @@ import contextlib
 class DiskTokenCache:
     """Disk-backed cache for tokenization results.
 
-    Stores tokenized text as raw int64 binary files, keyed by a hash of
-    (text, tokenizer_hash). On cache hit, reads via memory-mapped I/O
-    (near-zero overhead for large caches). On miss, tokenizes and writes
-    to disk for future runs.
+    Stores tokenized text as raw int64 binary, keyed by a hash of
+    (text, tokenizer_hash).
+
+    Format v2 (packed): a single append-only ``tokens.dat`` plus an
+    ``index.json`` mapping key -> [offset, nbytes]. One file handle,
+    seek+read per hit — sequential-friendly on HDD/USB disks, and new
+    entries append in dataset order so a repeat tokenize pass reads
+    them nearly sequentially. The v1 layout (one .bin per entry under
+    2-hex shard dirs) collapsed to ~38 file-opens/s on the USB HDD —
+    0.1MB/s effective on a 230MB/s drive. Legacy entries still read via
+    their .bin path and are migrated to the packed file lazily on hit
+    plus eagerly by a throttled background thread at init.
 
     Benefits:
       - Eliminates re-tokenization across runs (saves 30-60s on 10K examples)
-      - Memory-mapped reads are faster than re-tokenizing
+      - Packed sequential I/O instead of per-entry file opens
       - Bounded disk usage (LRU eviction of old cache entries)
       - Thread-safe (multiple workers can read concurrently)
     """
+
+    _PACKED_NAME = "tokens.dat"
+    _REC_STRUCT = struct.Struct("<I")  # u32 nbytes header per record
 
     def __init__(self, cache_dir: str = "research/data/tok_cache",
                  max_entries: int = 100_000, max_disk_mb: int = 2048):
@@ -72,10 +87,102 @@ class DiskTokenCache:
         self.max_entries = max_entries
         self.max_disk_bytes = max_disk_mb * 1024 * 1024
         self._lock = threading.Lock()
-        self._index: OrderedDict[str, str] = OrderedDict()  # hash -> filename
+        self._index: OrderedDict[str, object] = OrderedDict()  # hash -> [off, nbytes] | legacy str path
         self._total_bytes = 0
+        self._dead_bytes = 0  # packed bytes orphaned by re-put/evict
         self._puts_since_save = 0
+        self._rf = None   # read fd for tokens.dat (lazy)
+        self._af = None   # append fd for tokens.dat (lazy)
+        self._migrate_started = False
         self._load_index()
+        if self._has_legacy_entries() and not self._packed_path.exists():
+            self._start_background_migrate()
+
+    @property
+    def _packed_path(self) -> Path:
+        return self.cache_dir / self._PACKED_NAME
+
+    def _has_legacy_entries(self) -> bool:
+        return any(isinstance(v, str) for v in self._index.values())
+
+    def _open_rf(self):
+        if self._rf is None:
+            self._rf = open(self._packed_path, "rb")
+        return self._rf
+
+    def _open_af(self):
+        if self._af is None:
+            self._af = open(self._packed_path, "ab")
+        return self._af
+
+    def _read_packed(self, off: int, nbytes: int) -> list[int] | None:
+        try:
+            f = self._open_rf()
+            f.seek(off)
+            hdr = f.read(self._REC_STRUCT.size)
+            if len(hdr) != self._REC_STRUCT.size:
+                return None
+            (n,) = self._REC_STRUCT.unpack(hdr)
+            if n != nbytes:
+                return None
+            buf = f.read(n)
+            if len(buf) != n:
+                return None
+            return np.frombuffer(buf, dtype=np.int64).tolist()
+        except Exception:
+            return None
+
+    def _write_packed(self, token_ids: list[int]) -> tuple[int, int]:
+        arr = np.array(token_ids, dtype=np.int64)
+        f = self._open_af()
+        off = f.tell()
+        f.write(self._REC_STRUCT.pack(arr.nbytes))
+        arr.tofile(f)
+        return off, arr.nbytes
+
+    def _start_background_migrate(self):
+        """Throttled one-shot migration of legacy .bin entries into
+        tokens.dat. Low duty cycle so it doesn't starve a live training
+        run on the same HDD."""
+        self._migrate_started = True
+        def _work():
+            try:
+                n_done = 0
+                for key, val in list(self._index.items()):
+                    if not isinstance(val, str):
+                        continue
+                    path = Path(val)
+                    try:
+                        arr = np.memmap(str(path), dtype=np.int64, mode="r")
+                        ids = arr.tolist()
+                    except Exception:
+                        with self._lock:
+                            if self._index.get(key) == val:
+                                del self._index[key]
+                        continue
+                    with self._lock:
+                        if self._index.get(key) != val:
+                            continue  # already re-pointed
+                        off, nb = self._write_packed(ids)
+                        self._index[key] = [off, nb]
+                        self._total_bytes += nb
+                    n_done += 1
+                    if n_done % 40 == 0:
+                        self._open_af().flush()
+                        time.sleep(0.05)  # ~50% duty throttle
+                with self._lock:
+                    self._open_af().flush()
+                    self._save_index()
+                # Legacy shards are dead weight now — delete in this
+                # same background thread (139k-file delete is itself
+                # slow on HDD; never do it on the init path).
+                for d in self.cache_dir.iterdir():
+                    if d.is_dir() and len(d.name) == 2:
+                        shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
+        threading.Thread(target=_work, daemon=True,
+                         name="tokcache-migrate").start()
 
     def _load_index(self):
         """Load the cache index from disk."""
@@ -122,18 +229,33 @@ class DiskTokenCache:
             if key in self._index:
                 # Move to end (most recently used)
                 self._index.move_to_end(key)
-                path = self._cache_path(key)
+                val = self._index[key]
+                if isinstance(val, list):
+                    # Packed v2 entry: [offset, nbytes] into tokens.dat
+                    out = self._read_packed(val[0], val[1])
+                    if out is None:
+                        del self._index[key]
+                    return out
+                # Legacy v1 entry: one .bin file per key — read it, then
+                # re-write packed so this entry migrates on hit.
+                path = Path(val)
                 if path.exists():
                     try:
-                        # Memory-mapped read: fast for large caches
                         arr = np.memmap(str(path), dtype=np.int64, mode="r")
-                        return arr.tolist()
+                        ids = arr.tolist()
                     except Exception:
-                        # Corrupted entry — remove it
                         del self._index[key]
                         with contextlib.suppress(Exception):
                             path.unlink()
                         return None
+                    if self._packed_path.exists() or self._migrate_started:
+                        try:
+                            off, nb = self._write_packed(ids)
+                            self._index[key] = [off, nb]
+                            self._total_bytes += nb
+                        except Exception:
+                            pass
+                    return ids
                 else:
                     # Index says it exists but file is gone
                     del self._index[key]
@@ -145,13 +267,13 @@ class DiskTokenCache:
         if not token_ids:
             return
         key = self._hash_key(text, tokenizer_hash)
-        path = self._cache_path(key)
         with self._lock:
-            # Write as raw int64 binary
-            arr = np.array(token_ids, dtype=np.int64)
-            arr.tofile(str(path))
-            size = arr.nbytes
-            self._index[key] = str(path)
+            off, size = self._write_packed(token_ids)
+            old = self._index.get(key)
+            if isinstance(old, list):
+                self._total_bytes -= old[1]
+                self._dead_bytes += old[1]
+            self._index[key] = [off, size]
             self._total_bytes += size
             # Evict if over limits
             self._evict_if_needed()
@@ -167,18 +289,78 @@ class DiskTokenCache:
                 self._puts_since_save = 0
 
     def _evict_if_needed(self):
-        """Evict least recently used entries if over limits."""
+        """Evict least recently used entries if over limits.
+
+        Packed entries can't be unlinked — their bytes become dead
+        space in tokens.dat and are reclaimed by _compact() at init
+        when dead space exceeds 50% of the file."""
         while (len(self._index) > self.max_entries or
                self._total_bytes > self.max_disk_bytes):
             if not self._index:
                 break
-            _key, path_str = self._index.popitem(last=False)  # LRU
-            try:
-                size = Path(path_str).stat().st_size
-                Path(path_str).unlink()
-                self._total_bytes -= size
-            except Exception:
-                pass
+            _key, val = self._index.popitem(last=False)  # LRU
+            if isinstance(val, list):
+                self._total_bytes -= val[1]
+                self._dead_bytes += val[1]
+            else:
+                try:
+                    size = Path(val).stat().st_size
+                    Path(val).unlink()
+                    self._total_bytes -= size
+                except Exception:
+                    pass
+
+    def _compact(self) -> None:
+        """Rewrite tokens.dat keeping only live entries — reclaims dead
+        space from evicted/re-put records. Runs at init only when dead
+        space is large (the file would otherwise grow unbounded)."""
+        if not self._packed_path.exists():
+            return
+        live = {k: v for k, v in self._index.items() if isinstance(v, list)}
+        if not live:
+            return
+        src = self._packed_path
+        try:
+            self._close_fds()
+            # Read live records into memory first (in-place rewrite —
+            # os.replace is impossible while another cache instance in
+            # this or a worker process holds tokens.dat open on Windows).
+            records: list[tuple[str, bytes]] = []
+            with open(src, "rb") as r:
+                for k, (off, nb) in live.items():
+                    r.seek(off)
+                    rec = r.read(self._REC_STRUCT.size + nb)
+                    if len(rec) != self._REC_STRUCT.size + nb:
+                        continue
+                    (n,) = self._REC_STRUCT.unpack(rec[:self._REC_STRUCT.size])
+                    if n == nb:
+                        records.append((k, rec))
+            with open(src, "r+b") as w:
+                new_index: OrderedDict[str, object] = OrderedDict()
+                for k, rec in records:
+                    nb = len(rec) - self._REC_STRUCT.size
+                    new_index[k] = [w.tell(), nb]
+                    w.write(rec)
+                w.truncate()
+            rebuilt: OrderedDict[str, object] = OrderedDict()
+            for k, v in self._index.items():
+                if isinstance(v, list):
+                    if k in new_index:
+                        rebuilt[k] = new_index[k]
+                else:
+                    rebuilt[k] = v  # legacy path entry untouched
+            self._index = rebuilt
+            self._save_index()
+        except Exception:
+            pass
+
+    def _close_fds(self):
+        for attr in ("_rf", "_af"):
+            f = getattr(self, attr, None)
+            if f is not None:
+                with contextlib.suppress(Exception):
+                    f.close()
+                setattr(self, attr, None)
 
     def flush(self) -> None:
         """Persist any pending index entries (batched saves leave up to
@@ -187,6 +369,11 @@ class DiskTokenCache:
             if self._puts_since_save:
                 self._save_index()
                 self._puts_since_save = 0
+            # Reclaim dead packed space once it dominates the file —
+            # bounded, so tokens.dat can't grow past ~2x live data.
+            if self._dead_bytes > max(self._total_bytes, 64 << 20):
+                self._compact()
+                self._dead_bytes = 0
 
     def __del__(self):
         try:
