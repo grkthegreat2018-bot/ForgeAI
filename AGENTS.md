@@ -71,6 +71,14 @@ unless the user explicitly overrides them for a specific task.
 - **Profile before assuming**: use `torch.cuda.memory_allocated()` /
   `torch.cuda.max_memory_allocated()` in test scripts. Guessing VRAM is
   how we get OOM at 3am.
+- **Storage constraint — D: is SMR + USB-BOT**: the 4TB external
+  (`WD Elements 2620`) is a device-managed SMR HDD on `USBSTOR`
+  (no UASP, no command queue). Sequential ≈230 MB/s, but small-file
+  reads ≈38 files/s and random writes collapse <10 MB/s once the
+  drive's CMR cache fills. Keep hot random I/O (many-small-file
+  caches) on C: NVMe; D: is for sequential data (checkpoints,
+  datasets, packed single-file caches like `DiskTokenCache`).
+  See `docs/FAILURE_CATALOG.md` 2026-11-05 entry.
 
 ### E. No Redundant Files — Search Before You Create
 - **Before creating ANY new script or module, grep the codebase for an
