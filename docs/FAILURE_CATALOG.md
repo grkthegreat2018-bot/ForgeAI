@@ -264,3 +264,16 @@ larger batch (bs8 — better GEMM utilization, VRAM headroom exists at
 7.9/12GB), Liger-style fused elementwise kernels (~10%% est), shorter
 seq (marginal — attention is a small flop fraction at 2048).
 
+
+## 2026-11-05 - D: is a device-managed SMR HDD on USB-BOT (platform constraint)
+
+WD Elements 2620 (4TB, WDBU6Y0040BBK, VID 1058 PID 2620) hosts a
+WD40NDZW/EDAZ SMR drive; fsutil sectorinfo reports TRIM supported =
+WD's SMR tell. Transport verified as USBSTOR (Bulk-Only Transport, no
+UASP, no command queueing). Measured: sequential ~230 MB/s, small-file
+reads ~38 files/s (0.1 MB/s) on the 596k-file token cache; SMR random
+writes collapse <10 MB/s with multi-second stalls once the drive's CMR
+cache fills (the observed "10 MB/s" training phases). Not fixable in
+software: keep hot random I/O off D:; packed single-file token cache
+shipped as the mitigation; checkpoints/datasets are sequential and OK.
+SMART via SAT passthrough (CrystalDiskInfo / smartctl -d sat).
