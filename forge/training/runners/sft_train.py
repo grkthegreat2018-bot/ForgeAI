@@ -2471,11 +2471,19 @@ def main():
                         bw = optimizer.bandwidth_stats()
                         if 'b_p' in bw:
                             msg += f" | B_P={bw['b_p']}"
+                    # Phase-time profile: where step time actually goes
+                    # (data_load/forward/backward/optimizer, avg ms per call)
+                    phases = log.bottleneck()["per_phase"]
+                    if phases:
+                        msg += " | " + " ".join(
+                            f"{p['phase']}={p['avg_ms']:.0f}ms"
+                            for p in phases[:4])
                     print(msg)
                     log.log(msg)
                     write_status_json(args.status_file, {
                         "step": step + 1, "max_steps": args.max_steps,
                         "loss": last_loss, "lr": lr, "epoch": epoch,
+                        "phases": phases,
                     })
                     write_heartbeat(args.heartbeat_file)
 
