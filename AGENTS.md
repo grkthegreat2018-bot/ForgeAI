@@ -117,6 +117,15 @@ unless the user explicitly overrides them for a specific task.
 - **Keep AGENTS.md current**: when you add a new file, feature, or R&D
   round, update the relevant section here in the SAME session. Stale
   AGENTS.md causes the next agent to duplicate your work.
+- **Keep the GitHub wiki current**: the user-facing wiki at
+  https://github.com/grkthegreat2018-bot/ForgeAI/wiki is a separate git
+  repo (`ForgeAI.wiki.git`, cloned at `scratch/wiki_repo/`). When you
+  change something the wiki documents — new preset, engine flag,
+  decoding/KV/quant strategy, endpoint, script, security posture,
+  build/test command — update the matching page in `scratch/wiki_repo/`
+  and `git push` to `master` in the SAME session. If `scratch/wiki_repo/`
+  is gone, re-clone `https://github.com/grkthegreat2018-bot/ForgeAI.wiki.git`.
+  Only changes pushed to `master` go live.
 - **Use `.devin/scratchpad.md` for long working notes**, not the main
   conversation. Keeps context clean and persists across sessions.
 - **Debate the user's premise when warranted** — if a requested approach
