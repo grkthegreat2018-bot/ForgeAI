@@ -297,3 +297,9 @@ SMART via SAT passthrough (CrystalDiskInfo / smartctl -d sat).
 **Salvage**: sft1 NOT salvageable - .lora.safetensors is the same destructive deltas. Deltas are trained-in noise, not a merge artifact.
 
 **Fixes for next run**: (a) attach LoRA to fused qkv_proj or unfuse for training; (b) disable bitnet_everywhere for SFT (train on fp forward matching inference); (c) pass emit_cu_seqlens or disable packing; (d) lr <= 2e-5; (e) expect loss < 5 - abort early if ~10.
+**Resolution**: sft2 corrective run (d003e24 fix + --no-bitnet-everywhere +
+--manual-lora --lora-targets qkv_proj,out_proj,w_gate,w_up,w_down +
+--no-pack-sequences + lr 2e-5, 400 steps/2 epochs): step-1 loss 1.04
+(vs ~26 broken), converged ~0.9-1.2 band. Merged model generates clean
+fenced code; proposer bench 50% valid / 66.7% syntax with code in ALL
+12 outputs (sft1: 0%/75%, mostly fence-less). Verified end-to-end.
