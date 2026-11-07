@@ -173,6 +173,12 @@ _BOOTSTRAP = r'''
 import sys as _sys, os as _os, json as _json, io as _io, struct as _st
 import traceback as _tb, time as _time, builtins as _bi, fnmatch as _fm
 import threading as _threading, re as _re, ctypes as _ct
+# Pre-import pure-stdlib utility modules: sandboxed code may `import` them
+# (a sys.modules hit needs no file read, so no jail escape); importing at
+# BOOT is a worker-internal op and therefore allowed. Without this, a
+# sandboxed `import string` tries to read the stdlib .py from outside the
+# jail and dies (selfgen RFT harness hit exactly that).
+import math, itertools, collections, functools, string, operator
 
 _SCRATCH = _sys.argv[1] if len(_sys.argv) > 1 else _os.getcwd()
 _PROTO = _sys.argv[2] if len(_sys.argv) > 2 else _SCRATCH
