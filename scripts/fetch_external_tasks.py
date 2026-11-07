@@ -76,6 +76,8 @@ def main():
     ap.add_argument("--split", default="train")
     ap.add_argument("--kind", choices=["code", "reflection"], default="code")
     ap.add_argument("--limit", type=int, default=500)
+    ap.add_argument("--skip", type=int, default=0,
+                    help="skip the first N eligible rows (held-out slices)")
     ap.add_argument("--out", default="data/external/opc_sft2_tasks.json")
     args = ap.parse_args()
 
@@ -98,6 +100,7 @@ def main():
         return
     tasks = []
     n_seen = 0
+    n_eligible = 0
     for row in ds:
         n_seen += 1
         name = (row.get("entry_point") or "").strip()
@@ -114,6 +117,10 @@ def main():
             continue
         if len({t["expected"] for t in tests}) < 2:
             continue  # constant-output tasks carry no signal
+        if n_eligible < args.skip:
+            n_eligible += 1
+            continue
+        n_eligible += 1
         sig_m = re.search(r"def\s+\w+\s*(\([^)]*\))", code, re.S)
         signature = re.sub(r"\s+", " ", sig_m.group(1)) if sig_m else "(...)"
         tasks.append(dict(name=name, code=code, desc=desc, tests=tests,
