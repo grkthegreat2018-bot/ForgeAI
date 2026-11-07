@@ -1203,6 +1203,20 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   reserved stubs. CodeEvolve `export_sft` now writes `reward` =
   1−exp(−Δ) from the verified score delta → per-example
   `reward_weights` in collate.
+  2026-11-07 hardening (spark sft3 postmortems): tokenizer resolution is
+  `_resolve_tokenizer_source` — `--tokenizer` → ckpt dir → bare-file
+  `.meta.json` `tokenizer_path` → canonical default (a bare .safetensors
+  ckpt previously fell through to the Qwen-vocab default and mis-tokenized
+  every row: train loss ~10 vs true CE 0.64); vocab guard = hard error
+  when tokenizer vocab > model vocab, loud warning otherwise. Loader
+  dedup keys on prompt+response (RFT k-variants survive; prompt-only
+  dedup had dropped 259→50 proposer rows). Periodic step saves under
+  manual LoRA are adapter/qscale-only by default (`--full-step-saves`
+  opts out) — ~7× less SMR I/O, no full-weight CPU copy (the RAM-spike
+  kill moment); resume detects `lora_only` in the sidecar and re-injects
+  adapters onto `base_checkpoint` instead of loading weights from the
+  snapshot. `torch.compile` call fixed (no `cache_dir` kwarg on torch
+  2.11 → `TORCHINDUCTOR_CACHE_DIR`; default mode, not reduce-overhead).
 - `forge/evolution/` — Evolutionary optimizer (ForgeEvolve); CLI: `python -m forge.evolution --domain <name> --steps <N>` (use `--list-domains` to see all domains). Domain specs + run/focus profiles live in `forge/evolution/configs/` (canonical; the legacy `tests/evolution/configs/` copy was removed — the tests/evolution harness scripts now point at the canonical dir). `--fixate` pins a run to one domain: no cross-domain transfer, no refinement spawning, plateaus re-diversify in place (`_fixate_rediversify`); `run_evolve.py --fixate` additionally kills auto-discover/revisit/parallel waves. `forge/evolution/domains/livet_domains.py` — `MicroLiveLM` (R64): the micro live-format search domain; REAL evaluator (builds ConfigurableResearchLLM+LiveSession on CUDA, measures fact-recall live_gain, bs=1 decode tps, ingest tps, params, revert parity — not synthetic). Structural grid via `discrete_choices` (240 cells) + 9 continuous dims. Focus topic: `--focus micro_format`. Results: conv+titan+ngram substrate dominates the micro frontier (d64-class ~0.2-0.5M params, gain ~5, ~250tps); see scratchpad R64. `forge/evolution/domains/flux_domains.py` — `FluxTune` (R65): FluxLM self-tuning domain; builds real FluxLM (cuda_primary, graphs+compile_dev off — concurrent captures/poisoned RNG state crash threaded evals) and measures held-out NLL, 1-hop + 2-hop chain recall, pred/ingest/gen tps, memory_report+VRAM, argmax diversity; score = weighted log2 ratios vs production defaults (baseline anchors at 25). `forge/evolution/domains/meta_domains.py` — `EvolverTune` (R65): meta-evolution — candidates are ForgeEvolveConfig knobs scored by real inner ForgeEvolve runs on SyntheticDomain (progress vs random-floor + eval efficiency); fixated+warm_start=False inner runs isolate proposal quality. Both set `eval_thread_safe=False` (engine opt-out of `_threaded_eval` side-stream pools — added in engine.py `_gpu_batch_eval`). Categories/focus topics: `fluxlm`, `evolver`. DBs: `forge_evolve_flux.db`, `forge_evolve_meta.db`, `forge_evolve_meta_inner.db` (scratch). R66 proposal frontier (engine.py): proposals are submitted to a pending frontier every gen and popped for eval later — submission is decoupled from eval throughput (`_submitted` counter in logs; measured ~2.1K unique proposals/s on synthetic). `ForgeEvolveConfig.propose_mult` (proposals/gen = n_generators×propose_mult, multi-sample grouped-einsum forward in `BatchedGenerator`), `frontier_cap` (evict lowest surrogate-scored pending), `quick_ratio` (multi-fidelity: pop quick_ratio×, domain `quick_eval` ranks, top fraction promotes to full eval). Domains may set `cpu_eval_ok=False` to opt out of the `parallel_eval` CPU pool (FluxTune/EvolverTune do — GPU-bound/nested-CUDA). Dedup is one D2H transfer + vectorized round for all candidates (was per-candidate `.cpu()`, ~100x). FluxTune quick_eval: ~1/3 corpus, 200 held positions, no decode probe, quality+mem terms only (tps is wall-clock noise at that fidelity), ~3x cheaper, deterministic prod=25.0 anchor. FluxTune hop2 probe is real chain recall (`#V>` -> V_next, the hop-1 value becomes the hop-2 key — measures association chaining, baseline ~2.35 nats). R66b literature fixes (AlphaEvolve/FunSearch/pyribs/MEMES parity): dedup keys on the DECODED config (discrete-bin domains were re-evaluating identical configs under different param vectors); per-generator archive-conditioned contexts (60% UCB elite / 15% random cell / 15% two-elite blend / 10% best — was one shared elite for all generators); rank-shaped scores for trainer+evolve (OpenAI-ES centered-rank fitness shaping — -1e9 failure spikes no longer poison fitness_ema); explore emitters (first 20% of generators credited on rank-shaped novelty, MEMES-style); crossover emitter (`crossover_frac`, blends two elite encodings + jitter as direct proposals, generator_idx=-2); islands (`n_islands` deme archives — generator g feeds island g%K, weakest half import global elites every `island_migrate_gens`).
 - `forge/evolution/scout.py` — Scout (OpenEvolve-lite): lightweight goal-driven discovery engine layered on the same domain specs + simulators + FindingsDB, replacing the 500-generator MLP population / gen-model manager / weight-BLOB storage with three small ML components: (1) numpy-only TPE proposer (Parzen l(x)/g(x) density-ratio over top-γ history + elite archive parents; per-dim bandwidths shrink where |corr(param,score)| is high — learned knob importance; `--mode random` = baseline), (2) Thompson-sampling Beta bandit over domains so cycles flow to whichever domain keeps paying off, (3) cross-domain param priors — `scout_param_stats` holds global per-(param-name, bin) Welford stats of within-domain z-scored evals, so a fresh domain inherits good regions for params shared with other domains (`transferable=false` specs neither leak nor receive). Promotion gate: candidate must beat the incumbent's re-measured mean by max(min_delta, rel_delta·|inc|, k·pooled SEM) over `--verify-reps` replicated evals of BOTH configs (fresh seeds; z-score recorded in metadata) — only then is it written to `discoveries`. Stagnation: domain retires after `--patience-dom` (40) dry cycles (basin hop at `--hop-after` 12 first), run stops after `--patience` (30) globally dry cycles or when all domains retire. Goal routing: `--focus memory|speed|quality|training` maps to spec categories (mirrors focus_profiles.json); `--require "metric>=v"` adds an end-result gate on promotions. CLI: `scripts/scout_loop.py` (e.g. `--focus memory --cycles 300`, `--report` for discoveries + cross-domain insights). ~20 evals/s on CPU, zero VRAM. Tests: `tests/unit/test_scout.py` (10). Measured smoke: 37 verified discoveries / 640 evals / 32s on `--focus memory`.
 - `forge/evolution/code_evolve.py` — CodeEvolve (OpenEvolve-style *program* evolution, the code-level sibling of Scout): evolves actual implementations, not just parameter values. A `Target` file declares `SEED_CODE` + `REQUIRED` names + `test(ns)` correctness gate + `bench(ns)` returning real metrics + `METRIC`/`GOAL`/`BUDGETS`/`TAGS`. Loop: proposer -> free syntax/required-name/dup gates -> `_candidate_eval.py` subprocess runs test+bench in isolation (invoked BY FILE PATH, pure-stdlib, never imports `forge.evolution.__init__` = ~0.2s not ~10s/eval; preamble injects `np`/`torch` only if referenced) -> score = sign*metric vs incumbent -> replicated verification re-benches challenger AND incumbent `reps` times (mean/SEM/z + min_delta + rel margin) -> promote only on verified win. Compares vs original seed, last best, AND the round's own candidates (per-island elite archives feed parent selection). Islands + Thompson arms + basin hop at `hop_after`; stagnation check sits at TOP of loop so every cheap-reject `continue` still counts — run stops after `patience` dry cycles. Proposers (`--proposer`): `mut` = `forge/evolution/mutator.py` AST mutation engine (default; no model, ~0ms/candidate — sort-reuse, `_ctor` ctor hoisting, diff/masked_fill/funcify swaps, literal perturb, elite crossover) with a **Thompson bandit per op persisted in `mutator_op_stats`** — every eval feeds credit back via `Mutator.note()`, so the policy literally resumes across runs and shares by target tag_sig; `mix` = mutations + LLM leap every `--llm-every`; `llm` = coder model via forge/exp harness (Qwen2.5-Coder-0.5B default — measured weak: 17/21 verbatim copies; any other `--model` routes through transformers AutoModel + chat template, e.g. cached Instruct variants); `none` = seed-eval only. **Resume** (default on, `--fresh` to disable): prior best program becomes incumbent (re-measured), last-2000 code hashes pre-seed dedup, top-24 programs repopulate island elites. `code_programs`/`code_insights`/`mutator_op_stats` all live in the same FindingsDB; `--export-pairs out.jsonl` writes DPO pairs (chosen=improved child, rejected=parent) for the future proposer fine-tune. `--emit-target pkg.mod:fn` scaffolds a target file from any codebase function. Targets: `forge/evolution/targets/` — ForgeEngine hot paths: `sample_pipeline` (`_sample_next_token`'s rep→temp→DRY→min_p→min_k→top_k→top_p→vocab-order chain, every decoded token), `suffix_mem` (SuffixMemory feed/lift/draft per-token sidecar), `radix_prefix` (RadixPrefixCache match/insert/evict, list-API so the surface is the tree logic), `stop_matcher` (`_StopMatcher` incremental stop-string matching), `prefix_hash` (blake2b rolling chain), `canon_key` (mutator's own canonicalizer — self-target), plus `min_k_filter` (mutator found +33% verified, ~+50% cumulative — the production win is wired into `engine_common`), `top_p_filter`, `top_p_probs`, `quantize_4bit`, `dequantize_4bit`, `dry_penalties`, `fast_softmax`. Tests: `tests/unit/test_code_evolve.py` (26). Fixed bugs: `continue`-paths skipped bottom-of-loop stagnation check (infinite reject loop); `_load_insights` SELECT missed the `target` col → resume-time KeyError; module-level `sqlite3` import missing (ALTER-race handler would NameError); `_promos` never incremented (status/watch reported 0); `_detect_cuda_target` body-only AST scan missed module-level `.to("cuda")` (VRAM-capped autoscaler); `LLMProposer._engine` waiters crashed unpacking on a failed builder's entry (now retries on a fresh entry so the real error surfaces); `_seed_signature` couldn't prime `class` targets (SuffixMem/RadixPrefixCache got `def SuffixMem(` primes → function proposals, guaranteed test-fail).
@@ -2069,6 +2083,53 @@ Measured on `research/checkpoints/lfm3_1p7b_cc_fq` (int4, ~1.4B):
   weighting. Loss oscillated 35.5–38.75 (advantage weights ≈3.8× CE at
   clip — not comparable to plain CE). VRAM steady 7.78GB. Checkpoint
   verified end-to-end: logits ≈ base delta-small, generation clean.
+
+## Spark selfgen staged plan + external-DB fallback (2026-11-07)
+
+`scripts/gen_sft3_data.py --mode selfgen` (codebase-grounded RFT: AST-harvest
+`forge/`/`scripts/`/`research/` functions → fuzz inputs → sandbox ground
+truth → execution-verified solver rollouts → Goldilocks keep). Proposal-
+authored tasks are a documented DEAD END at 1.7B (0/10 + 0/4 smokes).
+Staged plan: (1) codebase-grounded variety batch → (2) retry model-authored
+prompts → (3) ONLINE DBs if variety still fails. Full annotated catalog +
+licenses: `.devin/scratchpad.md` "online-DB fallback catalog" (2026-11-07).
+
+Implementation status (2026-11-07): the mode is LIVE with three task
+supplies — harvested codebase functions (fuzz + model-input rescue) and
+`--external <task.json>` (reference must pass its own literal asserts in
+the sandbox, then the shared solver/Goldilocks/novelty pipeline) plus a
+describe-first pass for undocumented functions. `scripts/fetch_external_
+tasks.py` wrote 500 opc-sft2 tasks from 506 rows (99% yield). Sandbox
+worker now pre-imports pure-stdlib utility modules (93b568f). Tests:
+`tests/unit/test_selfgen_rft.py` (12, incl. real sandbox execution).
+Anti-overfit training recipe: `--val-every 25 --early-stop-patience 3`
++ fresh selfgen data each round + lora-only periodic saves.
+
+Stage-3 shortlist (verified on HF hub):
+- **Code tasks w/ refs+tests** (drop into the exec-verified loop):
+  `OpenCoder-LLM/opc-sft-stage2` `educational_instruct` (compiler-validated
+  triples), `KodCode/KodCode-V1` (447k + tests; CC-BY-NC), `nvidia/
+  OpenCodeInstruct` (5M, unit-test pass arrays; CC-BY-4.0), `bigcode/
+  self-oss-instruct-sc2-exec-filter-50k` (execution-filtered self-instruct;
+  ODC-BY), `open-r1/codeforces-cots`.
+- **Reasoning**: `open-thoughts/OpenThoughts3-1.2M` (apache-2.0),
+  `nvidia/OpenCodeReasoning` (735k; CC-BY-4.0), `open-r1/OpenR1-Math-220k`,
+  `PrimeIntellect/SYNTHETIC-1` (2M verifier-annotated; apache-2.0),
+  `allenai/big-reasoning-traces`, `nvidia/OpenMathReasoning`.
+- **Token efficiency**: `horseee/MixChain-Z-*` CoT-Valve sets (same Q,
+  multiple CoT lengths), `distilled-ai/condensed-thinking-sft-dataset`,
+  `yrdu/S3-CoT-Self-Sampled-Data`, `SmallDoge/TokenSkip-10K`,
+  `simplescaling/s1K-1.1`, `GAIR/LIMO`.
+- **Behavior / self-improvement mindset**: `bigai-nlco/ReflectionEvo`
+  (ReflectEvo-460k failure→locate→correct reflections; SFT+DPO),
+  `nvidia/Nemotron-SFT-SWE-v3` (238k agentic SWE trajectories),
+  `SWE-bench/SWE-smith-trajectories` (~102k), `lambda/hermes-agent-
+  reasoning-traces`. Gap: no public DB teaches self-goal-proposal —
+  AZR path remains the unique lever there.
+- Pull order if triggered: opc-sft-stage2 + KodCode tests →
+  OpenCodeReasoning slice → ReflectionEvo → MixChain/TokenSkip.
+  License notes: KodCode non-commercial; Magicoder/OpenAI-output terms;
+  OpenCodeInstruct/OpenThoughts3 are the clean-license picks.
 
 ## Environment
 

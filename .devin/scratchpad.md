@@ -2118,3 +2118,173 @@ beat another hour of code reading.
 - IMPORTANT: the 1.86x speedup at accept_rate=0 comes from AMORTIZED PYTHON OVERHEAD (2 commits/round via main+resample; ~35ms/tok python in StandardDecoding), NOT acceptance. Suffix draft pays when token-level recurrence is high; on varied-digit patterns accept stays ~0 but spec still wins on overhead amortization.
 - consolidate_pairs E2E verified twice: lr5e-4x60 -> post_ce 0.0, held-out ctrl drift +2.17 (too hot); lr2e-4x20 -> post_ce 0.0001, drift +0.80. Replay count bounds drift more than lr.
 
+
+## 2026-11-05 — util/slow-task investigation + SFT run #3
+
+D: drive root-caused: WD Elements 2620 = WD40NDZW device-managed SMR
+on USBSTOR BOT (verified DEVPKEY_Device_Service=USBSTOR, TRIM
+supported). ~230MB/s seq / ~38 files/s small-file / <10MB/s random
+writes once CMR cache fills. Docs: wiki Development+Known-Issues
+(pushed a92911a), FAILURE_CATALOG, AGENTS.md section D.
+
+Committed: e43b0d4 reward_weights=None for all-default batches (kills
+per-step GPU sync; 3 tests); 790fa7a phase timings persisted into
+status.json (bottleneck() was never called); 0690c3a SMR catalog;
+d0b7b27 AGENTS.md note.
+
+Trainer deaths this session: (a) PID 74812 stale run at 25.4GB private
++ 11GB VRAM — killed, freed to 19.3GB free RAM; (b) PID 75700 died
+silently ~15min in — no status/heartbeat/stop/log passed, stdout lost.
+interrupt_step60 = weights+meta only, .train.pt absent = killed between
+the two writes in save_training_checkpoint (order: weights+meta, then
+train sidecar — load_training_state handles missing sidecar).
+
+Run #3 (PID 127552 real / stub 94660): resume step50, --status-file
+data/run_tasks/sft_status.json --heartbeat-file ... --stop-file
+<save>.stop, stdout->research/checkpoints/sft_run_1105_0550.log.
+Step 56 loss 10.6875 = bit-consistent w/ prior run's step56 (resume
+deterministic). GPU sampled 100/100/25/100/100/98 — brief step-boundary
+dips (optimizer/data_load bubble), otherwise saturated.
+## 2026-11-05 late — trainer memory profile (PID 127552)
+Private commit plateaued at 24.7GB (24.701->24.697 over 90s sample) —
+NOT a leak; it's retained peak-commit from the step100 save transient
+(7.4GB CPU state_dict copy + 605MB optimizer sidecar). Reinterprets
+the earlier deaths: the checkpoint-save spike is the kill moment, not
+steady growth. Commit 41.1/54.7GB; physical 64%; next saves spike
+~+8GB transient — watch at step 150/200/... intervals.
+GPU sampling: ~100% with brief ~25% dips at step boundaries (optimizer
+sync + collate); phase timings now persisted for future runs.
+## Memory plateau confirmed (3 saves observed)
+save@100: +7.9GB retained | save@150: +2.5GB | save@200: +0.0GB —
+allocator arenas now recycle the checkpoint transient; flat 27.13GB.
+Safe to run to completion (~42GB commit < 54.7 limit). Earlier deaths
+= save-transient spike at peak system pressure.
+## 2026-11-05 sft1 postmortem (diagnosis CLOSED)
+
+Result chain: sft1 merged model = orig + trained LoRA deltas on out_proj+FFN only.
+q/k/v adapters bit-zero (attached to dead modules - fused qkv forward bypasses them).
+Merged model = garbage through EVERY load path; orig dense through same path = perfect.
+=> adapter deltas are destructive noise, not a merge/pack/cache bug.
+
+Why destructive: bitnet_everywhere QAT forward (ternary weights) during training;
+adapters partly learned quantization-error compensation. On fp inference weights
+that compensation is noise. Plus loss ~10 (cross-doc packing, no cu_seqlens emitted).
+
+Artifacts: sft1.safetensors / .lora / _fq / sft1_src / dense_clean all carry the
+same deltas - none usable. Disk space: sft1_src+dense_clean ~15GB reclaimable.
+
+Next-run recipe (bounded, ~same 3h):
+- --no-bitnet-everywhere (fp forward = inference path)
+- LoRA on fused path or unfuse qkv for training
+- pack_sequences off or emit_cu_seqlens=True wired to forward
+- lr 2e-5, 2-3 epochs, watch loss < 5
+## 2026-11-05 - OS crashes root cause + sft1 salvage verdict
+
+CRASH: 2x bugcheck 0x00020001 HYPERVISOR_ERROR today (11:47, 17:19), both during
+ForgeEngine CUDA work (graph capture / engine load). NOT commit-pressure - VBS/HVCI
+level fault (driver+IOMMU or RAM under GPU DMA). Mitigation: auto_activate=False
+skips graph capture for diagnostic engine loads. Open: could also be unstable RAM
+(XMP) or NVIDIA driver - watch for recurrence outside Forge workloads.
+
+sft2 corrective run (PID live, detached): loss 1.04 at step1 vs ~26 on broken run.
+Confirms root cause chain: BitNet ternary forward + dead qkv adapters + boundary-
+blind packing produced the destructive deltas. sft1 artifacts all carry the noise
+- ~15GB reclaimable (sft1_src, sft1_dense_clean, sft1_fq, sft1.safetensors).
+## 2026-11-05 sft3 RFT pipeline (running)
+
+gen_sft3_data.py: verified-sample generation, append-mode JSONL, resume via gen_key.
+Stage1: base_fq x proposer-wrap (139 targets x4 reps xk4) -> sft3_proposer.jsonl
+Stage2: sft2_fq x direct (900 prompts xk3) -> sft3_direct.jsonl
+Verify tier: fence+compile+required-names+AST dangerous-import blocklist.
+Proposer rows embed runtime prefill (</think>+```python) INSIDE response so
+the trained pattern continues the open fence at inference.
+
+PACK FIX for sft3: strip *.attn.qkv_proj.weight from src before
+prequant_forge_quant (engine rebuilds fused from separate q/k/v at load;
+packing both = +0.48GB dup). sft2_fq bloat 1.81GB -> ~1.33GB.
+## 2026-11-07 - spark sft3 continuation (Devin)
+- Corpus: spark_sft_v2.jsonl = 833 rows (283 rft_direct + 259 rft_proposer + 291 replay_v1) via build_sft3.py.
+- UNSEEN EVAL VERDICT (results/unseen_eval.json): base_fq valid 4/10 -> sft2_fq valid 10/10 (fence+syntax+named, 10 fresh coding prompts, temp0). sft2 confirmed NOT degraded; large format+syntax win.
+- sft3 train attempt #1 KILLED at step 11: loss 8.375 -> 12.69 -> 9.31 (sft2 was ~1.0 at step1). Recipe mirrored sft2 (--manual-lora --no-bitnet-everywhere --no-pack-sequences lr2e-5 cpu_offload). Differences vs sft2: ckpt = merged sft2 (unfused q/k/v keys, 224 LoRA adapters incl out-gate vs 140 on base HF dir), data = v2 RFT corpus.
+- Loader note: load_examples dedups by prompt[:200] -> 833 rows collapse to 508 conversations (generator's <=2 variants/prompt intentionally dropped by loader); 489 after tokenize.
+- Probe running: .devin/_probe_sft3_loss.py = per-row eval CE of merged sft2 on replay_v1 vs rft_direct vs rft_proposer through exact sft_train tokenize+load path.
+
+### sft3 loss anomaly - probe results
+- _probe_sft3_loss.py: merged sft2 eval CE on 9 sampled v2 rows = 0.005-0.95 (model+data both clean in eval).
+- _probe_sft3_sweep.py (results/sft3_row_ce.json): ALL 493 usable rows mean CE = 0.644, max row = 3.53. replay_v1 mean 0.711 (n=264), rft_direct 0.497 (n=179), rft_proposer 0.819 (n=50). Training step1 = 8.375 ~= 13x true CE -> TRAINING-PATH bug, not data, not weights.
+- Corpus composition note: loader prompt[:200] dedup hits proposer rows hardest (259 -> 50); final mix = 54% replay / 36% direct / 10% proposer (intended 35/35/30). Fix later: dedup key should be prompt+response hash.
+- Next: _probe_sft3_step.py isolates mask vs internal-targets-CE vs LoRA on one fixed batch.
+
+### sft3 loss anomaly - ROOT CAUSE + FIX (commit ecbe404)
+- Step-probe (mask/internal-targets/LoRA-224/train-mode) ALL CLEAN: internal loss 0.547 on a fixed batch. Not mask, not LoRA, not chunked CE.
+- ROOT CAUSE: sft_train tokenizer resolution for a bare .safetensors --checkpoint looked for tokenizer.json in the checkpoint's PARENT dir (research/checkpoints) -> missing -> get_tokenizer() default = ForgeLM V2/Qwen-vocab tokenizer. Spark vocab 131072 mis-tokenized every row. sft2 dodged it because --checkpoint was the base HF DIRECTORY (has tokenizer.json). Tell: 489 usable examples (wrong tok) vs 493 (right tok, matches probe sweep exactly).
+- FIX ecbe404: _resolve_tokenizer_source() = --tokenizer -> ckpt dir -> .meta.json tokenizer_path (engine's _tokenizer_from_meta) -> default. Vocab guard after cfg build: tok_vocab > model vocab = hard error, != = loud warning. Test test_sft_tokenizer_source_resolution 4/4 pass.
+- sft3 train attempt #2 (fixed): step1 loss 0.8203 (expected ~0.64 CE x WeFT), step11 0.5586. 120 steps on 493 rows.
+- LESSON banked: when train loss ~10 but eval CE ~0.6 on same ckpt+data, check WHICH tokenizer the trainer resolved BEFORE suspecting adapters/packing. The 489-vs-493 usable-example count diff was the fingerprint.
+
+### 2026-11-07 sft3 COMPLETE + training-process upgrade round
+- sft3 train: 120 steps / 493 ex, final loss ~0.7-0.9, merged save 311 tensors + lora 448 tensors. Pack: sft3_fq 1.59GB (qkv-strip worked; sft2_fq was 1.94GB dup pack).
+- UNSEEN EVAL sft3: sft2_fq 10/10, sft3_fq 10/10 (results/unseen_eval_sft3.json). RFT round holds the format win; outputs differ from sft2 (genuine new weights).
+- Periodic saves on D: SMR measured ~110s each (4.39GB weights + 0.64GB sidecar) - NOT a hang; py-spy confirmed forward resumes after. This is ~20% of a short run's wall time.
+- Upgrades in flight: (a) torch.compile call-site fix (cache_dir kwarg doesn't exist on torch 2.11 -> TORCHINDUCTOR_CACHE_DIR env; default mode not reduce-overhead for CPU-offload optimizers), (b) lora-only periodic saves (save_training_checkpoint lora_only=True; resume re-injects adapters onto base; --full-step-saves opt-out) + tests 37/37, (c) compile fwd+bwd bench running.
+- sft2 corrective recipe now proven TWICE (sft2 + sft3 both healthy loss + 10/10 unseen). Canonical launcher: .devin/launch_sft3_train.cmd.
+
+### 2026-11-07 selfgen (AZR) implementation + first smoke
+- User directive: fixed prompts overfit -> self-expanding curriculum. Implemented scripts/gen_sft3_data.py --mode selfgen (commit 8b3f14e, moved from .devin into tracked source for the tests): fresh tasks per wave (12 domains x difficulty x uuid seed), cliche banlist, 8-gram Jaccard novelty gate (0.5), persistent-sandbox reference execution for ground truth, k=4 solver rollouts execution-verified vs reference, Goldilocks keep (0<rate<1), per-domain rolling-rate difficulty adaptation, <=2 variants/task, marker-row resume.
+- Tests test_selfgen_rft.py 10/10 (incl REAL sandbox: reference ground truth + wrong-solver mismatch).
+- Smoke #1 on sft3_fq: 0/8 valid proposals. RAW outputs: model copied format placeholders literally (def solve(literal_input)) or fell into verbatim if-not-s loops. LESSON (same as proposer-wrap round): abstract format instructions fail on 1.7B; few-shot + PRIME is mandatory. Fix: one complete example in-prompt + wrap_proposal prime '`python\n# Task: ' (model continues the open comment).
+- sft4 launcher staged (.devin/launch_sft4_train.cmd): val-every 25 + early-stop-patience 3 + lora-only saves + 150 max steps.
+- Compile bench timeboxed OUT: harness thrashes VRAM (37s/step vs trainer 1.7s) - not representative; call-site fix committed (4686267) unmeasured. Trainer real numbers: fwd ~850ms bwd ~815ms per micro-step (batch4x2048), CPUAdamW ~420ms/step, periodic full saves ~110s -> now lora-only (0d82900).
+- py-spy via uvx works on this box for hung-python diagnosis (uvx py-spy dump --pid N).
+
+### 2026-11-07 selfgen v2: codebase-grounded (user directive) + staged plan
+- Proposal-based selfgen DEAD END (2 designs measured): from-scratch 0/10 valid, seed-variation 0/4 (verbatim seed clones, fence spam, placeholder code). The 1.7B solves well but does NOT invent tasks well. PIVOT: tasks = REAL functions harvested from ForgeAI production code (forge/scripts/research, GUI excluded) — user's explicit directive.
+- Implementation (commit 9b69aed): AST eligibility (top-level, public, undecorated, 3-45 lines, <=4 params, stdlib+builtins free-names only, deterministic, no banned deps) + type-annotation fuzz inputs + per-input-isolated sandbox ground truth (>=2 valid + >=2 distinct outputs) + solver rollouts execution-matched on the reference-valid subset + Goldilocks + 8-gram novelty + source-hash dedup + resume. Undocumented functions get a describe-first pass (model describes existing code = learnable skill). Unannotated params get name-heuristic types (execution validates).
+- Sandbox fix (93b568f): worker boot pre-imports math/itertools/collections/functools/string/operator — sandboxed 'import string' previously died on out-of-jail stdlib file read.
+- Pool: 28 strictly-clean functions at first pass; expanded via name-heuristics + describe-pass. First smoke (older code): wave0 executable 5/8 -> solver rollouts running.
+- STAGED PLAN (user): (1) codebase-grounded variety batch NOW; (2) after training on that variety, RETRY model-authored unique prompts (the AZR proposal path, currently dead) — if still failing, (3) ONLINE DBs: code-task DBs with working references+tests (MBPP, HumanEval, APPS/CodeContests/TACO, Magicoder) for the prompt-gen side + knowledge/skill self-improvement DBs (FLAN/Tulu/OpenHermes/UltraFeedback-class instruction data) for the general side. MBPP/HumanEval = first external supply (references+tests included, drops straight into the execution-verified loop).
+- Tests test_selfgen_rft.py 9/9 (incl real sandbox + real-codebase pool check).
+
+### 2026-11-07 online-DB fallback catalog (stage-3 backup, researched via HF hub + web)
+
+A. CODE TASKS w/ verifiable refs+tests (drop into execution-verified selfgen loop):
+- OpenCoder-LLM/opc-sft-stage2 `educational_instruct` — (instruction, code, test case) triples, compiler-validated. ~436k rows total config family.
+- KodCode/KodCode-V1 — 447k verifiable coding tasks w/ unit tests (12 subsets, algo->package). CC-BY-NC-4.0 (non-comm). SFT variant: KodCode/KodCode-V1-SFT-R1.
+- nvidia/OpenCodeInstruct — 5M SFT rows w/ quality scores + unit-test pass arrays. CC-BY-4.0. Filter to test-passed subset for RFT.
+- bigcode/self-oss-instruct-sc2-exec-filter-50k — self-instruct prompts EXECUTION-filtered (the "working prompt" recipe Spark needs). ODC-BY.
+- open-r1/codeforces-cots (~100k R1 CoT), open-r1/ioi-cots — competitive problems w/ tests for RLVR-style verification.
+- deepmind/code_contests, BAAI/TACO, newfacade/LeetCodeDataset — classic verified-task pools.
+
+B. REASONING:
+- open-thoughts/OpenThoughts3-1.2M — math+code+science R1 traces, apache-2.0, SOTA-open.
+- nvidia/OpenCodeReasoning — 735k code-reasoning (28k unique problems), CC-BY-4.0.
+- nvidia/OpenMathReasoning — CoT/TIR/GenSelect splits, CC-BY-4.0.
+- open-r1/OpenR1-Math-220k — verified math traces.
+- PrimeIntellect/SYNTHETIC-1 — 2M crowdsourced R1 traces w/ verifier annotations (filtered SFT variant in its collection). apache-2.0.
+- allenai/big-reasoning-traces — ~2.5B tokens permissive traces for midtraining.
+- MarshootLab/beam-verified-reasoning-traces — 63.6k verified across 58 task families (RLVR tag).
+
+C. TOKEN EFFICIENCY (short/controlled CoT):
+- horseee CoT-Valve: MixChain-Z-GSM8K (6.9k), MixChain-Z-PRM12K (12k), MixChain-C-LIMO — same Q, multiple CoT lengths => length-conditioning pairs.
+- distilled-ai/condensed-thinking-sft-dataset — condensed-think SFT.
+- yrdu/S3-CoT-Self-Sampled-Data — multi-ratio compressed traces + token stats (length-compression SFT).
+- TokenSkip family: SmallDoge/TokenSkip-10K; vm2825/token-skip-gsm8k-gamma-{0.5..0.9} (explicit compression-ratio tags).
+- simplescaling/s1K-1.1 (1k MIT) + GAIR/LIMO (817 apache-2.0) — less-is-more high-quality reasoning.
+
+D. BEHAVIOR / GOAL-HONING / self-improvement mindset:
+- bigai-nlco/ReflectionEvo — ReflectEvo-460k self-generated reflection traces (identify-failure -> locate-error -> correct); SFT+DPO formats, multi-domain incl code. ~437k rows.
+- lambda/hermes-agent-reasoning-traces — multi-turn tool-calling agent traces, apache-2.0.
+- nvidia/Nemotron-SFT-SWE-v3 — 238k agentic SWE trajectories (OpenHands/SWE-agent/mini-SWE-agent), CC-BY-4.0 => developer-mindset task pursuit.
+- SWE-bench/SWE-smith-trajectories — ~102k SWE-agent trajectories; SWE-Gym/OpenHands-SFT-Trajectories (491 curated) + SWE-Gym env tasks.
+- nebius/SWE-rebench + R2E-Gym trajectories (in fan-shu/swe-native-trajectories bundle, gated).
+- GAP: no quality public DB explicitly trains "propose your own goals" — closest is ReflectEvo (self-diagnosis) + agentic traj DBs (persistent goal pursuit). AZR proposal-path remains novel/novel.
+
+Priority if stage-3 triggers: opc-sft-stage2/educational_instruct + KodCode tests (verification-ready) -> OpenCodeReasoning/OT3 slice (reasoning) -> ReflectionEvo (mindset) -> MixChain/TokenSkip (efficiency). Licenses to respect: KodCode NC, self-oss ODC-BY, Magicoder OpenAI-output terms.
+
+### 2026-11-07 selfgen external supply ONLINE + results
+- scripts/fetch_external_tasks.py: opc-sft-stage2 educational_instruct -> 500 tasks from 506 rows (99% yield; >=2 literal asserts + non-constant outputs). --kind reflection writes ReflectEvo corrected-CoT rows for the knowledge/skill side.
+- External 32-task smoke: 32/32 executable (DB references all pass their asserts) -> 7 goldilocks -> 9 verified rows (waves vary 0-7/8 by difficulty). Full run on all 500 launched at batch 24 (data/sft/sft4_external.jsonl).
+- Local pool expanded 28 -> 80 candidates (name-heuristic types + undocumented via describe-pass); diagnostic: 43/80 crash on wrong literal types, 14 constant-output, 23 OK -> added model-written input rescue pass (parse_input_calls).
+- LoRA-only save/resume VERIFIED end-to-end: step3.safetensors 79.9MB (vs 4.3GB full) -> 'adapter-only snapshot' + 448 tensors restored + resume at step4 + clean continuation (smoke_lora_resume2.log). NOTE: the LAST step goes to the final merged save, not a periodic stepN file — resume must target an actual stepN.
+- AGENTS.md selfgen section updated with implementation status; wiki pushed dfc0fbe (Training/Self-Play/Model-Presets).
+- Commits this session: ecbe404 tokenizer, 190dea5 dedup, 8b3f14e selfgen AZR, 0d82900 lora-saves, 4686267 compile fix, 9b69aed codebase-grounded pivot, 93b568f sandbox preimports, 1634652 input rescue, 5e01504 external supply.
