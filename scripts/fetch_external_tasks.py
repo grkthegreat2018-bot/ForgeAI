@@ -41,11 +41,40 @@ def literal_asserts(testcases, name):
     return out
 
 
+def reflection_rows(row):
+    """ReflectEvo D+ -> up to 2 {prompt, response} rows teaching the
+    self-repair loop faithfully (instruction/response stay consistent):
+      reflect: reflect_prompt (embeds question+failed attempt) -> reflections
+      repair:  question + own error analysis -> corrected reasoning + answer
+    The raw reason_prompt[1] is unusable (its history leaks the correct
+    trajectory), so the repair prompt is synthesized without answer leak."""
+    q = (row.get("question") or "").strip()
+    refl = (row.get("reflections") or "").strip()
+    rp = (row.get("reflect_prompt") or "").strip()
+    cot = (row.get("second_trial_reasoning") or "").strip()
+    ans = (row.get("second_trial_answer") or row.get("answer") or "").strip()
+    out = []
+    if rp and refl:
+        out.append(dict(prompt=rp, response=refl,
+                        source="reflectionevo_reflect"))
+    if q and refl and cot and ans:
+        prompt = (q + "\n\nReflection on your previous incorrect "
+                  "attempt:\n" + refl)
+        out.append(dict(prompt=prompt,
+                        response=cot + f"\nAnswer: {ans}",
+                        source="reflectionevo_repair"))
+    elif q and cot and ans:
+        out.append(dict(prompt=q, response=cot + f"\nAnswer: {ans}",
+                        source="reflectionevo"))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", default="OpenCoder-LLM/opc-sft-stage2")
     ap.add_argument("--config", default="educational_instruct")
     ap.add_argument("--split", default="train")
+    ap.add_argument("--kind", choices=["code", "reflection"], default="code")
     ap.add_argument("--limit", type=int, default=500)
     ap.add_argument("--out", default="data/external/opc_sft2_tasks.json")
     args = ap.parse_args()
@@ -53,6 +82,20 @@ def main():
     from datasets import load_dataset
     ds = load_dataset(args.dataset, args.config, split=args.split,
                       streaming=True)
+    if args.kind == "reflection":
+        rows = []
+        for row in ds:
+            rows.extend(reflection_rows(row))
+            if len(rows) >= args.limit:
+                break
+        rows = rows[:args.limit]
+        out = REPO / args.out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        print(f"wrote {len(rows)} reflection rows -> {out}")
+        return
     tasks = []
     n_seen = 0
     for row in ds:
