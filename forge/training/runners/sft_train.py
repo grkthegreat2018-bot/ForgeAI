@@ -2024,9 +2024,16 @@ def main():
     if args.compile:
         try:
             from research.paths import TORCH_CACHE_DIR
-            model = torch.compile(model, mode="reduce-overhead", dynamic=True,
-                                  cache_dir=str(TORCH_CACHE_DIR / "inductor"))
-            print("torch.compile enabled (reduce-overhead)")
+            # torch.compile has no cache_dir kwarg (torch 2.11) — the old
+            # call raised TypeError and silently disabled compile every run.
+            # Inductor reads TORCHINDUCTOR_CACHE_DIR instead. Default mode
+            # (not reduce-overhead): cudagraph trees fight CPU-offloaded
+            # optimizers that mutate params in place between steps.
+            _inductor_cache = str(TORCH_CACHE_DIR / "inductor")
+            os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", _inductor_cache)
+            model = torch.compile(model, dynamic=True)
+            print(f"torch.compile enabled (default mode, "
+                  f"cache={_inductor_cache})")
         except Exception as e:
             print(f"torch.compile failed ({e}), continuing without")
 
