@@ -45,6 +45,22 @@ class TestLoadExamplesLogging:
         examples = load_examples([path])
         assert len(examples) == 2
 
+    def test_rft_variants_survive_dedup(self, jsonl_file):
+        """RFT k-sample design: distinct responses to one prompt must all
+        load; only exact prompt+response duplicates dedup (spark sft3 lost
+        259->50 proposer rows to the old prompt-only key)."""
+        lines = [
+            json.dumps({"prompt": "solve X", "response": "answer A"}),
+            json.dumps({"prompt": "solve X", "response": "answer B"}),
+            json.dumps({"prompt": "solve X", "response": "answer A"}),
+            json.dumps({"prompt": "solve Y", "response": "answer A"}),
+        ]
+        path = jsonl_file(lines)
+        examples = load_examples([path])
+        assert len(examples) == 3
+        assert [e["response"] for e in examples] == [
+            "answer A", "answer B", "answer A"]
+
     def test_bad_json_logged_not_silent(self, jsonl_file, caplog):
         """A malformed JSON line should be logged at WARNING, not silently skipped."""
         lines = [

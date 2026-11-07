@@ -332,11 +332,15 @@ def load_examples(paths: list[str], strict_data: bool = False) -> list[dict]:
                 examples.append(ex)
                 n_loaded += 1
             elif "prompt" in obj and ("response" in obj or "solution" in obj):
-                key = obj["prompt"][:200]
+                resp = obj.get("response", obj.get("solution", ""))
+                # Dedup on prompt+response, not prompt alone: RFT/ReST data
+                # intentionally keeps k verified variants per prompt — the
+                # old prompt[:200] key silently dropped them (spark sft3:
+                # 259 proposer rows -> 50) and skewed the corpus mix.
+                key = obj["prompt"][:200] + "\x00" + resp[:200]
                 if key in seen:
                     continue
                 seen.add(key)
-                resp = obj.get("response", obj.get("solution", ""))
                 ex = {"type": "single_turn",
                       "prompt": obj["prompt"],
                       "response": resp}
@@ -445,11 +449,11 @@ def load_examples_parquet(
                 examples.append({"type": "multi_turn", "messages": row["messages"]})
                 n_loaded += 1
             elif "prompt" in row and ("response" in row or "solution" in row):
-                key = str(row["prompt"])[:200]
+                resp = row.get("response", row.get("solution", ""))
+                key = str(row["prompt"])[:200] + "\x00" + str(resp)[:200]
                 if key in seen:
                     continue
                 seen.add(key)
-                resp = row.get("response", row.get("solution", ""))
                 ex = {"type": "single_turn",
                       "prompt": row["prompt"],
                       "response": resp}
