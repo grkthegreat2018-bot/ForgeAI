@@ -51,7 +51,7 @@ def main() -> None:
         checkpoint=str(ROOT / "research/checkpoints/ForgeLM_V2.safetensors"),
         config_name="forgelm_v2")
     engine.load_gate_probes(
-        str(ROOT / "research/checkpoints/gate_probes.pt"))
+        str(ROOT / "research/checkpoints/gate_probes.safetensors"))
 
     system = get_default_prompt_for_config("forgelm_v2")
 

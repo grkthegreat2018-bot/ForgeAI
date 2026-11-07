@@ -7,11 +7,12 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import auth
 from .deps import services
 from .hub import dumps
 from .routes import chat, core, system, train
@@ -40,6 +41,20 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"])
 
+    @app.middleware("http")
+    async def _auth_gate(request: Request, call_next):
+        # Every /api route mutates or reads real engine/workspace state —
+        # gate on the per-launch token (header preferred; ?token= covers
+        # WS-upgrade and bare-link clients that can't set headers).
+        if request.url.path.startswith("/api"):
+            tok = (request.headers.get("x-forge-token")
+                   or request.query_params.get("token"))
+            if not auth.verify(tok):
+                return JSONResponse(
+                    {"detail": "missing or invalid GUI token"},
+                    status_code=401)
+        return await call_next(request)
+
     app.include_router(core.router, prefix="/api")
     app.include_router(chat.router, prefix="/api")
     app.include_router(train.router, prefix="/api")
@@ -54,6 +69,11 @@ def create_app() -> FastAPI:
         origin = websocket.headers.get("origin")
         if origin and not _re.fullmatch(
                 r"https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?", origin):
+            await websocket.close(code=1008)
+            return
+        tok = (websocket.headers.get("x-forge-token")
+               or websocket.query_params.get("token"))
+        if not auth.verify(tok):
             await websocket.close(code=1008)
             return
         await websocket.accept()

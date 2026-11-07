@@ -2,10 +2,31 @@
 
 const BASE = ''
 
+// Per-launch auth token: the launcher opens `/?token=…`; we lift it into
+// sessionStorage (per-tab) and strip it from the visible URL. The server
+// never serves it back over HTTP.
+function initToken(): string {
+  const q = new URLSearchParams(location.search).get('token')
+  if (q) {
+    sessionStorage.setItem('forge_gui_token', q)
+    const url = new URL(location.href)
+    url.searchParams.delete('token')
+    history.replaceState(null, '', url.toString())
+    return q
+  }
+  return sessionStorage.getItem('forge_gui_token') ?? ''
+}
+
+export const authToken = initToken()
+
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  return { 'X-Forge-Token': authToken, ...(extra ?? {}) }
+}
+
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method,
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    headers: authHeaders(body !== undefined ? { 'Content-Type': 'application/json' } : undefined),
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
   if (!res.ok) {
@@ -42,7 +63,7 @@ export async function ssePost(
 ): Promise<void> {
   const res = await fetch(`${BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
     signal,
   })

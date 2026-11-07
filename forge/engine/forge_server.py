@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import hmac
 import inspect
 import json
 import logging
@@ -1378,7 +1379,8 @@ class ForgeServer:
             if (self._api_key
                     and request.url.path.startswith("/v1")):
                 auth = request.headers.get("authorization", "")
-                if auth != f"Bearer {self._api_key}":
+                if not hmac.compare_digest(
+                        auth, f"Bearer {self._api_key}"):
                     self._metrics["errors_total"] += 1
                     if self._log_requests:
                         _log_request_line(request, rid, 401, _t0)

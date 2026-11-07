@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import os
 import torch
 
 from forge.model.kv_cache import unpack_output_with_kv
@@ -75,8 +76,22 @@ class GateProbes:
 
     @classmethod
     def load(cls, path, device):
-        ck = torch.load(path, map_location='cpu', weights_only=False)
-        ver = ck.get('version', 0)
+        path = str(path)
+        st = path if path.endswith('.safetensors') else (
+            path[:-3] + '.safetensors' if path.endswith('.pt') else None)
+        if st and os.path.exists(st):
+            ver, tensors = cls._load_safetensors(st)
+        else:
+            # Legacy pickle bundle — self-produced only; safetensors is the
+            # canonical tracked artifact now.
+            import warnings
+            warnings.warn(
+                f"gate probes loaded via pickle path {path!r} — "
+                "prefer the .safetensors bundle", stacklevel=2)
+            ck = torch.load(path, map_location='cpu', weights_only=False)
+            ver, tensors = ck.get('version', 0), {
+                f'{k}.{kk}': vv for k in ('route', 'doom', 'conv')
+                for kk, vv in ck[k].items()}
         if ver != GATE_PROBES_VERSION:
             raise ValueError(
                 f"gate probe bundle version {ver} != "
@@ -86,10 +101,20 @@ class GateProbes:
             # score() must not build a grad graph on every call.
             return t.detach().to(device) if torch.is_tensor(t) else t
         return cls(
-            tb(ck['route']['w']), tb(ck['route']['b']),
-            tb(ck['doom']['w']), tb(ck['doom']['b']),
-            tb(ck['conv']['w']), tb(ck['conv']['b']),
+            tb(tensors['route.w']), tb(tensors['route.b']),
+            tb(tensors['doom.w']), tb(tensors['doom.b']),
+            tb(tensors['conv.w']), tb(tensors['conv.b']),
         )
+
+    @staticmethod
+    def _load_safetensors(path):
+        from safetensors.torch import safe_open
+        tensors = {}
+        with safe_open(path, framework='pt') as f:
+            meta = f.metadata() or {}
+            for k in f.keys():
+                tensors[k] = f.get_tensor(k)
+        return int(meta.get('version', 0)), tensors
 
     def score(self, which, feat):
         w, b = getattr(self, which)

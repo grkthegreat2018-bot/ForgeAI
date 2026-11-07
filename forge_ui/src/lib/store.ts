@@ -3,7 +3,7 @@
 // replaces the 500ms/2s page refresh loops.
 
 import { create } from 'zustand'
-import { api } from './api'
+import { api, authToken } from './api'
 import type {
   AgentEvent,
   AgentRunDetail,
@@ -240,7 +240,7 @@ export function connectWs() {
     return
   }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  ws = new WebSocket(`${proto}://${location.host}/ws`)
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(authToken)}`)
   ws.onopen = () => {
     retryMs = 1000
     useForge.setState({ connected: true })

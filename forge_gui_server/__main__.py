@@ -59,7 +59,10 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-    url = f"http://{args.host}:{args.port}"
+    from forge_gui_server.auth import token as _gui_token
+    # The per-launch token rides the launch URL (?token=) — the SPA lifts
+    # it into sessionStorage and sends X-Forge-Token / ?token= afterwards.
+    url = f"http://{args.host}:{args.port}/?token={_gui_token()}"
 
     if args.dev or args.no_window:
         # foreground serve
@@ -67,7 +70,9 @@ def main() -> int:
             "forge_gui_server.app:app", host=args.host, port=args.port,
             log_level="info", ws="auto")
         if args.dev:
-            print(f"API on {url} — Vite dev server expected on :5173")
+            print(f"API on http://{args.host}:{args.port} — Vite dev "
+                  "server expected on :5173 — open "
+                  f"http://localhost:5173/?token={_gui_token()}")
         else:
             print(f"ForgeAI GUI on {url}")
         uvicorn.Server(config).run()
