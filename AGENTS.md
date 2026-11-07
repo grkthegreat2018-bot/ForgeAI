@@ -2174,6 +2174,28 @@ OpenCodeInstruct code supply — bigger verified pool), and watch
 attempt-rate as the leading metric since binary pass@k is ceiling-
 bound at this scale.
 
+**sft6 lineage + abstention root cause (2026-11-08)**: `spark_sft_v5.jsonl`
+(520 rows: 112 sft3-solved opc_sft2_c rows [72 gold+3 easy of 589 — best
+yield yet], 200 ReflectEvo slice-C, 208 v2 replay) → sft5→sft6 LoRA-r32,
+early-stop @101/175; bestval step26 val .4941, final .5042 →
+`sft6.safetensors`+`.lora`+`.sft6_fq`; bestval adapter merged via
+`.devin/merge_bestval.py` → `sft6.bestval_merged_fq` (224/224 adapters,
+all 448 tensors attached). On-manifold: sft6_fq **5/60 pass@4 but only
+25 runnable outputs** (24% precision); bestval arm 1/60, 45 runnable —
+bestval is worse (more code-forward, much less precise). Extraction
+decline continues: 102→83→53→**25**, yet solve precision rose ~4×.
+ROOT CAUSE pinned by raw-output peek: **empty-fence abstention** — the
+model emits ` ```python ` then EOS/empty bodies on hard prompts, a
+learned give-up pattern, NOT prose drift. Corpus culprit: v5 fenced-code
+bodies median 228ch vs v2's 770ch; 32% are <60ch stubs (v2: 17%).
+Short repair rows + short external solutions taught stub/abstain
+responses. sft7 direction: enforce a complete-function floor on corpus
+rows (min body length, required names, no trivial returns), cut or
+reformat reflection rows so they never end in stub code, replay
+v2-style long solutions; lineage continues from sft6_fq (final — best
+solve precision), not bestval. `opc_sft2` ~118k rows deep, ~1260
+consumed; next fetch `--skip 1660`.
+
 Stage-3 shortlist (verified on HF hub):
 - **Code tasks w/ refs+tests** (drop into the exec-verified loop):
   `OpenCoder-LLM/opc-sft-stage2` `educational_instruct` (compiler-validated
