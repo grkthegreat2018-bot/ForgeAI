@@ -12,6 +12,7 @@ missed stop string means runaway generation, a false positive means
 truncated output.
 """
 
+import random
 NAME = "stop_matcher"
 GOAL = "min"
 METRIC = "us_per_push"
@@ -133,7 +134,7 @@ def bench(ns):
     import random
     import time
     cls = ns["StopMatcher"]
-    rng = random.Random(13)
+    rng = random.Random()
     m = cls(_StubTok(), [IM_END, "###", "qw"],
             skip_special_tokens=True)
     toks = [rng.randrange(0, 500) for _ in range(60000)]

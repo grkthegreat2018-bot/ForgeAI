@@ -6,6 +6,7 @@ equivalent to torch.softmax (atol 1e-5). Evolve region = the whole
 fused ops, dtype tricks, caching) as long as test() passes.
 """
 
+import random
 NAME = "fast_softmax"
 GOAL = "min"
 METRIC = "ms_per_call"
@@ -28,7 +29,7 @@ def softmax_fast(x: torch.Tensor) -> torch.Tensor:
 # ── correctness gate ────────────────────────────────────────────────────
 def _inputs():
     import torch
-    g = torch.Generator().manual_seed(1234)
+    g = torch.Generator().manual_seed(random.SystemRandom().getrandbits(63))
     return [
         torch.randn(1, 4096, generator=g),
         torch.randn(64, 4096, generator=g),
@@ -60,7 +61,7 @@ def bench(ns) -> dict:
     import time
     import torch
     fn = ns["softmax_fast"]
-    x = torch.randn(64, 4096, generator=torch.Generator().manual_seed(7))
+    x = torch.randn(64, 4096, generator=torch.Generator().manual_seed(random.SystemRandom().getrandbits(63)))
     for _ in range(10):  # warmup
         fn(x)
     t0 = time.perf_counter()

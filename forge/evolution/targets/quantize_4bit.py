@@ -7,6 +7,7 @@ Gate: packed bytes AND scales must match the reference bit-for-bit
 (int paths are exact; scales fp16 -> allclose with 0 tol = equal).
 """
 
+import random
 NAME = "quantize_4bit"
 GOAL = "min"
 METRIC = "ms_per_call"
@@ -69,7 +70,7 @@ def _quantize_4bit(w_row: torch.Tensor, group_size: int):
 def _inputs():
     import torch
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    g = torch.Generator().manual_seed(0)
+    g = torch.Generator().manual_seed(random.SystemRandom().getrandbits(63))
     cases = []
     for n, gs in ((8192, 128), (8192, 64), (4097, 128), (1536, 32),
                   (20480, 128), (300, 32)):

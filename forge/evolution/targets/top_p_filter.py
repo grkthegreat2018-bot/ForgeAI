@@ -6,6 +6,7 @@ in-place clone shift. Goal: identical kept-set, lower ms_per_call.
 Gate is torch.equal — the nucleus boundary is semantics, not noise.
 """
 
+import random
 NAME = "top_p_filter"
 GOAL = "min"
 METRIC = "ms_per_call"
@@ -63,7 +64,7 @@ def top_p_filter_logits(logits: torch.Tensor, top_p: float,
 def _inputs():
     import torch
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    g = torch.Generator().manual_seed(0)
+    g = torch.Generator().manual_seed(random.SystemRandom().getrandbits(63))
     cases = []
     for b, v, scale in ((1, 50257, 4.0), (4, 128256, 4.0), (8, 32000, 6.0),
                         (2, 50257, 1.5)):

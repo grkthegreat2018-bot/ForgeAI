@@ -12,6 +12,7 @@ Gate: masked logits must match the reference on a flag matrix — the
 -inf support IS the semantics (a dropped token must stay dropped).
 """
 
+import random
 NAME = "sample_pipeline"
 GOAL = "min"
 METRIC = "ms_per_call"
@@ -147,7 +148,7 @@ def _ref():
 def _cases():
     import torch
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    g = torch.Generator().manual_seed(0)
+    g = torch.Generator().manual_seed(random.SystemRandom().getrandbits(63))
     logits = torch.randn(4, 8192, generator=g).to(dev)
     sharp = (torch.randn(2, 8192, generator=g) * 8).to(dev)
     dry = {11: 0.4, 77: 0.9, 1234: 0.2}
@@ -201,7 +202,7 @@ def bench(ns):
     import torch
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     fn = ns["filter_logits"]
-    g = torch.Generator().manual_seed(7)
+    g = torch.Generator().manual_seed(random.SystemRandom().getrandbits(63))
     logits = torch.randn(8, 65536, generator=g).to(dev)
     gen = [int(x) for x in torch.randint(0, 65500, (64,), generator=g)]
     dry = {5: 0.5, 91: 0.7, 404: 0.3, 2077: 1.1, 9000: 0.2, 45000: 0.6}

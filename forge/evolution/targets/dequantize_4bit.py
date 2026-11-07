@@ -6,6 +6,7 @@ and stack/reshape for nibble unpack. Goal: numerically identical
 output (fp noise ok), lower ms_per_call.
 """
 
+import random
 NAME = "dequantize_4bit"
 GOAL = "min"
 METRIC = "ms_per_call"
@@ -64,7 +65,7 @@ def _dequantize_4bit(packed: torch.Tensor, scales: torch.Tensor,
 def _inputs():
     import torch, math
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    g = torch.Generator().manual_seed(0)
+    g = torch.Generator().manual_seed(random.SystemRandom().getrandbits(63))
     cases = []
     for n, gs in ((8192, 128), (8192, 64), (4097, 128), (1536, 32),
                   (20480, 128)):

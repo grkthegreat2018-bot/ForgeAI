@@ -6,6 +6,7 @@ lower ms_per_call. Correctness must match the reference bit-for-bit on
 the sampled inputs (allclose atol=1e-5 to allow benign fp assoc order).
 """
 
+import random
 NAME = "min_k_filter"
 GOAL = "min"
 METRIC = "ms_per_call"
@@ -55,7 +56,7 @@ def _min_k_filter(logits: torch.Tensor, sensitivity: float) -> torch.Tensor:
 def _inputs():
     import torch
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    g = torch.Generator(device="cpu").manual_seed(0)
+    g = torch.Generator(device="cpu").manual_seed(random.SystemRandom().getrandbits(63))
     cases = []
     # Small vocabularies and extreme logit scales are where a weight-
     # profile drift actually flips the cliff argmax — the gate must cover

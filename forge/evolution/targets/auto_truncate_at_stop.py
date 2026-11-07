@@ -25,12 +25,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-def _gen_cases():
+def _gen_cases(seed):
     """Representative cases for the _truncate_at_stop evolution target
     (auto_targets harvest). Real decode output: chat text up to ~1k
     chars, 0-4 stop strings, a planted hit half the time."""
     import random
-    rng = random.Random(0)
+    rng = random.Random(seed)
     words = ("the quick brown fox jumps over lazy dog alpha beta gamma "
              "delta epsilon lorem ipsum dolor sit amet consectetur "
              "assistant user system answer question").split()
@@ -113,8 +113,9 @@ def test(ns):
     if not callable(fn):
         return {"ok": False, "detail": f"no {REQUIRED[0]}"}
     ref = _ref()
-    cases_a = _gen_cases()
-    cases_b = _gen_cases()          # fresh inputs — mutation-safe
+    _s = random.Random().getrandbits(63)
+    cases_a = _gen_cases(_s)
+    cases_b = _gen_cases(_s)          # fresh inputs — mutation-safe
     for i, (ca, cb) in enumerate(zip(cases_a, cases_b)):
         try:
             y = _call(fn, ca)
@@ -132,7 +133,7 @@ def test(ns):
 
 def bench(ns):
     fn = ns[REQUIRED[0]]
-    cases = _gen_cases()
+    cases = _gen_cases(random.Random().getrandbits(63))
     for c in cases:
         _call(fn, c)
     on_cuda = _any_cuda(cases)

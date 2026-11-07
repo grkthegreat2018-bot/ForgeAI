@@ -8,6 +8,7 @@ exits, dict/slice tricks, or vectorized numpy compare. Gate is dict
 equality — the penalty values are semantics.
 """
 
+import random
 NAME = "dry_penalties"
 GOAL = "min"
 METRIC = "us_per_call"
@@ -82,7 +83,7 @@ def _mk_ctx(kind, n, g):
 
 def _inputs():
     import random
-    g = random.Random(0)
+    g = random.Random()
     cases = []
     for kind in ("repeats", "uniform", "lowvocab"):
         for n in (600, 1500):

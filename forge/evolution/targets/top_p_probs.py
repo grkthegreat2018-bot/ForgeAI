@@ -6,6 +6,7 @@ vocab) and sorts 100 topk candidates. Gate: torch.equal on the
 renormalized output — the nucleus boundary is semantics.
 """
 
+import random
 NAME = "top_p_probs"
 GOAL = "min"
 METRIC = "ms_per_call"
@@ -59,7 +60,7 @@ def top_p_sample_probs(probs: torch.Tensor, top_p: float,
 def _inputs():
     import torch
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    g = torch.Generator().manual_seed(0)
+    g = torch.Generator().manual_seed(random.SystemRandom().getrandbits(63))
     cases = []
     for b, v, sharp in ((1, 50257, 4.0), (4, 128256, 2.0), (8, 32000, 6.0),
                         (2, 50257, 1.0), (1, 4096, 12.0)):

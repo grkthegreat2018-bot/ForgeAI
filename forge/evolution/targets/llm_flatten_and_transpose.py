@@ -21,9 +21,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-def _gen_cases():
+def _gen_cases(seed):
     import random
-    random.seed(42)
+    random.seed(seed)
     cases = [
         [[[1, 2], [3, 4]]],
         [[[1, 2, 3], [4, 5, 6], [7, 8, 9]]],
@@ -96,8 +96,9 @@ def test(ns):
     if not callable(fn):
         return {"ok": False, "detail": f"no {REQUIRED[0]}"}
     ref = _ref()
-    cases_a = _gen_cases()
-    cases_b = _gen_cases()          # fresh inputs — mutation-safe
+    _s = random.Random().getrandbits(63)
+    cases_a = _gen_cases(_s)
+    cases_b = _gen_cases(_s)          # fresh inputs — mutation-safe
     for i, (ca, cb) in enumerate(zip(cases_a, cases_b)):
         try:
             y = _call(fn, ca)
@@ -115,7 +116,7 @@ def test(ns):
 
 def bench(ns):
     fn = ns[REQUIRED[0]]
-    cases = _gen_cases()
+    cases = _gen_cases(random.Random().getrandbits(63))
     for c in cases:
         _call(fn, c)
     on_cuda = _any_cuda(cases)

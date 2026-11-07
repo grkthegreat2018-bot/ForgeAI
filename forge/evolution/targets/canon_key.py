@@ -16,6 +16,7 @@ object (both C), tokenize-stream keys, ast.dump variants, local-attr binding.
 Memoization cannot game bench(): every bench string is unique.
 """
 
+import random
 NAME = "canon_key"
 GOAL = "min"
 METRIC = "ms_per_call"
@@ -110,7 +111,7 @@ def _corpus():
 def _bench_corpus():
     """~2400 unique valid programs — unique strings defeat memoization."""
     import random
-    rng = random.Random(1234)
+    rng = random.Random()
     ops = ["+", "-", "*", "//", "%", "|", "&", "^"]
     out = []
     for i in range(2400):
