@@ -2346,3 +2346,8 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
 - sft6 corpus plan: code-heavier (reflection ~300 absolute not 600, replay-frac .45+, add KodCode/OpenCodeInstruct verified supply); track attempt-rate as leading metric; consider sft6 train FROM sft5 (lineage) or re-eval whether sft4 is the better solver base — sft5 selfgen yield was 43 rows vs sft3's 75 on comparable slices (confounded by slice difficulty).
 - KNOWN CAVEAT for _onmanifold_eval.py: task dicts shared across eval_model calls => _solved/_attempts flags carry between arms => mid-run wave prints for arm2+ contaminated (final counts clean — reset at rep0). Fix later if reused.
 
+
+- Extraction-decline refined: sft5's extra failures are DEGENERATE outputs (empty code fences + EOS collapse, same mode as proposal collapse) not prose drift. Peek: sft5 rep5 = repeated empty fences; sft4 reps all emitted code.
+- _onmanifold_eval flag-carryover fixed (up-front reset).
+- sft6 banking: selfgen slice C (opc_sft2_c 600 tasks, sft3_fq solver = best extraction arm) running -> sft6_external.jsonl.
+
