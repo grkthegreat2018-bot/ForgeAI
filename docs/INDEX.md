@@ -43,8 +43,9 @@
 - `BUG_LOG.md` — Resolved bug log (see `log-bug` in `~/.codeium/windsurf/skills/` for the workflow)
 
 ## Notes
-- R&D round numbering has gaps (rounds 1-31 are documented in CHANGELOG.md,
-  rounds 32+ have individual files here)
-- Round 42-43 notes are in CHANGELOG.md (no separate files)
+- R&D round numbering has gaps: CHANGELOG.md only keeps recent rounds
+  (R60+); rounds 1-48 were rotated out in commit `0ada4ee` — see
+  `git show 0ada4ee^:docs/CHANGELOG.md` and the wiki's `tried/` pages
+  (Rounds-32-48, Rounds-49-70). Rounds 32+ also have individual files here.
 - For the full critique driving the 2026-09-09 refactor, see
   `CODEBASE_CRITIQUE_2026-09-09.md`
