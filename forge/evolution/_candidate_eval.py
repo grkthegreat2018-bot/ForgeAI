@@ -84,8 +84,9 @@ def _scrub_secrets() -> None:
     NVIDIA_API_KEY, NODE_AUTH_TOKEN, CARGO_REGISTRY_TOKEN, OS_PASSWORD…"""
     import re
     pat = re.compile(
-        r'(token|secret|passw|credential|private|api[_-]?key|auth|bearer'
-        r'|(^|_)key($|_))', re.IGNORECASE)
+        r'(token|secret|pass|credential|private|api[_-]?key|auth|bearer'
+        r'|jwt|cookie|session|netrc|(^|_)(key|pwd|url|dsn|cert)($|_))',
+        re.IGNORECASE)
     safe = {'TOKENIZERS_PARALLELISM'}
     for k in list(os.environ):
         ku = k.upper()

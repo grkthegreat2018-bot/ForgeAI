@@ -43,7 +43,8 @@ from research.json_compat import loads
 # ── env scrubbing (shared parent/worker logic — worker gets its own copy) ──
 
 _SECRET_ENV_RE = re.compile(
-    r'(token|secret|passw|credential|private|api[_-]?key|auth|bearer|(^|_)key($|_))',
+    r'(token|secret|pass|credential|private|api[_-]?key|auth|bearer'
+    r'|jwt|cookie|session|netrc|(^|_)(key|pwd|url|dsn|cert)($|_))',
     re.IGNORECASE)
 
 # Exact-match allowlist for names that trip the secret regex but are NOT
@@ -177,25 +178,17 @@ _PROTO = _sys.argv[2] if len(_sys.argv) > 2 else _SCRATCH
 _TAG = '<sandbox>'
 
 # ── 1. env scrub: remove secret-looking vars before any user code runs ──
+# Deny-wins: a secret-pattern match survives ONLY via the exact-match safe
+# list — the old prefix allowlist passed FORGE_API_KEY, NVIDIA_API_KEY,
+# NODE_AUTH_TOKEN, CARGO_REGISTRY_TOKEN, OS_PASSWORD… (prefixes beat deny).
 _scrub = _re.compile(
-    r'(token|secret|passw|credential|private|api[_-]?key|auth|bearer|(^|_)key($|_))',
+    r'(token|secret|pass|credential|private|api[_-]?key|auth|bearer'
+    r'|jwt|cookie|session|netrc|(^|_)(key|pwd|url|dsn|cert)($|_))',
     _re.I)
-_keep = ('PYTHON', 'CUDA', 'NV', 'TRITON', 'TORCH', 'OMP', 'MKL', 'OPENBLAS',
-         'NUMEXPR', 'PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'TEMP',
-         'TMP', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'HOMEDRIVE',
-         'HOMEPATH', 'COMSPEC', 'OS', 'PROCESSOR', 'WINDIR', 'HF_HOME',
-         'HF_HUB', 'HF_ENDPOINT', 'TRANSFORMERS', 'VIRTUAL_ENV', 'CONDA',
-         'NUMBER_OF_PROCESSORS', 'USERNAME', 'USERDOMAIN', 'DRIVERDATA',
-         'PROGRAMDATA', 'PROGRAMFILES', 'PUBLIC', 'SESSIONNAME',
-         'LOGONSERVER', 'ALLUSERSPROFILE', 'COMMONPROGRAM', 'PSMODULEPATH',
-         'TOKENIZERS_PARALLELISM', 'ONEAPI', 'VS', 'VC', 'INCLUDE', 'INTEL',
-         'DOTNET', 'GOPATH', 'CARGO', 'RUST', 'NODE', 'JAVA', 'MSYSTEM',
-         'MINGW', 'CHOCOLATEY', 'VCPKG', 'WSL', 'XDG', 'HOME', 'SHELL',
-         'LANG', 'LC_', 'TZ', 'EMSDK', 'GOOGLE_APPLICATION_CREDENTIALS_JSON',
-         'FORGE_')
+_keep_safe = frozenset({'TOKENIZERS_PARALLELISM'})
 for _k in list(_os.environ):
     _ku = _k.upper()
-    if _scrub.search(_ku) and not _ku.startswith(_keep):
+    if _scrub.search(_ku) and _ku not in _keep_safe:
         del _os.environ[_k]
 
 # ── 2. denylist + fs policy ────────────────────────────────────────────────

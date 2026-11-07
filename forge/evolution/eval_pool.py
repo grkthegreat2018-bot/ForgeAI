@@ -35,6 +35,13 @@ parent sha256s the target spec on disk (~1 Hz) and restores+flags on
 mid-eval writes. Each worker chdirs to a private tempdir so relative
 writes (forge_evolve.db, targets/*.py) and relative .env reads miss
 the repo root.
+
+TRUST BOUNDARY: pool results are a speed filter, not a verdict —
+candidates share the worker's interpreter and can reach result_q/frame
+state, so a sufficiently adversarial candidate could forge a result.
+CodeEvolve._verified routes promotion replication through the nonced
+_candidate_eval subprocess instead; never consume pool results as the
+sole basis for promotion.
 """
 from __future__ import annotations
 
@@ -247,8 +254,9 @@ def _scrub_secrets() -> None:
     if _SECRET_ENV_RE is None:
         import re
         _SECRET_ENV_RE = re.compile(
-            r'(token|secret|passw|credential|private|api[_-]?key|auth'
-            r'|bearer|(^|_)key($|_))', re.IGNORECASE)
+            r'(token|secret|pass|credential|private|api[_-]?key|auth'
+            r'|bearer|jwt|cookie|session|netrc'
+            r'|(^|_)(key|pwd|url|dsn|cert)($|_))', re.IGNORECASE)
     # Deny-wins: secret-pattern matches survive ONLY via exact-match —
     # the old prefix allowlist passed FORGE_API_KEY, NVIDIA_API_KEY,
     # NODE_AUTH_TOKEN, CARGO_REGISTRY_TOKEN, OS_PASSWORD…

@@ -2357,12 +2357,15 @@ class CodeEvolve:
         if need_inc:
             codes += [self.incumbent_code] * r
         if codes:
-            if self._epool is not None:
-                results = self._epool.eval_many(
-                    codes, timeout_s=self.cfg.timeout_s)
-            else:
-                results = [self._eval(c, workdir, f"v{self._eval_n}_{k}")
-                           for k, c in enumerate(codes)]
+            # Promotion evals NEVER go through the eval pool: pool workers
+            # exec candidates in-process, so candidate code can reach the
+            # result_q/frame state — canaries detect poisoned globals but
+            # can't stop a forged result. The subprocess path's per-eval
+            # nonce + os._exit marker IS a trust boundary, and promotions
+            # are rare enough to afford the spawn cost. The pool stays the
+            # first-pass filter; promotion decisions run isolated.
+            results = [self._eval(c, workdir, f"v{self._eval_n}_{k}")
+                       for k, c in enumerate(codes)]
         else:
             results = []
         c_scores = [cand_score]
