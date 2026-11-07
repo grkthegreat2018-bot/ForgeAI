@@ -835,3 +835,17 @@ returned content:null or pseudo-German word salad with mojibake.
   genuinely emits EOS on user-turn-wrapped transcripts.
 - Note: temp=2.0 (Chub preset value observed in proxy.log) still produces
   degraded sampling by design - user-side sampler choice, not a bug.
+
+## 2026-11-07 — sft3 mis-tokenized by canonical-default fallback (bare .safetensors ckpt)
+
+### Symptom
+Spark sft3 training loss 8.4 -> 12.7 -> 9.3 on data whose measured eval CE was 0.644 (max row 3.53). Step-probe (mask/internal-targets/LoRA-224/train-mode) all clean; 493-row sweep proved weights+data healthy.
+
+### Root cause
+sft_train resolved the tokenizer from the --checkpoint's PARENT dir when the ckpt was a bare .safetensors file (research/checkpoints has no tokenizer.json) and silently fell back to the canonical ForgeLM-V2/Qwen-vocab tokenizer. Every row was tokenized with the wrong vocab for the 131072-vocab Spark model. sft2 dodged it because its --checkpoint was the base HF DIRECTORY. Fingerprint: 489 usable examples (wrong tok) vs 493 (right tok).
+
+### Fix (commit ecbe404)
+_resolve_tokenizer_source: --tokenizer -> ckpt dir -> .meta.json tokenizer_path (engine's _tokenizer_from_meta) -> default. Vocab guard after cfg build (tok_vocab > model vocab = hard error; != = warning). Regression test test_sft_tokenizer_source_resolution.
+
+### Lesson
+When train loss ~10 but eval CE <1 on the same ckpt+data, check WHICH tokenizer the trainer resolved before suspecting adapters/packing/quant. The usable-example count diff is the cheapest fingerprint.
