@@ -2120,7 +2120,21 @@ tasks.py` wrote 500 opc-sft2 tasks from 506 rows (99% yield). Sandbox
 worker now pre-imports pure-stdlib utility modules (93b568f). Tests:
 `tests/unit/test_selfgen_rft.py` (12, incl. real sandbox execution).
 Anti-overfit training recipe: `--val-every 25 --early-stop-patience 3`
-+ fresh selfgen data each round + lora-only periodic saves.
++ fresh selfgen data each round + lora-only periodic saves. Val-loss
+improvements now write `<save>.bestval.safetensors` adapter snapshots
+(~76MB) so the best — not last — step is recoverable.
+
+**sft4 lineage (2026-11-07)**: `spark_sft_v3.jsonl` (646 rows: 86
+exec-verified opc-sft2 selfgen rows [48 goldilocks+3 easy of 392 tasks],
+300 ReflectEvo reflect/repair pairs, 258 v2 replay, 2 codebase) →
+sft3→sft4 LoRA-r32 150 steps, val 0.694→0.649 monotone (no early-stop
+needed) → `spark_x26_1p7b.sft4.safetensors` + `.lora` + `.sft4_fq` 1.59GB.
+Unseen eval 16/16 incl. 6/6 repair-prompt items. `--keep-easy-prob`
+(default 0) keeps 1 verified row from always-solved tasks — all-k-pass
+rows are the strongest-verified and add task variety (SFT learns from
+every correct row; the 0<p<1 Goldilocks band is an RL-centric bias).
+Held-out solver eval: `.devin/_solver_eval.py` + `data/external/
+opc_sft2_heldout.json` (fetch `--skip 500`) measures real pass@k.
 
 Stage-3 shortlist (verified on HF hub):
 - **Code tasks w/ refs+tests** (drop into the exec-verified loop):
