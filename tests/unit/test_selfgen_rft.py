@@ -244,3 +244,23 @@ def test_real_codebase_harvest_pool():
     # Undocumented tasks (desc="") get a describe-first pass at run time.
     assert all(t["desc"] == "" or len(t["desc"]) >= 15 for t in tasks)
     assert len({t["key"] for t in tasks}) == len(tasks)
+
+
+def test_clean_for_store_strips_degenerate_tail():
+    """Verified rows must not store empty-fence/EOS-collapse tails --
+    the sft6 postmortem traced the abstention regression to exactly this."""
+    code = "def f(x):\n    return x"
+    raw = ("Here is the code:\n```python\n" + code + "\n```" + "\n```" * 12)
+    out = G.clean_for_store(raw, code)
+    assert out == "Here is the code:\n```python\n" + code + "\n```"
+
+    # glued-empty prefix: "```\n\n```python" must not eat the real fence
+    raw2 = ("```python\n```\n```\n\n```python\n\n" + code +
+            "\n```\n```\n\n\n```")
+    out2 = G.clean_for_store(raw2, code)
+    assert "def f(x):" in out2 and "return x" in out2
+    assert out2.count("```") <= 4  # at most one open + one close
+
+    # no-fence / salvage extraction: raw returned unchanged-ish
+    raw3 = "def f(x):\n    return x"
+    assert "def f(x):" in G.clean_for_store(raw3, code)

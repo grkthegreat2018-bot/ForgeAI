@@ -104,6 +104,51 @@ def norm_hash(code: str) -> str:
     return hashlib.md5(n.encode()).hexdigest()[:12]
 
 
+def _fence_blocks(lines: list[str]) -> list[tuple[int, int, str]]:
+    """Line-based fence parse (immune to glued ```\\n\\n```python artifacts
+    that break a naive regex): opener = line starting with ```, closer =
+    line that is exactly ```. Returns (start, end, body) per block."""
+    blocks, i = [], 0
+    while i < len(lines):
+        if lines[i].strip().startswith("```"):
+            j = i + 1
+            while j < len(lines) and lines[j].strip() != "```":
+                j += 1
+            blocks.append((i, j, "\n".join(lines[i + 1:j])))
+            i = j + 1
+        else:
+            i += 1
+    return blocks
+
+
+def clean_for_store(raw: str, code: str) -> str:
+    """Return raw truncated just after the fence that produced `code`,
+    with empty fences stripped from the kept prefix.
+
+    Stored rows were verified on _extract_code(raw), but raw often carries
+    a degenerate tail (empty ```python fences, EOS-collapse spam). Storing
+    the tail verbatim teaches the abstention pattern found in the sft6
+    postmortem; keep only up to the verified payload.
+    """
+    lines = raw.split("\n")
+    key = (code.strip().split("\n") or [""])[0].strip()
+    end = len(lines)
+    for s, e, body in _fence_blocks(lines):
+        if key and key in body:
+            end = e + 1
+            break
+    blocks = _fence_blocks(lines[:end])
+    out, cur = [], 0
+    for s, e, body in blocks:
+        out.extend(lines[cur:s])                    # prose before fence
+        if body.strip():
+            out.extend(lines[s:e + 1])              # keep non-empty fence
+        cur = e + 1
+    out.extend(lines[cur:end])                      # trailing prose
+    res = re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+    return res or raw
+
+
 def proposer_prompts(reps: int) -> list[dict]:
     out = []
     tdir = REPO / "forge" / "evolution" / "targets"
@@ -672,7 +717,8 @@ def run_selfgen(args, out_path: Path, finished: set):
                 if all(not outs[i].startswith("__ERROR__")
                        and _approx_eq(outs[i], t["expected"][i])
                        for i in t["valid_idx"]):
-                    passes[ti].append((norm_hash(code), raw))
+                    passes[ti].append((norm_hash(code),
+                                       clean_for_store(raw, code)))
 
         # ── Phase 3: Goldilocks gate + keep <=2 variants + markers ──
         # Easy tasks (rate==1.0): all-k passes = strongest verification and
