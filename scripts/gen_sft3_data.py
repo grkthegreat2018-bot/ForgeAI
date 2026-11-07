@@ -16,12 +16,14 @@ Usage:
   python gen_sft3_data.py --model <ckpt> --mode direct --k 3 --limit 900
   python gen_sft3_data.py --model <ckpt> --mode selfgen --tasks 64 --k 4
 
-selfgen (AZR anti-overfitting): every wave proposes FRESH tasks (domain x
-difficulty x uniqueness-seed rotation, cliche banlist, 8-gram novelty
-gate), the sandbox executor derives ground truth from the reference
-implementation, solver rollouts must reproduce it on all tests, and only
-Goldilocks-informative tasks (0 < solve_rate < 1) are kept. Fixed corpora
-are never reused, so the prompt distribution expands every round.
+selfgen (codebase-grounded anti-overfitting): tasks are REAL functions
+harvested from ForgeAI production code (forge/scripts/research, GUI
+excluded) — self-contained, stdlib-only, documented, deterministic. The
+sandbox executor runs each reference on type-annotation-fuzzed inputs
+for ground truth (>=2 distinct outputs required), solver rollouts must
+reproduce it on all tests, and only Goldilocks-informative tasks
+(0 < solve_rate < 1) are kept. 8-gram novelty gate + resume markers;
+the pool is the whole codebase, not a fixed prompt list.
 """
 import argparse
 import ast
@@ -185,92 +187,229 @@ def done_keys(path: Path) -> set:
     return s
 
 
-# ── SELFGEN (AZR): fresh tasks + executor ground truth + Goldilocks ──
-# Anti-fixed-pool-overfitting: the model proposes NEW tasks (never the
-# fixed corpora), the sandbox executor derives ground truth from the
-# reference implementation, solver rollouts must MATCH it on tests, and
-# only informative tasks (0 < solve_rate < 1) enter the corpus.
+# ── SELFGEN (codebase-grounded): real functions -> execution-verified RFT ──
+# Anti-fixed-pool-overfitting: tasks are harvested from REAL ForgeAI
+# production functions (valid, executable, diverse — never a fixed prompt
+# pool). The sandbox executes the harvested reference on type-fuzzed
+# inputs for ground truth; solver rollouts must MATCH it on all tests;
+# only Goldilocks-informative tasks (0 < solve_rate < 1) enter the corpus.
+# Measured dead end (2026-11-07): model-authored task proposals (from-
+# scratch AND seed-variation) = 0/10 valid on the 1.7B — placeholder
+# copies, syntax errors, verbatim seed clones, fence spam. The model
+# solves well; it does not invent well. Tasks come from the codebase.
 
-_SELFGEN_DOMAINS = [
-    "string manipulation", "array algorithms", "hash maps and counting",
-    "two pointers", "stack and queue simulation", "greedy algorithms",
-    "recursion and backtracking", "math and number theory",
-    "date and interval logic", "matrix and grid traversal",
-    "dynamic programming (small)", "parsing and tokenizing",
-]
-_SELFGEN_DIFFICULTIES = ["easy", "medium", "medium", "hard"]
-_RE_TEST_INPUT = re.compile(
-    r'#\s*solve\s*\((.*?)\)\s*(?:->[^\n]*)?(?:\n|$)')
-
-
-def selfgen_proposal_prompt(domain: str, difficulty: str, seed: str) -> str:
-    return (
-        "Invent ONE novel Python programming exercise for a coding student.\n"
-        f"Domain: {domain}. Difficulty: {difficulty}.\n"
-        f"Uniqueness seed: {seed} (use it to pick an unusual topic).\n"
-        "Banned cliches: Fibonacci, palindrome, LRU cache, sorting, "
-        "binary search, factorial, prime checking, debounce, flatten.\n"
-        "Rules: stdlib only; deterministic (no randomness, no I/O); the "
-        "reference solution must be a single function `solve`.\n"
-        "Reply in EXACTLY this format:\n"
-        "# Task: <one-sentence description of what solve computes>\n"
-        "```python\n"
-        "def solve(<args>):\n"
-        "    <reference implementation>\n"
-        "# solve(<literal input 1>)\n"
-        "# solve(<literal input 2>)\n"
-        "# solve(<literal input 3>)\n"
-        "# solve(<literal input 4, an edge case>)\n"
-        "```\n"
-        "Test inputs must be Python literals; do NOT write expected outputs.")
+_HARVEST_ROOTS = ("forge", "scripts", "research")
+_HARVEST_EXCLUDE_DIRS = {
+    "__pycache__", "forge_gui", "forge_gui_server", "tests", "checkpoints",
+    "proposer_ckpt", "proposer_mla_moe", "loras", "loras_lfm3", "hf_cache",
+    "torch_cache", "tmp", "node_modules", "qwen25-05b", "ruffbase",
+}
+_HARVEST_ALLOWED_MODULES = {"math", "re", "itertools", "collections",
+                            "functools", "string", "operator"}
+_HARVEST_BANNED_TOKENS = (
+    "torch", "np.", "numpy", "cuda", "open(", "print(", "eval(", "exec(",
+    "globals(", "input(", "random", "time.", "datetime", "requests",
+    "subprocess", "os.", "sys.", "Path(", "ForgeEngine", "self.",
+    "cls.", "__import__", "pickle", "socket", "ctypes", "shutil",
+)
+_FUZZ_VALUES = {
+    "int": ["0", "1", "-3", "42"],
+    "float": ["0.0", "1.5", "-2.25", "3.25"],
+    "str": ["''", "'a'", "'hello world'", "'a,b,c'"],
+    "bool": ["True", "False", "True", "False"],
+    "list[int]": ["[]", "[1]", "[1, 2, 3]", "[-4, 0, 7, 7]"],
+    "list[str]": ["[]", "['a']", "['a', 'bb']", "['x', 'yy', 'zzz']"],
+    "list[float]": ["[]", "[1.0]", "[1.5, -2.0]", "[0.1, 0.2, 0.3]"],
+    "list": ["[]", "[1]", "[1, 2, 3]", "[-4, 0, 7, 7]"],
+    "dict[str,int]": ["{}", "{'a': 1}", "{'a': 1, 'b': 2}", "{'x': 0}"],
+}
 
 
-def parse_proposal(raw: str) -> dict | None:
-    """Extract (description, reference code, test arg strings) from a
-    proposal generation. Returns None when the contract isn't met."""
-    m = re.search(r"#\s*Task:\s*(.+?)(?:\n|$)", raw)
-    if not m:
-        return None
-    desc = m.group(1).strip()
-    if len(desc) < 15:
-        return None
-    code = _extract_code(raw) or ""
-    if not code.strip() or not safe_code(code):
+def _annotation_str(node) -> str | None:
+    """Normalize a param annotation to a fuzzable type key."""
+    if node is None:
         return None
     try:
-        compile(code, "<proposal>", "exec")
-    except SyntaxError:
+        s = ast.unparse(node)
+    except Exception:
         return None
-    if not re.search(r"def\s+solve\s*\(", code):
-        return None
-    tests = [a.strip() for a in _RE_TEST_INPUT.findall(code)]
-    tests = [a for a in tests if a]
-    if len(tests) < 3:
-        return None
-    for a in tests:
-        try:
-            ast.literal_eval(f"({a},)")
-        except Exception:
-            return None
-    return dict(desc=desc, code=code, tests=tests)
+    s = (s.replace("typing.", "").replace("List", "list")
+         .replace("Dict", "dict").replace(" ", ""))
+    return s if s in _FUZZ_VALUES else None
 
 
-def _harness(code: str, tests: list[str]) -> str:
-    """One-shot script: run solve on every test input, print reprs after a
-    marker. The marker isolates results from user print() noise."""
-    lines = [code, "", "import json as _json", "_out = []", "_err = None",
-             "try:"]
+_NAME_TYPE_RULES = (
+    (("s", "text", "string", "prompt", "desc", "word", "sentence", "line",
+      "query", "name", "msg", "message"), "str"),
+    (("xs", "arr", "array", "nums", "numbers", "values", "items", "seq",
+      "lst", "list", "ts", "scores", "ids", "tokens"), "list[int]"),
+    (("d", "dct", "dict", "mapping", "counts", "freq", "freqs", "counter",
+      "hist", "histogram"), "dict[str,int]"),
+    (("flag", "enabled", "disabled", "verbose", "strict", "reverse"), "bool"),
+    (("x", "y", "v", "val", "value", "score", "ratio", "alpha", "lr",
+      "tol", "eps", "threshold", "rate", "scale", "weight"), "float"),
+)
+
+
+def _name_type(name: str) -> str:
+    """Type inference for unannotated params (validated later by the
+    reference-execution filter — a wrong guess just drops the task)."""
+    n = name.lower()
+    if n.startswith(("use_", "is_", "has_", "do_", "should_", "allow_")):
+        return "bool"
+    for keys, t in _NAME_TYPE_RULES:
+        if n in keys:
+            return t
+    return "int"  # ints are the most common scalar in this codebase
+
+
+def _function_to_task(node: ast.FunctionDef, source: str,
+                      path: Path) -> dict | None:
+    """Eligibility: top-level, public, undecorated, 3-45 lines, 1-4
+    fully-annotated params, docstring description, stdlib+builtins only,
+    no module-level dependencies, deterministic."""
+    if (node.name.startswith("_") or node.decorator_list
+            or isinstance(node, ast.AsyncFunctionDef)):
+        return None
+    n_lines = (node.end_lineno or node.lineno) - node.lineno + 1
+    if not 3 <= n_lines <= 45:
+        return None
+    params = list(node.args.posonlyargs) + list(node.args.args)
+    if (not 1 <= len(params) <= 4 or node.args.vararg or node.args.kwarg
+            or node.args.kwonlyargs):
+        return None
+    types = [(_annotation_str(p.annotation) or _name_type(p.arg))
+             for p in params]
+    desc = (ast.get_docstring(node) or "").strip().splitlines()
+    desc = desc[0].strip() if desc else ""
+    if desc and (len(desc) < 15 or not desc.isascii()):
+        return None
+    src = ast.get_source_segment(source, node)
+    if not src or any(tok in src for tok in _HARVEST_BANNED_TOKENS):
+        return None
+    # Free-name analysis: every loaded name must be a param, a local, a
+    # builtin, an allowed stdlib module, or the function itself (recursion).
+    local_names = {p.arg for p in params} | {node.name}
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+            local_names.add(sub.id)
+        elif isinstance(sub, ast.arg):
+            local_names.add(sub.arg)
+        elif isinstance(sub, (ast.FunctionDef, ast.Lambda)):
+            for p in (sub.args.posonlyargs + sub.args.args
+                      + sub.args.kwonlyargs):
+                local_names.add(p.arg)
+        elif isinstance(sub, ast.ExceptHandler) and sub.name:
+            local_names.add(sub.name)
+        elif isinstance(sub, ast.withitem) and sub.optional_vars is not None:
+            for n2 in ast.walk(sub.optional_vars):
+                if isinstance(n2, ast.Name):
+                    local_names.add(n2.id)
+    import builtins as _b
+    allowed = (local_names | set(dir(_b)) | _HARVEST_ALLOWED_MODULES
+               | {"True", "False", "None"})
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+            if sub.id not in allowed:
+                return None
+    sig_m = re.search(r"def\s+\w+\s*(\([^)]*\))", src, re.S)
+    signature = re.sub(r"\s+", " ", sig_m.group(1)) if sig_m else "(...)"
+    try:
+        rel = str(path.relative_to(REPO))
+    except ValueError:
+        rel = path.name
+    return dict(name=node.name, code=src, desc=desc, signature=signature,
+                types=types, file=rel,
+                key=hashlib.md5(src.encode()).hexdigest()[:12])
+
+
+def harvest_functions(roots=_HARVEST_ROOTS, limit: int = 0) -> list[dict]:
+    """Extract execution-ready RFT tasks from production code."""
+    out = []
+    seen = set()
+    for root in roots:
+        for f in sorted((REPO / root).rglob("*.py")):
+            if any(part in _HARVEST_EXCLUDE_DIRS for part in f.parts):
+                continue
+            try:
+                if f.stat().st_size > 300_000:
+                    continue
+                source = f.read_text(encoding="utf-8")
+                tree = ast.parse(source)
+            except Exception:
+                continue
+            for node in tree.body:
+                if isinstance(node, ast.FunctionDef):
+                    task = _function_to_task(node, source, f)
+                    if task is not None and task["key"] not in seen:
+                        seen.add(task["key"])
+                        out.append(task)
+                        if limit and len(out) >= limit:
+                            return out
+    return out
+
+
+def fuzz_inputs(types: list[str], n: int = 4) -> list[str]:
+    """Deterministic literal arg strings per param annotation."""
+    out = []
+    for i in range(n):
+        out.append(", ".join(_FUZZ_VALUES[t][i % len(_FUZZ_VALUES[t])]
+                             for t in types))
+    return out
+
+
+def describe_function_prompt(code: str) -> str:
+    """Describe-existing-code pass for undocumented functions — a much
+    easier skill than task invention, and yields on-policy prompt text."""
+    return ("Describe in ONE English sentence (15-40 words) what this "
+            "Python function computes, including its edge-case behavior. "
+            "Reply with the sentence only — no code, no preamble, no "
+            "'This function' opener.\n```python\n" + code + "\n```")
+
+
+def valid_description(text: str) -> str:
+    d = " ".join(text.strip().split()).strip('"`').strip()
+    for pre in ("this function ", "the function "):
+        if d.lower().startswith(pre):
+            d = d[len(pre):]
+            if d:
+                d = d[0].upper() + d[1:]
+            break
+    if not 15 <= len(d) <= 300 or not d.isascii() or "\n" in d:
+        return ""
+    if re.search(r"\bdef\b|```|[{}]", d):
+        return ""  # code leaked into the description
+    return d
+
+
+def codebase_solver_prompt(task: dict) -> str:
+    return (f"Task: {task['desc']}\n"
+            f"Signature: `{task['name']}{task['signature']}`\n"
+            "Constraints: stdlib only, deterministic, no prints, no I/O.\n"
+            "Respond with ONE python code block containing only the "
+            f"function (named `{task['name']}`).")
+
+
+def _harness(code: str, tests: list[str], name: str = "solve") -> str:
+    """One-shot script: run the function on every test input, print reprs
+    after a marker (isolates results from user print() noise)."""
+    lines = ["import math, re, itertools, collections, functools, "
+             "string, operator", code, "",
+             "import json as _json", "_out = []"]
+    # Per-input isolation: an out-of-domain fuzz input must not kill the
+    # whole suite — it just marks that input invalid for ground truth.
     for a in tests:
-        lines.append(f"    _out.append(repr(solve({a})))")
-    lines += ["except Exception as _e:", "    _err = repr(_e)",
-              "print('__SELF_GEN_RESULT__' + _json.dumps([_out, _err]))"]
+        lines += ["try:", f"    _out.append(repr({name}({a})))",
+                  "except Exception as _e:",
+                  "    _out.append('__ERROR__' + repr(_e))"]
+    lines += ["print('__SELF_GEN_RESULT__' + _json.dumps([_out, None]))"]
     return "\n".join(lines)
 
 
-def run_tests(executor, code: str, tests: list[str]):
-    """Execute solve() on all test inputs in the sandbox. Returns
+def run_tests(executor, code: str, tests: list[str], name: str = "solve"):
+    """Execute the function on all test inputs in the sandbox. Returns
     (repr_outputs, error) — outputs None on timeout/crash/exception."""
-    r = executor.execute(_harness(code, tests))
+    r = executor.execute(_harness(code, tests, name))
     if r.get("timed_out") or r.get("returncode") != 0:
         return None, r.get("stderr", "failed")[:200]
     for line in reversed(r.get("stdout", "").splitlines()):
@@ -328,44 +467,23 @@ def goldilocks_ok(solve_rate: float) -> bool:
     return 0.0 < solve_rate < 1.0
 
 
-def selfgen_solver_prompt(desc: str, code: str) -> str:
-    m = re.search(r"def\s+solve\s*\([^)]*\)", code)
-    sig = m.group(0) if m else "def solve(...)"
-    return (f"Write a Python function that {desc[0].lower() + desc[1:]}\n"
-            f"Signature: `{sig}`\n"
-            "Constraints: stdlib only, deterministic, no prints.\n"
-            "Respond with ONE python code block containing only the "
-            "function (name it `solve`).")
-
-
 def run_selfgen(args, out_path: Path, finished: set):
-    """AZR wave loop: propose fresh tasks -> executor ground truth ->
-    solver rollouts -> execution-verified, Goldilocks + novelty gated rows.
-    Every wave is NEW tasks — the fixed corpora are never reused."""
+    """Codebase-grounded wave loop: harvested real functions -> sandbox
+    ground truth on fuzzed inputs -> solver rollouts -> execution-verified,
+    Goldilocks + novelty gated rows. Every wave uses NEW functions."""
     import random
-    import uuid
     from research.persistent_executor import PersistentCodeExecutor
 
     rng = random.Random(args.seed)
     executor = PersistentCodeExecutor(timeout_s=6.0, memory_limit_mb=512)
+    pool = harvest_functions()
+    print(f"selfgen: harvested {len(pool)} candidate functions", flush=True)
+    rng.shuffle(pool)
+    pool = [t for t in pool if f"selfgen:{t['key']}" not in finished]
     e = ForgeEngine.from_checkpoint(args.model)
     BS = args.batch_init or 16
-    stats = dict(proposed=0, valid=0, novel=0, executable=0, gen=0, kept=0,
-                 goldilocks=0)
+    stats = dict(executable=0, gen=0, kept=0, goldilocks=0)
     t0 = time.time()
-    domain_stats: dict[str, list] = {}
-    seen_grams: set = set()
-    # Rebuild novelty memory from prior selfgen rows (resume-safe).
-    if out_path.exists():
-        for line in open(out_path, encoding="utf-8"):
-            try:
-                r = json.loads(line)
-                if r.get("task_desc"):
-                    seen_grams |= novelty_ngrams(r["task_desc"])
-            except Exception:
-                pass
-    print(f"selfgen: {len(seen_grams)} prior novelty grams, "
-          f"{len(finished)} finished tasks", flush=True)
 
     def gen_batch(ws, seeds):
         nonlocal BS
@@ -386,78 +504,85 @@ def run_selfgen(args, out_path: Path, finished: set):
                 print(f"  batch err: {str(ex)[:150]}", flush=True)
                 return [None] * len(ws)
 
-    n_waves = (args.tasks + BS - 1) // BS
-    for wave in range(n_waves):
-        # ── Phase 1: propose fresh tasks ──
-        specs = []
-        for _ in range(min(BS, args.tasks - wave * BS)):
-            domain = rng.choice(_SELFGEN_DOMAINS)
-            # Goldilocks difficulty adaptation per domain: high recent
-            # solve rate -> harder, low -> easier.
-            diff = rng.choice(_SELFGEN_DIFFICULTIES)
-            hist = domain_stats.get(domain, [])
-            if len(hist) >= 4:
-                rate = sum(hist[-8:]) / len(hist[-8:])
-                if rate > 0.6:
-                    diff = "hard"
-                elif rate < 0.4:
-                    diff = "easy"
-            specs.append((domain, diff, uuid.uuid4().hex[:8]))
-        ws = [wrap(selfgen_proposal_prompt(d, df, s)) for d, df, s in specs]
+    # ── Describe-first pass: undocumented functions get a model-written
+    # one-line description (describe-existing-code is a learnable skill,
+    # unlike task invention; the text is on-policy prompt material).
+    need = [t for t in pool if not t["desc"]]
+    for d0 in range(0, len(need), BS):
+        chunk = need[d0:d0 + BS]
+        ws = [wrap(describe_function_prompt(t["code"])) for t in chunk]
         raws = gen_batch(ws, [rng.randrange(1 << 30) for _ in ws])
+        for t, raw in zip(chunk, raws):
+            if raw is not None:
+                t["desc"] = valid_description(raw)
+    pool = [t for t in pool if t["desc"]]
+    print(f"selfgen: {len(pool)} described tasks "
+          f"({len(need)} needed describe-pass)", flush=True)
+
+    seen_grams: set = set()
+    if out_path.exists():
+        for line in open(out_path, encoding="utf-8"):
+            try:
+                r = json.loads(line)
+                if r.get("task_desc"):
+                    seen_grams |= novelty_ngrams(r["task_desc"])
+            except Exception:
+                pass
+    pool = [t for t in pool if is_novel(t["desc"], seen_grams)]
+    pool = pool[:args.tasks]
+    print(f"selfgen: {len(pool)} fresh tasks after resume+novelty filters",
+          flush=True)
+
+    for w0 in range(0, len(pool), BS):
+        # ── Phase 1: executor ground truth on fuzzed inputs ──
         tasks = []
-        for (domain, diff, _seed), raw in zip(specs, raws):
-            stats["proposed"] += 1
-            if raw is None:
-                continue
-            p = parse_proposal(raw)
-            if p is None:
-                continue
-            stats["valid"] += 1
-            if not is_novel(p["desc"], seen_grams):
-                continue
-            stats["novel"] += 1
-            expected, err = run_tests(executor, p["code"], p["tests"])
+        for t in pool[w0:w0 + BS]:
+            t["tests"] = fuzz_inputs(t["types"], n=4)
+            expected, err = run_tests(executor, t["code"], t["tests"],
+                                      t["name"])
             if expected is None:
                 continue
-            stats["executable"] += 1
-            p.update(domain=domain, difficulty=diff, expected=expected,
-                     key=hashlib.md5(p["desc"].encode()).hexdigest()[:12])
-            tasks.append(p)
-        print(f"[wave {wave}] proposals valid={stats['valid']}/"
-              f"{stats['proposed']} novel={stats['novel']} "
-              f"executable={stats['executable']} -> solving {len(tasks)}",
+            # Ground truth = inputs the reference itself survives (fuzz
+            # inputs can be outside the function's domain). Require >=2
+            # valid inputs and >=2 distinct outputs (non-degenerate).
+            valid = [i for i, o in enumerate(expected)
+                     if not o.startswith("__ERROR__")]
+            if len(valid) < 2 or len({expected[i] for i in valid}) < 2:
+                continue
+            t["expected"] = expected
+            t["valid_idx"] = valid
+            tasks.append(t)
+        stats["executable"] += len(tasks)
+        print(f"[wave {w0//BS}] executable={len(tasks)}/{BS} -> solving",
               flush=True)
 
-        # ── Phase 2: k solver rollouts per fresh task ──
+        # ── Phase 2: k solver rollouts per task ──
         queue = [(ti, ki) for ti in range(len(tasks))
                  for ki in range(args.k)]
         passes: dict[int, list] = {ti: [] for ti in range(len(tasks))}
         for q0 in range(0, len(queue), BS):
             chunk = queue[q0:q0 + BS]
-            ws = [wrap(selfgen_solver_prompt(
-                tasks[ti]["desc"], tasks[ti]["code"])) for ti, _ in chunk]
+            ws = [wrap(codebase_solver_prompt(tasks[ti])) for ti, _ in chunk]
             raws = gen_batch(ws, [rng.randrange(1 << 30) for _ in ws])
             for (ti, _ki), raw in zip(chunk, raws):
                 if raw is None:
                     continue
                 stats["gen"] += 1
                 t = tasks[ti]
-                code = verify(raw, ["solve"])
+                code = verify(raw, [t["name"]])
                 if code is None:
                     continue
-                outs, err = run_tests(executor, code, t["tests"])
-                if outs is None:
+                outs, err = run_tests(executor, code, t["tests"], t["name"])
+                if outs is None or len(outs) != len(t["expected"]):
                     continue
-                if len(outs) == len(t["expected"]) and all(
-                        _approx_eq(o, ex) for o, ex in
-                        zip(outs, t["expected"])):
+                if all(not outs[i].startswith("__ERROR__")
+                       and _approx_eq(outs[i], t["expected"][i])
+                       for i in t["valid_idx"]):
                     passes[ti].append((norm_hash(code), raw))
 
         # ── Phase 3: Goldilocks gate + keep <=2 variants + markers ──
         for ti, t in enumerate(tasks):
             rate = len(passes[ti]) / args.k
-            domain_stats.setdefault(t["domain"], []).append(rate)
             gk = f"selfgen:{t['key']}"
             if goldilocks_ok(rate):
                 stats["goldilocks"] += 1
@@ -469,12 +594,12 @@ def run_selfgen(args, out_path: Path, finished: set):
                         continue
                     seen_h.add(hh)
                     row = dict(
-                        prompt=selfgen_solver_prompt(t["desc"], t["code"]),
-                        response=raw, source="rft_selfgen", gen_key=gk,
-                        task_desc=t["desc"], domain=t["domain"],
-                        difficulty=t["difficulty"], solve_rate=rate,
+                        prompt=codebase_solver_prompt(t), response=raw,
+                        source="rft_codebase", gen_key=gk,
+                        task_desc=t["desc"], domain=t["file"].split("/")[0],
+                        difficulty="auto", solve_rate=rate,
                         n_tests=len(t["tests"]), seed_code=t["code"],
-                        required=["solve"])
+                        required=[t["name"]])
                     with open(out_path, "a", encoding="utf-8") as f:
                         f.write(json.dumps(row, ensure_ascii=False) + "\n")
                     kept += 1
@@ -485,7 +610,7 @@ def run_selfgen(args, out_path: Path, finished: set):
                         prompt=None, response=None, gen_key=gk,
                         task_desc=t["desc"], solve_rate=rate)) + "\n")
         el = time.time() - t0
-        print(f"[wave {wave} done] goldilocks={stats['goldilocks']}/"
+        print(f"[wave {w0//BS} done] goldilocks={stats['goldilocks']}/"
               f"{len(tasks)} kept={stats['kept']} gen={stats['gen']} "
               f"bs={BS} {el/60:.1f}min", flush=True)
     executor.close()
