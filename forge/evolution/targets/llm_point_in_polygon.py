@@ -24,7 +24,7 @@ import torch.nn.functional as F
 import numpy as np
 
 def _gen_cases(seed):
-    np.random.seed(seed)
+    np.random.seed(seed % (2 ** 32))
     cases = [
         # Simple square
         ((0.5, 0.5), [(0, 0), (1, 0), (1, 1), (0, 1)]),

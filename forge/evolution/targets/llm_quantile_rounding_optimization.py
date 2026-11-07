@@ -24,7 +24,7 @@ import torch.nn.functional as F
 import numpy as np
 
 def _gen_cases(seed):
-    np.random.seed(seed)
+    np.random.seed(seed % (2 ** 32))
     cases = [
         (np.random.normal(0, 1, 1000), [0.1, 0.5, 0.9]),
         (np.random.uniform(0, 100, 500), [0.01, 0.25, 0.5, 0.75, 0.99]),

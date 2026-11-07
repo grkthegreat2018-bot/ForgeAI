@@ -24,7 +24,7 @@ import torch.nn.functional as F
 import numpy as np
 
 def _gen_cases(seed):
-    np.random.seed(seed)
+    np.random.seed(seed % (2 ** 32))
     cases = [
         np.array([[0, 0], [1, 1]]),
         np.array([[1, 1], [2, 2], [3, 3]]),

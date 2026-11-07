@@ -199,9 +199,11 @@ the correctness constraint",
   "seed_code": "<python source: imports + exactly one required function \
 `def <name>(...)` — a CORRECT but deliberately unoptimized \
 implementation>",
-  "gen_cases": "<python source of `def _gen_cases():` — a DETERMINISTIC \
-zero-arg function returning a list of 5-15 inputs; a tuple item is \
-called f(*item), anything else f(item). Seed random inside if needed.>"
+  "gen_cases": "<python source of `def _gen_cases(seed):` — a \
+DETERMINISTIC function OF THE SEED returning a list of 5-15 inputs; a \
+tuple item is called f(*item), anything else f(item). Bind randomness \
+to `seed` (random.seed(seed) / np.random.seed(seed % (2**32)) / \
+torch.Generator().manual_seed(seed)); literal corpora may ignore it.>"
 }}
 
 Rules:
@@ -210,8 +212,8 @@ prints, no input()
 - the required function name in seed_code MUST equal "name"
 - the function must be clearly optimizable (naive loops, repeated \
 work, O(n^2) that could be O(n log n), unnecessary copies)
-- _gen_cases must be deterministic and produce realistic inputs that \
-exercise the function
+- _gen_cases must be a deterministic function OF THE SEED (same seed -> \
+identical cases) and produce realistic inputs that exercise the function
 - output ONLY the JSON object"""
 
 
@@ -228,8 +230,8 @@ try:
         print(json.dumps({{"ok": False, "why": "required not callable"}})); sys.exit()
     exec(gen, ns)
     t0 = time.perf_counter()
-    cases1 = ns["_gen_cases"]()
-    cases2 = ns["_gen_cases"]()
+    cases1 = ns["_gen_cases"](7)
+    cases2 = ns["_gen_cases"](7)
     if not isinstance(cases1, list) or not cases1:
         print(json.dumps({{"ok": False, "why": "gen_cases empty/not list"}})); sys.exit()
     if repr(cases1) != repr(cases2):
@@ -374,7 +376,8 @@ def main() -> int:
             if not name or name[0].isdigit() or name in existing:
                 continue
             seed, gen = str(spec["seed_code"]), str(spec["gen_cases"])
-            if f"def {name}" not in seed or "def _gen_cases" not in gen:
+            if f"def {name}" not in seed \
+                    or "def _gen_cases(seed" not in gen:
                 continue
             ok1, _ = _check_domain_code(seed)
             ok2, _ = _check_domain_code(gen)

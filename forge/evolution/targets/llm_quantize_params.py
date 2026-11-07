@@ -26,7 +26,7 @@ import numpy as np
 
 def _gen_cases(seed):
     cases = []
-    np.random.seed(seed)
+    np.random.seed(seed % (2 ** 32))
     for _ in range(10):
         params = torch.tensor(np.random.rand(4))
         cases.append((params,))

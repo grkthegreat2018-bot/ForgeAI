@@ -9,7 +9,7 @@ BENCH_REPS = 3
 REQUIRED = ['top_p_sampling']
 PROMPT = 'Implement a function that performs top-p (nucleus) sampling from a probability distribution, where only the smallest set of tokens whose cumulative probability exceeds p are considered. The function must be optimized to avoid unnecessary computations and memory allocations. Ensure the output is deterministic for the same input probabilities and random seed.'
 
-SEED_CODE = 'import numpy as np\n\ndef top_p_sampling(probs, p, seed=42):\n    np.random.seed(seed)\n    sorted_indices = np.argsort(probs)[::-1]\n    sorted_probs = probs[sorted_indices]\n    cumulative_probs = np.cumsum(sorted_probs)\n    cutoff = np.argmax(cumulative_probs >= p) + 1\n    filtered_probs = sorted_probs[:cutoff]\n    filtered_probs /= filtered_probs.sum()\n    sampled_index = np.random.choice(len(filtered_probs), p=filtered_probs)\n    return sorted_indices[sampled_index]\n'
+SEED_CODE = 'import numpy as np\n\ndef top_p_sampling(probs, p, seed=42):\n    np.random.seed(seed % (2 ** 32))\n    sorted_indices = np.argsort(probs)[::-1]\n    sorted_probs = probs[sorted_indices]\n    cumulative_probs = np.cumsum(sorted_probs)\n    cutoff = np.argmax(cumulative_probs >= p) + 1\n    filtered_probs = sorted_probs[:cutoff]\n    filtered_probs /= filtered_probs.sum()\n    sampled_index = np.random.choice(len(filtered_probs), p=filtered_probs)\n    return sorted_indices[sampled_index]\n'
 
 import hashlib
 import math

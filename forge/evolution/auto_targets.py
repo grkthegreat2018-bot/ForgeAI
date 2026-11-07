@@ -148,14 +148,28 @@ def _callable_source(obj) -> str:
 
 
 def _gen_source(gen) -> str:
-    """Lift the case generator into the spec as ``_gen_cases()``."""
+    """Lift the case generator into the spec as ``_gen_cases(seed)``.
+
+    The oracle supplies ONE fresh seed per eval (fresh inputs each eval —
+    fixed-seed corpora let candidates specialize to known inputs); the
+    lifted body re-binds any fixed seed literals to it. np.random.seed is
+    masked to its uint32 domain."""
     src = _callable_source(gen)
-    out = re.sub(r"def\s+" + re.escape(gen.__name__) + r"\s*\(",
-                 "def _gen_cases(", src, count=1)
+    out = re.sub(r"def\s+" + re.escape(gen.__name__) + r"\s*\([^)]*\)",
+                 "def _gen_cases(seed)", src, count=1)
     if "_gen_cases(" not in out:
         raise ValueError(
             f"gen_input {gen.__name__!r}: could not lift def — "
             "it must be a module-level `def name():` function")
+    out = re.sub(r"\bnp\.random\.seed\(\d+\)",
+                 "np.random.seed(seed % (2 ** 32))", out)
+    out = re.sub(r"\bnumpy\.random\.seed\(\d+\)",
+                 "numpy.random.seed(seed % (2 ** 32))", out)
+    out = re.sub(r"\brandom\.seed\(\d+\)", "random.seed(seed)", out)
+    out = re.sub(r"\btorch\.manual_seed\(\d+\)",
+                 "torch.manual_seed(seed)", out)
+    out = re.sub(r"\brandom\.Random\(\d+\)", "random.Random(seed)", out)
+    out = re.sub(r"\.manual_seed\(\d+\)", ".manual_seed(seed)", out)
     return out
 
 
@@ -321,8 +335,12 @@ def test(ns):
     if not callable(fn):
         return {"ok": False, "detail": f"no {REQUIRED[0]}"}
     ref = _ref()
-    cases_a = _gen_cases()
-    cases_b = _gen_cases()          # fresh inputs — mutation-safe
+    # Fresh OS-entropy seed per eval — fixed corpora let candidates
+    # specialize to known inputs. Same seed for both calls: candidate and
+    # reference see paired (independent-copy) inputs.
+    _s = random.Random().getrandbits(63)
+    cases_a = _gen_cases(_s)
+    cases_b = _gen_cases(_s)          # fresh inputs — mutation-safe
     for i, (ca, cb) in enumerate(zip(cases_a, cases_b)):
         try:
             y = _call(fn, ca)
@@ -340,7 +358,7 @@ def test(ns):
 
 def bench(ns):
     fn = ns[REQUIRED[0]]
-    cases = _gen_cases()
+    cases = _gen_cases(random.Random().getrandbits(63))
     for c in cases:
         _call(fn, c)
     on_cuda = _any_cuda(cases)

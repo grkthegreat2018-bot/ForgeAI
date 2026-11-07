@@ -22,7 +22,7 @@ import torch
 import torch.nn.functional as F
 
 def _gen_cases(seed):
-    np.random.seed(seed)
+    np.random.seed(seed % (2 ** 32))
     cases = [
         (np.eye(5),),  # Identity matrix
         (np.zeros((4, 4)),),  # Zero matrix
