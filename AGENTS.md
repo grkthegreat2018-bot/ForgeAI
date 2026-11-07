@@ -2196,6 +2196,24 @@ v2-style long solutions; lineage continues from sft6_fq (final — best
 solve precision), not bestval. `opc_sft2` ~118k rows deep, ~1260
 consumed; next fetch `--skip 1660`.
 
+**sft7 (negative result) + sft8 re-base FIX (2026-11-08)**: sft7 tested
+the corpus hypothesis — pure-code corpus (0 reflection, all rows
+stub-cleaned via `.devin/build_sft7.py`; stored rows now also truncated
+at the verified fence by `clean_for_store` in gen_sft3_data.py,
+commit 0229fc0) trained sft6→sft7: **extraction still collapsed**
+(1/60, 32 runnable; bv 26). Decline is cumulative weight drift across
+chained LoRA rounds, not corpus composition. Literature fix
+(ReST-EM arXiv:2312.06585 — M-step restarts from BASE each round):
+two repairs verified. (a) Weight soup `.devin/merge_soup.py`:
+0.5·sft3+0.5·sft6 → 3/60, 53 runnable — cheap partial rescue.
+(b) **Canonical re-base — THE FIX**: train `spark_x26_1p7b` BASE on
+`spark_sft_v7.jsonl` (290 union verified external + 209 v2 replay,
+0 refl) 175 steps val .4482 → `sft8.safetensors`+`_fq`: **2/60 pass,
+101/240 runnable — extraction fully restored to sft3 peak**.
+RULE (supersedes chain-SFT): future rounds retrain from BASE on the
+union corpus; never chain sftN→sftN+1. Remaining gap: precision
+(3/101 ≈ 3%) — next lever is more verified rows per round.
+
 Stage-3 shortlist (verified on HF hub):
 - **Code tasks w/ refs+tests** (drop into the exec-verified loop):
   `OpenCoder-LLM/opc-sft-stage2` `educational_instruct` (compiler-validated
