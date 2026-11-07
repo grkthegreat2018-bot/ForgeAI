@@ -221,12 +221,18 @@ def direct_prompts(limit: int) -> list[dict]:
     return out[:limit]
 
 
-def done_keys(path: Path) -> set:
+def done_keys(path: Path, kept_only: bool = False) -> set:
+    """gen_keys already written to `path`. kept_only=True ignores
+    prompt=None marker rows so a --retry-missed pass revisits tasks the
+    first pass failed to keep (kept tasks still skip)."""
     s = set()
     if path.exists():
         for line in open(path, encoding="utf-8"):
             try:
-                s.add(json.loads(line)["gen_key"])
+                r = json.loads(line)
+                if kept_only and not r.get("prompt"):
+                    continue
+                s.add(r["gen_key"])
             except Exception:
                 pass
     return s
@@ -622,7 +628,10 @@ def run_selfgen(args, out_path: Path, finished: set):
         for line in open(out_path, encoding="utf-8"):
             try:
                 r = json.loads(line)
-                if r.get("task_desc"):
+                # retry-missed: marker desc grams must not re-block the
+                # tasks being rescued — only kept rows gate novelty.
+                if r.get("task_desc") and (
+                        not args.retry_missed or r.get("prompt")):
                     seen_grams |= novelty_ngrams(r["task_desc"])
             except Exception:
                 pass
@@ -795,11 +804,15 @@ def main():
                          "All-k-pass rows are the strongest-verified and "
                          "still add novel-task variety for SFT.")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--retry-missed", action="store_true",
+                    help="Revisit tasks whose marker rows (prompt=None) "
+                         "show no kept solution — e.g. a second pass at "
+                         "higher --k on first-pass misses.")
     args = ap.parse_args()
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    finished = done_keys(out_path)
+    finished = done_keys(out_path, kept_only=args.retry_missed)
 
     if args.mode == "selfgen":
         run_selfgen(args, out_path, finished)
