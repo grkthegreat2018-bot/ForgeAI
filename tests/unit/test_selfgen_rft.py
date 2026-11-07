@@ -143,6 +143,21 @@ def test_goldilocks_filter():
     assert not G.goldilocks_ok(1.0)     # always solved: no signal
 
 
+def test_keep_decision_easy_prob():
+    import random
+    rng = random.Random(7)
+    # strict mode: easy prob 0 -> always-solved dropped
+    assert G.keep_decision(1.0, 0.0, rng) is None
+    assert G.keep_decision(0.0, 0.9, rng) is None   # never-solved stays dropped
+    assert G.keep_decision(0.5, 0.0, rng) == "goldilocks"
+    # prob 1.0 -> every always-solved kept as 'easy'
+    assert G.keep_decision(1.0, 1.0, rng) == "easy"
+    # prob 0.5 -> deterministic-ish mix over seeds
+    verdicts = {G.keep_decision(1.0, 0.5, random.Random(s))
+                for s in range(40)}
+    assert verdicts == {"easy", None}
+
+
 def test_sandbox_harness_executes_reference(sample_tree):
     """End-to-end: harvested references run in the real sandbox (stdlib
     imports injected), wrong solvers mismatch, custom names work."""

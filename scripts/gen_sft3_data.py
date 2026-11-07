@@ -494,6 +494,17 @@ def goldilocks_ok(solve_rate: float) -> bool:
     return 0.0 < solve_rate < 1.0
 
 
+def keep_decision(solve_rate: float, easy_prob: float, rng) -> str | None:
+    """-> 'goldilocks' | 'easy' | None. Easy tasks (all-k passes) are the
+    strongest-verified; easy_prob controls how many enter the corpus —
+    SFT learns from every correct row, RL would see zero signal."""
+    if goldilocks_ok(solve_rate):
+        return "goldilocks"
+    if solve_rate == 1.0 and easy_prob > 0 and rng.random() < easy_prob:
+        return "easy"
+    return None
+
+
 def run_selfgen(args, out_path: Path, finished: set):
     """Codebase-grounded wave loop: harvested real functions -> sandbox
     ground truth on fuzzed inputs -> solver rollouts -> execution-verified,
@@ -515,7 +526,7 @@ def run_selfgen(args, out_path: Path, finished: set):
     pool = [t for t in pool if f"selfgen:{t['key']}" not in finished]
     e = ForgeEngine.from_checkpoint(args.model)
     BS = args.batch_init or 16
-    stats = dict(executable=0, gen=0, kept=0, goldilocks=0)
+    stats = dict(executable=0, gen=0, kept=0, goldilocks=0, easy=0)
     t0 = time.time()
 
     def gen_batch(ws, seeds):
@@ -655,22 +666,30 @@ def run_selfgen(args, out_path: Path, finished: set):
                     passes[ti].append((norm_hash(code), raw))
 
         # ── Phase 3: Goldilocks gate + keep <=2 variants + markers ──
+        # Easy tasks (rate==1.0): all-k passes = strongest verification and
+        # still novel-task variety — keep 1 row w.p. keep_easy_prob. This is
+        # SFT (every correct row teaches), not RL (zero gradient signal).
         for ti, t in enumerate(tasks):
             rate = len(passes[ti]) / args.k
             gk = f"selfgen:{t['key']}"
-            if goldilocks_ok(rate):
-                stats["goldilocks"] += 1
+            verdict = keep_decision(rate, args.keep_easy_prob, rng)
+            easy = verdict == "easy"
+            if verdict:
+                stats[verdict] += 1
                 seen_grams |= novelty_ngrams(t["desc"])
+                cap = 1 if easy else 2
                 kept = 0
                 seen_h = set()
                 for hh, raw in passes[ti]:
-                    if hh in seen_h or kept >= 2:
+                    if hh in seen_h or kept >= cap:
                         continue
                     seen_h.add(hh)
                     row = dict(
                         prompt=codebase_solver_prompt(t), response=raw,
-                        source="rft_external" if args.external
-                        else "rft_codebase", gen_key=gk,
+                        source=("rft_external_easy" if easy else
+                                "rft_external") if args.external
+                        else ("rft_codebase_easy" if easy else
+                              "rft_codebase"), gen_key=gk,
                         task_desc=t["desc"],
                         domain="external" if args.external
                         else t["file"].split("/")[0],
@@ -687,9 +706,9 @@ def run_selfgen(args, out_path: Path, finished: set):
                         prompt=None, response=None, gen_key=gk,
                         task_desc=t["desc"], solve_rate=rate)) + "\n")
         el = time.time() - t0
-        print(f"[wave {w0//BS} done] goldilocks={stats['goldilocks']}/"
-              f"{len(tasks)} kept={stats['kept']} gen={stats['gen']} "
-              f"bs={BS} {el/60:.1f}min", flush=True)
+        print(f"[wave {w0//BS} done] goldilocks={stats['goldilocks']} "
+              f"easy={stats['easy']}/{len(tasks)} kept={stats['kept']} "
+              f"gen={stats['gen']} bs={BS} {el/60:.1f}min", flush=True)
     executor.close()
     print(f"SELFGEN DONE {stats} -> {out_path}")
 
@@ -715,6 +734,11 @@ def main():
                     help="0=auto from free VRAM")
     ap.add_argument("--batch-min", type=int, default=4)
     ap.add_argument("--batch-max", type=int, default=40)
+    ap.add_argument("--keep-easy-prob", type=float, default=0.0,
+                    help="selfgen: probability of keeping 1 verified row "
+                         "from always-solved tasks (0=strict Goldilocks). "
+                         "All-k-pass rows are the strongest-verified and "
+                         "still add novel-task variety for SFT.")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
