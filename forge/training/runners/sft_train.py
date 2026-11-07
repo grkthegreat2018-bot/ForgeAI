@@ -2584,20 +2584,31 @@ def main():
                         "loss": last_loss, "val_loss": val_loss,
                         "lr": lr, "epoch": epoch,
                     })
-                    # Early stopping: patience-based (val loss not improving)
-                    if args.early_stop_patience > 0:
-                        if val_loss < best_val_loss:
-                            best_val_loss = val_loss
-                            patience_counter = 0
-                        else:
-                            patience_counter += 1
-                            print(f"  [EarlyStop] val_loss not improving "
-                                  f"({patience_counter}/{args.early_stop_patience})")
-                            if patience_counter >= args.early_stop_patience:
-                                print(f"  [EarlyStop] Stopping: val loss hasn't improved "
-                                      f"for {args.early_stop_patience} checks.")
-                                early_stopped = True
-                                break
+                    # Best-val tracking: whenever val improves, snapshot the
+                    # adapter so the best (not last) step is recoverable.
+                    # LoRA-only ~80MB — cheap insurance vs full saves.
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        patience_counter = 0
+                        if use_manual_lora:
+                            _bs, _bx = os.path.splitext(str(args.save))
+                            _best_path = f"{_bs}.bestval{_bx}"
+                            save_training_checkpoint(
+                                model, _best_path, step=step,
+                                lora_only=True,
+                                meta={"base_checkpoint": args.checkpoint,
+                                      "best_val_loss": val_loss})
+                            print(f"  [Val] new best {val_loss:.4f} — adapter "
+                                  f"snapshot -> {_best_path}")
+                    elif args.early_stop_patience > 0:
+                        patience_counter += 1
+                        print(f"  [EarlyStop] val_loss not improving "
+                              f"({patience_counter}/{args.early_stop_patience})")
+                        if patience_counter >= args.early_stop_patience:
+                            print(f"  [EarlyStop] Stopping: val loss hasn't improved "
+                                  f"for {args.early_stop_patience} checks.")
+                            early_stopped = True
+                            break
                 # Early stopping: min train loss (format learned, stop before overfit)
                 # Checked at every logging interval (every 5 steps), not just validation.
                 if args.min_train_loss > 0 and step % 5 == 0:
