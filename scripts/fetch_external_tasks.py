@@ -86,7 +86,12 @@ def main():
                       streaming=True)
     if args.kind == "reflection":
         rows = []
+        n_src = 0
         for row in ds:
+            if n_src < args.skip:
+                n_src += 1
+                continue
+            n_src += 1
             rows.extend(reflection_rows(row))
             if len(rows) >= args.limit:
                 break
