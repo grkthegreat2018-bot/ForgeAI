@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import traceback
 
@@ -26,7 +27,8 @@ def _load_module(path: str, name: str):
 
 
 def _emit(out: dict) -> None:
-    print("__RESULT__" + json.dumps(out, default=str))
+    out["_nonce"] = _NONCE
+    print("__RESULT__" + json.dumps(out, default=str), flush=True)
 
 
 def _clearly_worse(metrics: dict, cheap: dict) -> bool:
@@ -76,32 +78,30 @@ def _cheap_gate(target, ns: dict, cheap: dict) -> dict | None:
 
 
 def _scrub_secrets() -> None:
-    """Drop secret-looking env vars before exec'ing candidate code."""
-    import os
+    """Drop secret-looking env vars before exec'ing candidate code.
+    Deny-wins: a secret-pattern match survives ONLY via the exact-match
+    safe list — the old prefix allowlist passed FORGE_API_KEY,
+    NVIDIA_API_KEY, NODE_AUTH_TOKEN, CARGO_REGISTRY_TOKEN, OS_PASSWORD…"""
     import re
     pat = re.compile(
         r'(token|secret|passw|credential|private|api[_-]?key|auth|bearer'
         r'|(^|_)key($|_))', re.IGNORECASE)
-    keep = ('PYTHON', 'CUDA', 'NV', 'TRITON', 'TORCH', 'OMP', 'MKL',
-            'OPENBLAS', 'NUMEXPR', 'PATH', 'PATHEXT', 'SYSTEMROOT',
-            'SYSTEMDRIVE', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA',
-            'LOCALAPPDATA', 'HOMEDRIVE', 'HOMEPATH', 'COMSPEC', 'OS',
-            'PROCESSOR', 'WINDIR', 'HF_HOME', 'HF_HUB', 'TRANSFORMERS',
-            'VIRTUAL_ENV', 'CONDA', 'NUMBER_OF_PROCESSORS', 'USERNAME',
-            'USERDOMAIN', 'PROGRAMDATA', 'PROGRAMFILES', 'PUBLIC',
-            'ALLUSERSPROFILE', 'COMMONPROGRAM', 'PSMODULEPATH',
-            'TOKENIZERS_PARALLELISM', 'ONEAPI', 'VS', 'VC', 'INCLUDE',
-            'INTEL', 'DOTNET', 'GOPATH', 'CARGO', 'RUST', 'NODE', 'JAVA',
-            'MSYSTEM', 'MINGW', 'VCPKG', 'WSL', 'XDG', 'HOME', 'SHELL',
-            'LANG', 'LC_', 'TZ', 'FORGE_', 'DRIVERDATA', 'SESSIONNAME',
-            'LOGONSERVER')
+    safe = {'TOKENIZERS_PARALLELISM'}
     for k in list(os.environ):
         ku = k.upper()
-        if pat.search(ku) and not ku.startswith(keep):
+        if pat.search(ku) and ku not in safe:
             del os.environ[k]
 
 
+_NONCE = ""
+
+
 def main() -> int:
+    global _NONCE
+    # Pop the parent's per-eval nonce BEFORE candidate exec — after this
+    # os.environ no longer carries it, so forged __RESULT__ lines can't
+    # learn the token (PEB/env-block snapshot reads remain a residual).
+    _NONCE = os.environ.pop("_FORGE_EVAL_NONCE", "")
     target_path, cand_path = sys.argv[1], sys.argv[2]
     cheap = json.loads(sys.argv[3]) if len(sys.argv) > 3 else None
     _scrub_secrets()
@@ -172,4 +172,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # os._exit, not sys.exit: candidate atexit handlers must NEVER run —
+    # a registered handler could print a forged __RESULT__ line after the
+    # real one and win last-line parsing. Flush first; os._exit skips it.
+    _rc = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(_rc)

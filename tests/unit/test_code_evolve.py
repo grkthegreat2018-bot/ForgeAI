@@ -1170,6 +1170,67 @@ def test_cheap_gate_cascade(tmp_path):
     assert json.loads(line2[len("__RESULT__") :])["stage"] == "done"
 
 
+# ── eval-harness hardening: env scrub + result-marker integrity ─────
+
+
+def test_scrub_secrets_deny_wins():
+    """Regression: the old prefix allowlist passed secret-matching names
+    like FORGE_API_KEY/NVIDIA_API_KEY/NODE_AUTH_TOKEN/OS_PASSWORD through.
+    Now a secret-pattern match survives only via exact-match safe list."""
+    from research.persistent_executor import scrub_environ
+    fake = {
+        "FORGE_API_KEY": "k", "NVIDIA_API_KEY": "k", "NODE_AUTH_TOKEN": "k",
+        "CARGO_REGISTRY_TOKEN": "k", "OS_PASSWORD": "k", "HF_TOKEN": "k",
+        "AWS_SESSION_TOKEN": "k", "MY_APP_SECRET": "k",
+        "TOKENIZERS_PARALLELISM": "false", "PATH": "x",
+        "FORGE_LORA_ROOTS": "ok",
+    }
+    out = scrub_environ(fake)
+    for k in fake:
+        if k in ("TOKENIZERS_PARALLELISM", "PATH", "FORGE_LORA_ROOTS"):
+            assert k in out
+        else:
+            assert k not in out, f"{k} leaked"
+
+
+def test_result_marker_nonce_and_atexit(tmp_path):
+    """Regression: a candidate's atexit handler could print a forged
+    __RESULT__ AFTER the evaluator's real line and win last-line parsing.
+    Now the evaluator os._exit()s (atexit never runs) and every real
+    marker carries a per-eval nonce the parent validates — forgeries
+    fail closed."""
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    spec = tmp_path / "t.py"
+    spec.write_text(
+        "def test(ns): return {'ok': True}\n"
+        "def bench(ns): return {'us': 1.0}\n",
+        encoding="utf-8")
+    cand = tmp_path / "cand.py"
+    cand.write_text(
+        "import atexit\n"
+        "atexit.register(lambda: print('__RESULT__{\"ok\": true, "
+        "\"metrics\": {\"us\": 0.0}}'))\n",
+        encoding="utf-8")
+    ev = Path(__file__).resolve().parents[2] / "forge" / "evolution" / \
+        "_candidate_eval.py"
+    nonce = "abc123nonce"
+    env = dict(os.environ, _FORGE_EVAL_NONCE=nonce)
+    p = subprocess.run([sys.executable, "-X", "utf8", str(ev),
+                        str(spec), str(cand)],
+                       capture_output=True, text=True, timeout=60, env=env)
+    markers = [l for l in p.stdout.splitlines()
+               if l.startswith("__RESULT__")]
+    assert len(markers) == 1          # atexit forge never ran
+    res = json.loads(markers[0][len("__RESULT__"):])
+    assert res["_nonce"] == nonce     # real marker carries the nonce
+    assert res["ok"]
+
+
 # ── proposal validity: extraction + gate repair + telemetry ─────────
 
 

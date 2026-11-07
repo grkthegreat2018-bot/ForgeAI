@@ -849,3 +849,22 @@ _resolve_tokenizer_source: --tokenizer -> ckpt dir -> .meta.json tokenizer_path 
 
 ### Lesson
 When train loss ~10 but eval CE <1 on the same ckpt+data, check WHICH tokenizer the trainer resolved before suspecting adapters/packing/quant. The usable-example count diff is the cheapest fingerprint.
+
+
+## 2026-11-07 — evolve eval-harness: secret-scrub bypass + result-marker forgery
+
+### Symptom (user-verified)
+- _scrub_secrets let FORGE_API_KEY, NVIDIA_API_KEY, NODE_AUTH_TOKEN, CARGO_REGISTRY_TOKEN, OS_PASSWORD reach candidate code.
+- A candidate's atexit handler printed a forged `__RESULT__` line AFTER the evaluator's real one; parent took last marker -> forged ok/metrics accepted.
+
+### Root cause
+- Scrub: `pat.search(ku) and not ku.startswith(keep)` — broad prefixes (FORGE_, NV, NODE, CARGO, OS, XDG, HOME) outranked the deny regex in _candidate_eval, eval_pool, persistent_executor.
+- Marker: evaluator returned via sys.exit -> normal shutdown ran candidate atexit after the real print; the 'can only precede' comment was false.
+
+### Fix
+- Deny-wins scrub: secret-regex match survives only via exact-match {TOKENIZERS_PARALLELISM} (all 3 sites).
+- Evaluator emits `__RESULT__`{json with _nonce} then os._exit — atexit never runs. Parent passes _FORGE_EVAL_NONCE per eval (uuid4 hex), validates it, and fails closed when no nonced line exists. Early candidate os._exit -> no valid marker -> scored as failure.
+- prefix_hash target: Random(3)/Random(9) -> unseeded (fresh inputs per eval). Other targets remain fixed-seed (documented residual).
+
+### Lesson
+'Last-line-wins' parsing is a forge oracle whenever hostile code can outlive the real writer. Pair output-position rules with an unforgeable token AND a hard exit that skips user-registered cleanup.

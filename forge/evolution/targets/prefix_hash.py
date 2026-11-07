@@ -67,7 +67,8 @@ def _ref():
 
 def _cases():
     import random
-    rng = random.Random(3)
+    rng = random.Random()   # fresh entropy per eval — fixed seeds let
+                            # candidates specialize to known inputs
     out = []
     for n in (0, 1, 17, 255, 256, 257, 511, 2048, 4097):
         out.append([rng.randrange(-2**31, 2**31) for _ in range(n)])
@@ -104,7 +105,7 @@ def bench(ns):
     import random
     import time
     chain = ns["prefix_hashes"]
-    rng = random.Random(9)
+    rng = random.Random()   # fresh entropy per eval (same reason)
     prompts = [[rng.randrange(0, 152000) for _ in range(4096)]
                for _ in range(48)]
     for p in prompts[:4]:

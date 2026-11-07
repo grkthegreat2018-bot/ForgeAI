@@ -180,8 +180,13 @@ Hard guarantees now enforced:
   was inert; the in-process `exec(all_code)` self_critique is gone),
   `forge/self_play/infinite_curriculum.py` (_execute_sandbox).
 - `forge/evolution/eval_pool.py` + `_candidate_eval.py` + `code_evolve.py`:
-  secret-env scrub before candidate exec, Job Object on pool workers,
-  `__RESULT__` marker parsed from the LAST line only.
+  secret-env scrub before candidate exec (deny-wins — secret-pattern
+  matches survive only via exact-match `TOKENIZERS_PARALLELISM`; the old
+  prefix allowlist leaked FORGE_API_KEY/NVIDIA_API_KEY/NODE_AUTH_TOKEN/
+  CARGO_REGISTRY_TOKEN/OS_PASSWORD), Job Object on pool workers,
+  `__RESULT__` lines carry a per-eval `_nonce` (env-passed, popped before
+  candidate exec) and the evaluator exits via `os._exit` so candidate
+  atexit forgeries never run; un-nonced markers fail closed.
 - `forge_gui/api/agent_tools.py`: run_python env-scrubbed + timeout
   capped; run_tests args filtered to a safe pytest flag allowlist.
 - `forge_gui_server/app.py`: loopback-only CORS + WebSocket Origin check
@@ -218,6 +223,16 @@ Honest residuals — NOT guaranteed:
 - eval_pool/candidate workers intentionally keep full capabilities
   (torch.compile subprocess, CUDA) — only env secrets are stripped;
   treat evolved candidate code as hostile-but-jailed, not harmless.
+- The `_nonce` marker token is env-delivered and popped before candidate
+  exec — a candidate that reads its own PEB env-block snapshot via
+  ctypes/native (eval workers have full capabilities) could recover it.
+  eval_pool results travel via result_q + canaries (drift detection,
+  not a trust boundary). Promotion-grade integrity still needs
+  audit-hooked workers; today the nonce defeats print/atexit-level
+  forgery, not a determined native-code attacker.
+- Bench inputs in most evolve targets remain fixed-seed (only
+  prefix_hash randomizes per-eval) — input-specialization resistance
+  is partial pending the randomized-inputs roadmap item.
 - `weights_only=False` torch.load sites remain for genuinely
   pickle-required formats (flux snapshots, optimizer/RNG resume
   bundles): load only self-produced artifacts; all now warn.

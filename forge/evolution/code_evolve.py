@@ -2289,6 +2289,11 @@ class CodeEvolve:
             env = dict(os.environ)
         env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
         env["PYTHONIOENCODING"] = "utf-8"
+        # Per-eval result token: the evaluator pops it from environ before
+        # exec'ing candidate code and embeds it in the real __RESULT__
+        # payload. Forged lines can't know it.
+        nonce = uuid.uuid4().hex[:16]
+        env["_FORGE_EVAL_NONCE"] = nonce
         try:
             # Run by file path, NOT -m: `-m forge.evolution._candidate_eval`
             # imports the heavy package __init__ (torch+all domains) into
@@ -2302,15 +2307,25 @@ class CodeEvolve:
                 cwd=str(ROOT), env=env)
         except subprocess.TimeoutExpired:
             return {"ok": False, "stage": "timeout"}
-        # LAST __RESULT__ line wins: a candidate that prints a forged
-        # "__RESULT__{...}" marker can only precede the evaluator's real
-        # line (emitted after exec returns), never follow it.
-        line = next((ln for ln in reversed(p.stdout.splitlines())
-                     if ln.startswith("__RESULT__")), None)
-        if line is None:
+        # Result integrity: only lines whose payload carries THIS eval's
+        # nonce count — a forged "__RESULT__{...}" printed by candidate
+        # code (e.g. via atexit, which the evaluator's os._exit now skips
+        # anyway, or an early os._exit + fake marker) is rejected and the
+        # eval fails closed rather than trusting the last marker.
+        res = None
+        for ln in p.stdout.splitlines():
+            if not ln.startswith("__RESULT__"):
+                continue
+            try:
+                cand_res = json.loads(ln[len("__RESULT__"):])
+            except Exception:
+                continue
+            if isinstance(cand_res, dict) and cand_res.get("_nonce") == nonce:
+                res = cand_res
+        if res is None:
             return {"ok": False, "stage": "spawn",
                     "detail": (p.stderr or p.stdout or "")[-400:]}
-        return json.loads(line[len("__RESULT__"):])
+        return res
 
     def _eval_sync(self, code: str, workdir: Path, tag: str = "x",
                    timeout_s: float | None = None) -> dict:

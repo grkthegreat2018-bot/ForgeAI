@@ -46,30 +46,22 @@ _SECRET_ENV_RE = re.compile(
     r'(token|secret|passw|credential|private|api[_-]?key|auth|bearer|(^|_)key($|_))',
     re.IGNORECASE)
 
-# Vars that must survive even if they match the secret regex — runtime/toolchain
-# configuration the interpreter or child build tools legitimately need.
-_ENV_KEEP_PREFIXES = (
-    'PYTHON', 'CUDA', 'NV', 'TRITON', 'TORCH', 'OMP', 'MKL', 'OPENBLAS',
-    'NUMEXPR', 'PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'TEMP', 'TMP',
-    'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'HOMEDRIVE', 'HOMEPATH',
-    'COMSPEC', 'OS', 'PROCESSOR', 'WINDIR', 'HF_HOME', 'HF_HUB', 'HF_ENDPOINT',
-    'TRANSFORMERS', 'VIRTUAL_ENV', 'CONDA', 'NUMBER_OF_PROCESSORS', 'USERNAME',
-    'USERDOMAIN', 'DRIVERDATA', 'PROGRAMDATA', 'PROGRAMFILES', 'PUBLIC',
-    'SESSIONNAME', 'LOGONSERVER', 'ALLUSERSPROFILE', 'COMMONPROGRAM',
-    'PSMODULEPATH', 'TOKENIZERS_PARALLELISM', 'ONEAPI', 'VS', 'VC', 'INCLUDE',
-    'INTEL', 'DOTNET', 'GOPATH', 'CARGO', 'RUST', 'NODE', 'JAVA', 'MSYSTEM',
-    'MINGW', 'CHOCOLATEY', 'VCPKG', 'WSL', 'XDG', 'HOME', 'SHELL', 'LANG',
-    'LC_', 'TZ', 'EMSDK', 'GOOGLE_APPLICATION_CREDENTIALS_JSON', 'FORGE_',
-)
+# Exact-match allowlist for names that trip the secret regex but are NOT
+# secrets. MUST be exact-match only — the old prefix allowlist let
+# FORGE_API_KEY, NVIDIA_API_KEY, NODE_AUTH_TOKEN, CARGO_REGISTRY_TOKEN and
+# OS_PASSWORD through (FORGE_/NV/NODE/CARGO/OS prefixes beat the deny).
+_SECRET_ENV_SAFE = frozenset({'TOKENIZERS_PARALLELISM'})
 
 
 def scrub_environ(env: dict | None = None) -> dict:
     """Return a copy of `env` (default os.environ) with secret-looking vars
-    removed. Applied parent-side before spawn AND inside the worker."""
+    removed. Deny-wins: a secret-pattern match survives ONLY via the exact
+    _SECRET_ENV_SAFE allowlist. Applied parent-side before spawn AND inside
+    the worker."""
     src = dict(os.environ if env is None else env)
     for k in list(src):
         ku = k.upper()
-        if _SECRET_ENV_RE.search(ku) and not ku.startswith(_ENV_KEEP_PREFIXES):
+        if _SECRET_ENV_RE.search(ku) and ku not in _SECRET_ENV_SAFE:
             del src[k]
     return src
 

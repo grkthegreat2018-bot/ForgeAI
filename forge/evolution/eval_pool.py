@@ -249,21 +249,13 @@ def _scrub_secrets() -> None:
         _SECRET_ENV_RE = re.compile(
             r'(token|secret|passw|credential|private|api[_-]?key|auth'
             r'|bearer|(^|_)key($|_))', re.IGNORECASE)
-    keep = ('PYTHON', 'CUDA', 'NV', 'TRITON', 'TORCH', 'OMP', 'MKL',
-            'OPENBLAS', 'NUMEXPR', 'PATH', 'PATHEXT', 'SYSTEMROOT',
-            'SYSTEMDRIVE', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA',
-            'LOCALAPPDATA', 'HOMEDRIVE', 'HOMEPATH', 'COMSPEC', 'OS',
-            'PROCESSOR', 'WINDIR', 'HF_HOME', 'HF_HUB', 'TRANSFORMERS',
-            'VIRTUAL_ENV', 'CONDA', 'NUMBER_OF_PROCESSORS', 'USERNAME',
-            'USERDOMAIN', 'DRIVERDATA', 'PROGRAMDATA', 'PROGRAMFILES',
-            'PUBLIC', 'SESSIONNAME', 'LOGONSERVER', 'ALLUSERSPROFILE',
-            'COMMONPROGRAM', 'PSMODULEPATH', 'TOKENIZERS_PARALLELISM',
-            'ONEAPI', 'VS', 'VC', 'INCLUDE', 'INTEL', 'DOTNET', 'GOPATH',
-            'CARGO', 'RUST', 'NODE', 'JAVA', 'MSYSTEM', 'MINGW', 'VCPKG',
-            'WSL', 'XDG', 'HOME', 'SHELL', 'LANG', 'LC_', 'TZ', 'FORGE_')
+    # Deny-wins: secret-pattern matches survive ONLY via exact-match —
+    # the old prefix allowlist passed FORGE_API_KEY, NVIDIA_API_KEY,
+    # NODE_AUTH_TOKEN, CARGO_REGISTRY_TOKEN, OS_PASSWORD…
+    safe = {'TOKENIZERS_PARALLELISM'}
     for k in list(os.environ):
         ku = k.upper()
-        if _SECRET_ENV_RE.search(ku) and not ku.startswith(keep):
+        if _SECRET_ENV_RE.search(ku) and ku not in safe:
             del os.environ[k]
 
 
