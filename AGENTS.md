@@ -82,7 +82,7 @@ unless the user explicitly overrides them for a specific task.
 
 ### E. No Redundant Files — Search Before You Create
 - **Before creating ANY new script or module, grep the codebase for an
-  existing one that does the same thing.** The codebase has ~600 .py files
+  existing one that does the same thing.** The codebase has ~1,000 .py files
   after the aggressive refactor (was 908); the odds are high that a related
   implementation exists.
 - **Prefer upgrading an existing file over spawning a new one.** If
@@ -236,8 +236,10 @@ Honest residuals — NOT guaranteed:
 - `weights_only=False` torch.load sites remain for genuinely
   pickle-required formats (flux snapshots, optimizer/RNG resume
   bundles): load only self-produced artifacts; all now warn.
-- forge_gui_server binds 127.0.0.1 but has no auth — any local process
-  can call it; do not port-forward it or serve it on LAN.
+- forge_gui_server binds 127.0.0.1 and gates /api + /ws on a per-launch
+  token (FORGE_GUI_TOKEN env or launcher-minted, carried as X-Forge-Token
+  header / ?token=). It is still a local-trust boundary — the token
+  travels in the launch URL; do not port-forward it or serve it on LAN.
 - `tempfile`/os.stat inside the jail are fine (confined); os.stat on
   outside paths is a file-existence oracle only.
 
@@ -1083,7 +1085,7 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   boundary). Tests: `tests/unit/test_deepinfer_ports.py`.
 - `forge/engine/gated.py` — ForgeGate three-probe gated generation
   (route/doom/convergence); `ForgeEngine.load_gate_probes()` +
-  `generate_gated()`; probe bundle `research/checkpoints/gate_probes.pt`
+  `generate_gated()`; probe bundle `research/checkpoints/gate_probes.safetensors`
   (~44KB, version-guarded). VRAM overhead ~0 (logistic heads on hidden
   states the model already computes). Trained on the gate_r 1450-label
   self-verified corpus; retrain pipeline documented in

@@ -519,7 +519,8 @@ class TestLogitsProcessor:
     def test_registry_forwards_logits_processor(self):
         eng = _FakeEngine()
         reg = _registry_with(eng)
-        proc = lambda lg, ids: lg
+        def proc(lg, ids):
+            return lg
         reg.generate(MODEL, "hi", logits_processor=proc)
         assert eng.generate_kwargs.get("logits_processor") is proc
 

@@ -534,6 +534,9 @@ def main() -> int:
         i, p = item
         raw = raw0
         reasoning = ""
+        # bound before the loop: the retry-feedback path references it and
+        # retries=-1 would otherwise leave it (and status) unbound (F823).
+        status, last_detail = "gen_err", "no generation attempt"
         try:
             for attempt in range(args.retries + 1):
                 if raw is not None:

@@ -15,7 +15,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
-
 import torch
 
 from forge.training.runners.sft_train import collate_batch, load_examples

@@ -11,16 +11,16 @@ Verifies:
 import torch
 
 from forge.config import get_config
-from forge.model_loader import ConfigurableResearchLLM
 from forge.model.builders import refresh_fused_qkv
 from forge.model.loader import ModelLoader
+from forge.model_loader import ConfigurableResearchLLM
 
 
 def _cfg(**kw):
-    base = dict(n_layers=2, layer_types=["attention", "attention"],
-                d_model=64, n_heads=4, n_kv_heads=2, head_dim=16,
-                intermediate_size=128, vocab_size=256, max_seq_len=64,
-                use_attn_out_gate=True)
+    base = {"n_layers": 2, "layer_types": ["attention", "attention"],
+                "d_model": 64, "n_heads": 4, "n_kv_heads": 2, "head_dim": 16,
+                "intermediate_size": 128, "vocab_size": 256, "max_seq_len": 64,
+                "use_attn_out_gate": True}
     base.update(kw)
     return get_config("forgelm_tiny", device="cpu", **base)
 

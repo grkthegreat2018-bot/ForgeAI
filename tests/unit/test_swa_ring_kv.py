@@ -15,21 +15,21 @@ layers. Verifies:
 import torch
 
 from forge.config import get_config
-from forge.model.kv_cache import PreAllocatedKVCache, create_kv_cache
+from forge.model.kv_cache import create_kv_cache
 from forge.model_loader import ConfigurableResearchLLM
 
 W = 8
 
 
 def _cfg(**kw):
-    base = dict(
-        n_layers=3,
-        layer_types=["attention", "attention_swa", "attention"],
-        sliding_window=W,
-        max_seq_len=64,
-        d_model=64, n_heads=4, n_kv_heads=2, head_dim=16,
-        intermediate_size=128, vocab_size=256,
-    )
+    base = {
+        "n_layers": 3,
+        "layer_types": ["attention", "attention_swa", "attention"],
+        "sliding_window": W,
+        "max_seq_len": 64,
+        "d_model": 64, "n_heads": 4, "n_kv_heads": 2, "head_dim": 16,
+        "intermediate_size": 128, "vocab_size": 256,
+    }
     base.update(kw)
     return get_config("forgelm_tiny", device="cpu", **base)
 
@@ -89,7 +89,7 @@ def test_ring_append_t_pos_t():
         cache.append_t(1, k, v)
         cache.advance(1)
         cache.sync_tensor_pos()
-    kk, vv = cache.kv_view(1)
+    kk, _vv = cache.kv_view(1)
     # slots hold positions W+3-W .. W+2 in wrapped slot order
     assert kk.shape[2] == W
     vals = sorted(kk[0, 0, :, 0].tolist())
@@ -104,7 +104,7 @@ def test_ring_decode_equivalent_vs_linear():
     torch.manual_seed(0)
     m_ring = _build(ring=True)
     for p, q in zip(m_lin.state_dict().values(),
-                    m_ring.state_dict().values()):
+                    m_ring.state_dict().values(), strict=False):
         assert torch.equal(p, q)  # same weights, buffers only differ
 
     prompt = torch.randint(0, 256, (1, 2 * W + 2))

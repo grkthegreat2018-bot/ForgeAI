@@ -13,21 +13,21 @@ from forge.model_loader import ConfigurableResearchLLM
 
 
 def _cfg(**kw):
-    base = dict(
-        n_layers=4,
-        layer_types=["attention", "attention", "attention_swa",
+    base = {
+        "n_layers": 4,
+        "layer_types": ["attention", "attention", "attention_swa",
                      "attention"],
-        sliding_window=16,
-        max_seq_len=64,
-        rope_layer_params={
+        "sliding_window": 16,
+        "max_seq_len": 64,
+        "rope_layer_params": {
             "attention": {"rope_theta": 1_000_000.0,
                           "partial_rotary_factor": 0.5},
             "attention_swa": {"rope_theta": 10_000.0,
                               "partial_rotary_factor": 1.0},
         },
-        d_model=64, n_heads=4, n_kv_heads=2, head_dim=16,
-        intermediate_size=128, vocab_size=256,
-    )
+        "d_model": 64, "n_heads": 4, "n_kv_heads": 2, "head_dim": 16,
+        "intermediate_size": 128, "vocab_size": 256,
+    }
     base.update(kw)
     return get_config("forgelm_tiny", device="cpu", **base)
 

@@ -2288,3 +2288,9 @@ Priority if stage-3 triggers: opc-sft-stage2/educational_instruct + KodCode test
 - LoRA-only save/resume VERIFIED end-to-end: step3.safetensors 79.9MB (vs 4.3GB full) -> 'adapter-only snapshot' + 448 tensors restored + resume at step4 + clean continuation (smoke_lora_resume2.log). NOTE: the LAST step goes to the final merged save, not a periodic stepN file — resume must target an actual stepN.
 - AGENTS.md selfgen section updated with implementation status; wiki pushed dfc0fbe (Training/Self-Play/Model-Presets).
 - Commits this session: ecbe404 tokenizer, 190dea5 dedup, 8b3f14e selfgen AZR, 0d82900 lora-saves, 4686267 compile fix, 9b69aed codebase-grounded pivot, 93b568f sandbox preimports, 1634652 input rescue, 5e01504 external supply.
+
+### 2026-11-07 overnight plan (AFK session)
+DONE: evol-harness hardening committed (ace44da + 0c5b70b + 295aac1) — deny-wins scrub x3 sites incl. worker-embedded copy, nonced __RESULT__ + os._exit, promotion evals bypass pool, 131 targets fresh-seeded.
+DONE: keep-easy-prob 0.3 in selfgen (2249e6a); external run v2 on 392 tasks underway (wave4: 13 gold+2 easy -> 22 kept).
+NEXT: (1) build spark_sft_v3.jsonl = sft4_external + sft4_selfgen + ~300 reflectionevo slice + 35% replay v2; (2) train sft4 via .devin/launch_sft4_train.cmd (sft3 ckpt, val25/early3 -> .bestval snapshots now work); (3) pack sft4_fq w/ QKV strip; (4) unseen eval; (5) docs+commit; (6) stretch: retry model-authored proposals on sft4, KodCode/OpenCodeInstruct supply.
+GUARDRAILS: one GPU job at a time; --ram-limit 75 --vram 10.5; SMR writes only via adapter ckpts; no 25+ QA-line file edits.

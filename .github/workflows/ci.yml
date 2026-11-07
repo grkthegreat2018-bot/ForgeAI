@@ -14,7 +14,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install ruff
+      - run: pip install "ruff==0.16.2"  # pinned — matches pre-commit + pyproject
       - run: ruff check tests/
       # Undefined-name ratchet — the select list expands as the lint zoo in
       # forge/ and scripts/ is cleaned. (tests/ is one-time formatted

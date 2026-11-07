@@ -181,7 +181,7 @@ def test_sandbox_harness_executes_reference(sample_tree):
         # floor_mean uses math without importing it in the source segment —
         # the harness must inject stdlib imports.
         t2 = next(t for t in tasks if t["name"] == "floor_mean")
-        outs3, err3 = G.run_tests(ex, t2["code"],
+        _outs3, err3 = G.run_tests(ex, t2["code"],
                                   G.fuzz_inputs(t2["types"], n=4), t2["name"])
         assert err3 is None
     finally:
@@ -218,20 +218,20 @@ def test_external_ground_truth_sandbox():
     """External task: reference must pass its own asserts; solver compared
     on the same subset."""
     from research.persistent_executor import PersistentCodeExecutor
-    task = dict(
-        name="is_palindrome",
-        code="def is_palindrome(s):\n"
+    task = {
+        "name": "is_palindrome",
+        "code": "def is_palindrome(s):\n"
              "    s = ''.join(c for c in s if c.isalnum()).lower()\n"
              "    return s == s[::-1]",
-        tests=[{"args": '"No lemon, no melon"', "expected": "True"},
+        "tests": [{"args": '"No lemon, no melon"', "expected": "True"},
                {"args": '"hello"', "expected": "False"},
-               {"args": '"racecar"', "expected": "True"}])
+               {"args": '"racecar"', "expected": "True"}]}
     ex = PersistentCodeExecutor(timeout_s=15.0, memory_limit_mb=512)
     try:
         argstrs = [x["args"] for x in task["tests"]]
         outs, err = G.run_tests(ex, task["code"], argstrs, task["name"])
         assert err is None
-        for o, x in zip(outs, task["tests"]):
+        for o, x in zip(outs, task["tests"], strict=False):
             assert G._approx_eq(o, x["expected"])
     finally:
         ex.close()

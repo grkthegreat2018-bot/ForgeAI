@@ -665,7 +665,7 @@ class TestPlan6b:
         monkeypatch.delenv("FORGE_NO_CACHE", raising=False)
         monkeypatch.setenv(
             "FORGE_MODEL_ALIASES", f"fast={MODEL},code=other-model")
-        server, eng = _server()
+        server, _eng = _server()
         c = TestClient(server.app)
         r = c.post("/v1/chat/completions", json={
             "model": "fast",

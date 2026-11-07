@@ -7,10 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
-from bench_flux_vs_rag import (TfidfRetriever, _check, _check_any,
-                               _clean_scaffold, scaffold_records,
-                               synth_corpus)
-
+from bench_flux_vs_rag import TfidfRetriever, _check, _check_any, _clean_scaffold, scaffold_records, synth_corpus
 
 DOCS = [
     "Zorblax is a city in the Aldermere region. The capital of Zorblax "

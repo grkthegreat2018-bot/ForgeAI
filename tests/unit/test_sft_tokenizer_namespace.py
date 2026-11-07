@@ -12,8 +12,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from forge.training.data.efficient_pipeline import DiskTokenCache
 import forge.training.runners.sft_train as sft
+from forge.training.data.efficient_pipeline import DiskTokenCache
 
 
 class _FakeTokenizer:
@@ -91,11 +91,11 @@ def test_uniform_sample_weights_fall_back_to_chunked_path(monkeypatch):
             calls["targets_given"] = targets is not None
             return (torch.zeros(2, 8, 16), None)
 
-    try:
+    import contextlib
+    with contextlib.suppress(Exception):
         sft.compute_loss(_M2(), ii, lab, am,
                          sample_weights=torch.tensor([1.0, 2.0]))
-    except Exception:
-        pass  # manual path needs real logits; we only care it was entered
+        # manual path needs real logits; we only care it was entered
     assert calls.get("targets_given") is False
 
 

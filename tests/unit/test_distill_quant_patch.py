@@ -18,13 +18,13 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from forge.engine.quant.forge_quant import ForgeQuantLinear
 from forge.training.losses.chunked_ce import (
-    chunked_linear_cross_entropy,
-    chunked_distill_ce,
     ChunkedDistillCE,
+    chunked_distill_ce,
+    chunked_linear_cross_entropy,
 )
 from forge.training.runners.sft_train import collate_batch
-from forge.engine.quant.forge_quant import ForgeQuantLinear
 
 torch.manual_seed(0)
 MISSING = ChunkedDistillCE.TEACHER_LOGP_MISSING  # -99.0
@@ -100,7 +100,7 @@ def test_collate_teacher_logp_alignment():
         {"input_ids": [30, 31, 32], "labels": [-100, -100, 32],
          "reward": 1.0},
     ]
-    ids, labels, attn, rw, tlp = collate_batch(exs, pad_id=pad, device="cpu")
+    ids, _labels, _attn, rw, tlp = collate_batch(exs, pad_id=pad, device="cpu")
     assert ids.shape == (3, 3) and tlp.shape == (3, 3)
     assert rw.shape == (3,) and torch.allclose(rw, torch.tensor([0.5, 2.0, 1.0]))
     # teacher values land on supervised positions only, in order
@@ -111,7 +111,7 @@ def test_collate_teacher_logp_alignment():
 
 def test_collate_no_teacher_logp_returns_none():
     exs = [{"input_ids": [1, 2], "labels": [1, 2]}]
-    ids, labels, attn, rw, tlp = collate_batch(exs, pad_id=0, device="cpu")
+    _ids, _labels, _attn, rw, tlp = collate_batch(exs, pad_id=0, device="cpu")
     assert tlp is None and rw.item() == 1.0
 
 

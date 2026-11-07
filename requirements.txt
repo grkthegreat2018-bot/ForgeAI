@@ -20,7 +20,7 @@ gigatoken==0.9.0
 bitsandbytes==0.49.2
 
 # Triton for torch.compile on Windows (patched at runtime by research.training_utils).
-triton-windows==3.4.0.post21
+triton-windows==3.4.0.post21 ; sys_platform == "win32"
 
 # fla-org chunked linear-attention kernels (GDN2/KDA fast path — AUDIT A4).
 # 0.6.x requires triton.experimental.gluon (absent in triton-windows 3.4);

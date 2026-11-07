@@ -749,6 +749,7 @@ class TestRepeatCyclePeriod:
 
     def test_no_cycle(self):
         import random
+
         from forge.engine.engine_common import _repeat_cycle_period
         random.seed(0)
         assert _repeat_cycle_period(

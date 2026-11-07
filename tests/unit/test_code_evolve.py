@@ -1223,8 +1223,8 @@ def test_result_marker_nonce_and_atexit(tmp_path):
     p = subprocess.run([sys.executable, "-X", "utf8", str(ev),
                         str(spec), str(cand)],
                        capture_output=True, text=True, timeout=60, env=env)
-    markers = [l for l in p.stdout.splitlines()
-               if l.startswith("__RESULT__")]
+    markers = [ln for ln in p.stdout.splitlines()
+               if ln.startswith("__RESULT__")]
     assert len(markers) == 1          # atexit forge never ran
     res = json.loads(markers[0][len("__RESULT__"):])
     assert res["_nonce"] == nonce     # real marker carries the nonce

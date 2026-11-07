@@ -296,8 +296,8 @@ class TestLoraOnlyTrainingCheckpoint:
 
     def test_lora_only_snapshot(self, tmp_path):
         from safetensors import safe_open
-        from forge.checkpoint_io import (
-            load_training_state, save_training_checkpoint)
+
+        from forge.checkpoint_io import load_training_state, save_training_checkpoint
 
         path = str(tmp_path / "step50.safetensors")
         save_training_checkpoint(self._model(), path, step=50, lora_only=True,
@@ -316,6 +316,7 @@ class TestLoraOnlyTrainingCheckpoint:
 
     def test_default_snapshot_keeps_base_weights(self, tmp_path):
         from safetensors import safe_open
+
         from forge.checkpoint_io import save_training_checkpoint
 
         path = str(tmp_path / "full.safetensors")

@@ -26,7 +26,7 @@ Usage:
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import argparse
 import json
 import threading
@@ -48,8 +48,8 @@ from forge.evolution.topic_scanner import TopicScanner
 
 _ensure_loaded()
 
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "forge" / "evolution" / "configs"
-RESULTS_DIR = Path(__file__).resolve().parents[2] / "research" / "results"
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "forge" / "evolution" / "configs"
+RESULTS_DIR = Path(__file__).resolve().parents[1] / "research" / "results"
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +599,7 @@ def main():
         print("  [ComputeSplit] Enabled — gen model + checker + train-first on unapplied DB entries")
 
     # ── Auto-discovery: scan codebase for new optimization topics ──
-    project_root = str(Path(__file__).resolve().parents[2])
+    project_root = str(Path(__file__).resolve().parents[1])
     revisit_scheduler = DomainRevisitScheduler(project_root=project_root)
     if args.auto_discover:
         print("\n  [AutoDiscover] Scanning codebase for optimization topics...")

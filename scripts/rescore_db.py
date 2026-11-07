@@ -35,7 +35,7 @@ from __future__ import annotations
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import argparse
 import json
@@ -45,7 +45,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-RESULTS_DIR = Path(__file__).resolve().parents[2] / "research" / "results"
+RESULTS_DIR = Path(__file__).resolve().parents[1] / "research" / "results"
 
 
 def get_db_path(db_arg: str) -> str:

@@ -3,8 +3,7 @@ import torch
 import torch.nn as nn
 
 from forge.keys.quantization.fused_gemm_key import FusedQKVLinear
-from forge.training.bitnet_lora import (
-    add_lora_adapters, merge_lora_adapters, convert_to_bitnet_everywhere)
+from forge.training.bitnet_lora import add_lora_adapters, convert_to_bitnet_everywhere, merge_lora_adapters
 
 
 class _Attn(nn.Module):
@@ -31,7 +30,7 @@ class _Net(nn.Module):
 
 def test_fused_qkv_adapter_attaches_and_applies():
     net = _Net()
-    n, params = add_lora_adapters(net, rank=4, alpha=8,
+    n, _params = add_lora_adapters(net, rank=4, alpha=8,
                                 target_modules=["qkv_proj", "out_proj"])
     assert n == 2
     lora = net.attn.qkv_proj.lora_adapter
@@ -43,7 +42,7 @@ def test_fused_qkv_adapter_attaches_and_applies():
         x.to(lora.lora_A.dtype)).float()
     exp = full.split([64, 16, 16, 8], dim=-1)
     got = net.attn.qkv_proj(x)
-    for e, g in zip(exp, got):
+    for e, g in zip(exp, got, strict=False):
         assert torch.allclose(e, g, atol=1e-5)
 
 

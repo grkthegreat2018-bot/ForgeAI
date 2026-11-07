@@ -7,9 +7,9 @@ the extended lookback contributes nothing — function-exact. Verifies:
   - prefill (T>1) output is bit-exact K7 vs padded-K11
   - incremental decode (T=1, conv_state) is bit-exact
 """
-import torch
-import torch.nn as nn
 from types import SimpleNamespace
+
+import torch
 
 from forge.model.layers import DoubleGatedConvLayer
 from forge.model.loader import ModelLoader
@@ -29,7 +29,7 @@ def _pair(d=32, k=7, k_new=11):
 
 
 def test_warm_start_pads_only_conv_weight():
-    l7, l11, padded = _pair()
+    l7, _l11, padded = _pair()
     w = padded["attn.conv.weight"]
     assert w.shape == (32, 1, 11)
     # original taps sit on the LAST 7 positions; leading 4 are zero
@@ -41,7 +41,7 @@ def test_warm_start_pads_only_conv_weight():
 
 
 def test_warm_start_idempotent_and_noop():
-    l7, _, padded = _pair()
+    _l7, _, padded = _pair()
     cfg = SimpleNamespace(conv_kernel_size=11)
     again = ModelLoader._warm_start_conv(dict(padded), cfg)
     assert torch.equal(again["attn.conv.weight"],

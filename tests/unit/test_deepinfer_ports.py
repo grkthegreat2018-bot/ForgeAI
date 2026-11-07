@@ -8,23 +8,22 @@ from types import SimpleNamespace
 
 import torch
 
-from forge.engine.engine_common import (
-    SamplingParams,
-    _hash_multinomial,
-    _hash_sample_positions,
-)
 from forge.engine.decoding import (
     _defer_restore_recurrent,
     _sample_from_logits,
     _spec_snapshot_recurrent,
     build_decoding,
 )
+from forge.engine.engine_common import (
+    SamplingParams,
+    _hash_multinomial,
+    _hash_sample_positions,
+)
 from forge.engine.prefix_cache import (
     ChunkedPrefixCache,
     _bounded_replay_recurrent,
     _reset_live_recurrent,
 )
-
 
 # ── deterministic sampling (DeepInfer seq_seed port) ─────────────────────
 
@@ -78,10 +77,10 @@ def test_hash_multinomial_explores_across_positions():
 
 def test_sample_from_logits_seed_deterministic():
     logits = torch.randn(1, 256)
-    kw = dict(temperature=0.8, top_p=0.95, top_k=50,
-              repetition_penalty=1.0, generated_ids=[],
-              min_p=0.0, min_k=0.0, dry_penalties=None,
-              top_p_fn=lambda l, p: l)
+    kw = {"temperature": 0.8, "top_p": 0.95, "top_k": 50,
+              "repetition_penalty": 1.0, "generated_ids": [],
+              "min_p": 0.0, "min_k": 0.0, "dry_penalties": None,
+              "top_p_fn": lambda lg, p: lg}
     t1 = _sample_from_logits(logits.clone(), seed=1234, sample_pos=9, **kw)
     t2 = _sample_from_logits(logits.clone(), seed=1234, sample_pos=9, **kw)
     assert torch.equal(t1, t2)
@@ -92,7 +91,7 @@ def test_sample_from_logits_seed_deterministic():
     g = _sample_from_logits(logits.clone(), temperature=0.0, top_p=1.0,
                             top_k=0, repetition_penalty=1.0,
                             generated_ids=[], min_p=0.0, min_k=0.0,
-                            dry_penalties=None, top_p_fn=lambda l, p: l,
+                            dry_penalties=None, top_p_fn=lambda lg, p: lg,
                             seed=1234, sample_pos=9)
     assert g.item() == logits.argmax(-1).item()
 
@@ -134,7 +133,7 @@ def test_defer_restore_recurrent_inplace_preserves_alias():
     # Values restored AND the aliased buffer object is the same storage —
     # captured graphs / _conv_state_buf keep pointing at it.
     assert holder._conv_state is buf
-    saved = [v for _, a, v in snap if a == "_conv_state"][0]
+    saved = next(v for _, a, v in snap if a == "_conv_state")
     assert torch.equal(holder._conv_state, saved)
 
 

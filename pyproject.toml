@@ -30,13 +30,13 @@ Repository = "https://github.com/grkthegreat2018-bot/ForgeLM"
 # Heavy optional deps — install via: pip install -e ".[gpu]"
 gpu = [
     "bitsandbytes>=0.43",
-    "triton-windows>=3.0",
+    "triton-windows>=3.0; sys_platform == 'win32'",
     "fastsafetensors",
 ]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
-    "ruff>=0.6",
+    "ruff==0.16.2",
 ]
 # Deps actually imported by forge/engine/forge_server.py and
 # forge_gui_server/ (EC-074 — gradio was listed but never imported).

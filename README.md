@@ -14,7 +14,8 @@ CodeEvolve evolutionary optimization + RSI self-improve loop.
 - `docs/` — documentation + R&D round notes (`docs/INDEX.md` is the index)
 - `research/` — legacy root still holding live modules (paths, tokenizer
   cache, port scripts) and checkpoints — new code goes in `forge/`
-- `data/`, `checkpoints/`, `results/`, `logs/` — local artifacts (ignored)
+- `data/`, `checkpoints/`, `logs/` — local artifacts (ignored)
+- `results/` — tracked RSI run summaries + external-eval output
 - `.devin/scratchpad.md` — running R&D working notes
 
 ## Docs
@@ -27,7 +28,7 @@ High-level tour: `docs/project_overview.md`. Engine guide:
 ## Test
 
 ```powershell
-$env:PYTHONPATH="D:\windsurf\ForgeAI"
+$env:PYTHONPATH="$PWD"
 .\venv\Scripts\python.exe -m pytest tests/ --tb=short -q
 ```
 

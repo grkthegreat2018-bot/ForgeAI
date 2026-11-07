@@ -10,7 +10,7 @@ pulls toward IDENTITY scale instead of zeroing channel gains. Verifies:
 import torch
 
 from forge.config import get_config
-from forge.model.layers import RMSNorm, GroupedQueryAttention
+from forge.model.layers import GroupedQueryAttention, RMSNorm
 from forge.model.loader import ModelLoader
 from forge.model_loader import ConfigurableResearchLLM
 

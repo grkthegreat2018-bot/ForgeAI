@@ -284,6 +284,7 @@ def test_suffixmem_overwrite_recency():
 
 def test_suffixmem_save_load_parity(tmp_path):
     import numpy as np
+
     from forge.model.ngram_mem import SuffixMemory
     sm = SuffixMemory(64, orders=(4, 8), gate=1.0, write_decay=0.5)
     sm.feed(list(range(1, 20)))
@@ -297,7 +298,8 @@ def test_suffixmem_save_load_parity(tmp_path):
     assert np.array_equal(lift_before, lift_after)
     assert sm2.info()["cells"] == sm.info()["cells"]
     # continued ingest works identically on both instances
-    sm.feed_one(9); sm2.feed_one(9)
+    sm.feed_one(9)
+    sm2.feed_one(9)
     assert np.array_equal(sm.lift_last().numpy(), sm2.lift_last().numpy())
 
 def test_suffix_draft_model_round_semantics():
@@ -305,7 +307,8 @@ def test_suffix_draft_model_round_semantics():
     # committed tokens live in mem._tail (the strategy feeds them);
     # T==1 calls roll only the virtual proposal chain.
     import torch
-    from forge.model.ngram_mem import SuffixMemory, SuffixDraftModel
+
+    from forge.model.ngram_mem import SuffixDraftModel, SuffixMemory
     mem = SuffixMemory(64, orders=(4,), gate=1.0, write_decay=0.5)
     seq = [10, 11, 12, 13, 42, 43, 10, 11, 12, 13, 42, 43]
     d = SuffixDraftModel(mem)

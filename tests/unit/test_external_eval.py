@@ -64,7 +64,7 @@ def test_loglikelihood_batch_matches_scalar():
     batched = ee.loglikelihood_batch(m, tok, "ab", conts, torch.device("cpu"))
     scalar = [ee.loglikelihood(m, tok, "ab", c, torch.device("cpu"))
               for c in conts]
-    for (lp_b, n_b, g_b), (lp_s, n_s, g_s) in zip(batched, scalar):
+    for (lp_b, n_b, g_b), (lp_s, n_s, g_s) in zip(batched, scalar, strict=False):
         assert lp_b == lp_s and n_b == n_s and g_b == g_s
 
 
