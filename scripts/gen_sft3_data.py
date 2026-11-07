@@ -382,6 +382,33 @@ def valid_description(text: str) -> str:
     return d
 
 
+def input_gen_prompt(task: dict) -> str:
+    """Model-written literal test calls for a GIVEN working function —
+    rescues tasks whose params aren't obvious from name heuristics."""
+    return ("Write 4 test calls for this Python function as comment lines "
+            f"`# {task['name']}(<args>)`, covering typical inputs plus one "
+            "edge case. Args must be Python LITERALS (numbers, strings, "
+            "lists, dicts, bools) — no variables, no objects, no calls.\n"
+            "```python\n" + task["code"] + "\n```\n"
+            "Reply with ONLY the 4 comment lines.")
+
+
+def parse_input_calls(raw: str, name: str) -> list[str]:
+    """Extract literal arg strings from `# name(<args>)` comment lines."""
+    out = []
+    for m in re.finditer(rf"#\s*{re.escape(name)}\s*\((.*?)\)\s*(?:\n|$)",
+                         raw):
+        a = m.group(1).strip()
+        if not a:
+            continue
+        try:
+            ast.literal_eval(f"({a},)")
+            out.append(a)
+        except Exception:
+            continue
+    return out
+
+
 def codebase_solver_prompt(task: dict) -> str:
     return (f"Task: {task['desc']}\n"
             f"Signature: `{task['name']}{task['signature']}`\n"
@@ -533,25 +560,41 @@ def run_selfgen(args, out_path: Path, finished: set):
     print(f"selfgen: {len(pool)} fresh tasks after resume+novelty filters",
           flush=True)
 
+    def resolve_gt(t, tests) -> bool:
+        expected, err = run_tests(executor, t["code"], tests, t["name"])
+        if expected is None:
+            return False
+        # Ground truth = inputs the reference itself survives (fuzz
+        # inputs can be outside the function's domain). Require >=2
+        # valid inputs and >=2 distinct outputs (non-degenerate).
+        valid = [i for i, o in enumerate(expected)
+                 if not o.startswith("__ERROR__")]
+        if len(valid) < 2 or len({expected[i] for i in valid}) < 2:
+            return False
+        t["tests"] = tests
+        t["expected"] = expected
+        t["valid_idx"] = valid
+        return True
+
     for w0 in range(0, len(pool), BS):
-        # ── Phase 1: executor ground truth on fuzzed inputs ──
+        # ── Phase 1: executor ground truth (fuzz, then model-input rescue) ──
         tasks = []
+        retry = []
         for t in pool[w0:w0 + BS]:
-            t["tests"] = fuzz_inputs(t["types"], n=4)
-            expected, err = run_tests(executor, t["code"], t["tests"],
-                                      t["name"])
-            if expected is None:
-                continue
-            # Ground truth = inputs the reference itself survives (fuzz
-            # inputs can be outside the function's domain). Require >=2
-            # valid inputs and >=2 distinct outputs (non-degenerate).
-            valid = [i for i, o in enumerate(expected)
-                     if not o.startswith("__ERROR__")]
-            if len(valid) < 2 or len({expected[i] for i in valid}) < 2:
-                continue
-            t["expected"] = expected
-            t["valid_idx"] = valid
-            tasks.append(t)
+            (tasks if resolve_gt(t, fuzz_inputs(t["types"], n=4))
+             else retry).append(t)
+        stats["fuzz_ok"] = stats.get("fuzz_ok", 0) + len(tasks)
+        for r0 in range(0, len(retry), BS):
+            chunk = retry[r0:r0 + BS]
+            ws = [wrap(input_gen_prompt(t)) for t in chunk]
+            raws = gen_batch(ws, [rng.randrange(1 << 30) for _ in ws])
+            for t, raw in zip(chunk, raws):
+                if raw is None:
+                    continue
+                calls = parse_input_calls(raw, t["name"])
+                if len(calls) >= 2 and resolve_gt(t, calls):
+                    tasks.append(t)
+                    stats["rescued"] = stats.get("rescued", 0) + 1
         stats["executable"] += len(tasks)
         print(f"[wave {w0//BS}] executable={len(tasks)}/{BS} -> solving",
               flush=True)

@@ -87,6 +87,16 @@ def test_harvest_eligibility(sample_tree):
     assert u["desc"] == ""  # describe-first pass fills this in
 
 
+def test_parse_input_calls():
+    raw = ("# two_smallest_sum([3, 1, 1, 2])\n"
+           "# two_smallest_sum([])\n"
+           "# two_smallest_sum([-1, -2, 0])\n"
+           "# two_smallest_sum(some_var)\n"      # non-literal -> dropped
+           "# two_smallest_sum([10, 9, 9, 8, 7])\n")
+    calls = G.parse_input_calls(raw, "two_smallest_sum")
+    assert calls == ["[3, 1, 1, 2]", "[]", "[-1, -2, 0]", "[10, 9, 9, 8, 7]"]
+
+
 def test_valid_description():
     assert G.valid_description("This function returns the sum of two "
                                "smallest distinct values.") == \
