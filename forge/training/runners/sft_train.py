@@ -1067,6 +1067,11 @@ def main():
                         "(default: canonical ForgeLM tokenizer). Required when "
                         "training a non-ForgeLM checkpoint, e.g. a ported Qwen "
                         "dir — pass the checkpoint dir itself.")
+    p.add_argument("--full-step-saves", action="store_true",
+                   help="Periodic step checkpoints carry full weights even under "
+                        "manual LoRA (default: adapter/qscale-only snapshots — "
+                        "~7x less disk I/O per save, no full-weight CPU copy; "
+                        "resume re-injects adapters onto the base checkpoint)")
     p.add_argument("--save", default="research/checkpoints/ForgeLM_V2.sft.safetensors",
                    help="Output checkpoint path")
     p.add_argument("--max-steps", type=int, default=500)
@@ -1576,8 +1581,26 @@ def main():
 
     # --resume supersedes --checkpoint: the resume file IS the weights
     # source; its .train.pt sidecar restores optimizer/RNG/step below.
+    # Exception: lora_only step snapshots carry no base weights — build from
+    # the original --checkpoint (or the snapshot's recorded base) and
+    # re-inject the adapter/qscale tensors after add_lora_adapters below.
     if args.resume:
-        args.checkpoint = args.resume
+        _lora_only_resume = False
+        _resume_meta_path = str(args.resume) + ".meta.json"
+        if os.path.exists(_resume_meta_path):
+            try:
+                with open(_resume_meta_path, encoding="utf-8") as _f:
+                    _rm = json.load(_f)
+                _lora_only_resume = bool(_rm.get("lora_only"))
+                if _lora_only_resume and _rm.get("base_checkpoint"):
+                    args.checkpoint = _rm["base_checkpoint"]
+            except Exception:
+                pass
+        if _lora_only_resume:
+            print(f"Resume: adapter-only snapshot; base weights from "
+                  f"{args.checkpoint}")
+        else:
+            args.checkpoint = args.resume
     print(f"Building model ({args.config}) from {args.checkpoint}...")
     _from_scratch = args.checkpoint in ("scratch", "none", "") or args.from_scratch
     # ── From-scratch training: "scratch"/"none" = random init, no checkpoint ──
@@ -2477,8 +2500,13 @@ def main():
                         from forge.training.runners.train_8b_all import export_nlrq_
                         export_nlrq_(model)
                     ckpt = step_checkpoint_path(args.save, step)
-                    save_training_checkpoint(model, ckpt, optimizer=optimizer,
-                                             ema_state=ema_state, step=step)
+                    _lora_only_save = use_manual_lora and not args.full_step_saves
+                    save_training_checkpoint(
+                        model, ckpt, optimizer=optimizer,
+                        ema_state=ema_state, step=step,
+                        lora_only=_lora_only_save,
+                        meta={"base_checkpoint": args.checkpoint}
+                        if _lora_only_save else None)
                     cleanup_step_checkpoints(args.save, args.keep_checkpoints)
 
                 # NaN check.

@@ -280,3 +280,49 @@ class TestPipelinedLoad:
         # (ValueError) or the reader hits the short blob (OSError).
         with pytest.raises((OSError, ValueError)):
             load_safetensors_pipelined(dst, "cuda")
+
+
+class TestLoraOnlyTrainingCheckpoint:
+    """Periodic LoRA-only snapshots: no frozen base weights, self-describing
+    sidecar for adapter re-injection on resume."""
+
+    def _model(self):
+        import torch.nn as nn
+        model = nn.Linear(8, 8)
+        model.lora_adapter = nn.Module()
+        model.lora_adapter.lora_A = nn.Parameter(torch.randn(2, 8))
+        model.lora_adapter.lora_B = nn.Parameter(torch.zeros(8, 2))
+        return model
+
+    def test_lora_only_snapshot(self, tmp_path):
+        from safetensors import safe_open
+        from forge.checkpoint_io import (
+            load_training_state, save_training_checkpoint)
+
+        path = str(tmp_path / "step50.safetensors")
+        save_training_checkpoint(self._model(), path, step=50, lora_only=True,
+                                 meta={"base_checkpoint": "base/dir"})
+        with safe_open(path, framework="pt") as f:
+            keys = list(f.keys())
+        assert keys, "no adapter tensors written"
+        assert all("lora_" in k or "qscale" in k for k in keys)
+
+        meta = json.loads((tmp_path / "step50.safetensors.meta.json")
+                          .read_text(encoding="utf-8"))
+        assert meta["lora_only"] is True
+        assert meta["step"] == 50
+        assert meta["base_checkpoint"] == "base/dir"
+        assert load_training_state(path)["step"] == 50
+
+    def test_default_snapshot_keeps_base_weights(self, tmp_path):
+        from safetensors import safe_open
+        from forge.checkpoint_io import save_training_checkpoint
+
+        path = str(tmp_path / "full.safetensors")
+        save_training_checkpoint(self._model(), path, step=1)
+        with safe_open(path, framework="pt") as f:
+            keys = list(f.keys())
+        assert "weight" in keys and "bias" in keys
+        meta = json.loads((tmp_path / "full.safetensors.meta.json")
+                          .read_text(encoding="utf-8"))
+        assert "lora_only" not in meta

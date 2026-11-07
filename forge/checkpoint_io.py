@@ -586,6 +586,7 @@ def save_training_checkpoint(
     ema_state: dict[str, torch.Tensor] | None = None,
     step: int | None = None,
     meta: dict[str, Any] | None = None,
+    lora_only: bool = False,
 ) -> str:
     """Save model weights + full training state atomically.
 
@@ -593,8 +594,20 @@ def save_training_checkpoint(
     state, EMA shadow weights, and RNG states go to `<path>.train.pt` (also
     atomic via tmp + rename). `step` and `meta` are recorded in the sidecar
     JSON so any checkpoint self-documents its training progress.
+
+    ``lora_only=True`` persists only adapter/qscale tensors — for LoRA-only
+    training the frozen base weights are unchanged, so writing them every
+    periodic save is gigabytes of dead I/O (and the full CPU state_dict copy
+    is a RAM-spike hazard on 32GB boxes). The sidecar records
+    ``lora_only: true``; resume re-injects the adapters onto the base
+    checkpoint (``base_checkpoint`` in meta) instead of loading weights from
+    this file. The .train.pt sidecar (optimizer/EMA/RNG) is always full.
     """
     state: dict[str, Any] = dict(model.state_dict())
+    if lora_only:
+        state = {k: v for k, v in state.items()
+                 if "lora_" in k or "qscale" in k}
+        state["lora_only"] = True
     if step is not None:
         state["step"] = int(step)
     if meta:
