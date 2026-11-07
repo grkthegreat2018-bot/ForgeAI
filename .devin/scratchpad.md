@@ -2294,3 +2294,12 @@ DONE: evol-harness hardening committed (ace44da + 0c5b70b + 295aac1) — deny-wi
 DONE: keep-easy-prob 0.3 in selfgen (2249e6a); external run v2 on 392 tasks underway (wave4: 13 gold+2 easy -> 22 kept).
 NEXT: (1) build spark_sft_v3.jsonl = sft4_external + sft4_selfgen + ~300 reflectionevo slice + 35% replay v2; (2) train sft4 via .devin/launch_sft4_train.cmd (sft3 ckpt, val25/early3 -> .bestval snapshots now work); (3) pack sft4_fq w/ QKV strip; (4) unseen eval; (5) docs+commit; (6) stretch: retry model-authored proposals on sft4, KodCode/OpenCodeInstruct supply.
 GUARDRAILS: one GPU job at a time; --ram-limit 75 --vram 10.5; SMR writes only via adapter ckpts; no 25+ QA-line file edits.
+
+### 2026-11-08 Sonnet-review application pass
+DONE: review findings implemented + committed on main:
+- f033668 fresh-seed all 137 evolve targets (_gen_cases(seed) + paired a/b calls + np uint32 mask); auto_targets._gen_source/_ORACLE + gen_llm_targets schema/validator emit the seed-param pattern for future targets; verify harness 137/137 pass.
+- c58460d forge_server API key via hmac.compare_digest; forge_gui_server per-launch token (auth.py, /api middleware + /ws query-param check, launcher ?token= URL, SPA sessionStorage + X-Forge-Token, rebuilt dist); gate_probes.pt->safetensors (GateProbes.load prefers .safetensors, warns on pickle), bench_gate_route repointed.
+- 95ac212 ruff pinned 0.16.2 (CI+pre-commit+pyproject); tests/ lint-clean (43->0); last_detail NameError bound pre-loop; triton-windows sys_platform marker x2; groq_models.json deleted (401 body); run_evolve/rescore_db moved to scripts/ (parents[2]->[1]); README results/-tracked + portable PYTHONPATH; AGENTS ~1000 files + token posture.
+- Prior commits already covered: deny-wins scrub x3 (incl _BOOTSTRAP worker copy, TOKENIZERS_PARALLELISM sole exact-keep), nonced __RESULT__+os._exit, promotion evals bypass pool (ace44da/0c5b70b/295aac1).
+TESTS: test_code_evolve 63 + test_sandbox_escapes 26 pass; test_selfgen_rft 13 pass; GUI auth smoke 401/200/200/200; ruff tests/ + F821,F823 forge+scripts green.
+NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp numbers (A1, needs GPU run); results/ ledger aggregation; git filter-repo purge of tools/llama DLLs (154MB history); test skip-gates for gitignored assets (26 files); AGENTS.md 169KB trim; giant-function refactors (sft_train.main 1610, _setup_routes 1569).
