@@ -2158,6 +2158,22 @@ has ~118k rows total (~660 consumed) — `opc_sft2_b.json` staged
 (next 500). sft5 selfgen uses sft4_fq as solver at k=4/temp.8/
 keep-easy .3.
 
+**sft5 lineage + extraction-decline finding (2026-11-08)**:
+`spark_sft_v4.jsonl` (1169 rows: 43 sft4-solved opc_sft2_b rows
+[36 gold+1 easy of 489], 600 fresh ReflectEvo slice-B, 526 v3 replay)
+→ sft4→sft5 LoRA-r32 275 steps, val .5629→.5297, bestval adapter.
+Held-out: 0/117 pass@4 both (sft4 147 attempts acc .006; sft5 108
+.010). On-manifold 60 known-solvable: sft3 3/60, sft4 3/60, sft5
+1/60, sft4+bestval 3/60 — all noise-equal on solves. THE REAL
+SIGNAL: runnable-extraction rate declines per round — attempts
+102 (sft3) → 83 (sft4) → 53 (sft5, bestval arm identical). Each
+SFT round makes the model less code-forward; the reflection-heavy
+corpus is the prime suspect. Roadmap for sft6: code-heavier mix
+(replay-frac ↑, reflection ↓ to ~sft4's absolute 300, add KodCode/
+OpenCodeInstruct code supply — bigger verified pool), and watch
+attempt-rate as the leading metric since binary pass@k is ceiling-
+bound at this scale.
+
 Stage-3 shortlist (verified on HF hub):
 - **Code tasks w/ refs+tests** (drop into the exec-verified loop):
   `OpenCoder-LLM/opc-sft-stage2` `educational_instruct` (compiler-validated

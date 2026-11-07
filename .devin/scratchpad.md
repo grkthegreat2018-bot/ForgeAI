@@ -2326,3 +2326,23 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
 - IMPLICATION: goldilocks corpus IS hard-tail informative, but pass@k evals need many attempts to discriminate; per-assert accuracy instrumentation added for future runs.
 - Eval scripts: _solver_eval.py (per-task JSON + attempt/assert acc), _onmanifold_eval.py (gen_key->pool join), _diag_resample.py, _diag_batch_ab.py, _propose_retry.py (few-shot proposal test on sft4).
 
+
+### sft5 staging + proposal verdicts
+- Stage-2 CLOSED: sft4 proposal attempts = 0/32 (abstract few-shot) + 0/24 (corpus-native few-shot, outputs ~16tok empty fences). 1.7B still can't author verifiable tasks; external DBs remain supply.
+- sft5 selfgen RUNNING: opc_sft2_b (500 tasks, sft4_fq solver, k4 t.8 keep-easy .3) -> data/sft/sft5_external.jsonl. Yield lower than sft3 slice A so far (4 kept/4 waves) — slice-vs-solver confound noted.
+- Staged for sft5 corpus: reflectionevo_sft_b.jsonl = 600 FRESH reflection rows (skip 300 sources; fetcher reflection branch now honors --skip, commit bfccb9e). Builder cmd: build_sft3.py --new sft5_external.jsonl reflectionevo_sft_b.jsonl --replay spark_sft_v3.jsonl --replay-frac .35 --out spark_sft_v4.jsonl. Train: .devin/launch_sft5_train.cmd (sft4->sft5 same recipe).
+- NOTE: fetch_external_tasks.py --kind reflection needs --dataset bigai-nlco/ReflectionEvo --config D+ explicitly (defaults are opc-sft2).
+
+
+### sft5 lineage (overnight)
+- Corpus spark_sft_v4.jsonl: 1169 rows = 43 fresh sft4-solved external (opc_sft2_b: 36 gold+1 easy of 489 executable, yield lower than slice A's 75 — harder slice or solver parity within noise) + 600 fresh reflectionevo_b (300 new sources, skip-300) + 526 v3 replay (0.45).
+- Train: sft4->sft5 LoRA-r32 275 steps (bumped from 150: corpus ~2x), val .5629->.5297 monotone, bestval adapter captured each improvement. Merged 4.1GB + .lora + sft5_fq 1.59GB packed.
+- Eval running: instrumented held-out (per-attempt + per-assert acc) sft4 vs sft5.
+
+
+### sft5 eval FINAL (all arms, on-manifold 60 tasks, k4 t.8)
+- sft3 3/60 (6/102 att) | sft4 3/60 (4/83) | sft5 1/60 (1/53) | sft4+sft5.bestval(partial,392/448 tensors attached — fused-qkv missing k_proj slots) 3/60 (3/53)
+- KEY: solves noise-flat but ATTEMPT rate declines each round 102->83->53. bestval doesn't rescue => not late drift. Reflection-heavy corpus = prime suspect for extraction decline. Held-out dense: sft4 147att acc.006 | sft5 108att acc.010 (both ~0 solves, unfiltered slice above ceiling).
+- sft6 corpus plan: code-heavier (reflection ~300 absolute not 600, replay-frac .45+, add KodCode/OpenCodeInstruct verified supply); track attempt-rate as leading metric; consider sft6 train FROM sft5 (lineage) or re-eval whether sft4 is the better solver base — sft5 selfgen yield was 43 rows vs sft3's 75 on comparable slices (confounded by slice difficulty).
+- KNOWN CAVEAT for _onmanifold_eval.py: task dicts shared across eval_model calls => _solved/_attempts flags carry between arms => mid-run wave prints for arm2+ contaminated (final counts clean — reset at rep0). Fix later if reused.
+
