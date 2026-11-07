@@ -417,9 +417,12 @@ def codebase_solver_prompt(task: dict) -> str:
             f"function (named `{task['name']}`).")
 
 
-def _harness(code: str, tests: list[str], name: str = "solve") -> str:
+def _harness(code: str, tests: list[str], name: str = "solve",
+             nonce: str = "") -> str:
     """One-shot script: run the function on every test input, print reprs
-    after a marker (isolates results from user print() noise)."""
+    after a nonced marker (isolates results from user print() noise —
+    and a candidate can't forge the marker: the nonce is generated
+    per-exec and the sandbox denies frame/source inspection)."""
     lines = ["import math, re, itertools, collections, functools, "
              "string, operator", code, "",
              "import json as _json", "_out = []"]
@@ -429,20 +432,26 @@ def _harness(code: str, tests: list[str], name: str = "solve") -> str:
         lines += ["try:", f"    _out.append(repr({name}({a})))",
                   "except Exception as _e:",
                   "    _out.append('__ERROR__' + repr(_e))"]
-    lines += ["print('__SELF_GEN_RESULT__' + _json.dumps([_out, None]))"]
+    lines += [f"print('__SELF_GEN_RESULT__{nonce}:' "
+              "+ _json.dumps([_out, None]))"]
     return "\n".join(lines)
 
 
 def run_tests(executor, code: str, tests: list[str], name: str = "solve"):
     """Execute the function on all test inputs in the sandbox. Returns
-    (repr_outputs, error) — outputs None on timeout/crash/exception."""
-    r = executor.execute(_harness(code, tests, name))
+    (repr_outputs, error) — outputs None on timeout/crash/exception.
+    Only the line carrying this call's nonce parses — anything else a
+    candidate prints (including a copied marker prefix) is ignored."""
+    import secrets
+    nonce = secrets.token_hex(6)
+    r = executor.execute(_harness(code, tests, name, nonce))
     if r.get("timed_out") or r.get("returncode") != 0:
         return None, r.get("stderr", "failed")[:200]
+    prefix = f"__SELF_GEN_RESULT__{nonce}:"
     for line in reversed(r.get("stdout", "").splitlines()):
-        if line.startswith("__SELF_GEN_RESULT__"):
+        if line.startswith(prefix):
             try:
-                outs, err = json.loads(line[len("__SELF_GEN_RESULT__"):])
+                outs, err = json.loads(line[len(prefix):])
             except Exception:
                 return None, "bad result payload"
             if err is not None:
