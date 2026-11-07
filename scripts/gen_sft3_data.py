@@ -503,8 +503,14 @@ def run_selfgen(args, out_path: Path, finished: set):
 
     rng = random.Random(args.seed)
     executor = PersistentCodeExecutor(timeout_s=6.0, memory_limit_mb=512)
-    pool = harvest_functions()
-    print(f"selfgen: harvested {len(pool)} candidate functions", flush=True)
+    if args.external:
+        pool = json.loads(Path(args.external).read_text(encoding="utf-8"))
+        print(f"selfgen: {len(pool)} external tasks from {args.external}",
+              flush=True)
+    else:
+        pool = harvest_functions()
+        print(f"selfgen: harvested {len(pool)} candidate functions",
+              flush=True)
     rng.shuffle(pool)
     pool = [t for t in pool if f"selfgen:{t['key']}" not in finished]
     e = ForgeEngine.from_checkpoint(args.model)
@@ -576,15 +582,40 @@ def run_selfgen(args, out_path: Path, finished: set):
         t["valid_idx"] = valid
         return True
 
+    def resolve_external_gt(t) -> bool:
+        """External DB rows: the reference must pass every literal assert
+        (>=2), else the row's tests are unreliable — drop it."""
+        argstrs = [x["args"] for x in t["tests"]]
+        expected, err = run_tests(executor, t["code"], argstrs, t["name"])
+        if expected is None:
+            return False
+        valid = []
+        for i, x in enumerate(t["tests"]):
+            o = expected[i]
+            if o.startswith("__ERROR__"):
+                continue
+            if not _approx_eq(o, x["expected"]):
+                return False
+            valid.append(i)
+        if len(valid) < 2:
+            return False
+        t["tests"] = argstrs
+        t["expected"] = expected
+        t["valid_idx"] = valid
+        return True
+
     for w0 in range(0, len(pool), BS):
         # ── Phase 1: executor ground truth (fuzz, then model-input rescue) ──
         tasks = []
         retry = []
         for t in pool[w0:w0 + BS]:
-            (tasks if resolve_gt(t, fuzz_inputs(t["types"], n=4))
-             else retry).append(t)
+            if args.external:
+                (tasks if resolve_external_gt(t) else retry).append(t)
+            else:
+                (tasks if resolve_gt(t, fuzz_inputs(t["types"], n=4))
+                 else retry).append(t)
         stats["fuzz_ok"] = stats.get("fuzz_ok", 0) + len(tasks)
-        for r0 in range(0, len(retry), BS):
+        for r0 in range(0, len(retry), BS) if not args.external else []:
             chunk = retry[r0:r0 + BS]
             ws = [wrap(input_gen_prompt(t)) for t in chunk]
             raws = gen_batch(ws, [rng.randrange(1 << 30) for _ in ws])
@@ -638,8 +669,11 @@ def run_selfgen(args, out_path: Path, finished: set):
                     seen_h.add(hh)
                     row = dict(
                         prompt=codebase_solver_prompt(t), response=raw,
-                        source="rft_codebase", gen_key=gk,
-                        task_desc=t["desc"], domain=t["file"].split("/")[0],
+                        source="rft_external" if args.external
+                        else "rft_codebase", gen_key=gk,
+                        task_desc=t["desc"],
+                        domain="external" if args.external
+                        else t["file"].split("/")[0],
                         difficulty="auto", solve_rate=rate,
                         n_tests=len(t["tests"]), seed_code=t["code"],
                         required=[t["name"]])
@@ -667,6 +701,10 @@ def main():
                     required=True)
     ap.add_argument("--tasks", type=int, default=64,
                     help="selfgen: fresh tasks to attempt")
+    ap.add_argument("--external", default=None,
+                    help="selfgen: external task-pool JSON from "
+                         "scripts/fetch_external_tasks.py (reference + "
+                         "literal asserts; skips harvest/describe/fuzz)")
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--k", type=int, default=4)
     ap.add_argument("--reps", type=int, default=4)

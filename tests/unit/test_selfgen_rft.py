@@ -182,6 +182,46 @@ def test_solver_prompt_names_function(sample_tree):
     assert "(xs: list[int])" in sp
 
 
+def test_external_literal_asserts():
+    spec = importlib.util.spec_from_file_location(
+        "fetch_external_tasks", REPO / "scripts" / "fetch_external_tasks.py")
+    F = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(F)
+    tcs = ['assert is_palindrome("No lemon, no melon") == True',
+           'assert is_palindrome("hello") == False',
+           'assert is_palindrome(root3) == True',   # non-literal arg
+           'root3 = TreeNode(10)',                  # setup line
+           'assert is_palindrome("racecar") == True']
+    tests = F.literal_asserts(tcs, "is_palindrome")
+    assert len(tests) == 3
+    assert tests[0]["args"] == '"No lemon, no melon"'
+    assert tests[0]["expected"] == "True"
+    assert tests[1]["expected"] == "False"
+
+
+def test_external_ground_truth_sandbox():
+    """External task: reference must pass its own asserts; solver compared
+    on the same subset."""
+    from research.persistent_executor import PersistentCodeExecutor
+    task = dict(
+        name="is_palindrome",
+        code="def is_palindrome(s):\n"
+             "    s = ''.join(c for c in s if c.isalnum()).lower()\n"
+             "    return s == s[::-1]",
+        tests=[{"args": '"No lemon, no melon"', "expected": "True"},
+               {"args": '"hello"', "expected": "False"},
+               {"args": '"racecar"', "expected": "True"}])
+    ex = PersistentCodeExecutor(timeout_s=15.0, memory_limit_mb=512)
+    try:
+        argstrs = [x["args"] for x in task["tests"]]
+        outs, err = G.run_tests(ex, task["code"], argstrs, task["name"])
+        assert err is None
+        for o, x in zip(outs, task["tests"]):
+            assert G._approx_eq(o, x["expected"])
+    finally:
+        ex.close()
+
+
 def test_real_codebase_harvest_pool():
     """The production pool must be large and diverse (anti-fixed-pool)."""
     tasks = G.harvest_functions(limit=400)
