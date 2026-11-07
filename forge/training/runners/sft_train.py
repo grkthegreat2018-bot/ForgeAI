@@ -257,6 +257,29 @@ def split_multi_turn(messages: list[dict]) -> list[tuple[str, str]]:
 
 # ── Dataset loading + tokenization ───────────────────────────────────────────
 
+def _resolve_tokenizer_source(args_tokenizer, checkpoint) -> str | None:
+    """Resolve the tokenizer dir for a run.
+
+    Priority: explicit --tokenizer → checkpoint's own dir (when it holds a
+    tokenizer.json) → the bare-file checkpoint's .meta.json tokenizer_path →
+    None (canonical default). The meta fallback matters for bare
+    .safetensors saves: without it a Spark/LFM3 checkpoint silently gets the
+    canonical Qwen-vocab tokenizer and every batch is mis-tokenized
+    (loss ~10 on data whose true CE is <1).
+    """
+    if args_tokenizer:
+        return args_tokenizer
+    if not checkpoint or checkpoint in ("scratch", "none", ""):
+        return None
+    ckpt_dir = (checkpoint if os.path.isdir(checkpoint)
+                else os.path.dirname(checkpoint))
+    if (ckpt_dir and os.path.isdir(ckpt_dir)
+            and os.path.exists(os.path.join(ckpt_dir, "tokenizer.json"))):
+        return ckpt_dir
+    from forge.engine.engine_common import _tokenizer_from_meta
+    return _tokenizer_from_meta(checkpoint)
+
+
 def load_examples(paths: list[str], strict_data: bool = False) -> list[dict]:
     """Load and deduplicate examples from one or more JSONL files.
 
@@ -1413,19 +1436,11 @@ def main():
     # silent device-side embed assert on CUDA. Prefer the checkpoint's own
     # tokenizer.json; only fall back to the canonical default for
     # from-scratch runs (which use the ForgeLM vocab anyway).
-    if getattr(args, "tokenizer", None):
-        tok_source = args.tokenizer
-    else:
-        _ckpt_dir = None
-        if args.checkpoint and args.checkpoint not in ("scratch", "none", ""):
-            _ckpt_dir = (args.checkpoint if os.path.isdir(args.checkpoint)
-                         else os.path.dirname(args.checkpoint))
-        tok_source = (_ckpt_dir
-                      if _ckpt_dir and os.path.isdir(_ckpt_dir)
-                      and os.path.exists(os.path.join(_ckpt_dir, "tokenizer.json"))
-                      else None)
+    tok_source = _resolve_tokenizer_source(
+        getattr(args, "tokenizer", None), args.checkpoint)
     tokenizer = (get_tokenizer(tok_source) if tok_source
                  else get_tokenizer())
+    _tok_vocab = getattr(tokenizer, "vocab_size", None)
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
     # ── Disk tokenization cache info ──
@@ -1532,6 +1547,20 @@ def main():
     # Use chunked CE to save VRAM on the 65K vocab.
     cfg.use_chunked_ce = True
     cfg.ce_chunk_size = 128
+    # Vocab guard: a tokenizer whose ids can exceed the model's embedding
+    # matrix is a hard error (CUDA gather assert / garbage batches); any
+    # other mismatch is called out loudly — mis-tokenized data still trains,
+    # it just learns nonsense (loss ~10 on clean rows).
+    if _tok_vocab is not None and getattr(cfg, "vocab_size", None):
+        if _tok_vocab > cfg.vocab_size and args.hf_model is None:
+            raise ValueError(
+                f"Tokenizer vocab ({_tok_vocab}, source={tok_source or 'default'}) "
+                f"exceeds model vocab ({cfg.vocab_size}). Pass --tokenizer "
+                f"<dir> matching the checkpoint — see .meta.json tokenizer_path.")
+        if _tok_vocab != cfg.vocab_size:
+            print(f"  WARNING: tokenizer vocab ({_tok_vocab}, "
+                  f"source={tok_source or 'default'}) != model vocab "
+                  f"({cfg.vocab_size}) — verify this is intentional.")
     # MTP auxiliary loss (Nemotron Lightning)
     if args.mtp_weight > 0.0:
         cfg.use_mtp = True

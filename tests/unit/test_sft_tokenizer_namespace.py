@@ -126,3 +126,43 @@ def test_meta_sidecar_tokenizer_resolution(tmp_path):
     (tmp_path / "model.safetensors.meta.json").write_text(
         json.dumps({"tokenizer_path": str(tok_dir)}))
     assert _tokenizer_from_meta(ckpt) == str(tok_dir)
+
+
+def test_sft_tokenizer_source_resolution(tmp_path):
+    """Regression (spark sft3): a bare .safetensors --checkpoint whose parent
+    dir has no tokenizer.json must resolve via the .meta.json sidecar, not
+    the canonical default — the Qwen-vocab fallback mis-tokenized every row
+    (train loss ~10 while true eval CE was 0.64)."""
+    import json
+
+    resolve = sft._resolve_tokenizer_source
+
+    # Explicit --tokenizer always wins.
+    assert resolve("some/tok", None) == "some/tok"
+    # No checkpoint -> canonical default (None).
+    assert resolve(None, None) is None
+    assert resolve(None, "scratch") is None
+
+    # Checkpoint dir holding tokenizer.json -> that dir.
+    ckpt_dir = tmp_path / "ckpt"
+    ckpt_dir.mkdir()
+    (ckpt_dir / "tokenizer.json").write_text("{}")
+    assert resolve(None, str(ckpt_dir)) == str(ckpt_dir)
+
+    # Bare .safetensors in a parent WITHOUT tokenizer.json + sidecar naming
+    # a real tokenizer dir -> sidecar path (the spark_sft3 case).
+    bare = tmp_path / "saves"
+    bare.mkdir()
+    ckpt = bare / "model.safetensors"
+    ckpt.write_bytes(b"x")
+    tok_dir = tmp_path / "spark_tok"
+    tok_dir.mkdir()
+    (tok_dir / "tokenizer.json").write_text("{}")
+    (bare / "model.safetensors.meta.json").write_text(
+        json.dumps({"tokenizer_path": str(tok_dir)}))
+    assert resolve(None, str(ckpt)) == str(tok_dir)
+
+    # Bare file with no sidecar -> None (canonical default, legacy path).
+    other = bare / "other.safetensors"
+    other.write_bytes(b"x")
+    assert resolve(None, str(other)) is None
