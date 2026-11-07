@@ -2303,3 +2303,26 @@ DONE: review findings implemented + committed on main:
 - Prior commits already covered: deny-wins scrub x3 (incl _BOOTSTRAP worker copy, TOKENIZERS_PARALLELISM sole exact-keep), nonced __RESULT__+os._exit, promotion evals bypass pool (ace44da/0c5b70b/295aac1).
 TESTS: test_code_evolve 63 + test_sandbox_escapes 26 pass; test_selfgen_rft 13 pass; GUI auth smoke 401/200/200/200; ruff tests/ + F821,F823 forge+scripts green.
 NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp numbers (A1, needs GPU run); results/ ledger aggregation; git filter-repo purge of tools/llama DLLs (154MB history); test skip-gates for gitignored assets (26 files); AGENTS.md 169KB trim; giant-function refactors (sft_train.main 1610, _setup_routes 1569).
+
+### 2026-11-08 k4 held-out eval rerun (cont.)
+- pass@2 was noise (sft3 1/117, sft4 0/117). Rerunning k=4 temp=0.8 matching selfgen conditions on same 117 verified-GT tasks; log .devin/solver_eval_k4.log. sft3 wave2 still 1/117 cumulative.
+- Staged: opc_sft2_b.json = 500 more verified tasks (rows 660+, 1179 scanned). .devin/_propose_retry.py = stage-2 few-shot proposal test for sft4.
+- NOTE: parallel session did Sonnet-review pass (f033668/c58460d/95ac212): all 137 evolve targets fresh-seeded incl llm_*; GUI token auth; ruff pin. Fixed-seed pending item CLOSED.
+
+
+### k4 held-out FINAL: sft3 1/117, sft4 0/117 (temp .8, pass@4)
+- Identical to pass@2; Fisher p~1.0 = no measurable diff. Held-out slice too hard for 1.7B (only ~1% ceiling).
+- _solver_eval.py instrumented: per-attempt passes + per-assert accuracy (dense metric for future runs) + per-task JSON to results/solver_heldout_<label>.json.
+- _onmanifold_eval.py built: 86 unique known-solvable tasks from kept-row gen_keys -> regression check sft3 vs sft4 running now (log .devin/onmanifold_eval.log).
+- _propose_retry.py built: few-shot (2 real exemplar tasks) proposal -> parse -> sandbox GT -> validity rate on sft4.
+- Next: on-manifold -> propose-retry -> sft5 selfgen on opc_sft2_b (500 tasks, sft4 solver).
+
+
+### on-manifold eval + batch-composition investigation (sft3_fq vs sft4_fq)
+- RESULT: dead heat. sft3 3/60 pass@4 (6/102 attempts), sft4 3/60 (4/83). ~60%% of rollouts don't produce extractable+named code at temp .8.
+- Held-out k4 FINAL: sft3 1/117, sft4 0/117 — statistically identical, held-out slice is beyond 1.7B capability ceiling.
+- 86/86 STORED corpus solutions still re-verify — loop consistent; gap is generation-side.
+- Diag: top-rate tasks (orig .75-1.0) re-solve 4-8/8 with identical-8 batch; first-8 low-rate tasks ~1-3/32 either batch layout. task-major vs rep-major A/B = 4 vs 2 = noise -> NO batch bug proven; true per-rollout rates are heterogeneous and mostly lower than the 1-3/4 observed single-pass draw suggests (selection bias: kept tasks = the lucky tail).
+- IMPLICATION: goldilocks corpus IS hard-tail informative, but pass@k evals need many attempts to discriminate; per-assert accuracy instrumentation added for future runs.
+- Eval scripts: _solver_eval.py (per-task JSON + attempt/assert acc), _onmanifold_eval.py (gen_key->pool join), _diag_resample.py, _diag_batch_ab.py, _propose_retry.py (few-shot proposal test on sft4).
+

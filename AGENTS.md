@@ -2136,6 +2136,28 @@ every correct row; the 0<p<1 Goldilocks band is an RL-centric bias).
 Held-out solver eval: `.devin/_solver_eval.py` + `data/external/
 opc_sft2_heldout.json` (fetch `--skip 500`) measures real pass@k.
 
+**sft4 vs sft3 verdict (2026-11-08)**: statistically indistinguishable.
+Held-out pass@4 temp0.8 on 117 GT-verified tasks: sft3 1/117, sft4
+0/117 — the unfiltered held-out slice sits above the 1.7B capability
+ceiling, so pass@k there can't discriminate. On-manifold eval
+(`.devin/_onmanifold_eval.py`: 60 unique known-solvable tasks joined
+back from kept-row gen_keys, k=4): sft3 3/60, sft4 3/60 — dead heat;
+only ~40% of rollouts even yield extractable+named code at temp .8.
+Re-running the 86 stored corpus solutions through `run_tests` passes
+86/86 — the verification loop is consistent; observed kept-task solve
+rates are tail-lucky single draws, so re-solve at k=4 is expectedly
+low (batch-composition A/B: no measurable layout effect; per-seed
+diag: top-rate tasks re-solve 4-8/8, low-rate ~0-1/4). The eval
+script now logs per-attempt passes + per-assert accuracy (dense
+metric) to `results/solver_heldout_<label>.json`.
+Stage-2 CONFIRMED DEAD on sft4: model-authored task proposals =
+0/32 valid (abstract few-shot) + 0/24 (corpus-native few-shot —
+outputs collapse to empty code fences, ~16 tokens each). External
+verified DBs remain the task supply; `opc-sft2 educational_instruct`
+has ~118k rows total (~660 consumed) — `opc_sft2_b.json` staged
+(next 500). sft5 selfgen uses sft4_fq as solver at k=4/temp.8/
+keep-easy .3.
+
 Stage-3 shortlist (verified on HF hub):
 - **Code tasks w/ refs+tests** (drop into the exec-verified loop):
   `OpenCoder-LLM/opc-sft-stage2` `educational_instruct` (compiler-validated
