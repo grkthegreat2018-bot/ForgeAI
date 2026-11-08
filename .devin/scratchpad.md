@@ -2320,8 +2320,8 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
 
 ### on-manifold eval + batch-composition investigation (sft3_fq vs sft4_fq)
 - RESULT: dead heat. sft3 3/60 pass@4 (6/102 attempts), sft4 3/60 (4/83). ~60%% of rollouts don't produce extractable+named code at temp .8.
-- Held-out k4 FINAL: sft3 1/117, sft4 0/117 — statistically identical, held-out slice is beyond 1.7B capability ceiling.
-- 86/86 STORED corpus solutions still re-verify — loop consistent; gap is generation-side.
+- Held-out k4 FINAL: sft3 1/117, sft4 0/117 ï¿½ statistically identical, held-out slice is beyond 1.7B capability ceiling.
+- 86/86 STORED corpus solutions still re-verify ï¿½ loop consistent; gap is generation-side.
 - Diag: top-rate tasks (orig .75-1.0) re-solve 4-8/8 with identical-8 batch; first-8 low-rate tasks ~1-3/32 either batch layout. task-major vs rep-major A/B = 4 vs 2 = noise -> NO batch bug proven; true per-rollout rates are heterogeneous and mostly lower than the 1-3/4 observed single-pass draw suggests (selection bias: kept tasks = the lucky tail).
 - IMPLICATION: goldilocks corpus IS hard-tail informative, but pass@k evals need many attempts to discriminate; per-assert accuracy instrumentation added for future runs.
 - Eval scripts: _solver_eval.py (per-task JSON + attempt/assert acc), _onmanifold_eval.py (gen_key->pool join), _diag_resample.py, _diag_batch_ab.py, _propose_retry.py (few-shot proposal test on sft4).
@@ -2329,25 +2329,101 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
 
 ### sft5 staging + proposal verdicts
 - Stage-2 CLOSED: sft4 proposal attempts = 0/32 (abstract few-shot) + 0/24 (corpus-native few-shot, outputs ~16tok empty fences). 1.7B still can't author verifiable tasks; external DBs remain supply.
-- sft5 selfgen RUNNING: opc_sft2_b (500 tasks, sft4_fq solver, k4 t.8 keep-easy .3) -> data/sft/sft5_external.jsonl. Yield lower than sft3 slice A so far (4 kept/4 waves) — slice-vs-solver confound noted.
+- sft5 selfgen RUNNING: opc_sft2_b (500 tasks, sft4_fq solver, k4 t.8 keep-easy .3) -> data/sft/sft5_external.jsonl. Yield lower than sft3 slice A so far (4 kept/4 waves) ï¿½ slice-vs-solver confound noted.
 - Staged for sft5 corpus: reflectionevo_sft_b.jsonl = 600 FRESH reflection rows (skip 300 sources; fetcher reflection branch now honors --skip, commit bfccb9e). Builder cmd: build_sft3.py --new sft5_external.jsonl reflectionevo_sft_b.jsonl --replay spark_sft_v3.jsonl --replay-frac .35 --out spark_sft_v4.jsonl. Train: .devin/launch_sft5_train.cmd (sft4->sft5 same recipe).
 - NOTE: fetch_external_tasks.py --kind reflection needs --dataset bigai-nlco/ReflectionEvo --config D+ explicitly (defaults are opc-sft2).
 
 
 ### sft5 lineage (overnight)
-- Corpus spark_sft_v4.jsonl: 1169 rows = 43 fresh sft4-solved external (opc_sft2_b: 36 gold+1 easy of 489 executable, yield lower than slice A's 75 — harder slice or solver parity within noise) + 600 fresh reflectionevo_b (300 new sources, skip-300) + 526 v3 replay (0.45).
+- Corpus spark_sft_v4.jsonl: 1169 rows = 43 fresh sft4-solved external (opc_sft2_b: 36 gold+1 easy of 489 executable, yield lower than slice A's 75 ï¿½ harder slice or solver parity within noise) + 600 fresh reflectionevo_b (300 new sources, skip-300) + 526 v3 replay (0.45).
 - Train: sft4->sft5 LoRA-r32 275 steps (bumped from 150: corpus ~2x), val .5629->.5297 monotone, bestval adapter captured each improvement. Merged 4.1GB + .lora + sft5_fq 1.59GB packed.
 - Eval running: instrumented held-out (per-attempt + per-assert acc) sft4 vs sft5.
 
 
 ### sft5 eval FINAL (all arms, on-manifold 60 tasks, k4 t.8)
-- sft3 3/60 (6/102 att) | sft4 3/60 (4/83) | sft5 1/60 (1/53) | sft4+sft5.bestval(partial,392/448 tensors attached — fused-qkv missing k_proj slots) 3/60 (3/53)
+- sft3 3/60 (6/102 att) | sft4 3/60 (4/83) | sft5 1/60 (1/53) | sft4+sft5.bestval(partial,392/448 tensors attached ï¿½ fused-qkv missing k_proj slots) 3/60 (3/53)
 - KEY: solves noise-flat but ATTEMPT rate declines each round 102->83->53. bestval doesn't rescue => not late drift. Reflection-heavy corpus = prime suspect for extraction decline. Held-out dense: sft4 147att acc.006 | sft5 108att acc.010 (both ~0 solves, unfiltered slice above ceiling).
-- sft6 corpus plan: code-heavier (reflection ~300 absolute not 600, replay-frac .45+, add KodCode/OpenCodeInstruct verified supply); track attempt-rate as leading metric; consider sft6 train FROM sft5 (lineage) or re-eval whether sft4 is the better solver base — sft5 selfgen yield was 43 rows vs sft3's 75 on comparable slices (confounded by slice difficulty).
-- KNOWN CAVEAT for _onmanifold_eval.py: task dicts shared across eval_model calls => _solved/_attempts flags carry between arms => mid-run wave prints for arm2+ contaminated (final counts clean — reset at rep0). Fix later if reused.
+- sft6 corpus plan: code-heavier (reflection ~300 absolute not 600, replay-frac .45+, add KodCode/OpenCodeInstruct verified supply); track attempt-rate as leading metric; consider sft6 train FROM sft5 (lineage) or re-eval whether sft4 is the better solver base ï¿½ sft5 selfgen yield was 43 rows vs sft3's 75 on comparable slices (confounded by slice difficulty).
+- KNOWN CAVEAT for _onmanifold_eval.py: task dicts shared across eval_model calls => _solved/_attempts flags carry between arms => mid-run wave prints for arm2+ contaminated (final counts clean ï¿½ reset at rep0). Fix later if reused.
 
 
 - Extraction-decline refined: sft5's extra failures are DEGENERATE outputs (empty code fences + EOS collapse, same mode as proposal collapse) not prose drift. Peek: sft5 rep5 = repeated empty fences; sft4 reps all emitted code.
 - _onmanifold_eval flag-carryover fixed (up-front reset).
 - sft6 banking: selfgen slice C (opc_sft2_c 600 tasks, sft3_fq solver = best extraction arm) running -> sft6_external.jsonl.
 
+### sft6 round FINAL (trained sft5->sft6, 520 rows: 112 ext + 200 refl-c + 208 v2-replay)
+- Train: early-stop @101/175. bestval step26 val .4941; final val .5042 (overfit).
+- Artifacts: sft6.safetensors (merged final) + sft6_fq; sft6.bestval.safetensors (adapter) -> .devin/merge_bestval.py -> sft6.bestval_merged.safetensors -> sft6.bestval_merged_fq.
+- merge_bestval.py: build_model_fast(sft5) + add_lora_adapters(rank32 a64, 7-name target list, 224 adapters) + load 448 tensors (0 missing/unexpected) + merge_lora_adapters + dedup tied head/embed clone + save_checkpoint. CPU-model tie-break: .cpu() is no-op on CPU so tied storages must be clone()-deduped before safetensors save.
+- On-manifold (60 tasks k4 t.8): sft6_fq 5/60 pass, runnable 25 (24% precision) | sft6bv 1/60, runnable 45 (4%). Extraction decline continues+worsens: 102->83->53->25. Bestval WORSE than final: earlier ckpt = more code-forward, less precise; later ckpt = rarer code, higher precision.
+- PEEK root cause (raw outputs): EMPTY-FENCE COLLAPSE â€” model emits ```python then EOS/empty body on hard prompts (2/6 reps sft6, 1/6 bv). NOT prose drift; learned abstention.
+- CORPUS root cause: v5 fenced-body median 228ch vs v2 770ch; 32% of v5 fenced bodies <60ch (stubs) vs 17% v2. Reflection+short external rows taught short/stub/abstain behavior.
+- sft7 direction: filter responses to complete functions (body len floor, no trivial returns, required names present); cut reflection or reformat so rows don't END in short code; prefer v2-style longer solutions; keep sft6_fq (final) not bestval for lineage â€” higher solve precision.
+- Held-out (unseen, k4 t.8): all arms ~0-1/117 â€” slice above capability ceiling, non-discriminating; on-manifold is the regression instrument.
+- opc_sft2_c consumed (600 rows used); next slices: educational_instruct has 118k rows; fetch via fetch_external_tasks.py --skip 1660.
+
+
+### sft7 staging (abstention-reversal experiment)
+- NEW TOOLS: scripts/gen_sft3_data.py clean_for_store() truncates stored rows
+  after the verified fence (line-based parse survives glued "```\n\n```python"
+  artifacts; committed 0229fc0). .devin/build_sft7.py = build_sft3 + response
+  cleaning (strips empty fences + prose-in-fence stubs <60ch; CODE_SIGNAL
+  keeps legit one-liners). .devin/merge_bestval.py merges adapter-only ckpt
+  into base for packing (CPU tie-break: clone() shared tensors before save).
+- sft7 supply: opc_sft2_d_fresh.json = 458 disjoint tasks (skip 1660 overlaps
+  142 with prior slices — fetcher --skip is eligible-row-index not key-disjoint;
+  post-filter by key against a/b/c/heldout pools is REQUIRED).
+  reflectionevo_sft_d.jsonl = 107 disjoint rows (kind=reflection needs
+  --dataset bigai-nlco/ReflectionEvo --config "D+"; default dataset yields 0).
+- sft7 corpus plan (spark_sft_v6): new = sft7_external + sft6_external
+  (cleaned), ZERO reflection, replay v2 @ .55 (v2 median body 894ch = long-code
+  anchor). Hypothesis: prose-free + stub-free corpus restores attempt rate.
+- OPEN diagnostic: is the attempt-decline partly decoding-side? Cheap test —
+  on-manifold @ temp 0.4 arm on sft6_fq before training sft7. If temp.4
+  rescues extraction, evals/selfgen should drop temp.
+- sft7 train from sft6.safetensors (lineage; sft6_fq final > bestval on
+  solve precision). Launcher staged: .devin/launch_sft7_train.cmd.
+
+### sft7 result + literature fix (2026-11-08)
+- sft7 (pure-code corpus, 0 refl, cleaned): 1/60 pass, runnable 32 (bv 26).
+  Corpus composition DOES NOT reverse decline => cumulative weight drift.
+- LITERATURE: ReST-EM canonical = M-step restarts from BASE each iterate,
+  not prev ckpt (arXiv 2312.06585; "constraints of prev-iterate patterns").
+  Personalized-ST study: base-restart beats continue-chain ~4%. Continual-
+  learning fixes: WiSE-FT/soup/SFA weight interpolation recovers capability.
+- SOUP TEST: (1-b)*sft3 + b*sft6 @ b=.5 -> 3/60 pass, runnable 53 (was 25).
+  Weight interpolation rescues ~half the lost extraction. Tool:
+  .devin/merge_soup.py (lazy tensor interp, no base needed same-layout).
+- sft8 = canonical re-base: spark_x26_1p7b (base) + spark_sft_v7.jsonl
+  (290 verified ext union + 209 v2 replay, 0 refl) 175 steps max.
+- If sft8 recovers extraction near sft3 levels => future rounds ALWAYS
+  retrain from base/sft8 on union corpus, never chain sftN->sftN+1.
+
+### sft8 RESULT (canonical re-base, 2026-11-08) — FIX CONFIRMED
+- sft8_fq on-manifold: 2/60 pass@4, runnable **101/240** — extraction FULLY
+  recovered to sft3 peak level (102). pass@4 noise-equal (2 vs 3).
+- Chain-collapse table (runnable/240): sft3 102 -> sft4 83 -> sft5 53 ->
+  sft6 25 -> sft7 32 -> [soup .5] 53 -> [sft8 re-base] 101.
+- NEW RULE (supersedes chain-SFT): each round = retrain from BASE
+  (spark_x26_1p7b) on union of ALL verified data. Never sftN->sftN+1.
+- sft8 train: val best .4482 @~151 (best of any round; no early-stop,
+  healthy curve vs sft7's immediate overfit on chained small corpus).
+- Soup remains a valid cheap-repair tool (merge_soup.py) but re-base is
+  the correct recipe going forward.
+- OPEN: sft8 precision low (3/101). Next lever = MORE verified rows per
+  round (bigger union) or harder tasks; also soup(sft8,sft6) if precision
+  vs recall tradeoff matters.
+
+## sft9 pipeline (current)
+- selfgen slice E: sft3_fq solver (sft8-as-solver yielded ~4%, killed at wave 6; sft3 wave3=12 rows ~13%) -> data/sft/sft9_external.jsonl, 544 tasks, ~23 waves
+- NEXT: build spark_sft_v8 = union(5 ext files) + frontier(150 refs from opc_sft2_pool_union misses) + v2 replay(frac .30) -> .devin/build_sft7.py --frontier-pool ... --frontier-limit 150
+- TRAIN: .devin/launch_sft9_train.cmd (staged: base ckpt, spark_sft_v8, 175 steps)
+- EVAL: .devin/_onmanifold_eval.py --rows (all 5 ext jsonls) --pool data/external/opc_sft2_pool_union.json -> 203 tasks, arms sft8_fq + sft9_fq
+- frontier builder: --frontier-pool/--frontier-limit flags in build_sft7.py; rows = solver prompt + fenced ref code
+- retry-missed: gen_sft3_data.py --retry-missed --k N revisits marker tasks (done_keys kept_only), novelty grams = kept rows only
+- spark_sft_v8 built: 744 rows = 317 rft_external + 10 easy + 150 frontier + 267 v2 replay; frontier from opc_sft2_pool_union (2065 missed available). sft9 selfgen killed at wave 18 (window-close) but banked 461 rows.
+- sft9 launched (ReST-EM re-base from BASE, 175 steps, LoRA r32, cpu_offload, bestval snapshots + early-stop p3). 697 usable ex.
+- sft9 DONE: 175 steps, best val 0.4043 (best all rounds; sft8 .4482). Packed sft9_fq (1.59GB).
+- sft9 on-manifold (union 228 tasks, k4 t.8): sft9 13/228 pass@4 (5.7%), attempts 30/369 (8.1%) vs sft8 11/228 (4.8%), 24/364 (6.6%). Re-base still holds; precision slowly climbing.
+- sft10 supply: opc_sft2_f.json = 500 tasks @ skip3000, 25/500 key overlap w/ prior slices. Selfgen launched w/ sft3_fq solver -> data/sft/sft10_external.jsonl (.devin/launch_sft10_selfgen.cmd).
+- NEXT: build spark_sft_v9 = union(6 ext) + frontier + v2 replay; train sft10 via clone of launch_sft9_train.cmd (relabel v8->v9, sft9->sft10); eval on-manifold again.
