@@ -2427,3 +2427,9 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
 - sft9 on-manifold (union 228 tasks, k4 t.8): sft9 13/228 pass@4 (5.7%), attempts 30/369 (8.1%) vs sft8 11/228 (4.8%), 24/364 (6.6%). Re-base still holds; precision slowly climbing.
 - sft10 supply: opc_sft2_f.json = 500 tasks @ skip3000, 25/500 key overlap w/ prior slices. Selfgen launched w/ sft3_fq solver -> data/sft/sft10_external.jsonl (.devin/launch_sft10_selfgen.cmd).
 - NEXT: build spark_sft_v9 = union(6 ext) + frontier + v2 replay; train sft10 via clone of launch_sft9_train.cmd (relabel v8->v9, sft9->sft10); eval on-manifold again.
+- sft10 selfgen DONE: 491/500 executable, 68 kept (49 goldilocks + 2 easy-kept ratio) — best yield yet vs sft9's 37.
+- spark_sft_v9: 868 rows = 383 rft_external + 12 easy + 150 frontier + 323 v2 replay.
+- sft10 train DONE: 175 steps, best val 0.4722 (corpus differs from sft9's — not comparable). Packed sft10_fq.
+- RUNNING: on-manifold sft9 vs sft10 on union of 6 ext files -> .devin/onman_sft10.log
+- sft10 RESULT: on-manifold 12/229 pass@4 (5.2%), attempts 26/461 (5.6%) vs sft9 13/229 (5.7%), 30/372 (8.1%). sft10 did NOT improve — pass@4 within noise, attempt rate regressed. Union corpus growth alone isn't lifting extraction; 1.7B ceiling near. sft9 remains canonical.
+- Candidates: soup(sft9,sft10) via merge_soup.py + re-eval; or pivot to reflection-heavy corpus (reflectionevo rows unused since v4); or accept sft9 as final Spark iterate.
