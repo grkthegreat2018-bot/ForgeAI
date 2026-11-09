@@ -42,9 +42,16 @@ class LoRAES:
                  perturb_mode: str = "full",        # full | block | fisher
                  block_size: int = 8,
                  fisher_scale: dict[str, torch.Tensor] | None = None,
+                 master_fp32: bool = True,
                  seed: int = 0, device: torch.device | None = None):
         assert perturb_mode in ("full", "block", "fisher")
         self.params = params
+        # fp32 shadow weights: bf16 params can't represent eps-scale
+        # perturbations (rounding kills the ZO signal -> |g|=0 measured
+        # on spark). Perturbations/updates live on these masters and are
+        # cast into the (possibly low-precision) params only for eval.
+        self._master = ([p.detach().to(torch.float32).clone()
+                         for p in params] if master_fp32 else None)
         self.names = names or [f"p{i}" for i in range(len(params))]
         self.eps, self.lr, self.n_dirs = eps, lr, n_dirs
         self.momentum = momentum
@@ -115,8 +122,11 @@ class LoRAES:
             g = g / self.n_dirs
             gnorm += float(g.pow(2).sum())
             self._vel[i].mul_(self.momentum).add_(g.to(self._vel[i].device))
-            self.params[i].data.add_(self._vel[i].to(self.params[i].dtype),
-                                     alpha=-self.lr)
+            tgt = self._master[i] if self._master is not None \
+                else self.params[i].data
+            tgt.add_(self._vel[i].to(tgt.device, tgt.dtype), alpha=-self.lr)
+            if self._master is not None:
+                self.params[i].data.copy_(tgt)
         return {"loss": base_loss, "grad_norm": math.sqrt(gnorm),
                 "dir_reward": scores}
 
@@ -125,8 +135,11 @@ class LoRAES:
             u, s = us[j], self._scale[i]
             if s is not None:
                 u = u * s
-            self.params[i].data.add_(u.to(self.params[i].dtype) *
-                                     (sign * self.eps))
+            tgt = self._master[i] if self._master is not None \
+                else self.params[i].data
+            tgt.add_(u.to(tgt.dtype) * (sign * self.eps))
+            if self._master is not None:
+                self.params[i].data.copy_(tgt)
 
 
 # ---------------------------------------------------------------------------
@@ -147,12 +160,18 @@ class LowRankBypass(torch.nn.Module):
         self.rank, self.scale = rank, scale
         dev, dt = linear.weight.device, linear.weight.dtype
         self.A = torch.nn.Parameter(
-            torch.randn(rank, linear.in_features, device=dev, dtype=dt)
-            * (0.01 if init == "randn" else 0.0))
+            torch.zeros(rank, linear.in_features, device=dev, dtype=dt))
         self.B = torch.nn.Parameter(
             torch.zeros(linear.out_features, rank, device=dev, dtype=dt))
         if init == "randn":
             torch.nn.init.normal_(self.A, std=1.0 / math.sqrt(rank))
+        elif init == "randn_ab":
+            # ZO needs BOTH matrices nonzero: with one at zero the
+            # adapter output is identically 0 and finite differences on
+            # EITHER matrix still read 0 (each multiplies through the
+            # zero partner). Backprop escapes this; ES cannot.
+            torch.nn.init.normal_(self.A, std=1.0 / math.sqrt(rank))
+            torch.nn.init.normal_(self.B, std=0.002)
 
     def forward(self, x):
         return self.linear(x) + (x @ self.A.t() @ self.B.t()) * self.scale

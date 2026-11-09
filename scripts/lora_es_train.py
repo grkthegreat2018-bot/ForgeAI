@@ -51,7 +51,9 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seq-len", type=int, default=256)
     ap.add_argument("--rows", type=int, default=256)
-    ap.add_argument("--layers-matching", default="mlp",
+    ap.add_argument("--init", default="randn_ab",
+                    choices=["zero", "randn", "randn_ab"])
+    ap.add_argument("--layers-matching", default="ffn",
                     help="substring filter for Linear names")
     ap.add_argument("--perturb-mode", default="full",
                     choices=["full", "block", "fisher"])
@@ -75,7 +77,7 @@ def main():
     model.requires_grad_(False)
 
     named_lora: dict[str, torch.Tensor] = {}
-    train = attach_lora(model, rank=args.rank,
+    train = attach_lora(model, rank=args.rank, init=args.init,
                         name_filter=lambda n: args.layers_matching in n)
     for name, mod in model.named_modules():
         if hasattr(mod, "A") and hasattr(mod, "B"):
@@ -85,6 +87,24 @@ def main():
 
     texts = _rows(args.data, args.rows)
     rng = torch.Generator().manual_seed(args.seed)
+    # fixed eval set (last 8 rows) — per-step batch loss is text-noise,
+    # the learning signal only shows on a constant set
+    eval_ids = [tok(t, return_tensors="pt", truncation=True,
+                    max_length=args.seq_len)["input_ids"].to(dev)
+                for t in texts[-8:]]
+    texts = texts[:-8]
+
+    @torch.inference_mode()
+    def eval_ce():
+        tot = 0.0
+        for ids in eval_ids:
+            out = model(ids[:, :-1])
+            lg = (out.logits if hasattr(out, "logits")
+                  else (out[0] if isinstance(out, tuple) else out))
+            tot += float(torch.nn.functional.cross_entropy(
+                lg.reshape(-1, lg.shape[-1]).float(),
+                ids[:, 1:].reshape(-1)))
+        return tot / len(eval_ids)
 
     def make_loss():
         text = texts[torch.randint(len(texts), (1,), generator=rng).item()]
@@ -109,13 +129,15 @@ def main():
 
     if dev.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
+    print(f"eval@0 CE {eval_ce():.4f}")
     for step in range(args.steps):
         info = es.step(make_loss())
         if step % 10 == 0 or step == args.steps - 1:
             peak = (torch.cuda.max_memory_allocated() / 2**30
                     if dev.type == "cuda" else 0)
             print(f"step {step:4d} loss {info['loss']:.4f} "
-                  f"|g| {info['grad_norm']:.3f} peakVRAM {peak:.2f}GB")
+                  f"|g| {info['grad_norm']:.3f} peakVRAM {peak:.2f}GB "
+                  f"evalCE {eval_ce():.4f}")
 
     if args.measure_vram and dev.type == "cuda":
         torch.cuda.reset_peak_memory_stats()

@@ -2525,3 +2525,14 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
   VERDICT: gate reverts regressed deltas AND recovers donor skill with
   alpha as the dial. CE-proxy positive; 240-task runnable eval queued.
   Fishers saved to .devin/fisher_sft9 (reusable via --load-fisher).
+- LoRA-ES REAL run (spark, ffn r8 adapters, 5.85M trainables):
+  Fixes found: (1) fp32 masters required — bf16 params round away
+  eps perturbations (|g|=0). (2) zero-init A,B is DEAD for ZO —
+  delta=B@A stays 0 through single-matrix perturbations; needs
+  randn_ab (both nonzero, B std 0.002).
+  Result: held-out evalCE monotone 1.963->1.682 (-14.3%) over 100
+  fwd-only steps, block mode, eps 5e-4 lr 1e-5 n_dirs 16 @3.94GB.
+  Honest: still above unadapted base (init damage not fully recovered
+  in 100 steps); VRAM win vs 1 backprop is small at batch=1/seq=256 —
+  ES=inference memory claim holds at larger batch where activations
+  dominate. Niche: adapter updates under memory pressure, not speed.
