@@ -112,8 +112,10 @@ def merge_fisher(base: dict[str, torch.Tensor],
             continue
         wb32 = wb.float()
         wn32 = wn.float()
-        fb = f_base[k].float() if k in f_base else torch.zeros_like(wb32)
-        fn = f_new[k].float() if k in f_new else torch.zeros_like(wb32)
+        fb = (f_base[k].float().to(wb32.device) if k in f_base
+              else torch.zeros_like(wb32))
+        fn = (f_new[k].float().to(wb32.device) if k in f_new
+              else torch.zeros_like(wb32))
         if mode == "interp":
             out[k] = ((fb * wb32 + fn * wn32 + eps * wb32)
                       / (fb + fn + eps)).to(wb.dtype)
@@ -125,7 +127,8 @@ def merge_fisher(base: dict[str, torch.Tensor],
 
 def fisher_diag(model, loss_fn, data_iter, n_batches: int,
                 fisher_dtype: torch.dtype = torch.float32,
-                accumulate_device: str | None = None) -> dict[str, torch.Tensor]:
+                accumulate_device: str | None = None,
+                n_groups: int = 1) -> dict[str, torch.Tensor]:
     """Empirical diagonal Fisher information: E_batch[(dL/dw_i)^2].
 
     `loss_fn(model, batch)` must return a scalar loss tensor (already
@@ -135,33 +138,57 @@ def fisher_diag(model, loss_fn, data_iter, n_batches: int,
 
     `accumulate_device`: where the running sum lives (default: param
     device). Use "cpu" when GPU headroom is tight (slower: D2H per step).
+
+    `n_groups` > 1 splits the pass into that many sequential runs, each
+    with requires_grad enabled on ONE contiguous group of params only —
+    GPU grad memory drops to ~1/n_groups of the model (the VRAM-safe
+    path for 12GB cards). Fisher is exact per-param; it just costs
+    n_groups backward passes per batch.
     """
-    dev = accumulate_device
+    named = [(n, p) for n, p in model.named_parameters()]
+    if n_groups <= 1:
+        groups = [named]
+    else:
+        gs = max(1, len(named) // n_groups)
+        groups = [named[i:i + gs] for i in range(0, len(named), gs)]
+
     fisher: dict[str, torch.Tensor] = {}
-    for n, p in model.named_parameters():
-        if p.requires_grad:
-            fisher[n] = torch.zeros(p.shape, dtype=fisher_dtype,
-                                    device=dev or p.device)
-    model.zero_grad(set_to_none=True)
-    it = iter(data_iter)
-    count = 0
-    while count < n_batches:
-        try:
-            batch = next(it)
-        except StopIteration:
+    dev = accumulate_device
+    prev_rg = {n: p.requires_grad for n, p in named}
+    try:
+        for gi, group in enumerate(groups):
+            gset = {n for n, _ in group}
+            for n, p in named:
+                p.requires_grad_(n in gset and prev_rg[n])
+            for n, p in group:
+                if p.requires_grad:
+                    fisher[n] = torch.zeros(
+                        p.shape, dtype=fisher_dtype,
+                        device=dev or p.device)
+            model.zero_grad(set_to_none=True)
             it = iter(data_iter)
-            batch = next(it)
-        loss = loss_fn(model, batch)
-        loss.backward()
-        for n, p in model.named_parameters():
-            if p.grad is not None and n in fisher:
-                acc = fisher[n]
-                g = p.grad.detach().to(acc.device, dtype=acc.dtype)
-                acc += g * g
-        model.zero_grad(set_to_none=True)
-        count += 1
+            count = 0
+            while count < n_batches:
+                try:
+                    batch = next(it)
+                except StopIteration:
+                    it = iter(data_iter)
+                    batch = next(it)
+                loss = loss_fn(model, batch)
+                loss.backward()
+                for n, p in group:
+                    if p.grad is not None:
+                        acc = fisher[n]
+                        g = p.grad.detach().to(acc.device,
+                                               dtype=acc.dtype)
+                        acc += g * g
+                model.zero_grad(set_to_none=True)
+                count += 1
+    finally:
+        for n, p in named:
+            p.requires_grad_(prev_rg[n])
     for n in fisher:
-        fisher[n] /= max(1, count)
+        fisher[n] /= max(1, n_batches)
     return fisher
 
 
