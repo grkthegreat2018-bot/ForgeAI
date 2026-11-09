@@ -1032,7 +1032,7 @@ def main():
                         "this gives ~30x speedup for 150K+ examples).")
     p.add_argument("--pack-sequences", action=argparse.BooleanOptionalAction, default=True,
                    help="Pack variable-length examples into fixed-length sequences "
-                        "(Llama-3 style, eliminates 30-50% padding waste). Default: True.")
+                        "(Llama-3 style, eliminates 30-50%% padding waste). Default: True.")
     p.add_argument("--async-prefetch", action=argparse.BooleanOptionalAction, default=True,
                    help="Use async background prefetcher for data loading (2-3x throughput "
                         "on I/O-bound workloads). Default: True.")
@@ -1139,7 +1139,7 @@ def main():
     p.add_argument("--curriculum", default="none",
                    choices=["none", "vanilla", "pacing", "interleaved", "warmup"],
                    help="Curriculum learning strategy: order training data easy→hard. "
-                        "18-45% fewer steps to reach baseline performance. "
+                        "18-45%% fewer steps to reach baseline performance. "
                         "'pacing' gradually increases difficulty, 'warmup' does easy "
                         "warmup then random, 'interleaved' mixes with increasing hard ratio.")
     p.add_argument("--augment", action="store_true",
@@ -1275,7 +1275,7 @@ def main():
                    help="Loss function: 'ce' (standard), 'focal' (hard token focus), "
                         "'label_smoothing' (anti-overconfidence), 'lovasz' (exact-match), "
                         "'dynamic_focal' (curriculum focal), 'mixture' (combined). "
-                        "Focal/Lovász give +36% exact match on math/QA (EMNLP 2024).")
+                        "Focal/Lovász give +36%% exact match on math/QA (EMNLP 2024).")
     p.add_argument("--focal-gamma", type=float, default=4.93,
                    help="Focal loss gamma (focusing parameter). 0=CE, 2=typical, "
                         "4.93=evolution-discovered optimum for SFT.")
@@ -1287,6 +1287,13 @@ def main():
     p.add_argument("--l2-lambda", type=float, default=0.01,
                    help="L2-SP regularization lambda (NeurIPS 2024). "
                         "Lower layers get 10x this value. Default 0.01")
+    p.add_argument("--sfa-alpha", type=float, default=0.0,
+                   help="SFA (Sequential Fine-tuning with Averaging): every "
+                        "--sfa-every optimizer steps, pull params toward the "
+                        "--anchor checkpoint by this fraction. 0 = disabled. "
+                        "Tests mid-training merge-back vs post-hoc FisherFold.")
+    p.add_argument("--sfa-every", type=int, default=50,
+                   help="Steps between SFA anchor pulls (default 50).")
     p.add_argument("--sigreg-weight", type=float, default=0.0,
                    help="SIGReg spectral regularization weight (LeWM/LeCun et al.). "
                         "Penalizes hidden-state spectral norms below threshold to prevent "
@@ -2078,6 +2085,24 @@ def main():
         print(f"  L2-SP active: {len(anchor_named_params)} matched params, "
               f"lambda={args.l2_lambda} (lower layers 10x)")
 
+    # SFA pull list: (param, anchor) pairs — shares the anchor map memory.
+    sfa_pairs = None
+    if args.sfa_alpha > 0:
+        if anchor_named_params is None:
+            # SFA needs the anchor even without L2-SP loss.
+            assert args.anchor, "--sfa-alpha requires --anchor"
+            anchor_sd = load_anchor_cached(args.anchor)
+            anchor_named_params = {}
+            model_named = dict(model.named_parameters())
+            for name, p in model_named.items():
+                if name in anchor_sd:
+                    anchor_named_params[name] = anchor_sd[name].to(device).to(p.dtype)
+        sfa_pairs = [(p, anchor_named_params[n])
+                     for n, p in model.named_parameters()
+                     if n in anchor_named_params]
+        print(f"  SFA active: {len(sfa_pairs)} params, "
+              f"alpha={args.sfa_alpha} every {args.sfa_every} steps")
+
     # ── Easy Sample Upweighting (ICML 2025) ──
     # Pre-compute per-example weights from base model loss.
     # Only activates when --sample-weighting flag is set.
@@ -2445,6 +2470,11 @@ def main():
                         g["lr"] = lr
                     optimizer.step()
                     optimizer.zero_grad()
+                    # SFA: periodic pull toward anchor (mid-training merge-back).
+                    if sfa_pairs is not None and (step + 1) % args.sfa_every == 0:
+                        with torch.no_grad():
+                            for p_, a_ in sfa_pairs:
+                                p_.data.lerp_(a_, args.sfa_alpha)
                     # QK-Clip (Kimi K2 MuonClip): cap per-head attention logits.
                     if qk_clip_monitor is not None:
                         n_clip = qk_clip_monitor.clip(model)
