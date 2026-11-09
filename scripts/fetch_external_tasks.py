@@ -72,19 +72,24 @@ def reflection_rows(row):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", default="OpenCoder-LLM/opc-sft-stage2")
-    ap.add_argument("--config", default="educational_instruct")
+    ap.add_argument("--config", default="")
     ap.add_argument("--split", default="train")
     ap.add_argument("--kind", choices=["code", "reflection"], default="code")
+    ap.add_argument("--adapter", choices=["auto", "opc", "oci"],
+                    default="auto",
+                    help="row schema: opc=opc-sft2 fields, "
+                         "oci=nvidia/OpenCodeInstruct (input/output/"
+                         "unit_tests + per-test pass status)")
     ap.add_argument("--limit", type=int, default=500)
     ap.add_argument("--skip", type=int, default=0,
                     help="skip the first N eligible rows (held-out slices)")
     ap.add_argument("--out", default="data/external/opc_sft2_tasks.json")
     args = ap.parse_args()
 
-    from datasets import load_dataset
-    ds = load_dataset(args.dataset, args.config, split=args.split,
-                      streaming=True)
     if args.kind == "reflection":
+        from datasets import load_dataset
+        ds = load_dataset(args.dataset, args.config or None,
+                          split=args.split, streaming=True)
         rows = []
         n_src = 0
         for row in ds:
@@ -103,21 +108,59 @@ def main():
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
         print(f"wrote {len(rows)} reflection rows -> {out}")
         return
+    adapter = args.adapter
+    if adapter == "auto":
+        adapter = "oci" if "OpenCodeInstruct" in args.dataset else "opc"
+    config = args.config or ("educational_instruct" if adapter == "opc"
+                             else None)
+    from datasets import load_dataset
+    ds = load_dataset(args.dataset, config, split=args.split,
+                      streaming=True)
+
+    def row_fields(row):
+        """Normalize one dataset row -> (name, code, desc, testcases,
+        pass_flags) or None."""
+        if adapter == "oci":
+            raw = (row.get("output") or "").strip()
+            m = re.search(r"```(?:python|py)?\s*\n(.*?)```", raw, re.S)
+            code = (m.group(1) if m else raw).strip()
+            nm = re.search(r"def\s+(\w+)\s*\(", code)
+            name = nm.group(1) if nm else ""
+            desc = (row.get("input") or "").strip()
+            tests = row.get("unit_tests") or []
+            status = row.get("tests_execution_status") or []
+            if isinstance(tests, str):
+                try:
+                    tests = json.loads(tests)
+                except Exception:
+                    tests = []
+            if isinstance(status, str):
+                try:
+                    status = json.loads(status)
+                except Exception:
+                    status = []
+            return name, code, desc, tests, status
+        name = (row.get("entry_point") or "").strip()
+        code = (row.get("code") or "").strip()
+        desc = (row.get("instruction") or "").strip()
+        return name, code, desc, row.get("testcase"), None
+
     tasks = []
     n_seen = 0
     n_eligible = 0
     for row in ds:
         n_seen += 1
-        name = (row.get("entry_point") or "").strip()
-        code = (row.get("code") or "").strip()
-        desc = (row.get("instruction") or "").strip()
+        name, code, desc, raw_tests, pass_flags = row_fields(row)
         if not name or not code or not desc:
             continue
         try:
             compile(code, "<row>", "exec")
         except SyntaxError:
             continue
-        tests = literal_asserts(row.get("testcase"), name)
+        if pass_flags:
+            raw_tests = [t for t, s in zip(raw_tests, pass_flags)
+                         if s == "pass"]
+        tests = literal_asserts(raw_tests, name)
         if len(tests) < 2:
             continue
         if len({t["expected"] for t in tests}) < 2:
@@ -131,7 +174,9 @@ def main():
         tasks.append(dict(name=name, code=code, desc=desc, tests=tests,
                           signature=signature,
                           key=hashlib.md5((name + code).encode())
-                          .hexdigest()[:12], source="opc_sft2"))
+                          .hexdigest()[:12],
+                          source="oci" if adapter == "oci"
+                          else "opc_sft2"))
         if len(tasks) >= args.limit:
             break
     out = REPO / args.out
