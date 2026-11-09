@@ -265,6 +265,20 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   tok/s vs airllm-today ≈4.4), `scripts/bench_lossless_weights.py` (bf16
   lossless ceiling ≈10.7 b/param, split-zlib 69.9%, minmax-int4 codes
   ~incompressible H=3.86/4). Design: `docs/R71_STREAMED_INTELLIGENCE_DESIGN.md`.
+  R71 lanes shipped: `airllm_streamer.py`+`airllm_ring.py` (StreamHead —
+  per-layer xp_shards + pinned cache + ring prefetch; numeric shard sort —
+  lexicographic order scrambles layers ≥10, verified bit-exact vs resident;
+  `scripts/make_xp_shards.py`, `smoke_streamhead.py`), `lookahead_decode.py`
+  (FORGE_LOOKAHEAD=k,w n-gram draft + batched verify — greedy-only,
+  rep-window=generated-only-last-64 like decoding.py, mirrors eos-append +
+  degenerate guard; 2.2-2.4x code, ~0.85-1.0x open text; streaming wins
+  when both apply), `ecq_codec.py` (entropy-bound lossless weight codec,
+  3.84 b/p), `lora_es.py` (fwd-only ES tuning — fp32 masters + randn_ab,
+  evalCE -14% @ 3.94GB), `loopdepth.py` (VerifierGate+LoopGates — FORGE_
+  LOOPTHINK=k,max,g[,thr],gates.pt; holdout -5.5..-8.1% CE, cross-domain
+  -2.6%; ungated recurrence diverges — gates are the mechanism), 
+  `fisher_merge`/`fisher_diag` (--alpha-new dial, grouped bf16 GPU fisher
+  ≈9.4GB; reverts damage on bad donors, keeps 36-74% of skill on good).
 - `forge/engine/forge_engine.py` — ForgeEngine (inference engine; core init +
   8 mixins: engine_checkpoints, engine_activation, engine_generation,
   engine_diagnostics, engine_merging, engine_lora, engine_lifecycle,

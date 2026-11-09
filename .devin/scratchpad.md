@@ -2536,3 +2536,9 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
   in 100 steps); VRAM win vs 1 backprop is small at batch=1/seq=256 —
   ES=inference memory claim holds at larger batch where activations
   dominate. Niche: adapter updates under memory pressure, not speed.
+
+## StreamHead real-model fix (commit 2a7936e)
+- Bug: lexicographic shard glob sort (shard_10<shard_2) scrambled layers >=10; numeric sort fix (same as HF #32023).
+- Bug: prefix-cache + finish_sentence + CacheBlend routed std decode on ring-aliased params -> '***'. Streaming dispatches first; finish_sentence skipped under streaming.
+- Bug: streamed sampling hardcoded top_k=0/rep=1.0 + prompt missing from penalty window; now flows params + prompt_ids.
+- Verified: 36-step logits bit-exact vs monolithic; smoke match:True. Streamed 1.8x slower than std on a VRAM-fitting model (expected — transport overhead; value is for non-fitting models).
