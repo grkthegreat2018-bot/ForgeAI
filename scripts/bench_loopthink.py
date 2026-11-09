@@ -42,6 +42,8 @@ def main():
     ap.add_argument("--margin", type=float, default=0.15)
     ap.add_argument("--train-gates", type=int, default=0,
                     help="steps of LoopGates training before eval")
+    ap.add_argument("--train-data", default=None,
+                    help="separate corpus for gate training (cross-domain test)")
     args = ap.parse_args()
 
     from forge.config import get_config
@@ -71,9 +73,27 @@ def main():
     trained = None
     if args.train_gates > 0:
         from forge.exp.loopdepth import train_loop_gates
-        half = max(1, len(texts) // 2)
-        train_texts, texts = texts[:half], texts[half:]
-        print(f"holdout split: {len(train_texts)} train / {len(texts)} eval")
+        if args.train_data:
+            train_texts = []
+            with open(args.train_data, encoding="utf-8") as f:
+                for line in f:
+                    r = json.loads(line)
+                    t = (r.get("text") or r.get("prompt")
+                         or r.get("instruction") or "")
+                    if not t and r.get("messages"):
+                        t = "\n".join(m.get("content", "")
+                                      for m in r["messages"])
+                    if t.strip():
+                        train_texts.append(t)
+                    if len(train_texts) >= 64:
+                        break
+            print(f"cross-domain: {len(train_texts)} train rows from "
+                  f"{args.train_data} / {len(texts)} eval")
+        else:
+            half = max(1, len(texts) // 2)
+            train_texts, texts = texts[:half], texts[half:]
+            print(f"holdout split: {len(train_texts)} train / "
+                  f"{len(texts)} eval")
         train_ids = [tok(t, return_tensors="pt", truncation=True,
                          max_length=args.seq_len)["input_ids"].to(dev)
                      for t in train_texts]

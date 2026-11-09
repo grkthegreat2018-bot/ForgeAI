@@ -2511,3 +2511,8 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
   std 1.746 vs gated 1.650 = -5.5%. Ungated always diverges ~10.4.
   Generalizes to unseen text — real capability, not memorization.
   Verifier early-stops ~half the eval texts at iter 2-3.
+- LoopThink CROSS-DOMAIN: gates trained on glaive_fc_2k (function-call
+  chat), eval on sft9 code rows: std 1.511 vs gated 1.472 = -2.6%.
+  Transfers but weaker than same-domain (-5.5/-8.1%): part general
+  "recur safely" skill, part domain-specific. 200 steps, gates still
+  small (|g|<0.12).
