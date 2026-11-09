@@ -2214,6 +2214,28 @@ RULE (supersedes chain-SFT): future rounds retrain from BASE on the
 union corpus; never chain sftN→sftN+1. Remaining gap: precision
 (3/101 ≈ 3%) — next lever is more verified rows per round.
 
+**sft9 = re-base round 2 + frontier rows (2026-11-09)**: three loop
+upgrades this round. (1) `--retry-missed` in gen_sft3_data.py revisits
+marker tasks at higher k (done_keys kept_only + novelty grams = kept
+rows only; commit 82c11fb). (2) **Frontier rows** — `build_sft7.py
+--frontier-pool/--frontier-limit`: tasks the solver MISSED (marker
+gen_keys) become prompt→fenced-reference-code rows; ~2065 misses
+available, cap 150/round. This is ceiling expansion (teaches patterns
+self-verification can't reach), unlike verified rows which only
+consolidate. (3) Cleaner hardening: rows with no fenced block are now
+DROPPED (13 degenerate "is the is the..." v2-replay rows caught) and
+unclosed trailing fences truncated (17 rows). Corpus `spark_sft_v8`
+= 610 rows (327 verified + 150 frontier + 133 clean replay). Selfgen
+supply: sft3_fq solver on slice E (`opc_sft2_e_fresh`, 544 tasks) —
+~8% yield (37 rows; harder slice than A/C's ~13%; sft8-as-solver
+yielded ~4% and was retired as banker). Train: BASE → 175 steps, val
+best **0.4043** (vs sft8's .4482) → `sft9.safetensors` + `_fq` +
+`.bestval`. Wide eval (all ~240 kept tasks, pool
+`data/external/opc_sft2_pool_union.json`): sft8 vs sft9 pending —
+watch attempt-rate (extraction) AND attempt precision. NOTE: eval's
+binary pass@4 saturates ~2-5/60; the wide pool + attempt_rate are the
+informative metrics.
+
 Stage-3 shortlist (verified on HF hub):
 - **Code tasks w/ refs+tests** (drop into the exec-verified loop):
   `OpenCoder-LLM/opc-sft-stage2` `educational_instruct` (compiler-validated
