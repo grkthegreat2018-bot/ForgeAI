@@ -52,7 +52,7 @@ def main():
     ap.add_argument("--seq-len", type=int, default=256)
     ap.add_argument("--rows", type=int, default=256)
     ap.add_argument("--init", default="randn_ab",
-                    choices=["zero", "randn", "randn_ab"])
+                    choices=["zero", "randn", "randn_ab", "pissa"])
     ap.add_argument("--layers-matching", default="ffn",
                     help="substring filter for Linear names")
     ap.add_argument("--perturb-mode", default="full",

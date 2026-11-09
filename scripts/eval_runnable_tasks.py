@@ -47,14 +47,21 @@ def cmd_generate(args):
     for i, t in enumerate(tasks):
         prompt = (f"# {t['desc']}\n"
                   f"# signature: {t['name']}{t['signature']}\n")
-        try:
-            out = e.generate(prompt, max_new_tokens=args.max_new,
-                             temperature=0.0, finish_sentence=False)
-        except Exception as ex:  # noqa: BLE001
-            out = f"<GENFAIL {ex}>"
+        outs = []
+        for s in range(args.samples):
+            try:
+                out = e.generate(
+                    prompt, max_new_tokens=args.max_new,
+                    temperature=0.0 if s == 0 else args.temp,
+                    top_p=0.95 if s > 0 else 1.0,
+                    finish_sentence=False)
+            except Exception as ex:  # noqa: BLE001
+                out = f"<GENFAIL {ex}>"
+            outs.append(out)
         rows.append({"key": t.get("key", i), "name": t["name"],
                      "signature": t["signature"], "tests": t["tests"],
-                     "completion": out})
+                     "completion": outs[0],
+                     "completions": outs if args.samples > 1 else None})
         if (i + 1) % 20 == 0:
             print(f"  {i + 1}/{len(tasks)}", flush=True)
     with open(args.out, "w", encoding="utf-8") as f:
@@ -63,46 +70,73 @@ def cmd_generate(args):
     print(f"wrote {len(rows)} -> {args.out}")
 
 
+def _judge_one(r: dict, completion: str) -> tuple[str, int]:
+    code = _extract_fn(completion, r["name"])
+    if not code:
+        return "no_fn", 0
+    env: dict = {}
+    try:
+        exec(compile(code, "<gen>", "exec"), env)
+    except SyntaxError:
+        return "compile_error", 0
+    fn = env.get(r["name"])
+    if not callable(fn):
+        return "name_missing", 0
+    ok = 0
+    verdict = "pass"
+    for tc in r["tests"]:
+        try:
+            got = fn(*eval(f"({tc['args']},)"))
+            if repr(got) == tc["expected"]:
+                ok += 1
+            else:
+                verdict = "wrong_answer"
+        except Exception:  # noqa: BLE001
+            verdict = "runtime_error"
+    if ok < len(r["tests"]) and verdict == "pass":
+        verdict = "wrong_answer"
+    return verdict, ok
+
+
+def _pass_at_k(n: int, c: int, k: int) -> float:
+    """Unbiased pass@k (Chen et al.): prob a size-k subset of n samples
+    with c correct contains >=1 pass."""
+    from math import comb
+    if n - c < k:
+        return 1.0
+    return 1.0 - comb(n - c, k) / comb(n, k)
+
+
 def cmd_run_tests(args):
     rows = [json.loads(x) for x in open(args.gens, encoding="utf-8")]
-    npass = fail_compile = fail_run = 0
-    results = []
-    for r in rows:
-        code = _extract_fn(r["completion"], r["name"])
-        ok = 0
-        verdict = "no_fn"
-        if code:
-            env: dict = {}
-            try:
-                exec(compile(code, "<gen>", "exec"), env)
-                fn = env.get(r["name"])
-                if not callable(fn):
-                    verdict = "name_missing"
-                else:
-                    verdict = "pass"
-                    for tc in r["tests"]:
-                        try:
-                            got = fn(*eval(f"({tc['args']},)"))
-                            if repr(got) == tc["expected"]:
-                                ok += 1
-                            else:
-                                verdict = "wrong_answer"
-                        except Exception:  # noqa: BLE001
-                            verdict = "runtime_error"
-                    if verdict == "pass" and ok < len(r["tests"]):
-                        verdict = "wrong_answer"
-            except SyntaxError:
-                verdict = "compile_error"
-                fail_compile += 1
-        passed = verdict == "pass" and ok == len(r["tests"])
-        npass += passed
-        fail_run += verdict in ("wrong_answer", "runtime_error")
-        results.append({"key": r["key"], "name": r["name"],
-                        "verdict": verdict, "tests_ok": ok})
-    n = len(results)
-    print(f"PASS {npass}/{n}  ({100.0 * npass / max(n, 1):.1f}%)")
     from collections import Counter
-    print("verdicts:", dict(Counter(r["verdict"] for r in results)))
+    results = []
+    nsamp = 0
+    for r in rows:
+        comps = r.get("completions") or [r["completion"]]
+        verdicts = [_judge_one(r, c)[0] for c in comps]
+        c_pass = verdicts.count("pass")
+        nsamp = max(nsamp, len(comps))
+        results.append({"key": r["key"], "name": r["name"],
+                        "verdict": verdicts[0],
+                        "verdicts": verdicts,
+                        "n": len(comps), "c": c_pass})
+    n = len(results)
+    npass = sum(v["verdict"] == "pass" for v in results)
+    print(f"PASS@1 {npass}/{n}  ({100.0 * npass / max(n, 1):.1f}%)")
+    print("verdicts:", dict(Counter(
+        v for r in results for v in r["verdicts"])))
+    # format vs solve decomposition
+    fn = [r for r in results if r["verdict"] != "no_fn"]
+    print(f"fn_emitted {len(fn)}/{n} ({100.0 * len(fn) / n:.1f}%)  "
+          f"pass|fn {npass}/{max(len(fn),1)} "
+          f"({100.0 * npass / max(len(fn), 1):.1f}%)")
+    if nsamp > 1:
+        for k in (1, 2, 4, 8):
+            if k <= nsamp:
+                pk = sum(_pass_at_k(r["n"], r["c"], k)
+                         for r in results) / n
+                print(f"pass@{k}: {100.0 * pk:.1f}%")
     if args.report:
         json.dump(results, open(args.report, "w"), indent=1)
 
@@ -113,6 +147,11 @@ def main():
     ap.add_argument("--config", default="spark_x26_1p7b")
     ap.add_argument("--tasks", default="data/external/opc_sft2_tasks.json")
     ap.add_argument("--n", type=int, default=240)
+    ap.add_argument("--samples", type=int, default=1,
+                    help="completions per task (sample 0 greedy; rest at "
+                         "--temp for pass@k)")
+    ap.add_argument("--temp", type=float, default=0.8,
+                    help="sampling temperature for samples 1..n-1")
     ap.add_argument("--max-new", type=int, default=160)
     ap.add_argument("--out", default="")
     ap.add_argument("--run-tests", dest="gens", default="")

@@ -172,6 +172,22 @@ class LowRankBypass(torch.nn.Module):
             # zero partner). Backprop escapes this; ES cannot.
             torch.nn.init.normal_(self.A, std=1.0 / math.sqrt(rank))
             torch.nn.init.normal_(self.B, std=0.002)
+        elif init == "pissa":
+            # PiSSA (arXiv 2404.02948): adapter = top-r SVD components of
+            # W, base shrunk to the residual. Function-preserving nonzero
+            # init — ideal for ZO (perturbations see real loss signal
+            # immediately) AND proven to converge faster than randn-LoRA.
+            # s*B@A == U_r S_r V_r^T so W_res + s*BA == W exactly (mod the
+            # discarded tail).
+            with torch.no_grad():
+                W = linear.weight.data.float()
+                U, S, V = torch.svd_lowrank(W, q=rank, niter=4)
+                Vr = V.t().contiguous()              # [r, in]
+                Br = (U * S.unsqueeze(0) / max(scale, 1e-8)).contiguous()
+                self.A.data.copy_(Vr.to(dt))
+                self.B.data.copy_(Br.to(dt))
+                linear.weight.data.sub_(
+                    ((self.B @ self.A) * scale).to(dt))
 
     def forward(self, x):
         return self.linear(x) + (x @ self.A.t() @ self.B.t()) * self.scale

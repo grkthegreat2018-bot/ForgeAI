@@ -123,6 +123,38 @@ class TestLowRankBypass:
         assert isinstance(model[1], LowRankBypass)
 
 
+class TestPiSSAInit:
+    def test_pissa_preserves_function(self):
+        # W_res + s*BA == W (mod discarded tail) → wrapped output must
+        # match the original Linear within fp32 tolerance.
+        torch.manual_seed(0)
+        lin = nn.Linear(16, 8, bias=False)
+        lin.weight.data.copy_(torch.randn(8, 16))
+        x = torch.randn(5, 16)
+        ref = lin(x)
+        wrap = LowRankBypass(lin, rank=4, scale=1.0, init="pissa")
+        torch.testing.assert_close(wrap(x), ref, rtol=1e-4, atol=1e-4)
+
+    def test_pissa_adapter_nonzero_and_residual(self):
+        lin = nn.Linear(16, 8, bias=False)
+        W0 = lin.weight.data.clone()
+        wrap = LowRankBypass(lin, rank=4, scale=1.0, init="pissa")
+        assert wrap.A.abs().sum() > 0 and wrap.B.abs().sum() > 0
+        # residual + adapter reconstructs W
+        torch.testing.assert_close(
+            lin.weight.data + wrap.B @ wrap.A, W0, rtol=1e-3, atol=1e-3)
+
+    def test_pissa_scale_division(self):
+        # scale multiplies the adapter in forward — init must pre-divide
+        torch.manual_seed(0)
+        lin = nn.Linear(16, 8, bias=False)
+        lin.weight.data.copy_(torch.randn(8, 16))
+        x = torch.randn(3, 16)
+        ref = lin(x)
+        wrap = LowRankBypass(lin, rank=4, scale=0.5, init="pissa")
+        torch.testing.assert_close(wrap(x), ref, rtol=1e-4, atol=1e-4)
+
+
 class TestFisherMode:
     def test_fisher_scale_shrinks_step(self):
         p = [torch.zeros(64, 64)]
