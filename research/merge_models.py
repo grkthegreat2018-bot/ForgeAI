@@ -81,6 +81,90 @@ def _kth_threshold(values: torch.Tensor, density: float) -> torch.Tensor:
 # Merge methods
 # ---------------------------------------------------------------------------
 
+def merge_fisher(base: dict[str, torch.Tensor],
+                 new: dict[str, torch.Tensor],
+                 f_base: dict[str, torch.Tensor],
+                 f_new: dict[str, torch.Tensor],
+                 eps: float = 1e-20,
+                 mode: str = "gate",
+                 dtype=None) -> dict[str, torch.Tensor]:
+    """FisherFold — diagonal-Fisher-weighted merge (R71/B4).
+
+    mode="gate" (rescue/anti-forgetting semantics):
+        w' = w_b + (w_n - w_b) * F_n / (F_b + F_n + eps)
+        Params the new model actually *uses* on its task (high F_new relative
+        to F_base) keep their delta; params that drifted without purpose
+        (both Fishers ~0) or that are base-critical (F_b >> F_n) revert to
+        base. This is the merge that extracts a regressed sftN's real
+        skills without importing its damage.
+
+    mode="interp" (symmetric skill union):
+        w' = (F_b * w_b + F_n * w_n) / (F_b + F_n + eps * (w_b prior))
+        Importance-weighted interpolation; eps floor leans to base.
+
+    Fisher dicts are keyed like the state dicts; missing keys -> 0 Fisher.
+    """
+    out = {}
+    for k, wb in base.items():
+        wn = new.get(k)
+        if wn is None or wn.shape != wb.shape:
+            out[k] = wb.clone()
+            continue
+        wb32 = wb.float()
+        wn32 = wn.float()
+        fb = f_base[k].float() if k in f_base else torch.zeros_like(wb32)
+        fn = f_new[k].float() if k in f_new else torch.zeros_like(wb32)
+        if mode == "interp":
+            out[k] = ((fb * wb32 + fn * wn32 + eps * wb32)
+                      / (fb + fn + eps)).to(wb.dtype)
+        else:  # gate
+            g = fn / (fb + fn + eps)
+            out[k] = (wb32 + (wn32 - wb32) * g).to(wb.dtype)
+    return out
+
+
+def fisher_diag(model, loss_fn, data_iter, n_batches: int,
+                fisher_dtype: torch.dtype = torch.float32,
+                accumulate_device: str | None = None) -> dict[str, torch.Tensor]:
+    """Empirical diagonal Fisher information: E_batch[(dL/dw_i)^2].
+
+    `loss_fn(model, batch)` must return a scalar loss tensor (already
+    backward-able). Runs exactly `n_batches` draws from `data_iter`
+    (re-iterates from the start if the iterator is exhausted early).
+    Returns {param_name: tensor} — same names as model.named_parameters().
+
+    `accumulate_device`: where the running sum lives (default: param
+    device). Use "cpu" when GPU headroom is tight (slower: D2H per step).
+    """
+    dev = accumulate_device
+    fisher: dict[str, torch.Tensor] = {}
+    for n, p in model.named_parameters():
+        if p.requires_grad:
+            fisher[n] = torch.zeros(p.shape, dtype=fisher_dtype,
+                                    device=dev or p.device)
+    model.zero_grad(set_to_none=True)
+    it = iter(data_iter)
+    count = 0
+    while count < n_batches:
+        try:
+            batch = next(it)
+        except StopIteration:
+            it = iter(data_iter)
+            batch = next(it)
+        loss = loss_fn(model, batch)
+        loss.backward()
+        for n, p in model.named_parameters():
+            if p.grad is not None and n in fisher:
+                acc = fisher[n]
+                g = p.grad.detach().to(acc.device, dtype=acc.dtype)
+                acc += g * g
+        model.zero_grad(set_to_none=True)
+        count += 1
+    for n in fisher:
+        fisher[n] /= max(1, count)
+    return fisher
+
+
 def merge_linear(models: list[dict[str, torch.Tensor]],
                  weights: list[float] | None = None
                  ) -> dict[str, torch.Tensor]:
