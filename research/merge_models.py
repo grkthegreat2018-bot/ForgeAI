@@ -87,6 +87,7 @@ def merge_fisher(base: dict[str, torch.Tensor],
                  f_new: dict[str, torch.Tensor],
                  eps: float = 1e-20,
                  mode: str = "gate",
+                 alpha_new: float = 1.0,
                  dtype=None) -> dict[str, torch.Tensor]:
     """FisherFold — diagonal-Fisher-weighted merge (R71/B4).
 
@@ -116,6 +117,8 @@ def merge_fisher(base: dict[str, torch.Tensor],
               else torch.zeros_like(wb32))
         fn = (f_new[k].float().to(wb32.device) if k in f_new
               else torch.zeros_like(wb32))
+        if alpha_new != 1.0:
+            fn = fn * alpha_new
         if mode == "interp":
             out[k] = ((fb * wb32 + fn * wn32 + eps * wb32)
                       / (fb + fn + eps)).to(wb.dtype)

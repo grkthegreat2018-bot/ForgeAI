@@ -84,6 +84,12 @@ def main():
     ap.add_argument("--n-groups", type=int, default=4,
                     help="param groups for fisher pass — grads held for "
                          "one group at a time (VRAM fit on 12GB)")
+    ap.add_argument("--alpha-new", type=float, default=1.0,
+                    help="scale F_new — >1 recovers more donor skill")
+    ap.add_argument("--save-fisher", default=None,
+                    help="dir to save computed fishers (f_base/f_new.pt)")
+    ap.add_argument("--load-fisher", default=None,
+                    help="dir with precomputed fishers — skips GPU pass")
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
 
@@ -113,41 +119,62 @@ def main():
 
     tk = {"cfg_fallback": args.cfg_fallback}
     t0 = time.time()
-    print("loading base model...")
-    model = _load_model(args.base, device, tk)
-    model.requires_grad_(True)
-    base_sd = {k: v.detach().cpu().clone()
-               for k, v in model.state_dict().items()}
-    print(f"F_base over {args.n} batches x{args.n_groups} groups...")
-    f_base = fisher_diag(model, loss_fn, ids_b, args.n,
-                         fisher_dtype=torch.bfloat16,
-                         accumulate_device=args.fisher_device,
-                         n_groups=args.n_groups)
-    # stream state dict to disk-mmap instead of RAM clone
-    base_sd = {k: v.detach().cpu()
-               for k, v in model.state_dict().items()}
-    torch.save(f_base, ".devin/f_base.pt")
-    del f_base, model
-    torch.cuda.empty_cache()
+    fdir = Path(args.load_fisher or args.save_fisher or "")
+    if args.load_fisher:
+        f_base = torch.load(fdir / "f_base.pt", map_location="cpu",
+                            weights_only=True)
+        f_new = torch.load(fdir / "f_new.pt", map_location="cpu",
+                           weights_only=True)
+        print("loaded precomputed fishers")
+        base_sd = new_sd = None
+    else:
+        print("loading base model...")
+        model = _load_model(args.base, device, tk)
+        model.requires_grad_(True)
+        base_sd = {k: v.detach().cpu()
+                   for k, v in model.state_dict().items()}
+        print(f"F_base over {args.n} batches x{args.n_groups} groups...")
+        f_base = fisher_diag(model, loss_fn, ids_b, args.n,
+                             fisher_dtype=torch.bfloat16,
+                             accumulate_device=args.fisher_device,
+                             n_groups=args.n_groups)
+        del model
+        torch.cuda.empty_cache()
 
-    print("loading new model...")
-    model = _load_model(args.new, device, tk)
-    model.requires_grad_(True)
-    new_sd = {k: v.detach().cpu()
-              for k, v in model.state_dict().items()}
-    print(f"F_new over {args.n} batches x{args.n_groups} groups...")
-    f_new = fisher_diag(model, loss_fn, ids_n, args.n,
-                        fisher_dtype=torch.bfloat16,
-                        accumulate_device=args.fisher_device,
-                        n_groups=args.n_groups)
-    del model
-    torch.cuda.empty_cache()
-    print(f"fisher compute: {time.time()-t0:.0f}s")
+        print("loading new model...")
+        model = _load_model(args.new, device, tk)
+        model.requires_grad_(True)
+        new_sd = {k: v.detach().cpu()
+                  for k, v in model.state_dict().items()}
+        print(f"F_new over {args.n} batches x{args.n_groups} groups...")
+        f_new = fisher_diag(model, loss_fn, ids_n, args.n,
+                            fisher_dtype=torch.bfloat16,
+                            accumulate_device=args.fisher_device,
+                            n_groups=args.n_groups)
+        del model
+        torch.cuda.empty_cache()
+        print(f"fisher compute: {time.time()-t0:.0f}s")
+        if args.save_fisher:
+            fdir.mkdir(parents=True, exist_ok=True)
+            torch.save(f_base, fdir / "f_base.pt")
+            torch.save(f_new, fdir / "f_new.pt")
 
-    f_base = torch.load(".devin/f_base.pt", map_location="cpu",
-                        weights_only=True)
+    if base_sd is None or new_sd is None:
+        # load state dicts without keeping a live model
+        print("loading sds for merge...")
+        model = _load_model(args.base, device, tk)
+        base_sd = {k: v.detach().cpu()
+                   for k, v in model.state_dict().items()}
+        model.load_state_dict(
+            _load_model(args.new, device, tk).state_dict())
+        new_sd = {k: v.detach().cpu()
+                  for k, v in model.state_dict().items()}
+        del model
+        torch.cuda.empty_cache()
+
     merged = merge_fisher(base_sd, new_sd, f_base, f_new,
-                          eps=args.eps, mode=args.mode)
+                          eps=args.eps, mode=args.mode,
+                          alpha_new=args.alpha_new)
     del f_base, f_new, base_sd, new_sd
 
     from safetensors.torch import save_file

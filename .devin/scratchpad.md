@@ -2516,3 +2516,12 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
   Transfers but weaker than same-domain (-5.5/-8.1%): part general
   "recur safely" skill, part domain-specific. 200 steps, gates still
   small (|g|<0.12).
+- FisherFold REAL runs (grouped GPU fisher, bf16, ~9.4GB peak):
+  sft6 rescue (collapsed donor): general CE 2.106 = base-level (sft6 was
+  2.167) — damage correctly reverted; domain CE mid 2.720.
+  sft9 merge (good donor): alpha sweep on sft9-domain CE —
+  base 1.571 | a1 1.505 | a4 1.462 | a10 1.436 | sft9 1.387.
+  a10 general CE 2.083 = sft9 level (no imported damage).
+  VERDICT: gate reverts regressed deltas AND recovers donor skill with
+  alpha as the dial. CE-proxy positive; 240-task runnable eval queued.
+  Fishers saved to .devin/fisher_sft9 (reusable via --load-fisher).
