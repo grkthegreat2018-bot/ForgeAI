@@ -2542,3 +2542,23 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
 - Bug: prefix-cache + finish_sentence + CacheBlend routed std decode on ring-aliased params -> '***'. Streaming dispatches first; finish_sentence skipped under streaming.
 - Bug: streamed sampling hardcoded top_k=0/rep=1.0 + prompt missing from penalty window; now flows params + prompt_ids.
 - Verified: 36-step logits bit-exact vs monolithic; smoke match:True. Streamed 1.8x slower than std on a VRAM-fitting model (expected — transport overhead; value is for non-fitting models).
+
+## R71-B6 lookahead decode (session findings)
+
+- `forge/engine/lookahead_decode.py` behind FORGE_LOOKAHEAD=k,w.
+- Mechanism duplicates existing `NGramSpeculativeDecoding` (decoding.py:647)
+  and `suffix_draft` — all ~2.3-2.4x on repetitive code, ~0.9-1.0x open text.
+  Value-add vs ngram_spec: EXACT std parity (rep-penalty window is
+  generated-only-last-64 NOT prompt+gen — decoding.py:410; prompt feeds DRY
+  only), eos-append-then-stop, degenerate guard (x8 same / <40% unique-20),
+  max_new cap, adaptive cooldown+dk. ngram_spec lacks ALL of these and also
+  does a stale-KV refeed on mismatch.
+- Bugs found wiring it: prompt-vs-gen rep window (fixed), eos must be
+  appended before break (std semantics), draft-accept can overshoot
+  max_new_tokens (cap), _forge_last_kv/logits needed for finish_sentence.
+- KV entropy probe (real spark KV): lo-byte H=3.97, hi-byte H=1.38 ->
+  independent-byte lossless ceiling ~3.0x. KV/token=57.3KB->19.2KB.
+  Parked: needs GPU-side entropy coder; kvtc-style lossy needed for more.
+- 240-task runnable eval harness: scripts/eval_runnable_tasks.py
+  (opc_sft2_tasks.json; --run-tests execs in separate process).
+  Comparing base/sft9/sft9_ff/sft6/sft6_ff — results pending.
