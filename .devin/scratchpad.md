@@ -2506,3 +2506,8 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
 - All 5 R71 lanes now have shipped code+tests. Remaining: real-ckpt evals
   (FisherFold sft6 rescue on 240-task eval; LoRA-ES VRAM/quality vs LoRA
   backprop; StreamHead end-to-end tok/s; longer gate training).
+- LoopThink HOLDOUT validation (fixed bench: train/eval split):
+  8/8 split: std 1.499 vs gated 1.378 = -8.1%. 21/22 split (300 steps):
+  std 1.746 vs gated 1.650 = -5.5%. Ungated always diverges ~10.4.
+  Generalizes to unseen text — real capability, not memorization.
+  Verifier early-stops ~half the eval texts at iter 2-3.

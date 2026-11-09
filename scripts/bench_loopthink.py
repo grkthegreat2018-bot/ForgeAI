@@ -71,9 +71,12 @@ def main():
     trained = None
     if args.train_gates > 0:
         from forge.exp.loopdepth import train_loop_gates
+        half = max(1, len(texts) // 2)
+        train_texts, texts = texts[:half], texts[half:]
+        print(f"holdout split: {len(train_texts)} train / {len(texts)} eval")
         train_ids = [tok(t, return_tensors="pt", truncation=True,
                          max_length=args.seq_len)["input_ids"].to(dev)
-                     for t in texts]
+                     for t in train_texts]
         trained, tl = train_loop_gates(
             model, train_ids, args.loop_lo, args.loop_hi,
             max_iters=args.max_iters, steps=args.train_gates, lr=3e-2)
