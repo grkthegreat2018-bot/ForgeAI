@@ -327,7 +327,8 @@ class _GenerationMixin:
             # suffix, skipping most of the prefill.  Falls through to the
             # prefix-cache / standard path on a miss (zero overhead).
             output_ids = None
-            if self._cache_blend is not None:
+            if (self._cache_blend is not None
+                    and self.acceleration != "airllm_streaming"):
                 blend_result = self._cache_blend.blend_prefill(self, ids)
                 if blend_result is not None:
                     blend_kv, covered_len = blend_result
@@ -344,14 +345,19 @@ class _GenerationMixin:
                                   f"tokens, suffix {suffix.shape[1]} to "
                                   f"prefill)")
 
+            # Streaming must be checked BEFORE the prefix cache: a cached
+            # prompt would route through the standard decoder while layer
+            # params are aliased to ring slots it never refreshes.
+            if output_ids is None and self.acceleration == "airllm_streaming":
+                output_ids = AirLLMStreamer.generate(
+                    self, ids, params.max_new_tokens, params.temperature,
+                    top_k=params.top_k, top_p=params.top_p,
+                    repetition_penalty=params.repetition_penalty)
             # Prefix caching: check if we've seen this prompt prefix before
             if output_ids is None:
                 output_ids = _generate_from_prefix_cache(
                     self, ids, params)
-            if output_ids is None and self.acceleration == "airllm_streaming":
-                output_ids = AirLLMStreamer.generate(
-                    self, ids, params.max_new_tokens, params.temperature)
-            elif output_ids is None:
+            if output_ids is None:
                 output_ids = self.decoding.generate(
                     self.model, ids, params.max_new_tokens,
                     params.temperature, params.top_p,
@@ -377,8 +383,11 @@ class _GenerationMixin:
         captured_kv = getattr(self.model, '_forge_last_kv', None)
 
         # Smart cutoff: if we hit max_new_tokens without EOS, extend to next
-        # natural stopping point (up to 32 extra tokens).
-        if finish_sentence and output_ids.shape[1] - ids.shape[1] >= params.max_new_tokens:
+        # natural stopping point (up to 32 extra tokens). Not under
+        # airllm_streaming — the standard-path decode would read layer
+        # params aliased to stale ring slots (verified: emits garbage).
+        if (finish_sentence and self.acceleration != "airllm_streaming"
+                and output_ids.shape[1] - ids.shape[1] >= params.max_new_tokens):
             output_ids = self._finish_to_stop(
                 output_ids, ids.shape[1], params,
                 extra_budget=32, past_kv=captured_kv)

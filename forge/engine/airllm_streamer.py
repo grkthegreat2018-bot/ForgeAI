@@ -247,16 +247,29 @@ class AirLLMStreamer:
         if not shards:
             return
 
+        # Numeric sort is mandatory: "shard_10" < "shard_2" lexicographically,
+        # which scrambles layer order for >=10 layers (B1 real-model bug).
+        shards = sorted(
+            shards, key=lambda p: int(p.stem.split("_")[1].split(".")[0]))
         shard0 = load_file(str(shards[0]))
         for kn, t in shard0.items():
             for name, param in engine.model.named_parameters():
                 if name == kn:
                     param.data = t.to(engine.device, dtype=torch.bfloat16)
                     break
+        # Non-weight buffers (RoPE cos/sin tables, masks) stay on CPU
+        # after model.to("cpu") — activations run on GPU, so resident
+        # buffers must live there too. Buffers are small; move all that
+        # aren't per-layer streamed weights.
+        for _, buf in engine.model.named_buffers():
+            if buf.device.type != "meta" and buf.device != engine.device:
+                buf.data = buf.data.to(engine.device)
         logger.info("AirLLM-Smart: resident: %d tensors from shard 0", len(shard0))
 
         i4_dir = Path(engine.checkpoint_path).parent / "xp_shards_i4"
-        i4_shards = sorted(i4_dir.glob("shard_*.i4.safetensors"))
+        i4_shards = sorted(
+            i4_dir.glob("shard_*.i4.safetensors"),
+            key=lambda p: int(p.stem.split("_")[1].split(".")[0]))
         engine._use_i4_stream = bool(_USE_I4 and len(i4_shards) == len(shards) - 1)
         engine._layer_shards = i4_shards if engine._use_i4_stream else shards[1:]
         engine._param_map = dict(engine.model.named_parameters())
@@ -336,31 +349,29 @@ class AirLLMStreamer:
     @staticmethod
     @torch.no_grad()
     def generate(engine, ids: torch.Tensor, max_new_tokens: int,
-                 temperature: float) -> torch.Tensor:
+                 temperature: float, top_k: int = 0, top_p: float = 1.0,
+                 repetition_penalty: float = 1.0) -> torch.Tensor:
         """Prefill + decode with prefetched streamed layers (CUDA path)."""
         device = engine.device
         if device.type != "cuda" or _LEGACY:
-            return AirLLMStreamer._generate_sync(engine, ids, max_new_tokens,
-                                                 temperature)
+            return AirLLMStreamer._generate_sync(
+                engine, ids, max_new_tokens, temperature, top_k, top_p,
+                repetition_penalty)
 
         eos_set = engine._eos_token_ids()
-        param_map = engine._param_map
+        param_map = getattr(engine, "_param_map", None)
+        if param_map is None:
+            param_map = dict(engine.model.named_parameters())
         n_layers = len(engine.model.blocks)
         int4 = getattr(engine, "_use_i4_stream", False)
 
-        cfg = getattr(engine.model, "config", None)
-        n_kv = getattr(cfg, "n_kv_heads", 2) or 12
-        head_dim = (getattr(cfg, "d_model", 2048)
-                    // (getattr(cfg, "n_heads", 32) or 32))
-        max_seq = getattr(cfg, "max_seq_len", 32768)
-        kv_cache = [
-            (torch.empty(1, n_kv, max_seq, head_dim,
-                         dtype=torch.bfloat16, device=device),
-             torch.empty(1, n_kv, max_seq, head_dim,
-                         dtype=torch.bfloat16, device=device))
-            for _ in range(n_layers)
-        ]
-        cache_pos = ids.shape[1]
+        # Per-layer pasts in the model's own (k,v) convention — the same
+        # object model(tok, past_key_values=...) splits per block, so
+        # rope positions and GQA shapes are handled inside the block.
+        # (The old manual kv_cache buffers were fetched but never passed
+        # to blocks: every token attended to itself alone -> degenerate
+        # repetition.)
+        pasts: list = [None] * n_layers
 
         plan = getattr(engine, "_stream_plan", None)
         if plan is None or plan["int4"] != int4:
@@ -379,7 +390,7 @@ class AirLLMStreamer:
                     if t is not None:
                         pm.data = t
 
-        def _forward_streamed(x, start_pos=0):
+        def _forward_streamed(x):
             S = _PREFETCH_SLOTS
             for j in range(min(S, n_layers)):
                 AirLLMStreamer._issue(plan, j)
@@ -387,16 +398,11 @@ class AirLLMStreamer:
                 s = i % S
                 main.wait_event(ev_load[s])
                 _bind_layer(i, s)
-                k_cache, v_cache = kv_cache[i]
-                out = engine.model.blocks[i](x)
-                if isinstance(out, tuple) and len(out) >= 3:
-                    x, new_k, new_v = out[0], out[1], out[2]
-                    seq_len = new_k.shape[1]
-                    end = start_pos + seq_len
-                    k_cache[:, :, start_pos:end] = new_k
-                    v_cache[:, :, start_pos:end] = new_v
-                else:
-                    x = out[0] if isinstance(out, tuple) else out
+                out, new_kv = engine.model.blocks[i](
+                    x, past_key_value=pasts[i],
+                    use_cache=True, layer_idx=i)
+                x = out
+                pasts[i] = new_kv
                 ev_use[s].record(main)
                 if i + S < n_layers:
                     side.wait_event(ev_use[s])
@@ -405,22 +411,26 @@ class AirLLMStreamer:
             return engine.model.head(x)
 
         with torch.inference_mode():
-            logits = _forward_streamed(engine.model.embed(ids), start_pos=0)
+            logits = _forward_streamed(engine.model.embed(ids))
 
         generated_ids: list[int] = []
         generated_tokens: list[torch.Tensor] = []
+        # Rep penalty must see prompt+generated like StandardDecoding —
+        # otherwise prompt tokens escape the penalty window and greedy
+        # argmax diverges from the standard path.
+        prompt_ids = ids[0].tolist()
         for _ in range(max_new_tokens):
             next_token = engine._sample_next_token(
-                logits[:, -1, :], temperature, 0, 1.0, 1.0, generated_ids)
+                logits[:, -1, :], temperature, top_k, top_p,
+                repetition_penalty, prompt_ids + generated_ids)
             token_id = next_token.item()
             generated_ids.append(token_id)
             if token_id in eos_set:
                 break
-            generated_tokens.append(next_token)
+            generated_tokens.append(next_token.reshape(1, 1))
             with torch.inference_mode():
-                x = engine.model.embed(next_token)
-                logits = _forward_streamed(x, start_pos=cache_pos)
-            cache_pos += 1
+                x = engine.model.embed(next_token.reshape(1, 1))
+                logits = _forward_streamed(x)
 
         if not generated_tokens:
             return ids
@@ -431,7 +441,9 @@ class AirLLMStreamer:
     @staticmethod
     @torch.no_grad()
     def _generate_sync(engine, ids: torch.Tensor, max_new_tokens: int,
-                       temperature: float) -> torch.Tensor:
+                       temperature: float, top_k: int = 0,
+                       top_p: float = 1.0,
+                       repetition_penalty: float = 1.0) -> torch.Tensor:
         from safetensors.torch import load_file
 
         eos_set = engine._eos_token_ids()

@@ -23,8 +23,10 @@ class _Block(nn.Module):
         super().__init__()
         self.w = nn.Parameter(torch.randn(d, d, dtype=torch.bfloat16) * 0.02)
 
-    def forward(self, x):
-        return torch.nn.functional.gelu(x @ self.w.to(x.dtype))
+    def forward(self, x, past_key_value=None, use_cache=False,
+                layer_idx=0, **_kw):
+        # Mirrors the real block convention: (hidden, kv|None).
+        return torch.nn.functional.gelu(x @ self.w.to(x.dtype)), None
 
 
 class _Model(nn.Module):
@@ -143,7 +145,8 @@ class TestStreamerRing:
         ref = ids.clone()
         h = model.embed(ref)
         for b in model.blocks:
-            h = b(h)
+            out_b = b(h)
+            h = out_b[0] if isinstance(out_b, tuple) else out_b
         logits = model.head(model.ln_f(h))
         next_id = logits[:, -1, :].argmax(-1)
 
