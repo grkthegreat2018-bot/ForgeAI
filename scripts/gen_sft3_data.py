@@ -548,6 +548,25 @@ def is_novel(desc: str, seen_grams: set, threshold: float = 0.5) -> bool:
     return len(g & seen_grams) / len(g) < threshold
 
 
+def _central_pass(passers: list) -> list:
+    """Syntactic MBR among correct candidates (MBR-exec is degenerate here:
+    all passers share one output signature by construction). Order by the
+    modal implementation — the passer with max mean token-Jaccard to the
+    other passing candidates goes first, so kept rows teach the most
+    typical correct solution rather than a lucky outlier."""
+    if len(passers) < 3:
+        return passers
+    toks = [set(re.findall(r"\w+", c[2])) for c in passers]
+
+    def jac(a, b):
+        return len(a & b) / max(1, len(a | b))
+
+    lead = max(range(len(passers)),
+               key=lambda i: sum(jac(toks[i], toks[j])
+                                 for j in range(len(passers)) if j != i))
+    return [passers[lead]] + [p for j, p in enumerate(passers) if j != lead]
+
+
 def goldilocks_ok(solve_rate: float) -> bool:
     """Informative tasks only: always-solved = no learning signal (format
     overfitting), never-solved = broken/too-hard task."""
@@ -705,9 +724,13 @@ def run_selfgen(args, out_path: Path, finished: set):
               flush=True)
 
         # ── Phase 2: k solver rollouts per task ──
+        # MBR-exec: record EVERY rollout's (code, outs) — the candidate
+        # clusters need failures too (consensus-wrong detection), and the
+        # modal implementation pick needs all passers' signatures.
         queue = [(ti, ki) for ti in range(len(tasks))
                  for ki in range(args.k)]
         passes: dict[int, list] = {ti: [] for ti in range(len(tasks))}
+        sig_count: dict[int, dict] = {ti: {} for ti in range(len(tasks))}
         for q0 in range(0, len(queue), BS):
             chunk = queue[q0:q0 + BS]
             ws = [wrap(codebase_solver_prompt(tasks[ti])) for ti, _ in chunk]
@@ -723,11 +746,13 @@ def run_selfgen(args, out_path: Path, finished: set):
                 outs, err = run_tests(executor, code, t["tests"], t["name"])
                 if outs is None or len(outs) != len(t["expected"]):
                     continue
+                sig = tuple(outs[i] for i in t["valid_idx"])
+                sig_count[ti][sig] = sig_count[ti].get(sig, 0) + 1
                 if all(not outs[i].startswith("__ERROR__")
                        and _approx_eq(outs[i], t["expected"][i])
                        for i in t["valid_idx"]):
                     passes[ti].append((norm_hash(code),
-                                       clean_for_store(raw, code)))
+                                       clean_for_store(raw, code), code))
 
         # ── Phase 3: Goldilocks gate + keep <=2 variants + markers ──
         # Easy tasks (rate==1.0): all-k passes = strongest verification and
@@ -744,7 +769,7 @@ def run_selfgen(args, out_path: Path, finished: set):
                 cap = 1 if easy else 2
                 kept = 0
                 seen_h = set()
-                for hh, raw in passes[ti]:
+                for hh, raw, _code in _central_pass(passes[ti]):
                     if hh in seen_h or kept >= cap:
                         continue
                     seen_h.add(hh)
@@ -765,10 +790,21 @@ def run_selfgen(args, out_path: Path, finished: set):
                     kept += 1
                     stats["kept"] += 1
             else:
+                # Consensus-miss marker: rollouts agree on ONE wrong answer
+                # (>= ceil(k/2) same non-passing signature) — the model is
+                # confidently wrong, ideal repair/frontier material.
+                miss = None
+                if sig_count[ti]:
+                    _msig, mcnt = max(sig_count[ti].items(),
+                                      key=lambda kv: kv[1])
+                    if mcnt >= -(-args.k // 2):
+                        miss = mcnt
+                row = dict(prompt=None, response=None, gen_key=gk,
+                           task_desc=t["desc"], solve_rate=rate)
+                if miss:
+                    row["consensus_miss"] = miss
                 with open(out_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(dict(
-                        prompt=None, response=None, gen_key=gk,
-                        task_desc=t["desc"], solve_rate=rate)) + "\n")
+                    f.write(json.dumps(row) + "\n")
         el = time.time() - t0
         print(f"[wave {w0//BS} done] goldilocks={stats['goldilocks']} "
               f"easy={stats['easy']}/{len(tasks)} kept={stats['kept']} "
