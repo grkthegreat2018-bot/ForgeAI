@@ -94,6 +94,92 @@ def looped_decode_step(model, tok, pasts, loop_lo: int, loop_hi: int,
     return model.head(hidden[:, -1:]), pasts
 
 
+class VerifierGate:
+    """Output-level early-stop for looped blocks (R71/B5).
+
+    Stops the loop when the next-token distribution has CONVERGED —
+    the model stopped changing its mind — rather than when hidden-state
+    drift is small (the old `tol` criterion, which can fire while logits
+    still move). Cheaper than a learned verifier head: head+ln_f on one
+    position is ~0.3% of a layer's FLOPs.
+
+    Rule: stop after `patience` consecutive iterations where
+      argmax(logits_t) == argmax(logits_{t-1})  AND
+      softmax margin (p1 - p2) >= min_margin.
+    """
+
+    def __init__(self, min_margin: float = 0.15, patience: int = 1):
+        self.min_margin = min_margin
+        self.patience = patience
+        self._prev_argmax = None
+        self._stable = 0
+
+    def update(self, logits: torch.Tensor) -> bool:
+        """logits: [vocab] or [1, 1, vocab] for the last position."""
+        lg = logits.reshape(-1).float()
+        probs = torch.softmax(lg, dim=-1)
+        top2 = probs.topk(2)
+        am = int(top2.indices[0])
+        margin = float(top2.values[0] - top2.values[1])
+        if self._prev_argmax is not None and am == self._prev_argmax \
+                and margin >= self.min_margin:
+            self._stable += 1
+        else:
+            self._stable = 0
+        self._prev_argmax = am
+        return self._stable >= self.patience
+
+    def reset(self):
+        self._prev_argmax = None
+        self._stable = 0
+
+
+@torch.no_grad()
+def looped_prefill_verified(model, ids, loop_lo: int, loop_hi: int,
+                            max_iters: int = 4, gates=None,
+                            gate: VerifierGate | None = None):
+    """looped_prefill with VerifierGate early-stop.
+
+    Identical math to looped_prefill except the loop exits early when
+    `gate` fires (output distribution converged). Returns
+    (logits_last, pasts, stats) with stats['stop_reason'].
+    """
+    dev = next(model.parameters()).device
+    ids = ids.to(dev)
+    x = _embed(model, ids)
+    pasts: list = [None] * len(model.blocks)
+    for i in range(loop_lo):
+        x, pasts[i] = model.blocks[i](x, past_key_value=None,
+                                      use_cache=True, layer_idx=i)
+    deltas = []
+    stop = "max_iters"
+    it = -1
+    for it in range(max(1, max_iters)):
+        h = x
+        for i in range(loop_lo, loop_hi):
+            out, pasts[i] = model.blocks[i](
+                h, past_key_value=None, use_cache=True, layer_idx=i)
+            if it > 0 and gates is not None:
+                h = h + gates[i - loop_lo] * (out - h)
+            else:
+                h = out
+        deltas.append(float((h - x).norm() / x.norm().clamp_min(1e-8)))
+        x = h
+        if gate is not None and it >= 1:
+            hh = model.ln_f(h) if model.ln_f is not None else h
+            lg = model.head(hh[:, -1:])
+            if gate.update(lg):
+                stop = f"verified@{it}"
+                break
+    for i in range(loop_hi, len(model.blocks)):
+        x, pasts[i] = model.blocks[i](x, past_key_value=None,
+                                      use_cache=True, layer_idx=i)
+    hidden = model.ln_f(x) if model.ln_f is not None else x
+    logits = model.head(hidden)
+    stats = {"iters_run": it + 1, "deltas": deltas, "stop_reason": stop}
+    return logits, pasts, stats
+
+
 class LoopGates(nn.Module):
     """Per-loop-layer scalar gates. g=0 => loop is identity."""
 
