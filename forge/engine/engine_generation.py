@@ -1055,6 +1055,19 @@ class _GenerationMixin:
                 ids, chunk_size=prefiller.chunk_size)
             self.model._forge_prefill_kv = past_kv
             return logits, past_kv
+        lt = self._loopthink_config()
+        if lt is not None:
+            from forge.exp.loopdepth import (VerifierGate,
+                                             looped_prefill_verified)
+            lo, hi, iters, margin, gates = lt
+            logits, past_kv, st = looped_prefill_verified(
+                self.model, ids, lo, hi, max_iters=iters,
+                gates=gates, gate=VerifierGate(min_margin=margin))
+            logits = logits[:, -1:]
+            self.model._forge_prefill_kv = past_kv
+            self._log(f"LoopThink L{lo}-{hi} iters={st['iters_run']} "
+                      f"({st['stop_reason']})")
+            return logits, past_kv
         with torch.inference_mode():
             out = self.model(ids, use_cache=True, logits_last_only=True)
             logits, past_kv = unpack_output_with_kv(out)
@@ -1065,6 +1078,42 @@ class _GenerationMixin:
             # when T fits).
             past_kv = self._maybe_compact_past_kv(past_kv, force=True)
             return logits, past_kv
+
+    def _loopthink_config(self):
+        """Parse FORGE_LOOPTHINK once: "lo,hi[,iters[,margin[,gates.pt]]]".
+
+        Returns (lo, hi, max_iters, margin, gates_tensor|None) or None.
+        Gates file: torch.save'd LoopGates state_dict or raw tensor —
+        a few hundred bytes, swappable per-domain.
+        """
+        cached = getattr(self, "_lt_cfg", "unset")
+        if cached != "unset":
+            return cached
+        import os
+        spec = os.environ.get("FORGE_LOOPTHINK", "").strip()
+        cfg = None
+        if spec:
+            try:
+                p = spec.split(",")
+                lo, hi = int(p[0]), int(p[1])
+                iters = int(p[2]) if len(p) > 2 else 4
+                margin = float(p[3]) if len(p) > 3 else 0.15
+                gates = None
+                if len(p) > 4 and p[4]:
+                    g = torch.load(p[4], map_location="cpu",
+                                   weights_only=True)
+                    gates = (g["g"] if isinstance(g, dict) and "g" in g
+                             else g.get("state_dict", g)
+                             if isinstance(g, dict) else g)
+                    if isinstance(gates, dict):
+                        gates = next(iter(gates.values()))
+                    gates = gates.to(next(self.model.parameters()).device,
+                                     torch.float32)
+                cfg = (lo, hi, iters, margin, gates)
+            except Exception as e:  # bad spec -> warn once, don't break gen
+                self._log(f"FORGE_LOOPTHINK parse failed ({e}); disabled")
+        self._lt_cfg = cfg
+        return cfg
 
     def _maybe_compact_past_kv(self, past_kv, *, force=False):
         """Run the active KV strategy's ``compact_past_kv`` hook, if any.
