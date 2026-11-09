@@ -15,10 +15,46 @@ import sys
 import time
 
 
-def _extract_fn(text: str, name: str) -> str:
+def _make_prompt(t: dict, fmt: str) -> str:
+    """Standard code-eval prompt formats (HumanEval/MBPP conventions)."""
+    if fmt == "humaneval":
+        # Completion-style: signature + docstring incl. doctest asserts;
+        # model literally continues the body (what code LMs are tuned on).
+        doc = t["desc"]
+        for tc in t["tests"][:2]:
+            doc += f"\n    >>> {t['name']}({tc['args']})\n    {tc['expected']}"
+        return f"def {t['name']}{t['signature']}:\n    \"\"\"{doc}\n    \"\"\"\n    "
+    if fmt == "mbpp":
+        # Instruct-style with fenced gen_prefix (evalscope convention).
+        tests = "".join(f"assert {t['name']}({tc['args']}) == "
+                        f"{tc['expected']}\n" for tc in t["tests"][:3])
+        return ("You are an expert Python programmer, and here is your "
+                f"task: {t['desc']} Your code should pass these tests:\n\n"
+                f"{tests}\n```python\n")
+    # 'comment' — original minimal format.
+    return (f"# {t['desc']}\n"
+            f"# signature: {t['name']}{t['signature']}\n")
+
+
+def _extract_fn(text: str, name: str, fmt: str = "comment",
+                signature: str = "()") -> str:
     """Pull the first def block out of a completion."""
     m = re.search(r"```(?:python)?\s*(.*?)```", text, re.S)
     code = m.group(1) if m else text
+    if fmt == "humaneval":
+        # Completion was body-only (signature lived in the prompt). If the
+        # model re-emitted the def line, strip it; then re-attach so the
+        # exec env always sees a complete function.
+        lines = code.splitlines()
+        while lines and (not lines[0].strip() or
+                         lines[0].startswith(("def ", '"""', "#"))):
+            lines.pop(0)
+        body = [ln for ln in lines if ln.strip()]
+        if not body:
+            return ""
+        if not all(ln.startswith((" ", "\t")) for ln in body):
+            body = ["    " + ln for ln in body]
+        return f"def {name}{signature}:\n" + "\n".join(body)
     lines = code.splitlines()
     start = None
     for i, ln in enumerate(lines):
@@ -45,8 +81,7 @@ def cmd_generate(args):
         checkpoint=args.ckpt, config_name=args.config, auto_activate=False)
     rows = []
     for i, t in enumerate(tasks):
-        prompt = (f"# {t['desc']}\n"
-                  f"# signature: {t['name']}{t['signature']}\n")
+        prompt = _make_prompt(t, args.prompt_format)
         outs = []
         for s in range(args.samples):
             try:
@@ -60,6 +95,7 @@ def cmd_generate(args):
             outs.append(out)
         rows.append({"key": t.get("key", i), "name": t["name"],
                      "signature": t["signature"], "tests": t["tests"],
+                     "fmt": args.prompt_format,
                      "completion": outs[0],
                      "completions": outs if args.samples > 1 else None})
         if (i + 1) % 20 == 0:
@@ -71,7 +107,8 @@ def cmd_generate(args):
 
 
 def _judge_one(r: dict, completion: str) -> tuple[str, int]:
-    code = _extract_fn(completion, r["name"])
+    code = _extract_fn(completion, r["name"], r.get("fmt", "comment"),
+                       r["signature"])
     if not code:
         return "no_fn", 0
     env: dict = {}
@@ -152,6 +189,12 @@ def main():
                          "--temp for pass@k)")
     ap.add_argument("--temp", type=float, default=0.8,
                     help="sampling temperature for samples 1..n-1")
+    ap.add_argument("--prompt-format", dest="prompt_format",
+                    default="comment",
+                    choices=["comment", "humaneval", "mbpp"],
+                    help="comment=#-desc style (original); humaneval="
+                         "def+docstring completion (Chen et al.); "
+                         "mbpp=instruct+asserts+fence prefix")
     ap.add_argument("--max-new", type=int, default=160)
     ap.add_argument("--out", default="")
     ap.add_argument("--run-tests", dest="gens", default="")
