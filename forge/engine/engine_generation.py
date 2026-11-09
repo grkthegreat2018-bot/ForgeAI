@@ -292,13 +292,14 @@ class _GenerationMixin:
                     "top_ids": ti.tolist(), "top_vals": tv.tolist()})
 
         # Per-step decode paths: constrained decoding (json_schema),
-        # caller logits_processors and logprobs capture share the
-        # _decode_tokens loop — the schema/processor masks per step, the
+        # caller logits_processors, logprobs capture and LoopThink share
+        # the _decode_tokens loop — the schema/processor masks per step, the
         # observer records raw logits per step.  All bypass prefix
         # cache / CacheBlend / AirLLM (those fast paths can't run
         # per-step processors or observers).
         if (json_schema is not None or lp_observer is not None
-                or logits_processor is not None):
+                or logits_processor is not None
+                or self._loopthink_config() is not None):
             processor = (self._build_xgrammar_processor(json_schema)
                          if json_schema is not None else logits_processor)
             eos_set = self._eos_token_ids()
