@@ -2435,3 +2435,74 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
 - Candidates: soup(sft9,sft10) via merge_soup.py + re-eval; or pivot to reflection-heavy corpus (reflectionevo rows unused since v4); or accept sft9 as final Spark iterate.
 - MBR guidance WIRED: gen_sft3_data.py records all rollout execution signatures (MBR-exec clusters incl. failures); kept rows take the modal correct implementation (_central_pass = syntactic MBR, token-Jaccard centrality â€” exec-MBR is degenerate among passers since they share one signature); non-kept tasks emit consensus_miss marker when >=k/2 rollouts share one wrong signature (repair/frontier material). _onmanifold_eval.py reports mbr@1 (modal signature vs expected) alongside pass@k/attempt rate.
 - NCM (Next-Concept Modeling, Hazy/Together Oct'26): coarse->fine hierarchical VQ-VAE generation, ~12 parallel-code passes vs ~1k sequential â€” user's take: batched compute, "1k words in 32 loops". VERDICT: needs retrained tokenizer+level-transformer, can't bolt onto autoregressive Spark ckpt. Cheap approximations on current model: speculative decoding (engine already has suffix-draft/BCG), sketch->code two-stage solver prompts. Noted, not implemented.
+
+## 2026-11-09 — R71 breakthrough program scoping + measured anchors
+
+- sft9 selfgen run CRASHED at wave 19 (~task 425/544, kept=37): `forrtl: error (200)
+  window-CLOSE event` — console window was closed. sft9_external.jsonl = 461 rows
+  banked. Restart needed to cover remaining ~119 tasks.
+- New doc: docs/R71_STREAMED_INTELLIGENCE_DESIGN.md — full lane designs B1-B8.
+- MEASURED (spark_x26_1p7b, this box):
+  - Pinned H2D 53.1 GB/s (PCIe5), pageable 13.3 GB/s.
+  - AirLLM today = pageable+sync ˜ 4.4 tok/s predicted (matches observed 1-5);
+    from SMR disk 0.35 tok/s. Root cause = copy mode, not streaming concept.
+  - int4 FFN-only stream + double-buffer prefetch ˜ 75 tok/s (compute-bound) —
+    streaming at resident speed. B1 StreamHead = top lane.
+  - bf16 lossless ceiling ˜ 10.7 b/param (H_hi=2.70 H_lo=7.97); zlib 79.4%,
+    split-zlib 69.9% (1.43x). ANS -> ~1.5x cap. "ZIP for weights" alone is
+    bounded; non-uniform ECQ codebook needed to make int4 codes compressible
+    (minmax g32 codes are ~uniform: H=3.86/4, floor ~4.89 b/p = FQ 4.9).
+- CONFIRMED GREENFIELD (nothing to dupe): entropy-coded weights (R50 audit noted),
+  async weight-layer prefetch (nowhere), MeZO/ZO training (nowhere), Fisher/EWC
+  (grep zero hits).
+- New scripts: scripts/bench_airllm_prefetch.py (H2D bw + streaming tok/s model),
+  scripts/bench_lossless_weights.py (entropy/zlib/int4-code measurement).
+
+## 2026-11-09b — R71 first-session results (B1+B2+B4 shipped)
+
+- **ECQ codec**: forge/quant/ecq_codec.py + scripts/bench_ecq_codec.py +
+  tests/unit/test_ecq_codec.py (9 tests). Range coder = Subbotin carryless;
+  decode MUST track (low,code) both — code//r alone desyncs (bug fixed).
+  Lossless bf16 actual 10.73 b/p (bound 10.67). ECQ-16 3.84 b/p real ckpt;
+  ECQ-32 24.7dB vs g32-int4 22.1dB at same 4.9 b/p. Pure-python RC ~1-3M
+  sym/s — packer is offline-only until ANS.
+- **StreamHead**: airllm_streamer.py rewritten — pinned shard cache +
+  3-slot GPU ring + side-stream prefetch + suffix-keyed binding (CRITICAL:
+  key slots by suffix not full name or GPU holds all layers). Old path was
+  pageable-copy + copy-back-per-token ? 3.3 tok/s vs new 30-36 tok/s (~10x)
+  on 28x50MB synthetic. bf16 beats int4 here: dequant 1.7ms/layer > 0.7ms
+  saved by 3.5x smaller transfer at 53GB/s bus. int4 opt-in via
+  FORGE_AIRLLM_INT4; phase-2 = Triton fused dequant. FORGE_AIRLLM_LEGACY=1
+  = old path for A/B.
+- **FisherFold**: research/merge_models.py merge_fisher (gate=rescue,
+  interp=union) + fisher_diag (E[grad^2] per param, GPU/CPU accumulate).
+  scripts/fisher_merge.py driver (ModelLoader.build_model_fast + CE-loss
+  fisher on jsonl rows, name-remap for ckpt keyspace). 8 tests green.
+  REAL eval queued: FisherFold(sft6) vs soup vs sft8 on 240-task eval.
+- Selfgen sft9 slice-E done: ~43 kept rows total in sft9_external.jsonl.
+- REMAINING lanes (user said easiest->hardest): B3 LoRA-ES next, then
+  B5 LoopThink (hardest - engine decode surgery). B6/B7 opportunistic.
+
+## 2026-11-09c — R71 B3+B5 shipped (all 5 lanes now have code)
+
+- **B3 LoRA-ES**: forge/training/lora_es.py — ZO antithetic ES over LoRA
+  params, forward-only (inference_mode). Modes: full (MeZO), block
+  (block-coordinate subsets), fisher (per-param eps scale from
+  fisher_diag — B4/B3 cross-lane). attach_lora wraps nn.Linear with
+  LowRankBypass (y = Wx + s·xA^T B^T). scripts/lora_es_train.py driver.
+  10 tests. ZO cos ˜ sqrt(n_dirs/d) verified empirically (32 dirs?0.117,
+  256?>0.2 on d=2048).
+- **B5 LoopThink**: forge/exp/loopdepth.py already had looped_prefill/
+  decode + LoopGates + train_loop_gates. Added VerifierGate (stop when
+  next-token argmax stable AND softmax margin>=thr — output-level
+  convergence) + looped_prefill_verified. scripts/bench_loopthink.py.
+  MEASURED on spark_x26_1p7b (8 texts, L8-20, iters<=3):
+    ungated loop   : loss 6.58 (DIVERGES - frozen model can't recur)
+    trained gates(60 steps, 12 params) + verifier: loss 1.529 vs std
+      1.644 = **-6.9% loss, +25% latency**, verifier early-stops 6/8.
+  LoopThink works on a FROZEN model with 12 scalar params. Next: longer
+  gate training + decode-step wiring (looped_decode_step exists) +
+  try multiple loop ranges.
+- All 5 R71 lanes now have shipped code+tests. Remaining: real-ckpt evals
+  (FisherFold sft6 rescue on 240-task eval; LoRA-ES VRAM/quality vs LoRA
+  backprop; StreamHead end-to-end tok/s; longer gate training).

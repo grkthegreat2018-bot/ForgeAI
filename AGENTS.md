@@ -260,6 +260,11 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   and `load_checkpoint`. `from_checkpoint` also overlaps the tokenizer
   load on a daemon thread. Bench: `scripts/bench_weight_io.py` (I/O only),
   `scripts/bench_load_time.py` (full engine load phases — V2: ~2.4s total).
+  R71 scoping benches: `scripts/bench_airllm_prefetch.py` (H2D bw 53.1 pinned /
+  13.3 pageable GB/s + streaming tok/s model — int4 FFN-only prefetch ≈75
+  tok/s vs airllm-today ≈4.4), `scripts/bench_lossless_weights.py` (bf16
+  lossless ceiling ≈10.7 b/param, split-zlib 69.9%, minmax-int4 codes
+  ~incompressible H=3.86/4). Design: `docs/R71_STREAMED_INTELLIGENCE_DESIGN.md`.
 - `forge/engine/forge_engine.py` — ForgeEngine (inference engine; core init +
   8 mixins: engine_checkpoints, engine_activation, engine_generation,
   engine_diagnostics, engine_merging, engine_lora, engine_lifecycle,
