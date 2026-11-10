@@ -135,6 +135,54 @@ def _judge_one(r: dict, completion: str) -> tuple[str, int]:
     return verdict, ok
 
 
+def _judge_worker(path: str) -> None:
+    """Subprocess entry: judge every completion in one task row, printing
+    one JSON line each so the parent can harvest partial results before
+    killing a hang."""
+    row = json.load(open(path, encoding="utf-8"))
+    comps = row.get("completions") or [row["completion"]]
+    for i, c in enumerate(comps):
+        v, ok = _judge_one(row, c)
+        print(json.dumps({"i": i, "verdict": v, "ok": ok}), flush=True)
+
+
+def _judge_row_subproc(row: dict, timeout: float = 30.0) -> list[tuple[str, int]]:
+    """Judge a row in a worker subprocess. Generated code is untrusted and
+    may hang (infinite loops) — the parent enforces the timeout; samples
+    not judged before it fires get verdict 'timeout'."""
+    import os
+    import subprocess
+    import tempfile
+    comps = row.get("completions") or [row["completion"]]
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                     encoding="utf-8") as f:
+        json.dump(row, f)
+        path = f.name
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__),
+             "--judge-worker", path],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        try:
+            out, _ = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, _ = proc.communicate()
+        got = {}
+        for line in out.splitlines():
+            try:
+                d = json.loads(line)
+                got[d["i"]] = (d["verdict"], d["ok"])
+            except Exception:  # noqa: BLE001
+                pass
+        return [got.get(i, ("timeout", 0)) for i in range(len(comps))]
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def _pass_at_k(n: int, c: int, k: int) -> float:
     """Unbiased pass@k (Chen et al.): prob a size-k subset of n samples
     with c correct contains >=1 pass."""
@@ -151,7 +199,10 @@ def cmd_run_tests(args):
     nsamp = 0
     for r in rows:
         comps = r.get("completions") or [r["completion"]]
-        verdicts = [_judge_one(r, c)[0] for c in comps]
+        if args.judge_inline:
+            verdicts = [_judge_one(r, c)[0] for c in comps]
+        else:
+            verdicts = [v for v, _ in _judge_row_subproc(r, args.judge_timeout)]
         c_pass = verdicts.count("pass")
         nsamp = max(nsamp, len(comps))
         results.append({"key": r["key"], "name": r["name"],
@@ -199,8 +250,18 @@ def main():
     ap.add_argument("--out", default="")
     ap.add_argument("--run-tests", dest="gens", default="")
     ap.add_argument("--report", default="")
+    ap.add_argument("--judge-worker", dest="judge_worker", default="",
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--judge-inline", action="store_true",
+                    help="exec generated code in-process (unsafe: no "
+                         "timeout — hangs block the whole run)")
+    ap.add_argument("--judge-timeout", type=float, default=30.0,
+                    help="seconds per task row before the worker is "
+                         "killed (default 30)")
     args = ap.parse_args()
-    if args.gens:
+    if args.judge_worker:
+        _judge_worker(args.judge_worker)
+    elif args.gens:
         cmd_run_tests(args)
     else:
         assert args.ckpt and args.out, "--ckpt and --out required"
