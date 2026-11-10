@@ -1279,6 +1279,10 @@ def main():
     p.add_argument("--sift-newton-lr", type=float, default=1.0,
                    help="Step scale for the Newton init (default 1.0; "
                         "output curvature folds into this)")
+    p.add_argument("--sift-es-polish", type=int, default=0,
+                   help="Backward-free per-slice scale evolution iters "
+                        "(antithetic OpenAI-ES on calibration batches; "
+                        "gains fold into deltas, 0=off)")
     p.add_argument("--sift-reselect-every", type=int, default=0,
                    help="Re-calibrate + re-pick units every N steps "
                         "(merge deltas first; 0=disabled)")
@@ -1894,6 +1898,10 @@ def main():
             if sift_ctx.prefix_cache is not None:
                 print(f"  [SIFT] prefix cache on "
                       f"(cap {args.sift_prefix_gb:.1f} GB)")
+            if args.sift_es_polish > 0:
+                _es = _sift_mod.es_scale_polish(
+                    model, _sift_calib_iter, _sift_loss, iters=args.sift_es_polish)
+                print(f"  [SIFT-ES] {_es}")
     elif use_manual_lora:
         from forge.training.bitnet_lora import add_lora_adapters
         if args.lora_targets:

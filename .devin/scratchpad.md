@@ -2663,6 +2663,19 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
   batch (default LoRA AND sift paths) — suspect all-masked-label batches
   0/0 in entropy-weighted CE (alpha=0.5 default). Band shields training.
   NEXT: root-cause compute_loss weighted-mean zero-weight guard.
+- Research sweep 2026-11 (scripts/bench_spark_research.py, wiki Spark-SIFT-Research):
+  PRISM-lite on SIFT deltas: NOT a win (lossN 1.141 vs 1.125, +6% ms) — Muon-family NS
+    doesn't pay on small slice matrices at lr2e-5/10 steps. Not integrated.
+  SIFT-ES scales-only: DIVERGED at lr.5/sigma.1 (sign flips); WORKS at lr.05/sigma.05
+    clamp>=0: eval .861->.551 holdout .945->.848 (16 iters, 256 fwd-only evals).
+    Shipped as es_scale_polish + --sift-es-polish (gains fold into deltas, rollback safe).
+  Vocab shortlist (kmeans 256 centroids on tied head): recall@10 .30@3% .69@12.5% .79@25%
+    -> post-hoc two-stage decode NOT viable; needs trained adaptive softmax/MIPS bounds.
+  HDC random codebook vs kmeans (real out_proj W): 1.154x MSE (training-free codebook ok)
+    but rel MSE .39 at ~1bit/w -> far from lossless (rate-distortion confirmed again).
+  Assoc memory d=64: recall 1.0@n<=32, .984@64, .93@128, .676@256 -> capacity ~d.
+  FF/HAZE/recurrence/sparse-attn/SSM/neuro-symbolic: analytic verdicts in wiki.
+  Tests 20/20. Wiki pushed (Spark-SIFT-Research + Training + _Sidebar).
 
 ## R&D reference shelf — provable algorithms for the 4 user questions (2026-11-10)
 Q1 next-token "algorithm": fixed GEMM+softmax pipeline; provable bounds:

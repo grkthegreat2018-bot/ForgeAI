@@ -74,6 +74,16 @@
   `band-skip K/N` in step logs; all-skipped epoch stops with a warning.
   Smoke: accept-all trains normally (loss 1.22→0.73, 0/10 skipped);
   skip-all stops cleanly after one epoch.
+- **SIFT-ES polish** (`--sift-es-polish N`): backward-free per-slice scale
+  evolution (antithetic OpenAI-ES, non-negative gains folded into deltas,
+  rollback on no-improvement). Spark: holdout 0.945→0.848 in 16 iters.
+- **11-topic research sweep** (probes in `scripts/bench_spark_research.py`,
+  full log in wiki `Spark-SIFT-Research`): PRISM optimizer on deltas NOT a
+  win (1.141 vs 1.125, +6% step); post-hoc vocab shortlist NOT viable
+  (recall@10 0.79 even at 25% of vocab); HDC random codebook ≈ kmeans
+  (1.154× MSE) but ~1bit VQ far from lossless; linear associative memory
+  capacity cliff at n≈d measured; FF/HAZE/sparse-attn/SSM/recurrence/
+  neuro-symbolic analytic verdicts documented.
 - **Trap fixed in review**: calibration must freeze non-candidate
   params (embed/head) — leaving the 131k-vocab head trainable
   allocates a 512MB CE grad buffer + dead autograd state; and

@@ -514,5 +514,23 @@ def test_newton_init_col_side_and_hooks_cleanup():
     assert not wd._forward_pre_hooks  # hooks removed
 
 
+def test_es_scale_polish_runs_and_never_worsens():
+    m = _toy()
+    ids = _ids()
+    sift._attach_slice(m.blocks[3].attn.qkv_proj, "row", torch.tensor([0, 1]))
+    sift.freeze_non_sift(m)
+
+    def loss_fn(i, l, mk):
+        return m(i).pow(2).mean()
+
+    with torch.no_grad():
+        m.blocks[3].attn.qkv_proj.sift_delta.fill_(0.01)
+    rep = sift.es_scale_polish(m, lambda: iter([(ids, ids, None)] * 2),
+                               loss_fn, iters=2, pop=4, eval_batches=1)
+    assert rep["iters"] == 2
+    assert rep["loss_es"] <= rep["loss0"] + 1e-6  # rejected runs roll back
+    assert torch.isfinite(m.blocks[3].attn.qkv_proj.sift_delta).all()
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
