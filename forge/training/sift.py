@@ -573,6 +573,135 @@ def build_selection(cands: _Cands, frontier: int,
 
 
 # ---------------------------------------------------------------------------
+# Newton init — one-shot diagonal Gauss–Newton on the attached slices
+# ---------------------------------------------------------------------------
+
+
+def newton_init(model: nn.Module, calib_iter, loss_fn, n_passes: int,
+                lr: float = 1.0, damp: float = 1e-2,
+                trust: float = 0.25) -> dict:
+    """Preconditioned warm-start for attached deltas.
+
+    For slice delta Δ the local quadratic surrogate is
+    ``L(Δ) ≈ L0 + gᵀΔ + ½ Σ_j h_j‖Δ[:,j]‖²`` with input-factor curvature
+    ``h_j = E[x_j²]`` — the input-only half of K-FAC (output curvature is
+    folded into ``lr``).  The exact minimizer of that surrogate is
+    ``Δ* = -ḡ/(E[x²]+damp)``, applied here in one shot:
+
+    - ``ḡ``: mean ``∂L/∂Δ`` — read directly off ``delta.grad`` (free: the
+      delta is already the trainable leaf, no weight-grad buffers needed).
+    - ``E[x²]``: per-input-channel second moment of the delta's input,
+      captured by forward-pre-hooks (fires on grad-ckpt recompute too, so
+      token counts are accumulated alongside and the ratio stays exact).
+    - col-side slices index ``E[x²]`` by ``sift_sel`` (their delta input is
+      ``x[..., sel]``).
+
+    The raw diagonal step has no global scale guarantee on non-quadratic
+    losses (CE output curvature ≠ 1), so the init is protected two ways:
+    per-slice trust region ``‖Δ‖_F ≤ 0.25‖W_sel‖_F`` and an Armijo-style
+    backtracking line search over the calibration batches — the accepted
+    point never has higher calibration loss than the zero-init base, and
+    if nothing helps the deltas stay zero (init is then a no-op).
+
+    Memory: one E[x²] vector per sliced module (~KBs); ``delta.grad`` plus
+    one direction copy = 2× the touched-parameter count.
+    """
+    mods = [m for m in model.modules()
+            if getattr(m, "_sift_side", None) is not None]
+    if not mods:
+        return {"passes": 0}
+    x2: dict[int, torch.Tensor] = {}
+    ntok: dict[int, int] = {}
+    hooks = []
+
+    def _mk(m):
+        def _pre(mod, args):
+            x = args[0].detach()
+            x2[id(m)] = x2.get(id(m), torch.zeros(
+                x.shape[-1], dtype=torch.float32, device=x.device)) + \
+                x.float().pow(2).sum(dim=tuple(range(x.dim() - 1)))
+            ntok[id(m)] = ntok.get(id(m), 0) + x.numel() // x.shape[-1]
+        return m.register_forward_pre_hook(_pre)
+
+    for m in mods:
+        hooks.append(_mk(m))
+    dirs: dict[int, torch.Tensor] = {}
+    l0 = 0.0
+    try:
+        model.zero_grad(set_to_none=True)
+        it = calib_iter()
+        for _ in range(n_passes):
+            try:
+                ids, labels, mask = next(it)
+            except StopIteration:
+                it = calib_iter()
+                ids, labels, mask = next(it)
+            loss = loss_fn(ids, labels, mask)
+            l0 += float(loss.detach()) / n_passes
+            (loss / n_passes).backward()
+        with torch.no_grad():
+            for m in mods:
+                d = m.sift_delta
+                if d.grad is None:
+                    continue
+                ex2 = x2[id(m)] / max(ntok[id(m)], 1)
+                dmp = float(ex2.mean()) * damp + 1e-12
+                if m._sift_side == "col":
+                    ex2 = ex2[m.sift_sel]
+                step = -lr * d.grad.float() / (ex2.float() + dmp)
+                step = torch.nan_to_num(step, nan=0.0, posinf=0.0, neginf=0.0)
+                # trust region: never move a slice more than 25% of its base
+                base = (m.weight[m.sift_sel] if m._sift_side == "row"
+                        else m.weight[:, m.sift_sel])
+                cap = trust * float(base.float().norm()) + 1e-12
+                n = float(step.norm())
+                if n > cap:
+                    step *= cap / n
+                dirs[id(m)] = step
+        model.zero_grad(set_to_none=True)
+    finally:
+        for h in hooks:
+            h.remove()
+        model.zero_grad(set_to_none=True)
+
+    if not dirs:
+        return {"passes": n_passes, "accepted": False}
+
+    # Armijo backtracking on the same calibration data: accept the largest
+    # scale whose forward-only loss beats the zero-init baseline l0.
+    def _eval() -> float:
+        tot, it2 = 0.0, calib_iter()
+        with torch.no_grad():
+            for _ in range(n_passes):
+                try:
+                    ids, labels, mask = next(it2)
+                except StopIteration:
+                    it2 = calib_iter()
+                    ids, labels, mask = next(it2)
+                tot += float(loss_fn(ids, labels, mask))
+        return tot / n_passes
+
+    best_s, best_l = 0.0, l0
+    s = 1.0
+    for _ in range(7):
+        with torch.no_grad():
+            for m in mods:
+                if id(m) in dirs:
+                    m.sift_delta.copy_(dirs[id(m)] * s)
+        ls = _eval()
+        if ls < best_l - 1e-6:
+            best_s, best_l = s, ls
+            break
+        s *= 0.5
+    with torch.no_grad():
+        for m in mods:
+            if id(m) in dirs:
+                m.sift_delta.copy_(dirs[id(m)] * best_s)
+    return {"passes": n_passes, "accepted": best_s > 0,
+            "scale": best_s, "loss0": l0, "loss_newton": best_l}
+
+
+# ---------------------------------------------------------------------------
 # Adapter save / load — the compact artifact
 # ---------------------------------------------------------------------------
 
@@ -819,6 +948,8 @@ def setup_sift(model: nn.Module, calib_iter, loss_fn, *,
                frontier="auto", frontier_mass: float = 0.75,
                calib_batches: int = 4,
                score_mode: str = "fro",
+               newton_passes: int = 0, newton_lr: float = 1.0,
+               newton_damp: float = 1e-2,
                prefix_cache_gb: float = 0.0) -> SiftState:
     """Calibrate -> pick frontier+units -> attach deltas -> freeze rest.
 
@@ -845,6 +976,9 @@ def setup_sift(model: nn.Module, calib_iter, loss_fn, *,
     _register_mirrors(model)
     n_frozen = freeze_non_sift(model)
     n_touched = sum(p.numel() for p in params)
+    if newton_passes > 0:
+        newton_init(model, calib_iter, loss_fn, newton_passes,
+                    lr=newton_lr, damp=newton_damp)
     pc = SiftPrefixCache(model, F_, max_gb=prefix_cache_gb) \
         if prefix_cache_gb > 0 else None
     return SiftState(
@@ -855,5 +989,7 @@ def setup_sift(model: nn.Module, calib_iter, loss_fn, *,
                   include_kv=include_kv, frontier=frontier,
                   frontier_mass=frontier_mass, calib_batches=calib_batches,
                   score_mode=score_mode,
+                  newton_passes=newton_passes, newton_lr=newton_lr,
+                  newton_damp=newton_damp,
                   prefix_cache_gb=prefix_cache_gb),
         prefix_cache=pc, calib_iter=calib_iter, loss_fn=loss_fn, cands=cands)

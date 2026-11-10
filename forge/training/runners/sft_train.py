@@ -1272,6 +1272,13 @@ def main():
                         "Fisher as free Hessian proxy)")
     p.add_argument("--sift-calib-batches", type=int, default=4,
                    help="Calibration batches for importance scoring (default 4)")
+    p.add_argument("--sift-newton-passes", type=int, default=0,
+                   help="Post-selection diagonal Gauss-Newton init passes "
+                        "(0=off). Sets deltas to -lr*E[g]/(E[x^2]+damp) — "
+                        "the input-factor half of K-FAC — before Adam starts")
+    p.add_argument("--sift-newton-lr", type=float, default=1.0,
+                   help="Step scale for the Newton init (default 1.0; "
+                        "output curvature folds into this)")
     p.add_argument("--sift-reselect-every", type=int, default=0,
                    help="Re-calibrate + re-pick units every N steps "
                         "(merge deltas first; 0=disabled)")
@@ -1856,6 +1863,8 @@ def main():
             frontier=args.sift_frontier, frontier_mass=args.sift_frontier_mass,
             calib_batches=args.sift_calib_batches,
             score_mode=args.sift_score_mode,
+            newton_passes=args.sift_newton_passes,
+            newton_lr=args.sift_newton_lr,
             prefix_cache_gb=(args.sift_prefix_gb
                              if args.sift_prefix_cache else 0.0))
         if args.resume and _sift_mod.resume_has_sift(args.resume):

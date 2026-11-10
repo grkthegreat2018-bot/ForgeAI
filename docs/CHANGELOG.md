@@ -59,6 +59,14 @@
   proxy). 3-way bench: same endpoint loss on v9; obs leanest
   (31.77M) + fastest (1070ms). Differentiator expected on noisy
   corpora.
+- **Newton init** (`--sift-newton-passes N`, `--sift-newton-lr`): one-shot
+  diagonal Gauss–Newton warm-start on the selected slices —
+  Δ = -lr·E[g]/(E[x²]+damp), the input-factor half of K-FAC, exact
+  minimizer of the diagonal-quadratic surrogate. Guarded by a per-slice
+  trust region (0.25‖W_sel‖) + Armijo backtracking on calibration batches
+  (accepted point never worse than zero-init; no-op if nothing helps).
+  Spark bench (footprint-matched, 10 steps): starting loss 0.668→0.287,
+  final loss 1.125→0.305, step time unchanged (817ms), VRAM 5.52GB.
 - **Trap fixed in review**: calibration must freeze non-candidate
   params (embed/head) — leaving the 131k-vocab head trainable
   allocates a 512MB CE grad buffer + dead autograd state; and

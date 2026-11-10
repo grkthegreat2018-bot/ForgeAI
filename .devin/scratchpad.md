@@ -2641,6 +2641,16 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
   differentiator expected on noisy/mixed corpora where fro picks
   large-but-inconsistent gradients. test: sign-flip loss_fn kills
   smean/obs scores <5% of fro (proves the mechanism, 17 tests green)
+- SIFT-N Newton init (--sift-newton-passes N): Δ=-lr·E[g]/(E[x²]+damp)
+  (input-factor K-FAC half). Raw lr=1 BLEW UP on real CE (loss 12.6 flat)
+  → added per-slice trust region (0.25‖W_sel‖) + Armijo backtracking
+  (accepted point never worse than zero-init, no-op fallback).
+  Bench spark_sft_v9 a2g128+f4g16, 10 steps: loss0 0.668->0.287 (-57%),
+  loss10 1.125->0.305, step 817ms, VRAM 5.52GB. Closed-form slice solve
+  >> dozens of Adam steps. Tests 19/19 (toy optimum is Δ*=D-W_sel not D —
+  assertion bug caught + fixed; gradient noise needs >=4k samples).
+  Test gotcha: trust=0.25 truncates toy's large true delta -> trust=1e6
+  in the recovery test.
 
 ## R&D reference shelf — provable algorithms for the 4 user questions (2026-11-10)
 Q1 next-token "algorithm": fixed GEMM+softmax pipeline; provable bounds:

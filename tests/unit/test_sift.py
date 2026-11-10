@@ -463,5 +463,56 @@ def test_setup_sift_end_to_end():
     assert not below
 
 
+# ── Newton init (diagonal Gauss-Newton slice warm-start) ───────────────────
+
+def test_newton_init_recovers_true_delta():
+    """White-input quadratic: the diagonal-GN step Δ=-lr·ḡ/E[x²] is
+    direction-exact (ḡ ∝ -D), so lr=1/h recovers the true slice."""
+    torch.manual_seed(0)
+    lin = nn.Linear(16, 8, bias=False)
+    holder = nn.Module()
+    holder.lin = lin
+    p = sift._attach_slice(lin, "row", torch.tensor([0, 1, 2, 3]))
+    sift.freeze_non_sift(holder)
+    D = torch.randn(4, 16) * 0.5  # true delta: t[..., :4] = x @ D.T
+
+    def loss_fn(_i, _l, _m):
+        x = torch.randn(8, 64, 16)
+        y = lin(x)
+        t = torch.zeros_like(y)
+        t[..., :4] = x @ D.T
+        return ((y - t) ** 2).mean()
+
+    # L = mean over 8 outputs -> h_j = (2/8)E[x_j^2] = ex2/4 -> exact lr = 4
+    sift.newton_init(holder, lambda: iter([(None, None, None)] * 8),
+                     loss_fn, 8, lr=4.0, trust=1e6)
+    # optimum is W_sel + Δ = D, i.e. Δ* = D - W_sel (not D itself)
+    Dstar = D - lin.weight[0:4]
+    err = (p.detach() - Dstar).norm() / Dstar.norm()
+    assert err < 0.15, f"newton init err {err:.3f}"
+    # post-init residual on the selected rows collapses vs target energy
+    x = torch.randn(4, 32, 16)
+    tgt = x @ D.T
+    res = lin(x)[..., :4] - tgt
+    assert (res ** 2).mean() < 0.05 * (tgt ** 2).mean()
+
+
+def test_newton_init_col_side_and_hooks_cleanup():
+    m = _toy()
+    ids = _ids()
+    wd = m.blocks[1].ffn.w_down
+    p = sift._attach_slice(wd, "col", torch.tensor([5, 6, 7]))
+    sift.freeze_non_sift(m)
+
+    def loss_fn(i, l, mk):
+        return m(i).pow(2).mean()
+
+    rep = sift.newton_init(m, lambda: iter([(ids, ids, None)] * 2),
+                           loss_fn, 2, lr=1.0)
+    assert rep["passes"] == 2
+    assert p.detach().abs().sum() > 0  # delta moved off zero
+    assert not wd._forward_pre_hooks  # hooks removed
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
