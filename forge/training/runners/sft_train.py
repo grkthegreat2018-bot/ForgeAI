@@ -1264,6 +1264,12 @@ def main():
     p.add_argument("--sift-frontier-mass", type=float, default=0.75,
                    help="Gradient-mass fraction above the auto frontier "
                         "(default 0.75 — train the top ~25%% blocks)")
+    p.add_argument("--sift-score-mode", default="fro",
+                   choices=["fro", "smean", "obs"],
+                   help="Unit scoring: 'fro' = E‖g‖_F (Gauss-Southwell), "
+                        "'smean' = ‖ḡ‖_F (noise-robust), 'obs' = "
+                        "Σ ḡ²/Var[g] (OBS-saliency selector — diagonal "
+                        "Fisher as free Hessian proxy)")
     p.add_argument("--sift-calib-batches", type=int, default=4,
                    help="Calibration batches for importance scoring (default 4)")
     p.add_argument("--sift-reselect-every", type=int, default=0,
@@ -1849,6 +1855,7 @@ def main():
             include_kv=args.sift_include_kv,
             frontier=args.sift_frontier, frontier_mass=args.sift_frontier_mass,
             calib_batches=args.sift_calib_batches,
+            score_mode=args.sift_score_mode,
             prefix_cache_gb=(args.sift_prefix_gb
                              if args.sift_prefix_cache else 0.0))
         if args.resume and _sift_mod.resume_has_sift(args.resume):

@@ -52,6 +52,13 @@
   (lossless init, grad isolation, selection, merge/mirrors,
   adapter round-trip, prefix cache + partial batches, scalar
   gate layout, end-to-end setup).
+- **Scoring modes** (`--sift-score-mode`): `fro` = E‖g‖_F
+  (Gauss–Southwell, default), `smean` = ‖ḡ‖_F (noise-robust — grads
+  that cancel across batches score ~0), `obs` = Σ ḡ²/Var[g] (OBS
+  saliency as selector — diagonal empirical Fisher = free Hessian
+  proxy). 3-way bench: same endpoint loss on v9; obs leanest
+  (31.77M) + fastest (1070ms). Differentiator expected on noisy
+  corpora.
 - **Trap fixed in review**: calibration must freeze non-candidate
   params (embed/head) — leaving the 131k-vocab head trainable
   allocates a 512MB CE grad buffer + dead autograd state; and

@@ -2628,6 +2628,48 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
   * resume loaded the ADAPTER as --checkpoint (meta lacked sift_only) -> random-init base, loss 23.6; save_sift_adapter now writes sift_only+base_checkpoint; resume meta check covers sift_adapter too
 - CAVEAT: importance mass on spark_sft_v9 near-UNIFORM (L2..L9 ~similar) -> frontier auto-picks block 4-5/28; backward-depth cut modest here. Expected bigger on late-layer-concentrated corpora; frontier is per-corpus measurable (block-mass printed at setup)
 - e2e smoke sft_train --sift: calib->train 4 steps loss 2.08->1.22 VRAM 4.06GB, adapter+merged saves, resume re-attach verified loss continues 1.70->0.71
+- SIFT score modes (R70 follow-on): --sift-score-mode fro|smean|obs —
+  fro = E‖g‖_F (Gauss-Southwell), smean = ‖ḡ‖_F (noise-robust),
+  obs = Σ ḡ²/Var[g] (OBS saliency as SELECTOR: diag empirical-Fisher =
+  free Hessian proxy, eps = module-mean Var keeps magnitude ordering).
+  fp16 Σg + fp32 Σg² accumulators on CPU during calib (~6GB RAM).
+  A/B/C on spark_sft_v9 (bs4 seq2048, a2g128+f4g16, 10 steps):
+    fro:   frontier=5, 33.25M, 1125ms, 5.71GB, .668->1.125
+    smean: frontier=5, 33.25M, 1099ms, 5.64GB, .672->1.125
+    obs:   frontier=6, 31.77M, 1070ms, 5.60GB, .680->1.125
+  VERDICT: neutral on clean corpus (same endpoint), obs leaner+faster;
+  differentiator expected on noisy/mixed corpora where fro picks
+  large-but-inconsistent gradients. test: sign-flip loss_fn kills
+  smean/obs scores <5% of fro (proves the mechanism, 17 tests green)
+
+## R&D reference shelf — provable algorithms for the 4 user questions (2026-11-10)
+Q1 next-token "algorithm": fixed GEMM+softmax pipeline; provable bounds:
+  dense matvec Theta(d^2) (low-rank O(dr)/butterfly O(d log d) only outs);
+  FlashAttention IO-optimal exact; speculative decode provably identical dist;
+  ADAPTIVE SOFTMAX (Grave'17) = EXACT softmax at O(d log V) — the one
+  provable free lunch left; Spark head = 268M params = biggest single GEMM.
+Q2 update rule = steepest descent under a norm; proven per-norm optima:
+  SGD euclidean | Adam ~diag-Fisher heuristic | Muon spectral-norm optimal |
+  K-FAC exact Gauss-Newton on linear layer | Gauss-Southwell = provably
+  optimal block pick per step (Nutini'15) — SIFT calibration IS this rule |
+  OBS saliency g^2/Hii provably min-loss unit removal (Hassibi'93) —
+  SIFT-v2 = g^2/v_hat selection (OBS as SELECTOR not pruner, v_hat = free
+  Adam 2nd-moment Hessian diag) | PiSSA = Eckart-Young optimal rank-r |
+  closed-form slice Newton: dW* = E[YX^T] E[XX^T]^-1 EXACT for quadratic —
+  only feasible because SIFT shrinks space to ~33M.
+Q3 1-bit f16-quality: DISPROVEN as post-hoc compression — scalar SQNR
+  ~1.2dB@1bit, need ~40dB. Provable: VQ>scalar (Shannon; E8 +1.41dB);
+  orthogonal rotation exact re-basis (QuaRot, in-repo); GPTQ = provably
+  optimal OBS quadratic solve; IRB converges geometrically (SubBitnet
+  in-repo); BitNet1.58 parity = TRAINED-native only (empirical). Floor
+  in-repo: IRI-FP4 r2 ~9b/w lossless, int4+rot ~lossless. Honest novel:
+  W = s*T + C[g] ternary + shared-codebook index ~1.7b/w (Shannon VQ
+  says it beats pure ternary). Better reframe: base+66MB SIFT adapter
+  IS the 60x artifact.
+Q4 full reinvention: NO — transformer is the hardware equilibrium; SSM/
+  linear attn have PROVEN recall gap (Arora'23); hybrids (Spark's own
+  SWA+full) are the fix. Replace weakest incumbents: vocab head, param
+  representation, update rule — per-component behind parity tests.
 
 
 ## NEGATIVE RESULT: LoRA-ES adapter halves pass@1

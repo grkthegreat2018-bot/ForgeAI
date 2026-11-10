@@ -1262,7 +1262,11 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   + w_down cols). A backward "frontier" F is picked as the shallowest
   block covering `--sift-frontier-mass` of gradient mass; blocks below F
   have zero trainable params so autograd builds no graph through them at
-  all. Selected slices get zero-init one-sided deltas
+  all. `--sift-score-mode` picks the unit scorer: `fro` = E‖g‖_F
+  (Gauss–Southwell, default), `smean` = ‖ḡ‖_F (noise-robust), `obs` =
+  Σ ḡ²/Var[g] (OBS saliency as selector — diagonal empirical Fisher is
+  the free Hessian proxy; leaner picks, same endpoint on clean data).
+  Selected slices get zero-init one-sided deltas
   (`y[...,sel] += x @ Δᵀ`, lossless init) merged into W on save/reselect;
   merge mirrors fused QKV/gate_up deltas back into the split checkpoint
   weights. Optional prefix cache (`--sift-prefix-cache`) hashes each

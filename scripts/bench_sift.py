@@ -98,6 +98,8 @@ def main():
     ap.add_argument("--attn-gran", type=int, default=128)
     ap.add_argument("--ffn-gran", type=int, default=32)
     ap.add_argument("--frontier-mass", type=float, default=0.75)
+    ap.add_argument("--score-mode", default="fro",
+                    choices=["fro", "smean", "obs"])
     ap.add_argument("--skip-lora", action="store_true")
     ap.add_argument("--skip-pc", action="store_true")
     args = ap.parse_args()
@@ -146,7 +148,8 @@ def main():
         model, calib_iter, lambda i, l, m: ce_loss(model, i, l, m),
         attn_units=args.attn_units, ffn_units=args.ffn_units,
         attn_gran=args.attn_gran, ffn_gran=args.ffn_gran,
-        frontier="auto", frontier_mass=args.frontier_mass, calib_batches=4)
+        frontier="auto", frontier_mass=args.frontier_mass, calib_batches=4,
+        score_mode=args.score_mode)
     opt = torch.optim.AdamW(st.delta_params, lr=args.lr, fused=True)
     bm = st.block_mass
     results["sift_profile"] = {
@@ -173,7 +176,8 @@ def main():
             attn_units=args.attn_units, ffn_units=args.ffn_units,
             attn_gran=args.attn_gran, ffn_gran=args.ffn_gran,
             frontier="auto", frontier_mass=args.frontier_mass,
-            calib_batches=4, prefix_cache_gb=6.0)
+            calib_batches=4, prefix_cache_gb=6.0,
+            score_mode=args.score_mode)
         opt = torch.optim.AdamW(st.delta_params, lr=args.lr, fused=True)
         losses = []
         run_steps(model, opt, batches, 2, losses)  # warmup

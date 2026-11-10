@@ -264,9 +264,20 @@ def _sq_norms(grad: torch.Tensor, side: str) -> torch.Tensor:
 
 
 def calibrate_importance(model: nn.Module, cands: _Cands,
-                         calib_iter, loss_fn, n_batches: int) -> dict[int, float]:
+                         calib_iter, loss_fn, n_batches: int,
+                         score_mode: str = "fro") -> dict[int, float]:
     """Run ``n_batches`` of fwd+bwd with candidate weights un-frozen and
     accumulate per-unit gradient block-norms into ``Unit.score``.
+
+    ``score_mode``:
+    - ``"fro"`` (default): expected Frobenius block-norm ``Σ_b‖g_b‖_F`` —
+      Gauss–Southwell block rule (Nutini'15).
+    - ``"smean"``: norm of the *mean* gradient ``‖ḡ‖_F`` — gradients that
+      cancel across batches score ~0 (noise-robust G-S).
+    - ``"obs"``: variance-normalized saliency ``Σ_i ḡ_i²/(Var[g_i]+ε)`` —
+      Optimal-Brain-Surgeon saliency used as a *selector*: the diagonal
+      empirical Fisher `E[g²]` is a free Hessian-diag proxy, so each
+      element's score ≈ expected Newton-step descent gain.
 
     Cost ≈ n_batches normal steps; no optimizer step is taken.
     Returns per-block total importance mass.
@@ -288,6 +299,10 @@ def calibrate_importance(model: nn.Module, cands: _Cands,
             refs = [(sp.module, sp.side, sp.start, sp.length)
                     for sp in u.members]
             unit_refs.append((bi, k, u, refs))
+    # Element-wise accumulators for smean/obs modes (CPU, ~3-6GB total for
+    # a 1.7B-class candidate set — fp16 for the sum, fp32 for the squares).
+    gsum: dict[str, torch.Tensor] = {} if score_mode in ("smean", "obs") else None
+    gssq: dict[str, torch.Tensor] = {} if score_mode == "obs" else None
     try:
         model.zero_grad(set_to_none=True)
         it = calib_iter()
@@ -299,22 +314,67 @@ def calibrate_importance(model: nn.Module, cands: _Cands,
                 ids, labels, mask = next(it)
             loss = loss_fn(ids, labels, mask)
             (loss / n_batches).backward()
-            # One vectorized row/col sq-norm pass per module per side,
-            # then slice by unit span.
-            sq_cache: dict[tuple[str, str], torch.Tensor] = {}
+            if gsum is not None:
+                for p in cand_paths:
+                    g = _mod(model, p).weight.grad
+                    if g is None:
+                        continue
+                    if p not in gsum:
+                        gsum[p] = torch.zeros_like(g, dtype=torch.float16,
+                                                   device="cpu")
+                        if gssq is not None:
+                            gssq[p] = torch.zeros_like(g, dtype=torch.float32,
+                                                       device="cpu")
+                    gsum[p] += g.to(torch.float16).cpu()
+                    if gssq is not None:
+                        gssq[p] += g.float().pow(2).cpu()
+            if score_mode == "fro":
+                # One vectorized row/col sq-norm pass per module per side,
+                # then slice by unit span.
+                sq_cache: dict[tuple[str, str], torch.Tensor] = {}
+                for _, _, u, refs in unit_refs:
+                    s = 0.0
+                    for path, side, start, length in refs:
+                        key = (path, side)
+                        if key not in sq_cache:
+                            g = _mod(model, path).weight.grad
+                            sq_cache[key] = (None if g is None
+                                             else _sq_norms(g.float(), side).cpu())
+                        sq = sq_cache[key]
+                        if sq is not None and start + length <= sq.numel():
+                            s += float(sq[start:start + length].sum().sqrt())
+                    u.score += s
+            model.zero_grad(set_to_none=True)
+        if score_mode != "fro":
+            B = float(n_batches)
+            # Per-module elementwise score matrices, computed once.
+            # smean: M = ḡ²  → span score = sqrt(Σ M[span]) = ‖ḡ_span‖_F
+            # obs:   M = ḡ²/(Var+mean(Var)) → span score = Σ M[span]
+            #        (additive OBS energy — expected descent under a
+            #        diagonal-Newton step on that slice).
+            sal_cache: dict[str, torch.Tensor] = {}
+            for p in cand_paths:
+                if p not in (gsum or {}):
+                    continue
+                m = gsum[p].float() / B
+                if score_mode == "smean":
+                    sal_cache[p] = m * m
+                else:
+                    var = gssq[p] / B - m * m
+                    eps = float(var.mean().clamp(min=1e-12))
+                    sal_cache[p] = m * m / var.clamp(min=0).add_(eps)
             for _, _, u, refs in unit_refs:
                 s = 0.0
                 for path, side, start, length in refs:
-                    key = (path, side)
-                    if key not in sq_cache:
-                        g = _mod(model, path).weight.grad
-                        sq_cache[key] = (None if g is None
-                                         else _sq_norms(g.float(), side).cpu())
-                    sq = sq_cache[key]
-                    if sq is not None and start + length <= sq.numel():
-                        s += float(sq[start:start + length].sum().sqrt())
-                u.score += s
-            model.zero_grad(set_to_none=True)
+                    S = sal_cache.get(path)
+                    if S is None:
+                        continue
+                    if side == "row":
+                        v = float(S[start:start + length].sum())
+                    else:
+                        v = float(S[:, start:start + length].sum())
+                    s += v ** 0.5 if score_mode == "smean" else v
+                u.score = s
     finally:
         for p in model.parameters():
             if id(p) in prev_req:
@@ -758,6 +818,7 @@ def setup_sift(model: nn.Module, calib_iter, loss_fn, *,
                include_kv: bool = False,
                frontier="auto", frontier_mass: float = 0.75,
                calib_batches: int = 4,
+               score_mode: str = "fro",
                prefix_cache_gb: float = 0.0) -> SiftState:
     """Calibrate -> pick frontier+units -> attach deltas -> freeze rest.
 
@@ -774,7 +835,7 @@ def setup_sift(model: nn.Module, calib_iter, loss_fn, *,
         model.enable_gradient_checkpointing()
     cands = discover_units(model, attn_gran, ffn_gran, include_kv)
     block_mass = calibrate_importance(
-        model, cands, calib_iter, loss_fn, calib_batches)
+        model, cands, calib_iter, loss_fn, calib_batches, score_mode)
     if frontier == "auto":
         F_ = pick_frontier(block_mass, frontier_mass, len(model.blocks))
     else:
@@ -793,5 +854,6 @@ def setup_sift(model: nn.Module, calib_iter, loss_fn, *,
                   attn_gran=attn_gran, ffn_gran=ffn_gran,
                   include_kv=include_kv, frontier=frontier,
                   frontier_mass=frontier_mass, calib_batches=calib_batches,
+                  score_mode=score_mode,
                   prefix_cache_gb=prefix_cache_gb),
         prefix_cache=pc, calib_iter=calib_iter, loss_fn=loss_fn, cands=cands)

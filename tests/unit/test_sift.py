@@ -290,6 +290,33 @@ def test_calibrate_and_select():
     assert not any("blocks.3." in p for p in mods)
 
 
+def test_score_modes_reject_sign_flipping_gradients():
+    """loss_fn flips sign every call → per-batch grads cancel.
+    'fro' accumulates magnitude anyway (score>0); 'smean'/'obs' score
+    the *mean* gradient → ~0 → selection empty."""
+    ref = None
+    for mode, expect_empty in (("fro", False), ("smean", True), ("obs", True)):
+        m = _toy()
+        ids = _ids()
+        cnt = [0]
+
+        def loss_fn(i, l, mk):
+            cnt[0] += 1
+            return m(i).pow(2).mean() * (1 if cnt[0] % 2 else -1)
+
+        c = sift.discover_units(m, attn_gran=16, ffn_gran=32)
+        it = lambda: iter([(ids, ids, None)] * 2)
+        mass = sift.calibrate_importance(m, c, it, loss_fn, 2,
+                                         score_mode=mode)
+        if ref is None:
+            ref = max(mass.values())
+        if expect_empty:
+            # fp16 accumulation leaves ~1e-3 relative residue, not exact 0
+            assert max(mass.values()) < 0.05 * ref
+        else:
+            assert all(v > 0 for v in mass.values())
+
+
 # ── merge + mirrors ────────────────────────────────────────────────────────
 
 def test_merge_fused_qkv_mirrors_to_split():
