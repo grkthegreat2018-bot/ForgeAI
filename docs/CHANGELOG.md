@@ -67,6 +67,13 @@
   (accepted point never worse than zero-init; no-op if nothing helps).
   Spark bench (footprint-matched, 10 steps): starting loss 0.668→0.287,
   final loss 1.125→0.305, step time unchanged (817ms), VRAM 5.52GB.
+- **Loss-band culling** (`--loss-band LO HI`): skip backward+step on
+  micro-batches outside the mean-CE band; NaN batches always skipped
+  (found: tiny packed corpora can produce all-masked-label batches whose
+  weighted CE is 0/0 = NaN — the band now shields training from them).
+  `band-skip K/N` in step logs; all-skipped epoch stops with a warning.
+  Smoke: accept-all trains normally (loss 1.22→0.73, 0/10 skipped);
+  skip-all stops cleanly after one epoch.
 - **Trap fixed in review**: calibration must freeze non-candidate
   params (embed/head) — leaving the 131k-vocab head trainable
   allocates a 512MB CE grad buffer + dead autograd state; and

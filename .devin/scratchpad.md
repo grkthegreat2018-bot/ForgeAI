@@ -2651,6 +2651,18 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
   assertion bug caught + fixed; gradient noise needs >=4k samples).
   Test gotcha: trust=0.25 truncates toy's large true delta -> trust=1e6
   in the recovery test.
+- Loss-band culling (--loss-band LO HI, general SFT flag): skip backward+
+  step on out-of-band micro-batches; NaN always skipped. band-skip K/N in
+  logs; all-skipped epoch -> warn+stop (else step never advances and
+  range(100) epochs of dead forwards spin). One loss sync per micro-batch
+  (opt-in; default path keeps deferred .item()).
+  Smoke (spark_x26_1p7b): skip-all guard fires clean exit; accept-all on
+  full v9 trains normal loss 1.22->0.73 band-skip 0/10.
+  PRE-EXISTING BUG FOUND (not fixed, out of scope): tiny packed corpora
+  (16-row subset -> 12 usable -> 8 packed seqs) yield NaN mean CE on every
+  batch (default LoRA AND sift paths) — suspect all-masked-label batches
+  0/0 in entropy-weighted CE (alpha=0.5 default). Band shields training.
+  NEXT: root-cause compute_loss weighted-mean zero-weight guard.
 
 ## R&D reference shelf — provable algorithms for the 4 user questions (2026-11-10)
 Q1 next-token "algorithm": fixed GEMM+softmax pipeline; provable bounds:

@@ -1271,7 +1271,12 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   per-slice trust region (0.25‖W_sel‖) and Armijo backtracking on the
   calibration batches — accepted point never exceeds the zero-init loss;
   on spark_sft_v9 it cut starting loss 0.668→0.287 and 10-step loss
-  1.125→0.305. Selected slices get zero-init one-sided deltas
+  1.125→0.305. Selected slices get zero-init one-sided deltas.
+  `--loss-band LO HI` (any SFT run, not just SIFT) skips backward+step on
+  micro-batches whose mean CE is outside [LO,HI] (easy rows teach nothing,
+  hopeless rows teach noise; NaN batches always skipped). Logs
+  `band-skip K/N`; if a whole epoch is skipped it stops with the last loss
+  printed instead of spinning. Costs one loss sync per micro-batch.
   (`y[...,sel] += x @ Δᵀ`, lossless init) merged into W on save/reselect;
   merge mirrors fused QKV/gate_up deltas back into the split checkpoint
   weights. Optional prefix cache (`--sift-prefix-cache`) hashes each

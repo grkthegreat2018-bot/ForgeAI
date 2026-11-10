@@ -1289,6 +1289,12 @@ def main():
                    help="Prefix-cache RAM cap in GB (default 6)")
     p.add_argument("--sift-lr", type=float, default=0.0,
                    help="Override --lr for slice params (0 = use --lr)")
+    p.add_argument("--loss-band", type=float, nargs=2, default=None,
+                   metavar=("LO", "HI"),
+                   help="Mid-loss-band data culling: skip backward/step on "
+                        "micro-batches whose mean CE falls outside [LO, HI] "
+                        "(easy rows teach nothing, hopeless rows teach "
+                        "noise). Adds one loss sync per micro-batch when on")
     p.add_argument("--qlora-nf4", action="store_true",
                    help="R32-1: NF4 QLoRA — quantize base weights to NF4 (4-bit normal float) "
                         "and train LoRA adapters on top. Works on standard nn.Linear models "
@@ -2310,6 +2316,9 @@ def main():
     with task_scope("sft") as log:
         step = start_step
         accum_count = 0
+        _band_skip = 0
+        _band_seen = 0
+        _band_last = float("nan")
         indices = list(range(len(dataset)))
         last_loss = 0.0  # initialized; updated at log intervals (R&D round 25)
 
@@ -2331,6 +2340,7 @@ def main():
                 prefetcher.set_transfer_on_consume(True)
 
         for epoch in range(100):
+            _epoch_step0 = step
             random.shuffle(indices)
             # If using prefetcher, get batches from it; otherwise use indices
             if prefetcher is not None:
@@ -2510,6 +2520,18 @@ def main():
                         loss = ce_loss + l2_sp
                     else:
                         loss = ce_loss
+
+                    # Mid-loss-band culling: forward already paid for, so
+                    # only backward+step are saved on out-of-band batches.
+                    if args.loss_band is not None:
+                        _lv = float(ce_loss.detach())
+                        _band_seen += 1
+                        if not (args.loss_band[0] <= _lv <= args.loss_band[1]):
+                            _band_skip += 1
+                            _band_last = _lv
+                            if sift_ctx is not None:
+                                sift_ctx.clear_prefix()
+                            continue
 
                     with log.time_phase("backward"):
                         (loss / grad_accum).backward()
@@ -2717,6 +2739,8 @@ def main():
                         msg += " | " + " ".join(
                             f"{p['phase']}={p['avg_ms']:.0f}ms"
                             for p in phases[:4])
+                    if args.loss_band is not None and _band_seen:
+                        msg += f" | band-skip {_band_skip}/{_band_seen}"
                     print(msg)
                     log.log(msg)
                     write_status_json(args.status_file, {
@@ -2791,6 +2815,13 @@ def main():
                         break
                 step += 1
                 current["step"] = step   # SIGINT emergency-save step
+            if args.loss_band is not None and step == _epoch_step0 \
+                    and step < args.max_steps:
+                print(f"  [LossBand] every micro-batch this epoch fell outside "
+                      f"[{args.loss_band[0]}, {args.loss_band[1]}] — nothing "
+                      f"left to learn; stopping (last loss {_band_last:.4f}; "
+                      "widen the band).")
+                break
             if aborted or early_stopped or step >= args.max_steps:
                 break
 
