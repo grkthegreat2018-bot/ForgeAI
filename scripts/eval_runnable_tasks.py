@@ -54,7 +54,16 @@ def _extract_fn(text: str, name: str, fmt: str = "comment",
             return ""
         if not all(ln.startswith((" ", "\t")) for ln in body):
             body = ["    " + ln for ln in body]
-        return f"def {name}{signature}:\n" + "\n".join(body)
+        # Salvage truncation: completions may cut mid-line at max_new —
+        # drop trailing lines until the function compiles.
+        while body:
+            cand = f"def {name}{signature}:\n" + "\n".join(body)
+            try:
+                compile(cand, "<gen>", "exec")
+                return cand
+            except SyntaxError:
+                body.pop()
+        return ""
     lines = code.splitlines()
     start = None
     for i, ln in enumerate(lines):
