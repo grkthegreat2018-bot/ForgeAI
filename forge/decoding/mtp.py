@@ -389,7 +389,8 @@ class MTPModule(nn.Module):
         w = self._tied_head_weight
         if self._tied_source is not None:
             parent, attr = self._tied_source
-            w = getattr(getattr(parent, attr), "weight", None) or w
+            w2 = getattr(getattr(parent, attr), "weight", None)
+            w = w2 if w2 is not None else w
         if w is not None and w.device != device:
             w = nn.Parameter(w.to(device), requires_grad=w.requires_grad)
         return w

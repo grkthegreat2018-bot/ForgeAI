@@ -2676,6 +2676,17 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
   Assoc memory d=64: recall 1.0@n<=32, .984@64, .93@128, .676@256 -> capacity ~d.
   FF/HAZE/recurrence/sparse-attn/SSM/neuro-symbolic: analytic verdicts in wiki.
   Tests 20/20. Wiki pushed (Spark-SIFT-Research + Training + _Sidebar).
+- SIFT+MTP (round-2 pointer implemented): 3 bugs — (1) ForgeEngine builds own cfg ->
+  use_mtp never constructed mtp_module on sft_train load path (pre-existing for ALL
+  mtp runs, not just sift); fixed by post-load construction+tie in the config-sync
+  block. (2) mtp.py _resolve_tied_weight `tensor or w` ambiguous-bool crash -> explicit
+  None check. (3) freeze_non_sift froze mtp too; now unfreezes mtp params EXCEPT the
+  tied main head (id match) which must stay frozen (268M, OOM'd 12GB when unfrozen).
+  adapter_heads forced under --sift: 8.39M trainable @n_heads=1 (vs 1.08B full heads).
+  MTP full-vocab loss is NOT chunked-CE: 4 heads = 13s/step + VRAM spike; use
+  --mtp-n-heads 1 (640ms/step, 4.21GB). Smoke loss 2.40->1.93 (CE + 0.1*fresh-head
+  ~11.8 MTP CE — consistent). LIMITATION: mtp params not in sift_only adapter saves;
+  final merged save includes them. tests/unit/test_mtp_sift.py (2 tests) 22/22 green.
 
 ## R&D reference shelf — provable algorithms for the 4 user questions (2026-11-10)
 Q1 next-token "algorithm": fixed GEMM+softmax pipeline; provable bounds:

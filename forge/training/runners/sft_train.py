@@ -1766,6 +1766,30 @@ def main():
             model.config.use_mtp = True
             model.config.mtp_loss_weight = cfg.mtp_loss_weight
             model.config.mtp_n_heads = cfg.mtp_n_heads
+            if getattr(model, "mtp_module", None) is None:
+                # ForgeEngine built its own config without use_mtp — the
+                # module was never constructed; create + tie it now or the
+                # aux loss is silently absent (mirrors llm.py __init__).
+                from forge.decoding.mtp import MTPModule
+                _hw = model.head.weight
+                model.mtp_module = MTPModule(
+                    d_model=model.config.d_model,
+                    vocab_size=model.config.vocab_size,
+                    n_heads=getattr(model.config, 'mtp_n_heads', 2),
+                    loss_weight=model.config.mtp_loss_weight,
+                    identity_init=getattr(model.config, 'zero_init_residual', True),
+                    # SIFT = minimal touched params: adapter heads are
+                    # d->d projections sharing the tied vocab head (~20M
+                    # total vs 1.08B full-vocab heads, which OOM 12GB).
+                    adapter_heads=bool(getattr(cfg, 'mtp_adapter_heads', False)
+                                       or args.sift),
+                ).to(device=_hw.device, dtype=_hw.dtype)
+                if hasattr(model.mtp_module, 'tie_head_from_module'):
+                    model.mtp_module.tie_head_from_module(model, "head")
+                else:
+                    model.mtp_module.tie_head_to_model(model.head.weight)
+                print(f"  [MTP] Constructed MTPModule post-load "
+                      f"({model.config.mtp_n_heads} heads, tied to head)")
 
     # ── From-scratch 8B init: NLRQ reset, BitNet QAT disable, kaiming init,
     #    logit scale normalization (mirrors train_8b_all.build_model) ──
@@ -1902,6 +1926,21 @@ def main():
                 _es = _sift_mod.es_scale_polish(
                     model, _sift_calib_iter, _sift_loss, iters=args.sift_es_polish)
                 print(f"  [SIFT-ES] {_es}")
+        if args.mtp_weight > 0.0:
+            # SIFT freezes ALL non-delta params — without this exemption the
+            # MTP aux loss would be silently a no-op under --sift.
+            _mtp = getattr(model, "mtp_module", None)
+            if _mtp is not None:
+                _head_id = id(model.head.weight)
+                _nmtp = 0
+                for _p in _mtp.parameters():
+                    if id(_p) == _head_id:
+                        continue  # tied main head stays frozen under SIFT
+                    _p.requires_grad_(True)
+                    _p._forge_frozen = False
+                    _nmtp += _p.numel()
+                print(f"  [SIFT+MTP] {_nmtp/1e6:.2f}M MTP params kept trainable "
+                      "(aux loss active; NOT included in sift_only adapter saves)")
     elif use_manual_lora:
         from forge.training.bitnet_lora import add_lora_adapters
         if args.lora_targets:

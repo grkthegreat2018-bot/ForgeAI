@@ -1277,6 +1277,11 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   hopeless rows teach noise; NaN batches always skipped). Logs
   `band-skip K/N`; if a whole epoch is skipped it stops with the last loss
   printed instead of spinning. Costs one loss sync per micro-batch.
+  `--sift --mtp-weight W --mtp-n-heads 1` trains the MTP draft head
+  alongside SIFT (adapter heads forced, ~8M params; tied main head stays
+  frozen; MTP params are not in sift_only adapter saves — final merged
+  save includes them). Multi-head MTP loss is unchunked full-vocab CE —
+  keep n_heads=1 on 12GB.
   (`y[...,sel] += x @ Δᵀ`, lossless init) merged into W on save/reselect;
   merge mirrors fused QKV/gate_up deltas back into the split checkpoint
   weights. Optional prefix cache (`--sift-prefix-cache`) hashes each

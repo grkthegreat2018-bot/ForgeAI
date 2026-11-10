@@ -84,6 +84,17 @@
   (1.154× MSE) but ~1bit VQ far from lossless; linear associative memory
   capacity cliff at n≈d measured; FF/HAZE/sparse-attn/SSM/recurrence/
   neuro-symbolic analytic verdicts documented.
+- **SIFT+MTP** (`--sift --mtp-weight W --mtp-n-heads 1`): MTP aux loss now
+  works under SIFT. Three bugs fixed: (1) ForgeEngine builds its own config
+  so `use_mtp` never constructed the module on the sft_train load path —
+  now constructed+tied post-load (pre-existing, affected all MTP runs on
+  this path); (2) `mtp.py _resolve_tied_weight` used `tensor or w`
+  (ambiguous-bool crash); (3) SIFT froze the whole MTP module — now keeps
+  adapter-head params trainable while the tied main head stays frozen.
+  Adapter heads forced under --sift (8.39M trainable vs 1.08B full-vocab
+  heads that OOM'd). Smoke: 2 steps, loss 2.40→1.93 (= CE + 0.1×fresh-head
+  MTP CE), VRAM 4.21GB, normal step time. MTP params NOT in sift_only
+  adapter saves (documented).
 - **Trap fixed in review**: calibration must freeze non-candidate
   params (embed/head) — leaving the 131k-vocab head trainable
   allocates a 512MB CE grad buffer + dead autograd state; and
