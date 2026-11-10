@@ -1233,6 +1233,49 @@ def main():
                         "archs, e.g. MLA+MoE ports: "
                         "'q_proj,out_proj,kv_down_proj,k_up_proj,v_up_proj,"
                         "k_rope_proj,w1,w2,w3'.")
+    # ── SIFT: Structured Importance-ranked Fine-Tuning (R&D) ──
+    # Trains real weight SLICES (sub-head / neuron-block groups picked by
+    # calibration gradient norms) instead of adapters, truncates backward
+    # at an importance frontier, optionally caches the frozen-prefix hidden.
+    # Mutually exclusive with LoRA/BitNet/quantized-base flags (auto-off).
+    p.add_argument("--sift", action="store_true",
+                   help="SIFT: structured sparse fine-tune — train real "
+                        "weight slices (heads/neurons) selected by gradient "
+                        "importance, with backward-frontier truncation + "
+                        "optional frozen-prefix cache. Minimal-compute SFT.")
+    p.add_argument("--sift-attn-units", type=int, default=4,
+                   help="Top attention units per active block (default 4; "
+                        "unit = attn_gran-sized row-block of q/gate + matching "
+                        "col-block of out_proj)")
+    p.add_argument("--sift-ffn-units", type=int, default=8,
+                   help="Top FFN neuron-blocks per active block (default 8; "
+                        "unit = aligned rows of gate+up and cols of down)")
+    p.add_argument("--sift-attn-gran", type=int, default=128,
+                   help="Attn unit granularity in rows/cols (default 128 = "
+                        "half-head at head_dim 256; use head_dim for whole heads)")
+    p.add_argument("--sift-ffn-gran", type=int, default=32,
+                   help="FFN unit granularity in neurons (default 32)")
+    p.add_argument("--sift-include-kv", action="store_true",
+                   help="Also train the k/v rows of selected units' kv-head "
+                        "(default off: q/gate/out edges only)")
+    p.add_argument("--sift-frontier", default="auto",
+                   help="Shallowest trainable block: 'auto' (cover "
+                        "--sift-frontier-mass of gradient mass) or int index")
+    p.add_argument("--sift-frontier-mass", type=float, default=0.75,
+                   help="Gradient-mass fraction above the auto frontier "
+                        "(default 0.75 — train the top ~25%% blocks)")
+    p.add_argument("--sift-calib-batches", type=int, default=4,
+                   help="Calibration batches for importance scoring (default 4)")
+    p.add_argument("--sift-reselect-every", type=int, default=0,
+                   help="Re-calibrate + re-pick units every N steps "
+                        "(merge deltas first; 0=disabled)")
+    p.add_argument("--sift-prefix-cache", action="store_true",
+                   help="Cache frontier-input hidden per sequence row "
+                        "(pinned RAM); epoch>=2 skips the whole prefix forward")
+    p.add_argument("--sift-prefix-gb", type=float, default=6.0,
+                   help="Prefix-cache RAM cap in GB (default 6)")
+    p.add_argument("--sift-lr", type=float, default=0.0,
+                   help="Override --lr for slice params (0 = use --lr)")
     p.add_argument("--qlora-nf4", action="store_true",
                    help="R32-1: NF4 QLoRA — quantize base weights to NF4 (4-bit normal float) "
                         "and train LoRA adapters on top. Works on standard nn.Linear models "
@@ -1378,6 +1421,18 @@ def main():
             print(f"[evolution] applied {_msg}")
     except Exception as _evo_err:
         print(f"[evolution] best_configs override skipped: {_evo_err}")
+
+    # ── SIFT conflicts: needs dense bf16 weights + no adapters ──
+    if getattr(args, "sift", False):
+        for _a in ("lora", "manual_lora", "bitnet_everywhere", "qlora_nf4",
+                   "forge_quant", "nanoquant_qat"):
+            if getattr(args, _a, False):
+                print(f"  [SIFT] --{_a.replace('_', '-')} ignored "
+                      "(incompatible with SIFT)")
+                setattr(args, _a, False)
+        args.sequential_freeze = 0
+        if getattr(args, "sift_lr", 0) > 0:
+            args.lr = args.sift_lr
 
     # ── Remote Vast.ai short-circuit: don't train locally ──
     if args.remote_vast:
@@ -1598,7 +1653,9 @@ def main():
             try:
                 with open(_resume_meta_path, encoding="utf-8") as _f:
                     _rm = json.load(_f)
-                _lora_only_resume = bool(_rm.get("lora_only"))
+                _lora_only_resume = bool(_rm.get("lora_only")
+                                         or _rm.get("sift_only")
+                                         or _rm.get("sift_adapter"))
                 if _lora_only_resume and _rm.get("base_checkpoint"):
                     args.checkpoint = _rm["base_checkpoint"]
             except Exception:
@@ -1769,7 +1826,53 @@ def main():
     # Use PEFT LoRA only for --lora on non-BitNet, non-NF4 models.
     use_manual_lora = args.manual_lora or (args.bitnet_everywhere and args.lora)
 
-    if use_manual_lora:
+    sift_ctx = None
+    if getattr(args, "sift", False):
+        # ── SIFT: Structured Importance-ranked Fine-Tuning ──
+        # Calibrate unit importances on a few batches, pick the backward
+        # frontier + top units, attach zero-init slice deltas, freeze rest.
+        from forge.training import sift as _sift_mod
+
+        def _sift_calib_iter():
+            _idxs = list(range(len(dataset)))
+            for _ci in range(0, len(_idxs), args.batch_size):
+                _b = [dataset[_j] for _j in _idxs[_ci:_ci + args.batch_size]]
+                _ids, _lab, _msk, _, _ = collate_batch(_b, pad_id, device)
+                yield _ids, _lab, _msk
+
+        def _sift_loss(_ids, _lab, _msk):
+            return compute_loss(model, _ids, _lab, _msk)
+
+        _sift_kwargs = dict(
+            attn_units=args.sift_attn_units, ffn_units=args.sift_ffn_units,
+            attn_gran=args.sift_attn_gran, ffn_gran=args.sift_ffn_gran,
+            include_kv=args.sift_include_kv,
+            frontier=args.sift_frontier, frontier_mass=args.sift_frontier_mass,
+            calib_batches=args.sift_calib_batches,
+            prefix_cache_gb=(args.sift_prefix_gb
+                             if args.sift_prefix_cache else 0.0))
+        if args.resume and _sift_mod.resume_has_sift(args.resume):
+            _ns = _sift_mod.load_sift_adapter(model, args.resume)
+            _sift_mod.freeze_non_sift(model)
+            sift_ctx = _sift_mod.resume_state(
+                model, _sift_calib_iter, _sift_loss, **_sift_kwargs)
+            print(f"SIFT resume: {_ns} slices from {args.resume} "
+                  f"({sift_ctx.n_touched/1e6:.2f}M touched, "
+                  f"frontier={sift_ctx.frontier})")
+        else:
+            sift_ctx = _sift_mod.setup_sift(
+                model, _sift_calib_iter, _sift_loss, **_sift_kwargs)
+            _bm = sift_ctx.block_mass
+            _top = sorted(_bm, key=lambda b: -_bm[b])[:6]
+            print(f"SIFT: frontier={sift_ctx.frontier}/"
+                  f"{len(model.blocks)}, {sift_ctx.n_touched/1e6:.2f}M "
+                  f"params touched across {len(sift_ctx.selection)} slices")
+            print("  [SIFT] block-mass top: "
+                  + ", ".join(f"L{b}={_bm[b]:.3f}" for b in _top))
+            if sift_ctx.prefix_cache is not None:
+                print(f"  [SIFT] prefix cache on "
+                      f"(cap {args.sift_prefix_gb:.1f} GB)")
+    elif use_manual_lora:
         from forge.training.bitnet_lora import add_lora_adapters
         if args.lora_targets:
             target_mods = [t.strip() for t in args.lora_targets.split(",")
@@ -2364,6 +2467,11 @@ def main():
                 if _has_overlap and hasattr(optimizer, 'wait'):
                     optimizer.wait()
 
+                # SIFT prefix cache: fill/inject the frozen-prefix hidden so
+                # blocks below the frontier are skipped entirely this step.
+                if sift_ctx is not None:
+                    sift_ctx.prepare_prefix(input_ids, attn_mask, device)
+
                 # Forward + backward (accumulate gradients).
                 # Token entropy weighting (WeFT/VCORE 2025) applied inside compute_loss.
                 with oom_guard(str(device), label="sft_fwd") as safe:
@@ -2389,6 +2497,8 @@ def main():
 
                     with log.time_phase("backward"):
                         (loss / grad_accum).backward()
+                if sift_ctx is not None:
+                    sift_ctx.clear_prefix()
                 if safe.skipped:
                     optimizer.zero_grad()
                     accum_count = 0
@@ -2470,6 +2580,18 @@ def main():
                         g["lr"] = lr
                     optimizer.step()
                     optimizer.zero_grad()
+                    # SIFT periodic re-selection: merge Δ→W, re-calibrate
+                    # importances, re-pick units. Optimizer rebuilt for the
+                    # new slice params (same pattern as sequential-freeze).
+                    if sift_ctx is not None and args.sift_reselect_every > 0 \
+                            and (step + 1) % args.sift_reselect_every == 0:
+                        _rs = sift_ctx.reselect()
+                        optimizer = configure_optimizer(
+                            model, args.lr, args.weight_decay,
+                            optimizer_name=args.optimizer)
+                        print(f"  [SIFT] reselect @step {step+1}: "
+                              f"frontier={_rs['frontier']}, "
+                              f"touched={_rs['n_touched']/1e6:.2f}M")
                     # SFA: periodic pull toward anchor (mid-training merge-back).
                     if sfa_pairs is not None and (step + 1) % args.sfa_every == 0:
                         with torch.no_grad():
@@ -2537,13 +2659,16 @@ def main():
                         from forge.training.runners.train_8b_all import export_nlrq_
                         export_nlrq_(model)
                     ckpt = step_checkpoint_path(args.save, step)
-                    _lora_only_save = use_manual_lora and not args.full_step_saves
+                    _adapter_only_save = (use_manual_lora
+                                          or sift_ctx is not None) \
+                        and not args.full_step_saves
                     save_training_checkpoint(
                         model, ckpt, optimizer=optimizer,
                         ema_state=ema_state, step=step,
-                        lora_only=_lora_only_save,
+                        lora_only=_adapter_only_save and sift_ctx is None,
+                        sift_only=_adapter_only_save and sift_ctx is not None,
                         meta={"base_checkpoint": args.checkpoint}
-                        if _lora_only_save else None)
+                        if _adapter_only_save else None)
                     cleanup_step_checkpoints(args.save, args.keep_checkpoints)
 
                 # NaN check.
@@ -2620,12 +2745,13 @@ def main():
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
                         patience_counter = 0
-                        if use_manual_lora:
+                        if use_manual_lora or sift_ctx is not None:
                             _bs, _bx = os.path.splitext(str(args.save))
                             _best_path = f"{_bs}.bestval{_bx}"
                             save_training_checkpoint(
                                 model, _best_path, step=step,
-                                lora_only=True,
+                                lora_only=sift_ctx is None,
+                                sift_only=sift_ctx is not None,
                                 meta={"base_checkpoint": args.checkpoint,
                                       "best_val_loss": val_loss})
                             print(f"  [Val] new best {val_loss:.4f} — adapter "
@@ -2678,7 +2804,17 @@ def main():
                           f"to {lora_path}")
                 else:
                     print("No LoRA tensors found — adapter save skipped.")
-            if use_manual_lora:
+            if sift_ctx is not None:
+                # SIFT: snapshot the compact adapter (sel+delta+side only),
+                # then merge slices into base weights for standalone save.
+                from forge.training.sift import detach_sift, save_sift_adapter
+                _adapter_path = str(Path(args.save).with_suffix(".sift.safetensors"))
+                save_sift_adapter(model, _adapter_path,
+                                  meta={"base_checkpoint": args.checkpoint})
+                _nd = detach_sift(model, merge=True)
+                print(f"SIFT: adapter -> {_adapter_path}; "
+                      f"merged {_nd} slices into base for standalone save.")
+            elif use_manual_lora:
                 from forge.training.bitnet_lora import merge_lora_adapters
                 n_merged = merge_lora_adapters(model)
                 print(f"Merged {n_merged} manual LoRA adapters into base model for standalone save.")

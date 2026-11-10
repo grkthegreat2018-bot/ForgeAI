@@ -2371,14 +2371,14 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
   keeps legit one-liners). .devin/merge_bestval.py merges adapter-only ckpt
   into base for packing (CPU tie-break: clone() shared tensors before save).
 - sft7 supply: opc_sft2_d_fresh.json = 458 disjoint tasks (skip 1660 overlaps
-  142 with prior slices — fetcher --skip is eligible-row-index not key-disjoint;
+  142 with prior slices ï¿½ fetcher --skip is eligible-row-index not key-disjoint;
   post-filter by key against a/b/c/heldout pools is REQUIRED).
   reflectionevo_sft_d.jsonl = 107 disjoint rows (kind=reflection needs
   --dataset bigai-nlco/ReflectionEvo --config "D+"; default dataset yields 0).
 - sft7 corpus plan (spark_sft_v6): new = sft7_external + sft6_external
   (cleaned), ZERO reflection, replay v2 @ .55 (v2 median body 894ch = long-code
   anchor). Hypothesis: prose-free + stub-free corpus restores attempt rate.
-- OPEN diagnostic: is the attempt-decline partly decoding-side? Cheap test —
+- OPEN diagnostic: is the attempt-decline partly decoding-side? Cheap test ï¿½
   on-manifold @ temp 0.4 arm on sft6_fq before training sft7. If temp.4
   rescues extraction, evals/selfgen should drop temp.
 - sft7 train from sft6.safetensors (lineage; sft6_fq final > bestval on
@@ -2399,8 +2399,8 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
 - If sft8 recovers extraction near sft3 levels => future rounds ALWAYS
   retrain from base/sft8 on union corpus, never chain sftN->sftN+1.
 
-### sft8 RESULT (canonical re-base, 2026-11-08) — FIX CONFIRMED
-- sft8_fq on-manifold: 2/60 pass@4, runnable **101/240** — extraction FULLY
+### sft8 RESULT (canonical re-base, 2026-11-08) ï¿½ FIX CONFIRMED
+- sft8_fq on-manifold: 2/60 pass@4, runnable **101/240** ï¿½ extraction FULLY
   recovered to sft3 peak level (102). pass@4 noise-equal (2 vs 3).
 - Chain-collapse table (runnable/240): sft3 102 -> sft4 83 -> sft5 53 ->
   sft6 25 -> sft7 32 -> [soup .5] 53 -> [sft8 re-base] 101.
@@ -2436,19 +2436,19 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
 - MBR guidance WIRED: gen_sft3_data.py records all rollout execution signatures (MBR-exec clusters incl. failures); kept rows take the modal correct implementation (_central_pass = syntactic MBR, token-Jaccard centrality â€” exec-MBR is degenerate among passers since they share one signature); non-kept tasks emit consensus_miss marker when >=k/2 rollouts share one wrong signature (repair/frontier material). _onmanifold_eval.py reports mbr@1 (modal signature vs expected) alongside pass@k/attempt rate.
 - NCM (Next-Concept Modeling, Hazy/Together Oct'26): coarse->fine hierarchical VQ-VAE generation, ~12 parallel-code passes vs ~1k sequential â€” user's take: batched compute, "1k words in 32 loops". VERDICT: needs retrained tokenizer+level-transformer, can't bolt onto autoregressive Spark ckpt. Cheap approximations on current model: speculative decoding (engine already has suffix-draft/BCG), sketch->code two-stage solver prompts. Noted, not implemented.
 
-## 2026-11-09 — R71 breakthrough program scoping + measured anchors
+## 2026-11-09 ï¿½ R71 breakthrough program scoping + measured anchors
 
 - sft9 selfgen run CRASHED at wave 19 (~task 425/544, kept=37): `forrtl: error (200)
-  window-CLOSE event` — console window was closed. sft9_external.jsonl = 461 rows
+  window-CLOSE event` ï¿½ console window was closed. sft9_external.jsonl = 461 rows
   banked. Restart needed to cover remaining ~119 tasks.
-- New doc: docs/R71_STREAMED_INTELLIGENCE_DESIGN.md — full lane designs B1-B8.
+- New doc: docs/R71_STREAMED_INTELLIGENCE_DESIGN.md ï¿½ full lane designs B1-B8.
 - MEASURED (spark_x26_1p7b, this box):
   - Pinned H2D 53.1 GB/s (PCIe5), pageable 13.3 GB/s.
-  - AirLLM today = pageable+sync ˜ 4.4 tok/s predicted (matches observed 1-5);
+  - AirLLM today = pageable+sync ï¿½ 4.4 tok/s predicted (matches observed 1-5);
     from SMR disk 0.35 tok/s. Root cause = copy mode, not streaming concept.
-  - int4 FFN-only stream + double-buffer prefetch ˜ 75 tok/s (compute-bound) —
+  - int4 FFN-only stream + double-buffer prefetch ï¿½ 75 tok/s (compute-bound) ï¿½
     streaming at resident speed. B1 StreamHead = top lane.
-  - bf16 lossless ceiling ˜ 10.7 b/param (H_hi=2.70 H_lo=7.97); zlib 79.4%,
+  - bf16 lossless ceiling ï¿½ 10.7 b/param (H_hi=2.70 H_lo=7.97); zlib 79.4%,
     split-zlib 69.9% (1.43x). ANS -> ~1.5x cap. "ZIP for weights" alone is
     bounded; non-uniform ECQ codebook needed to make int4 codes compressible
     (minmax g32 codes are ~uniform: H=3.86/4, floor ~4.89 b/p = FQ 4.9).
@@ -2458,15 +2458,15 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
 - New scripts: scripts/bench_airllm_prefetch.py (H2D bw + streaming tok/s model),
   scripts/bench_lossless_weights.py (entropy/zlib/int4-code measurement).
 
-## 2026-11-09b — R71 first-session results (B1+B2+B4 shipped)
+## 2026-11-09b ï¿½ R71 first-session results (B1+B2+B4 shipped)
 
 - **ECQ codec**: forge/quant/ecq_codec.py + scripts/bench_ecq_codec.py +
   tests/unit/test_ecq_codec.py (9 tests). Range coder = Subbotin carryless;
-  decode MUST track (low,code) both — code//r alone desyncs (bug fixed).
+  decode MUST track (low,code) both ï¿½ code//r alone desyncs (bug fixed).
   Lossless bf16 actual 10.73 b/p (bound 10.67). ECQ-16 3.84 b/p real ckpt;
   ECQ-32 24.7dB vs g32-int4 22.1dB at same 4.9 b/p. Pure-python RC ~1-3M
-  sym/s — packer is offline-only until ANS.
-- **StreamHead**: airllm_streamer.py rewritten — pinned shard cache +
+  sym/s ï¿½ packer is offline-only until ANS.
+- **StreamHead**: airllm_streamer.py rewritten ï¿½ pinned shard cache +
   3-slot GPU ring + side-stream prefetch + suffix-keyed binding (CRITICAL:
   key slots by suffix not full name or GPU holds all layers). Old path was
   pageable-copy + copy-back-per-token ? 3.3 tok/s vs new 30-36 tok/s (~10x)
@@ -2483,18 +2483,18 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
 - REMAINING lanes (user said easiest->hardest): B3 LoRA-ES next, then
   B5 LoopThink (hardest - engine decode surgery). B6/B7 opportunistic.
 
-## 2026-11-09c — R71 B3+B5 shipped (all 5 lanes now have code)
+## 2026-11-09c ï¿½ R71 B3+B5 shipped (all 5 lanes now have code)
 
-- **B3 LoRA-ES**: forge/training/lora_es.py — ZO antithetic ES over LoRA
+- **B3 LoRA-ES**: forge/training/lora_es.py ï¿½ ZO antithetic ES over LoRA
   params, forward-only (inference_mode). Modes: full (MeZO), block
   (block-coordinate subsets), fisher (per-param eps scale from
-  fisher_diag — B4/B3 cross-lane). attach_lora wraps nn.Linear with
-  LowRankBypass (y = Wx + s·xA^T B^T). scripts/lora_es_train.py driver.
-  10 tests. ZO cos ˜ sqrt(n_dirs/d) verified empirically (32 dirs?0.117,
+  fisher_diag ï¿½ B4/B3 cross-lane). attach_lora wraps nn.Linear with
+  LowRankBypass (y = Wx + sï¿½xA^T B^T). scripts/lora_es_train.py driver.
+  10 tests. ZO cos ï¿½ sqrt(n_dirs/d) verified empirically (32 dirs?0.117,
   256?>0.2 on d=2048).
 - **B5 LoopThink**: forge/exp/loopdepth.py already had looped_prefill/
   decode + LoopGates + train_loop_gates. Added VerifierGate (stop when
-  next-token argmax stable AND softmax margin>=thr — output-level
+  next-token argmax stable AND softmax margin>=thr ï¿½ output-level
   convergence) + looped_prefill_verified. scripts/bench_loopthink.py.
   MEASURED on spark_x26_1p7b (8 texts, L8-20, iters<=3):
     ungated loop   : loss 6.58 (DIVERGES - frozen model can't recur)
@@ -2509,7 +2509,7 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
 - LoopThink HOLDOUT validation (fixed bench: train/eval split):
   8/8 split: std 1.499 vs gated 1.378 = -8.1%. 21/22 split (300 steps):
   std 1.746 vs gated 1.650 = -5.5%. Ungated always diverges ~10.4.
-  Generalizes to unseen text — real capability, not memorization.
+  Generalizes to unseen text ï¿½ real capability, not memorization.
   Verifier early-stops ~half the eval texts at iter 2-3.
 - LoopThink CROSS-DOMAIN: gates trained on glaive_fc_2k (function-call
   chat), eval on sft9 code rows: std 1.511 vs gated 1.472 = -2.6%.
@@ -2518,22 +2518,22 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
   small (|g|<0.12).
 - FisherFold REAL runs (grouped GPU fisher, bf16, ~9.4GB peak):
   sft6 rescue (collapsed donor): general CE 2.106 = base-level (sft6 was
-  2.167) — damage correctly reverted; domain CE mid 2.720.
-  sft9 merge (good donor): alpha sweep on sft9-domain CE —
+  2.167) ï¿½ damage correctly reverted; domain CE mid 2.720.
+  sft9 merge (good donor): alpha sweep on sft9-domain CE ï¿½
   base 1.571 | a1 1.505 | a4 1.462 | a10 1.436 | sft9 1.387.
   a10 general CE 2.083 = sft9 level (no imported damage).
   VERDICT: gate reverts regressed deltas AND recovers donor skill with
   alpha as the dial. CE-proxy positive; 240-task runnable eval queued.
   Fishers saved to .devin/fisher_sft9 (reusable via --load-fisher).
 - LoRA-ES REAL run (spark, ffn r8 adapters, 5.85M trainables):
-  Fixes found: (1) fp32 masters required — bf16 params round away
-  eps perturbations (|g|=0). (2) zero-init A,B is DEAD for ZO —
+  Fixes found: (1) fp32 masters required ï¿½ bf16 params round away
+  eps perturbations (|g|=0). (2) zero-init A,B is DEAD for ZO ï¿½
   delta=B@A stays 0 through single-matrix perturbations; needs
   randn_ab (both nonzero, B std 0.002).
   Result: held-out evalCE monotone 1.963->1.682 (-14.3%) over 100
   fwd-only steps, block mode, eps 5e-4 lr 1e-5 n_dirs 16 @3.94GB.
   Honest: still above unadapted base (init damage not fully recovered
-  in 100 steps); VRAM win vs 1 backprop is small at batch=1/seq=256 —
+  in 100 steps); VRAM win vs 1 backprop is small at batch=1/seq=256 ï¿½
   ES=inference memory claim holds at larger batch where activations
   dominate. Niche: adapter updates under memory pressure, not speed.
 
@@ -2541,15 +2541,15 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
 - Bug: lexicographic shard glob sort (shard_10<shard_2) scrambled layers >=10; numeric sort fix (same as HF #32023).
 - Bug: prefix-cache + finish_sentence + CacheBlend routed std decode on ring-aliased params -> '***'. Streaming dispatches first; finish_sentence skipped under streaming.
 - Bug: streamed sampling hardcoded top_k=0/rep=1.0 + prompt missing from penalty window; now flows params + prompt_ids.
-- Verified: 36-step logits bit-exact vs monolithic; smoke match:True. Streamed 1.8x slower than std on a VRAM-fitting model (expected — transport overhead; value is for non-fitting models).
+- Verified: 36-step logits bit-exact vs monolithic; smoke match:True. Streamed 1.8x slower than std on a VRAM-fitting model (expected ï¿½ transport overhead; value is for non-fitting models).
 
 ## R71-B6 lookahead decode (session findings)
 
 - `forge/engine/lookahead_decode.py` behind FORGE_LOOKAHEAD=k,w.
 - Mechanism duplicates existing `NGramSpeculativeDecoding` (decoding.py:647)
-  and `suffix_draft` — all ~2.3-2.4x on repetitive code, ~0.9-1.0x open text.
+  and `suffix_draft` ï¿½ all ~2.3-2.4x on repetitive code, ~0.9-1.0x open text.
   Value-add vs ngram_spec: EXACT std parity (rep-penalty window is
-  generated-only-last-64 NOT prompt+gen — decoding.py:410; prompt feeds DRY
+  generated-only-last-64 NOT prompt+gen ï¿½ decoding.py:410; prompt feeds DRY
   only), eos-append-then-stop, degenerate guard (x8 same / <40% unique-20),
   max_new cap, adaptive cooldown+dk. ngram_spec lacks ALL of these and also
   does a stale-KV refeed on mismatch.
@@ -2561,4 +2561,80 @@ NOT DONE (review items deferred): external-eval baseline + engine-vs-llama.cpp n
   Parked: needs GPU-side entropy coder; kvtc-style lossy needed for more.
 - 240-task runnable eval harness: scripts/eval_runnable_tasks.py
   (opc_sft2_tasks.json; --run-tests execs in separate process).
-  Comparing base/sft9/sft9_ff/sft6/sft6_ff — results pending.
+  Comparing base/sft9/sft9_ff/sft6/sft6_ff ï¿½ results pending.
+
+
+## eval+training research (pass@k / PiSSA / continual-SFT)
+- unbiased pass@k = 1-C(n-c,k)/C(n,k) (Chen et al HumanEval); naive 1-(1-p)^k biased
+- eval_runnable_tasks.py now: --samples N --temp T (sample0 greedy), per-sample verdicts, pass@k + fn_emitted vs pass|fn decomposition
+- base 240-task: 42% emit fn, 30.7% pass|fn -> dominant failure = FORMAT (139/240 no_fn) not capability
+- PiSSA init for LowRankBypass: B=U_r*S_r, A=V_r^T, base weight -= s*BA -> function-preserving + ZO-perturbable
+- PROBE (same 8 texts): unadapted 1.8892, pissa-attached 1.8777 -> preserves function exactly; earlier '1.57' was different eval set
+- real run r=8 ffn 100 steps: randn_ab 1.963->1.682 (never beat base); pissa 1.888->1.422 = first ZO adapter to beat unadapted
+- svd_lowrank niter=2 vs 4: same eval@0 -> init gap was bf16/noise not approx; fp32 fwd rel err 0.16%
+- continual-SFT candidates from research: SuRe (high-NLL replay + fast/slow EMA), SFA (periodic merge-back mid-training), GeRe (fixed general replay + logit/state constraint) ï¿½ untested, target sft-chain collapse
+- running: 80-task x8-sample pass@k eval base vs sft6_fisherfold (bg)
+
+
+## pass@k results (80 tasks x 8 samples, comment fmt)
+- base:    pass@1 13.6  p@2 20.0  p@4 25.9  p@8 30.0 | no_fn 53% of samples | pass|fn 31.8
+- sft6_ff: pass@1 15.6  p@2 23.6  p@4 32.1  p@8 41.2 | no_fn 41.7% | pass|fn 29.0 | fn_emitted greedy 38.8 vs base 27.5
+- FF gap WIDENS with k (30->41 vs 13.6->15.6) - donor skill real under sampling
+- 17/80 base tasks solved ONLY via sampling (temp unlocks latent capability)
+- judge fix: subprocess per row + 30s timeout (was in-process exec = hang); verdict 'timeout' added
+- prompt formats added: comment/humaneval/mbpp; running humaneval probe on base
+
+
+## prompt-format A/B (80 tasks, greedy, base)
+- comment:   fn 27.5  p@1 8.8   p|fn 31.8
+- humaneval: fn 90.0  p@1 27.5  p|fn 30.6  <- 3x pass@1 from format alone
+- mbpp:      fn 50.0  p@1 20.0  p|fn 40.0  <- asserts lift per-emission solve +9
+- sft6_ff humaneval: fn 92.5  p@1 28.8  p|fn 31.1 (FF advantage was mostly format rescue; ~+1pt honest)
+- NEXT: hybrid prompt (docstring + inline asserts) may get 90 fn AND 40 p|fn
+- humaneval echoes prompt (~120 tok) -> humaneval runs need max_new>=256
+
+
+## PiSSA adapter-load bugs (fixed)
+- svd_lowrank nondeterministic -> eval-time re-split corrupted W_res (loaded CE 2.21 vs trained 1.27; zero-load 8.62)
+- fix: per-layer seed = crc32(module name) in attach -> bit-identical re-attach; OLD unseeded adapter lora_es_pissa_he.pt discarded, retrain needed
+- const-lr ZO diverges: 400 steps 1.27->12.5; fix --lr-decay linear + best-eval snapshot
+- rerun 400 steps block: min evalCE 1.2682 @~150, stable plateau ~1.30
+- retrain running w/ deterministic split; then eval pass@1 vs base 27.5
+
+
+
+## SIFT design (2026-11-09, R&D)
+- Structured Importance-ranked Fine-Tuning: train real weight SLICES not adapters
+- units: attn sub-head blocks (q+g rows of fused qkv + out cols, gran=128) ; ffn neuron-blocks (gate_up rows j & j+6656 + down cols, gran=32)
+- importance = ||dW_unit||_F from ONE calibration fwd+bwd (Gauss-Southwell block selection)
+- frontier F = shallowest block covering mass_frac(0.75) of grad mass; below F all params frozen -> autograd builds NO graph -> free backward-depth cut
+- delta side-params zero-init (lossless), merge into W on save/reselect; touched entries only -> .sift adapter ~40MB
+- prefix cache: h_F per row keyed by ids-hash -> epoch>=2 skips prefix fwd (fill pass doubles as prefix compute, no epoch-1 penalty)
+- target: spark_x26_1p7b SFT; recipe flags --manual-lora --no-bitnet-everywhere --no-pack-sequences
+- est: ~33-45% step-FLOP cut vs LoRA SFT; params touched ~LoRA-scale but REAL weights
+
+## SIFT R70 â€” implemented + measured (2026-11-10)
+- code: forge/training/sift.py (~780 ln) + llm.py 3 consume-on-read hooks + sft_train --sift* (11 flags) + checkpoint_io sift_only + tests/unit/test_sift.py (16 CPU tests, green)
+- spark bench (bench_sift.py, spark_sft_v9, bs4 seq2048, fused AdamW):
+  lora-r32: 31.66M touched / 1288ms step / 5.78GB / loss .992->1.188 (10 steps)
+  sift a2g128+f4g16: 33.25M touched / 1125ms (-12.7%) / 5.71GB / loss .668->1.125
+  sift+prefix-cache ep2: 1038ms (-19.4% vs lora); adapter 66MB vs 4.1GB full
+- inject path BIT-EXACT vs full forward (loss 0.94921875 both) â€” verified before bench
+- spark gate is 1 SCALAR ROW/head inside fused qkv (out_dim 3080 = 2048+512+512+8): units own gate row g_base+head (gran<=hd, first sub-unit); 132-row toy test added
+- sq-norm vectors (row/col) replaced granule views â€” arbitrary spans incl len-1; 3080%256!=0 would've crashed
+- BUGS FOUND+FIXED:
+  * calibration OOM: left embed/head trainable -> 512MB CE grad buf + dead autograd; now freezes non-candidates
+  * GC not engaged: ForgeEngine path enables grad-ckpt at ~line 2083, sift setup ran at 1862 -> enable_gradient_checkpointing() inside setup_sift
+  * resume loaded the ADAPTER as --checkpoint (meta lacked sift_only) -> random-init base, loss 23.6; save_sift_adapter now writes sift_only+base_checkpoint; resume meta check covers sift_adapter too
+- CAVEAT: importance mass on spark_sft_v9 near-UNIFORM (L2..L9 ~similar) -> frontier auto-picks block 4-5/28; backward-depth cut modest here. Expected bigger on late-layer-concentrated corpora; frontier is per-corpus measurable (block-mass printed at setup)
+- e2e smoke sft_train --sift: calib->train 4 steps loss 2.08->1.22 VRAM 4.06GB, adapter+merged saves, resume re-attach verified loss continues 1.70->0.71
+
+
+## NEGATIVE RESULT: LoRA-ES adapter halves pass@1
+- deterministic-split retrain: evalCE 1.49->1.1152 (best@399, -25% on clean humaneval SFT rows)
+- adapter eval (80 tasks humaneval greedy): fn 91.2, pass@1 13.8 (vs base 27.5), pass|fn 15.1 (vs 30.6)
+- verdicts: wrong_answer 53 (base 43) - adapter emits plausible-but-wrong code
+- interpretation: ZO mean-CE objective misaligned w/ functional correctness; surface-fluency gain, correctness loss. LoRA-ES = proven MEMORY-efficient trainer but objective needs to be task-aligned (e.g. pass reward / RL-style, not CE)
+- machinery all works: deterministic load (diff 0.0), best-snapshot, lr decay, --adapter eval
+- NEXT IDEAS: (a) ES on pass@k reward instead of CE (binary signal, ~80 gen/step too slow?); (b) train on sft9_external instead; (c) LoopGates RSI-depth training still untried
+

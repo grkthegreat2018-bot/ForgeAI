@@ -1,4 +1,64 @@
 
+#### SIFT — Structured Importance-ranked Fine-Tuning (R70 — train real weight slices, not adapters)
+
+- **The idea**: LoRA trains adapter params bolted onto every layer;
+  SIFT instead picks the weight *units* the data actually wants to
+  move and trains zero-init slice deltas on the real weights.
+  Units are functional groups, not entries — attn head/sub-head
+  blocks (fused-qkv q-rows + gate rows + matching out_proj cols)
+  and FFN neuron blocks (gate/up rows + matching w_down cols).
+- **Selection is measured, not guessed**: one calibration fwd+bwd
+  over a few batches → true `||dL/dW[unit]||_F` block-norms for
+  every candidate unit (Gauss–Southwell-style structured pick).
+  Vectorized per-module row/col sq-norms, then span indexing —
+  handles fused QKV incl. Spark's 1-scalar-row-per-head gate.
+- **Backward frontier**: the shallowest block covering
+  `--sift-frontier-mass` (0.75) of gradient mass becomes the
+  trainable region; blocks below get *zero* trainable tensors so
+  autograd builds no graph through them — real backward-FLOP and
+  activation-memory cut, no detach hooks needed.
+- **Slice updates**: `y[...,sel] += x @ Δᵀ` (row side) /
+  `y += x[...,sel] @ Δᵀ` (col side) — one-sided LoRA on real
+  weights; zero-init = bit-exact base at step 0. `merge_sift`
+  folds Δ→W (+ mirrors into split q/k/v|gate/up ckpt weights);
+  periodic `--sift-reselect-every` merges, re-calibrates, re-picks
+  (ReLoRA-style compounding, small touched set each round).
+- **Prefix cache**: frontier-input hidden per row keyed by
+  non-pad-id hash (padding-depth-invariant); pinned-CPU store,
+  consume-on-read inject — verified bit-exact vs full forward.
+- **Artifacts**: `.sift.safetensors` adapter = sel+Δ+side only
+  (66MB vs 4.1GB); periodic saves are `sift_only`; resume re-bases
+  onto `base_checkpoint` + re-attaches (meta flag `sift_only`/
+  `sift_adapter`). Conflicts: `--sift` disables lora/bitnet/qlora/
+  forge_quant; needs dense bf16 weights.
+- **Spark numbers** (`scripts/bench_sift.py`, spark_x26_1p7b,
+  spark_sft_v9, bs4×seq2048, fused AdamW): attn-units 2 gran128 +
+  ffn-units 4 gran16 → 33.25M touched (1.54%) ≈ LoRA-r32 31.66M;
+  step 1125ms vs LoRA 1288ms (−12.7%, −19.4% w/ prefix hits);
+  peak VRAM 5.71 vs 5.78GB; loss 0.668→1.125 vs 0.992→1.1875
+  over 10 steps — faster adaptation per touched param.
+  Caveat: importance mass on this corpus is near-uniform →
+  frontier lands at block ~4-5/28, so the backward-depth cut is
+  modest; bigger win expected on corpora with concentrated
+  late-layer importance.
+- **Impl**: `forge/training/sift.py` (~780 lines: discovery,
+  vectorized calibration, frontier pick, attach/merge/mirrors,
+  adapter save/load, prefix cache, `SiftState` driver);
+  `forge/model/llm.py` hooks `_sift_inject_hidden`/
+  `_sift_start_layer`/`_sift_capture_at` (consume-on-read);
+  `checkpoint_io.save_training_checkpoint(sift_only=)`;
+  `sft_train --sift*` flags (11 knobs) + loop hooks + saves +
+  resume. Tests: `tests/unit/test_sift.py` — 16 CPU tests
+  (lossless init, grad isolation, selection, merge/mirrors,
+  adapter round-trip, prefix cache + partial batches, scalar
+  gate layout, end-to-end setup).
+- **Trap fixed in review**: calibration must freeze non-candidate
+  params (embed/head) — leaving the 131k-vocab head trainable
+  allocates a 512MB CE grad buffer + dead autograd state; and
+  `enable_gradient_checkpointing()` must run before calibration
+  because the ForgeEngine load path doesn't engage cfg flags
+  until later (OOM on 12GB without both).
+
 #### FLUX knn extractive recall lift (R69 — held-out QA retrieval)
 
 - **Pipeline** (`_knn_votes_dev`, all config-gated, defaults off):

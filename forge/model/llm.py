@@ -562,6 +562,14 @@ class ConfigurableResearchLLM(nn.Module):
             else:
                 # Broadcast (B, d_model) → (B, T, d_model)
                 x = x + noisy_embeds.unsqueeze(1).expand(-1, x.shape[1], -1).to(x.dtype).to(x.device)
+        # SIFT prefix injection (forge/training/sift.py): replace the
+        # embedding-stage output with the cached hidden at the trainable
+        # frontier; blocks below _sift_start_layer are skipped in the loop.
+        # Training-only — set per-call by SiftPrefixCache, consumed once.
+        _sift_inj = getattr(self, '_sift_inject_hidden', None)
+        if _sift_inj is not None:
+            self._sift_inject_hidden = None
+            x = _sift_inj.to(dtype=x.dtype, device=x.device)
         # DiffusionBlocks: convert layer_indices to a set for O(1) lookup
         active_layers = set(layer_indices) if layer_indices is not None else None
         presents: list[KVCache | None] = []
@@ -633,10 +641,25 @@ class ConfigurableResearchLLM(nn.Module):
             _sched.extend((i, 0, True) for i in range(_loop_b1, _n_blocks))
         else:
             _sched = [(i, 0, True) for i in range(_n_blocks)]
+        # SIFT training hooks (forge/training/sift.py): _sift_start_layer =
+        # trainable frontier — blocks below it are skipped entirely (their
+        # weights are frozen, so their forward is pure overhead once the
+        # prefix hidden is injected). _sift_capture_at = early-exit capture
+        # of the hidden entering block N (fill pass for the prefix cache).
+        # Both are consumed on read so a later forward can never skip the
+        # prefix with stale/missing injection state.
+        _sift_start = int(getattr(self, '_sift_start_layer', 0) or 0)
+        _sift_cap = getattr(self, '_sift_capture_at', None)
+        if _sift_start:
+            self._sift_start_layer = 0
+        if _sift_cap is not None:
+            self._sift_capture_at = None
         # SIGReg: collect per-layer hidden states for spectral regularization.
         hidden_states_list: list[torch.Tensor] = [] if return_hidden_states else None
         for i, _it, _last_write in _sched:
             block = self.blocks[i]
+            if i < _sift_start:
+                continue
             # DiffusionBlocks: skip layers not in the active set
             if active_layers is not None and i not in active_layers:
                 if use_cache and _last_write:
@@ -721,6 +744,12 @@ class ConfigurableResearchLLM(nn.Module):
                     past_outputs.append(x)
             if use_cache and _last_write:
                 presents.append(present)
+            # SIFT prefix-cache fill: capture the hidden entering block
+            # _sift_cap (== output of block _sift_cap-1) and exit early —
+            # skips ln_f/head/CE entirely. Only the SIFT fill pass sets this.
+            if _sift_cap is not None and i + 1 >= _sift_cap:
+                self._sift_captured = x.detach()
+                return None
         # Snapshot per-layer recurrent state at the end of a fresh prefill
         # (past_key_values=None).  Decode steps mutate the live _conv_state
         # buffers, so this frozen copy is the only way prefix/session caches

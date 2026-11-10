@@ -587,6 +587,7 @@ def save_training_checkpoint(
     step: int | None = None,
     meta: dict[str, Any] | None = None,
     lora_only: bool = False,
+    sift_only: bool = False,
 ) -> str:
     """Save model weights + full training state atomically.
 
@@ -608,6 +609,12 @@ def save_training_checkpoint(
         state = {k: v for k, v in state.items()
                  if "lora_" in k or "qscale" in k}
         state["lora_only"] = True
+    if sift_only:
+        # SIFT adapter-only save: sel/delta/side tensors of the touched
+        # weight slices (forge/training/sift.py). Meta flag mirrors
+        # lora_only; resume re-attaches slices onto the base checkpoint.
+        state = {k: v for k, v in state.items() if "sift_" in k}
+        state["sift_only"] = True
     if step is not None:
         state["step"] = int(step)
     if meta:
