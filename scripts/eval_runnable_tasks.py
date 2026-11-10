@@ -88,6 +88,25 @@ def cmd_generate(args):
     tasks = json.load(open(args.tasks))[: args.n]
     e = ForgeEngine.from_checkpoint(
         checkpoint=args.ckpt, config_name=args.config, auto_activate=False)
+    if args.adapter:
+        # LoRA-ES .pt adapter ({name.A, name.B}) — attach LowRankBypass
+        # wrappers and load the tensors by module name.
+        import torch as _t
+        from forge.training.lora_es import attach_lora
+        sd = _t.load(args.adapter, map_location="cpu", weights_only=False)
+        attach_lora(e.model, rank=args.adapter_rank,
+                    init=args.adapter_init,
+                    name_filter=lambda n: "ffn" in n)
+        mods = {n: m for n, m in e.model.named_modules()
+                if hasattr(m, "A") and hasattr(m, "B")}
+        loaded = 0
+        with _t.no_grad():
+            for n, m in mods.items():
+                if f"{n}.A" in sd and f"{n}.B" in sd:
+                    m.A.data.copy_(sd[f"{n}.A"].to(m.A.dtype))
+                    m.B.data.copy_(sd[f"{n}.B"].to(m.B.dtype))
+                    loaded += 2
+        print(f"adapter: {loaded} tensors loaded")
     rows = []
     for i, t in enumerate(tasks):
         prompt = _make_prompt(t, args.prompt_format)
@@ -242,6 +261,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", default="")
     ap.add_argument("--config", default="spark_x26_1p7b")
+    ap.add_argument("--adapter", default="",
+                    help="LoRA-ES .pt adapter to attach (ffn layers)")
+    ap.add_argument("--adapter-rank", type=int, default=8)
+    ap.add_argument("--adapter-init", default="pissa",
+                    choices=["zero", "randn", "randn_ab", "pissa"],
+                    help="match the adapter's training init (pissa "
+                         "re-derives the residual split so the effective "
+                         "weight is restored, not double-counted)")
     ap.add_argument("--tasks", default="data/external/opc_sft2_tasks.json")
     ap.add_argument("--n", type=int, default=240)
     ap.add_argument("--samples", type=int, default=1,

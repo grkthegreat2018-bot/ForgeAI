@@ -154,7 +154,7 @@ class LowRankBypass(torch.nn.Module):
     """
 
     def __init__(self, linear: torch.nn.Linear, rank: int = 8,
-                 scale: float = 1.0, init: str = "zero"):
+                 scale: float = 1.0, init: str = "zero", seed: int = 0):
         super().__init__()
         self.linear = linear
         self.rank, self.scale = rank, scale
@@ -179,7 +179,11 @@ class LowRankBypass(torch.nn.Module):
             # immediately) AND proven to converge faster than randn-LoRA.
             # s*B@A == U_r S_r V_r^T so W_res + s*BA == W exactly (mod the
             # discarded tail).
+            # svd_lowrank is randomized — seed per layer so re-attaching
+            # (adapter load/merge) reproduces the SAME split; otherwise
+            # W_res mismatches and the effective weight is corrupted.
             with torch.no_grad():
+                torch.manual_seed(0x5EED + (seed or 0))
                 W = linear.weight.data.float()
                 U, S, V = torch.svd_lowrank(W, q=rank, niter=4)
                 Vr = V.t().contiguous()              # [r, in]
@@ -207,7 +211,11 @@ def attach_lora(model: torch.nn.Module, rank: int = 8, scale: float = 1.0,
             if isinstance(ch, torch.nn.Linear) and not isinstance(
                     ch, LowRankBypass) and (name_filter is None
                                             or name_filter(full)):
-                wrapped = LowRankBypass(ch, rank, scale, init)
+                # name-derived seed: reproducible across processes and
+                # independent of attach order (PYTHONHASHSEED-safe).
+                import zlib
+                lseed = zlib.crc32(full.encode()) & 0xFFFF
+                wrapped = LowRankBypass(ch, rank, scale, init, seed=lseed)
                 setattr(mod, ch_name, wrapped)
                 trainables += [wrapped.A, wrapped.B]
     return trainables

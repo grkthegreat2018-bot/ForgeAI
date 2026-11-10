@@ -60,6 +60,11 @@ def main():
     ap.add_argument("--adapter-out", default=None)
     ap.add_argument("--measure-vram", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--lr-decay", choices=["none", "linear", "cosine"],
+                    default="linear",
+                    help="lr schedule over --steps; ZO noise compounds so "
+                         "a constant lr random-walks past the minimum")
+    ap.add_argument("--eval-every", type=int, default=10)
     args = ap.parse_args()
 
     from forge.config import get_config
@@ -130,14 +135,28 @@ def main():
     if dev.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
     print(f"eval@0 CE {eval_ce():.4f}")
+    # ZO estimates are noisy — keep the best-eval adapter seen, not the
+    # final one (constant lr random-walks past the minimum on long runs).
+    best_ce, best_sd = float("inf"), None
     for step in range(args.steps):
+        if args.lr_decay == "linear":
+            es.lr = args.lr * max(0.0, 1.0 - step / args.steps)
+        elif args.lr_decay == "cosine":
+            import math
+            es.lr = args.lr * 0.5 * (1.0 + math.cos(
+                math.pi * step / args.steps))
         info = es.step(make_loss())
-        if step % 10 == 0 or step == args.steps - 1:
+        if step % args.eval_every == 0 or step == args.steps - 1:
+            ce = eval_ce()
+            if ce < best_ce:
+                best_ce = ce
+                best_sd = {k: v.detach().cpu().clone()
+                           for k, v in named_lora.items()}
             peak = (torch.cuda.max_memory_allocated() / 2**30
                     if dev.type == "cuda" else 0)
             print(f"step {step:4d} loss {info['loss']:.4f} "
                   f"|g| {info['grad_norm']:.3f} peakVRAM {peak:.2f}GB "
-                  f"evalCE {eval_ce():.4f}")
+                  f"evalCE {ce:.4f}")
 
     if args.measure_vram and dev.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
@@ -160,8 +179,10 @@ def main():
     if args.adapter_out:
         out = Path(args.adapter_out)
         out.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({k: v.detach().cpu() for k, v in named_lora.items()}, out)
-        print(f"saved adapter {out}")
+        sd = best_sd if best_sd is not None else {
+            k: v.detach().cpu() for k, v in named_lora.items()}
+        torch.save(sd, out)
+        print(f"saved adapter {out} (best evalCE {best_ce:.4f})")
 
 
 if __name__ == "__main__":
