@@ -160,6 +160,11 @@ class LoopConfig:
     ft_sift_lr: float = 0.0          # slice LR (0 = sft_train default)
     ft_loss_band: str = ""           # "LO HI" mid-loss-band batch culling
 
+    # ── Eval suite ──
+    eval_scale: float = 1.0          # procedural generator count multiplier
+    eval_online: int = 0             # items per real benchmark DB (0=off)
+    eval_seed: int | None = None     # fixed seed → identical questions across epochs
+
     # Loop control
     max_epochs: int = 50
     eval_threshold: float = 0.5      # lenient mode: max fractional quality regression
@@ -2468,6 +2473,9 @@ class InfiniteSelfPlayLoop:
                 device=self.config.device,
                 engine=self._engine,           # reuse self-play engine
                 config_name=self.config.config_name,  # V10 config
+                eval_scale=self.config.eval_scale,
+                eval_online=self.config.eval_online,
+                eval_seed=self.config.eval_seed,
             )
             # Engine still holds the candidate weights here — run the
             # frozen capability probe before _free_engine() (A14).
@@ -3023,6 +3031,13 @@ def main():
     parser.add_argument("--ft-sift-lr", type=float, default=0.0)
     parser.add_argument("--ft-loss-band", type=str, default="",
                         help="'LO HI' mid-loss-band batch culling")
+    parser.add_argument("--eval-scale", type=float, default=1.0,
+                        help="Procedural eval generator count multiplier")
+    parser.add_argument("--eval-online", type=int, default=0,
+                        help="Held-out items per real benchmark DB "
+                             "(gsm8k/mmlu/arc/boolq; 0=off)")
+    parser.add_argument("--eval-seed", type=int, default=None,
+                        help="Fixed eval seed → identical questions every epoch")
 
     # ── Live telemetry ──
     parser.add_argument("--status-dir", type=str,
@@ -3076,6 +3091,9 @@ def main():
         ft_sift_es_polish=args.ft_sift_es_polish,
         ft_sift_lr=args.ft_sift_lr,
         ft_loss_band=args.ft_loss_band,
+        eval_scale=args.eval_scale,
+        eval_online=args.eval_online,
+        eval_seed=args.eval_seed,
         # V10 inference features
         use_forge_engine=not args.no_forge_engine,
         kv_cache=args.kv_cache,

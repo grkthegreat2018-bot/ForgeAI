@@ -238,6 +238,10 @@ CATEGORY_MAX_TOKENS = {
     "identity": 64,
     "needle_haystack": 64,
     "math_error_detect": 128,
+    "gsm8k": 96,
+    "mmlu": 24,
+    "arc_easy": 24,
+    "boolq": 16,
 }
 
 
@@ -414,26 +418,179 @@ def _gen_math_error_detect(n: int = 3) -> list[dict]:
     return tests
 
 
-def _build_dynamic_categories(seed: int | None = None) -> dict[str, list[dict]]:
-    """Build eval categories with randomized questions + ban list filtering.
+# ── Online benchmark evals (held-out, can't be memorized from self-play) ──
+#
+# Real downloaded benchmark subsets: distributions are disjoint from the
+# procedural self-play tasks, so these measure GENERALIZATION while the
+# procedural categories measure in-domain (adjacent) learning.
 
-    Merges static tests with randomized ones. High-score questions from
-    previous runs are banned to prevent overfitting (data contamination
-    prevention pattern).
+import random as _pyrandom
+
+_NUM_RE = re.compile(r"-?\d[\d,]*\.?\d*")
+
+
+def _check_final_number(output: str, expected: str) -> float:
+    """Pass if the last number in output equals expected (GSM8K style)."""
+    nums = _NUM_RE.findall(output.replace(",", ""))
+    if not nums:
+        return 0.0
+    try:
+        got = float(nums[-1].replace(",", ""))
+        want = float(expected.replace(",", ""))
+        return 1.0 if abs(got - want) < 1e-6 else 0.0
+    except ValueError:
+        return 0.0
+
+
+def _check_mc_letter(output: str, expected_letter: str) -> float:
+    """Pass if the first standalone A-D letter equals expected."""
+    m = re.search(r"\b([A-D])\b", output)
+    if m:
+        return 1.0 if m.group(1) == expected_letter else 0.0
+    return 1.0 if expected_letter in output else 0.0
+
+
+def _check_yesno(output: str, expected: bool) -> float:
+    """Pass if output's yes/no verdict matches expected."""
+    low = output.strip().lower()
+    m = re.search(r"\b(yes|no)\b", low)
+    if not m:
+        return 0.0
+    return 1.0 if (m.group(1) == "yes") == expected else 0.0
+
+
+_ONLINE_CACHE_DIR = "research/data/eval"
+
+
+def _sample_rows(ds, n: int, rng: _pyrandom.Random):
+    idx = rng.sample(range(len(ds)), min(n, len(ds)))
+    return [(i, ds[i]) for i in idx]
+
+
+def _load_online_eval(n_per_db: int, seed: int) -> dict[str, list[dict]]:
+    """Download real benchmark subsets (HF datasets, disk-cached) as
+    held-out eval categories. Each DB degrades gracefully — a failed
+    download just skips that category so the eval still runs offline."""
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        print("  [EvalDB] datasets not installed — online evals skipped")
+        return {}
+    rng = _pyrandom.Random(seed)
+    cats: dict[str, list[dict]] = {}
+
+    try:
+        ds = load_dataset("openai/gsm8k", "main", split="test")
+        tests = []
+        for i, row in _sample_rows(ds, n_per_db, rng):
+            ans = row["answer"].split("####")[-1].strip()
+            tests.append({
+                "name": f"gsm8k_{i}",
+                "prompt": (f"{_SYS}<|im_start|>user\n{row['question']}"
+                           f"\nGive only the final number."
+                           f"<|im_end|>\n<|im_start|>assistant\n"),
+                "check": (lambda m, e=ans: _check_final_number(m.output, e)),
+            })
+        cats["gsm8k"] = tests
+    except Exception as e:
+        print(f"  [EvalDB] gsm8k unavailable: {e}")
+
+    try:
+        ds = load_dataset("cais/mmlu", "all", split="test")
+        tests = []
+        for i, row in _sample_rows(ds, n_per_db, rng):
+            q = row["question"]
+            ch = row["choices"]
+            exp = "ABCD"[row["answer"]]
+            opts = "\n".join(f"{L}. {c}" for L, c in zip("ABCD", ch))
+            tests.append({
+                "name": f"mmlu_{row.get('subject','x')[:12]}_{i}",
+                "prompt": (f"{_SYS}<|im_start|>user\n{q}\n{opts}"
+                           f"\nAnswer with the letter only."
+                           f"<|im_end|>\n<|im_start|>assistant\n"),
+                "check": (lambda m, e=exp: _check_mc_letter(m.output, e)),
+            })
+        cats["mmlu"] = tests
+    except Exception as e:
+        print(f"  [EvalDB] mmlu unavailable: {e}")
+
+    try:
+        ds = load_dataset("allenai/ai2_arc", "ARC-Easy", split="test")
+        tests = []
+        for i, row in _sample_rows(ds, n_per_db, rng):
+            q = row["question"]
+            labels = row["choices"]["label"]
+            texts = row["choices"]["text"]
+            # ARC labels are '1'-'4' or 'A'-'D' — normalize to letters.
+            letters = ["ABCD"[labels.index(x)] if x in "1234" else x
+                       for x in labels]
+            exp = row["answerKey"]
+            if exp in "1234":
+                exp = "ABCD"["1234".index(exp)]
+            opts = "\n".join(f"{L}. {t}" for L, t in zip(letters, texts))
+            if exp not in "ABCD":
+                continue
+            tests.append({
+                "name": f"arc_{i}",
+                "prompt": (f"{_SYS}<|im_start|>user\n{q}\n{opts}"
+                           f"\nAnswer with the letter only."
+                           f"<|im_end|>\n<|im_start|>assistant\n"),
+                "check": (lambda m, e=exp: _check_mc_letter(m.output, e)),
+            })
+        cats["arc_easy"] = tests
+    except Exception as e:
+        print(f"  [EvalDB] arc unavailable: {e}")
+
+    try:
+        ds = load_dataset("google/boolq", split="validation")
+        tests = []
+        for i, row in _sample_rows(ds, n_per_db, rng):
+            passage = row["passage"][:1200]
+            q = row["question"]
+            exp = bool(row["answer"])
+            tests.append({
+                "name": f"boolq_{i}",
+                "prompt": (f"{_SYS}<|im_start|>user\n{passage}\n\n{q}?"
+                           f" Answer yes or no."
+                           f"<|im_end|>\n<|im_start|>assistant\n"),
+                "check": (lambda m, e=exp: _check_yesno(m.output, e)),
+            })
+        cats["boolq"] = tests
+    except Exception as e:
+        print(f"  [EvalDB] boolq unavailable: {e}")
+
+    return cats
+
+
+# Held-out (online benchmark) vs adjacent (self-play-family) categories.
+HELDOUT_CATS = {"gsm8k", "mmlu", "arc_easy", "boolq"}
+ADJACENT_CATS = {"reasoning", "code", "math_error_detect", "needle_haystack"}
+
+
+def _build_dynamic_categories(seed: int | None = None, scale: float = 1.0,
+                              online_n: int = 0) -> dict[str, list[dict]]:
+    """Build eval categories: static + procedural + optional online DBs.
+
+    ``scale`` multiplies procedural generator counts (1.0 = 4 math, 3 code,
+    3 needle, 3 math-err). ``online_n`` > 0 downloads that many items per
+    real benchmark (gsm8k/mmlu/arc/boolq), seeded deterministically.
     """
     if seed is not None:
         _rng.seed(seed)
 
-    # Filter out banned static questions
     filtered = {}
     for cat_name, tests in CATEGORIES.items():
         filtered[cat_name] = [t for t in tests if not _is_banned(t["name"])]
 
-    # Add randomized questions
-    filtered["reasoning"] = filtered.get("reasoning", []) + _gen_random_math(4)
-    filtered["code"] = filtered.get("code", []) + _gen_random_code(3)
-    filtered["needle_haystack"] = _gen_needle_haystack(3)
-    filtered["math_error_detect"] = _gen_math_error_detect(3)
+    k = max(1, round(scale))
+    filtered["reasoning"] = filtered.get("reasoning", []) + _gen_random_math(4 * k)
+    filtered["code"] = filtered.get("code", []) + _gen_random_code(3 * k)
+    filtered["needle_haystack"] = _gen_needle_haystack(3 * k)
+    filtered["math_error_detect"] = _gen_math_error_detect(3 * k)
+
+    if online_n > 0:
+        for name, tests in _load_online_eval(online_n, seed or 0).items():
+            filtered[name] = [t for t in tests if not _is_banned(t["name"])]
 
     return filtered
 
@@ -550,7 +707,9 @@ def _load_state_dict_on_device(checkpoint_path, device, dtype=torch.bfloat16):
 
 def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
               device: str = "cuda", verbose: bool = False,
-              engine=None, config_name: str = "forgelm_v2") -> dict:
+              engine=None, config_name: str = "forgelm_v2",
+              eval_scale: float = 1.0, eval_online: int = 0,
+              eval_seed: int | None = None) -> dict:
     """Run in-process eval with weight swapping.
 
     If engine is provided (from self-play), reuses it to skip model reload (~40s saved).
@@ -599,7 +758,11 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
     # scorers got banned before the candidate's categories were built),
     # so base and candidate used to face different question sets —
     # observed live: bit-identical checkpoints scored 0.54 vs 0.34.
-    cats = _build_dynamic_categories()
+    cats = _build_dynamic_categories(seed=eval_seed, scale=eval_scale,
+                                     online_n=eval_online)
+    n_tests = sum(len(v) for v in cats.values())
+    print(f"  [FastEval] {n_tests} tests across {len(cats)} categories "
+          f"(online={eval_online}/db, scale={eval_scale})")
 
     # Run base tests
     base_result = _run_tests_on_engine(engine, "BASE (V10)", device,
@@ -661,6 +824,11 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
     # Print comparison
     _print_comparison(base_result, candidate_result)
 
+    def _split_q(result, catset):
+        ms = [m for c, l in result.per_category.items()
+              if c in catset for m in l]
+        return (sum(m.quality for m in ms) / len(ms)) if ms else 0.0
+
     # Save results JSON
     results = {
         "base": {
@@ -668,12 +836,16 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
             "quality": base_result.total_quality, "tokens": base_result.total_tokens,
             "time_ms": base_result.total_time_ms, "vram_mb": base_result.peak_vram_mb,
             "tokens_per_sec": base_result.avg_tokens_per_sec,
+            "heldout_q": _split_q(base_result, HELDOUT_CATS),
+            "adjacent_q": _split_q(base_result, ADJACENT_CATS),
         },
         "candidate": {
             "name": candidate_result.name, "checkpoint": candidate_result.checkpoint,
             "quality": candidate_result.total_quality, "tokens": candidate_result.total_tokens,
             "time_ms": candidate_result.total_time_ms, "vram_mb": candidate_result.peak_vram_mb,
             "tokens_per_sec": candidate_result.avg_tokens_per_sec,
+            "heldout_q": _split_q(candidate_result, HELDOUT_CATS),
+            "adjacent_q": _split_q(candidate_result, ADJACENT_CATS),
         },
         "winner": "",
     }
@@ -706,7 +878,7 @@ def _print_comparison(base: ModelResult, candidate: ModelResult):
     print(f"\n  {'Category':<15s} | {'Base Q':>7s} {'Base Tok':>8s} {'Base ms':>7s} "
           f"| {'Cand Q':>7s} {'Cand Tok':>8s} {'Cand ms':>7s} | {'Winner':>7s}")
     print(f"  {'-'*80}")
-    for cat in CATEGORIES:
+    for cat in base.per_category:
         b = base.per_category.get(cat, [])
         c = candidate.per_category.get(cat, [])
         b_q = sum(m.quality for m in b) / max(len(b), 1)
@@ -718,6 +890,21 @@ def _print_comparison(base: ModelResult, candidate: ModelResult):
         winner = "CAND" if c_q > b_q else ("BASE" if b_q > c_q else "TIE")
         print(f"  {cat:<15s} | {b_q:7.2f} {b_t:8d} {b_ms:7.0f} "
               f"| {c_q:7.2f} {c_t:8d} {c_ms:7.0f} | {winner:>7s}")
+
+    # Held-out (real benchmarks, disjoint from self-play data) vs adjacent
+    # (procedural categories in the same family as training tasks). If the
+    # candidate gains on adjacent but loses held-out → it memorized.
+    def _split_q(result, catset):
+        ms = [m for c, l in result.per_category.items()
+              if c in catset for m in l]
+        return (sum(m.quality for m in ms) / len(ms), len(ms)) if ms else (0.0, 0)
+    for label, catset in (("HELDOUT (online DBs)", HELDOUT_CATS),
+                          ("ADJACENT (self-play family)", ADJACENT_CATS)):
+        bq, bn = _split_q(base, catset)
+        cq, cn = _split_q(candidate, catset)
+        if bn:
+            print(f"  {label:<28s}: base {bq:.3f} ({bn}) | cand {cq:.3f} ({cn}) "
+                  f"| delta {cq - bq:+.3f}")
     print(f"\n  {'OVERALL':<15s} | {base.total_quality:7.2f} {base.total_tokens:8d} {base.total_time_ms:7.0f} "
           f"| {candidate.total_quality:7.2f} {candidate.total_tokens:8d} {candidate.total_time_ms:7.0f} |")
     print(f"\n  {'Metric':<25s} | {'Base':>12s} {'Candidate':>12s} {'Delta':>10s}")
