@@ -672,7 +672,13 @@ class InfiniteSelfPlayLoop:
             engine = ForgeEngine.from_checkpoint(
                 checkpoint=self.best_checkpoint,
                 config_name=cfg.config_name,
-                tokenizer_path="research/checkpoints/forgelm_v2_tokenizer",
+                # Pin the V2 tokenizer only for ForgeLM-family configs;
+                # other presets (spark: vocab 131072) auto-dispatch to the
+                # checkpoint dir's own tokenizer — a pinned mismatch makes
+                # every generated token decode as garbage.
+                tokenizer_path=(
+                    "research/checkpoints/forgelm_v2_tokenizer"
+                    if cfg.config_name.startswith("forgelm") else None),
                 device=cfg.device,
                 auto_activate=False,  # we activate explicitly below
             )
@@ -1534,6 +1540,7 @@ class InfiniteSelfPlayLoop:
             top_k=self.config.top_k,
             top_p=self.config.top_p,
             engine=engine,
+            config_name=self.config.config_name,
         )
         # Debug round: trace every model generation (propose/solve/retry)
         # so the raw outputs + token ids can be inspected afterwards.

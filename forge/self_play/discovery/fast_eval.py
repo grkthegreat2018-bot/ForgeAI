@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 
 import torch
@@ -439,16 +440,42 @@ def _build_dynamic_categories(seed: int | None = None) -> dict[str, list[dict]]:
 
 # ── Fast in-process benchmark ──────────────────────────────────────────────
 
-def _generate_with_metrics(engine, prompt, max_new_tokens, device="cuda"):
+_RE_CHATML_SEG = re.compile(
+    r"<\|im_start\|>(\w+)\n(.*?)<\|im_end\|>\n?", re.S)
+
+
+def _translate_prompt(prompt: str, config_name: str | None) -> str:
+    """Translate a hardcoded Jamba-ChatML eval prompt into the target
+    config's chat format. Non-ChatML input is returned unchanged."""
+    if not config_name or config_name.startswith(("forgelm", "lfm")):
+        return prompt
+    msgs = [(m.group(1), m.group(2)) for m in _RE_CHATML_SEG.finditer(prompt)]
+    if not msgs:
+        return prompt
+    from .qwen_adapter import render_messages_for_config
+    return render_messages_for_config(
+        [{"role": r, "content": c} for r, c in msgs],
+        config_name=config_name, add_generation_prompt=True,
+        thinking=False)
+
+
+def _generate_with_metrics(engine, prompt, max_new_tokens, device="cuda",
+                           config_name: str | None = None):
     torch.cuda.reset_peak_memory_stats(device)
     t0 = time.perf_counter()
+    prompt = _translate_prompt(prompt, config_name)
+    eos_ids = list(EOS_IDS)
+    if config_name and not config_name.startswith(("forgelm", "lfm")):
+        _e = getattr(engine.tokenizer, "eos_token_id", None)
+        if _e is not None:
+            eos_ids = [_e]
     output_text = engine.generate_raw(
         prompt,
         max_new_tokens=max_new_tokens,
         temperature=0.0,
         top_k=80,
         repetition_penalty=1.05,
-        eos_token_ids=list(EOS_IDS),
+        eos_token_ids=eos_ids,
         skip_special_tokens=False,
     )
     elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -458,7 +485,8 @@ def _generate_with_metrics(engine, prompt, max_new_tokens, device="cuda"):
 
 
 def _run_tests_on_engine(engine, name, device="cuda", verbose=False,
-                          use_dynamic=True, seed=None, cats=None):
+                          use_dynamic=True, seed=None, cats=None,
+                          config_name: str | None = None):
     """Run all test categories on an already-loaded engine.
 
     If use_dynamic=True, generates randomized questions + applies ban list
@@ -482,7 +510,8 @@ def _run_tests_on_engine(engine, name, device="cuda", verbose=False,
         print(f"\n  --- {cat_name.upper()} ({len(tests)} tests) ---")
         metrics_list = []
         for test in tests:
-            m = _generate_with_metrics(engine, test["prompt"], max_tok, device)
+            m = _generate_with_metrics(engine, test["prompt"], max_tok, device,
+                                       config_name=config_name)
             m.quality = test["check"](m)
             metrics_list.append(m)
             status = "PASS" if m.quality >= 0.7 else "FAIL"
@@ -545,7 +574,9 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
         engine = ForgeEngine.from_checkpoint(
             checkpoint=base_checkpoint,
             config_name=config_name,
-            tokenizer_path="research/checkpoints/forgelm_v2_tokenizer",
+            tokenizer_path=(
+                "research/checkpoints/forgelm_v2_tokenizer"
+                if config_name.startswith("forgelm") else None),
             device=device,
         )
         engine.activate(kv_cache="hadamard_int4", decoding="standard",
@@ -561,7 +592,8 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
 
     # Run base tests
     base_result = _run_tests_on_engine(engine, "BASE (V10)", device,
-                                       verbose, cats=cats)
+                                       verbose, cats=cats,
+                                       config_name=config_name)
     base_result.checkpoint = base_checkpoint
 
     # Swap to candidate weights (load directly to GPU)
@@ -590,7 +622,8 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
 
     # Run candidate tests — same question set as base
     candidate_result = _run_tests_on_engine(engine, "CANDIDATE (SFT)",
-                                            device, verbose, cats=cats)
+                                            device, verbose, cats=cats,
+                                            config_name=config_name)
     candidate_result.checkpoint = candidate_checkpoint
 
     # If we created the engine internally (engine=None path), free it now.

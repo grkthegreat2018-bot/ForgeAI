@@ -87,21 +87,78 @@ def jamba_render_messages(messages: list[dict],
     return qwen_render_messages(messages, tools, add_generation_prompt)
 
 
+# -- Spark chat format ----------------------------------------------------
+# Port of Spark-X2.6's chat_template.jinja: each turn is wrapped in
+# SPARK_SS..SPARK_SE sentence markers; roles are System/User/Bot/Tool;
+# the generation prompt opens <think> (thinking) or a bare </think>
+# (direct mode).
+
+SPARK_SS = "<｜start▁of▁sentence｜>"
+SPARK_SE = "<｜end▁of▁sentence｜>"
+PIPE = chr(124)
+
+_SPARK_THINK_INSTR = (
+    "\n`thinking_effort` guides on how much to think in your thinking "
+    "channel (not including the response channel), supported values "
+    "include `low` and `high`.\nNow the system is invoked with "
+    "`thinking_effort=high`.")
+
+
+def _sp_role(name: str) -> str:
+    return "<" + PIPE + name + PIPE + ">"
+
+
+def spark_render_messages(messages: list[dict],
+                          tools: list[dict] | None = None,
+                          add_generation_prompt: bool = True,
+                          thinking: bool = True) -> str:
+    """Render a conversation in Spark-X2.6 native chat format."""
+    system = "you are a helpful assistant." + (
+        _SPARK_THINK_INSTR if thinking else "")
+    rest = list(messages)
+    if rest and rest[0].get("role") == "system":
+        first = rest.pop(0).get("content") or ""
+        if first:
+            system += "\n\n" + first
+    out = SPARK_SS + _sp_role("System") + "\n" + system + SPARK_SE
+    for m in rest:
+        role = m.get("role")
+        content = m.get("content") or ""
+        if role == "system":
+            out += SPARK_SS + _sp_role("System") + "\n" + content + SPARK_SE
+        elif role == "user":
+            out += SPARK_SS + _sp_role("User") + content + SPARK_SE
+        elif role == "assistant":
+            rc = m.get("reasoning_content") or ""
+            out += (SPARK_SS + _sp_role("Bot")
+                    + ("<think>" + rc + "</think>" if rc else "</think>")
+                    + content + SPARK_SE)
+        elif role == "tool":
+            out += (SPARK_SS + _sp_role("Tool") + "<tool_response>" + content
+                    + "</tool_response>" + SPARK_SE)
+    if add_generation_prompt:
+        out += (SPARK_SS + _sp_role("Bot")
+                + ("<think>" if thinking else "</think>"))
+    return out
+
+
 def render_messages_for_config(messages: list[dict],
                                config_name: str | None = None,
                                tools: list[dict] | None = None,
                                add_generation_prompt: bool = True,
                                thinking: bool = True) -> str:
-    """Render messages in the canonical ChatML format for a config preset.
+    """Render messages in the canonical chat format for a config preset.
 
     ForgeLM V2-family configs (forgelm_v2, forgelm_v12_jamba) share the
-    Jamba-Reasoning-3B chat_template — including its trained thinking
-    prefix + open ``<think>`` block in the generation prompt.
+    Jamba-Reasoning-3B chat_template -- including its trained thinking
+    prefix + open <think> block in the generation prompt.
 
-    Llama/Hermes-family presets (``llama31_8b``) use plain ChatML — the
-    same im_start/im_end skeleton but NO thinking prefix and NO open
-    think block (Hermes-3 was not trained on Jamba's thinking protocol).
+    llama*-family presets use plain ChatML without thinking.
+    spark* presets use Spark's sentence-marker format.
     """
+    if config_name and config_name.startswith("spark"):
+        return spark_render_messages(messages, tools,
+                                     add_generation_prompt, thinking)
     if config_name and config_name.startswith("llama"):
         thinking = False
     return qwen_render_messages(messages, tools, add_generation_prompt,

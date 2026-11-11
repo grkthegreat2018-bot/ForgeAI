@@ -324,7 +324,10 @@ _POST_THINK_FENCE_DEADLINE = 48
 # Structural markers that may survive decode when skip_special_tokens=False.
 # </think> is needed for the reasoning split, so decode must preserve it;
 # trailing turn markers (<|im_end|>, <|endoftext|>) get dropped here.
-_RE_TURN_MARKERS = re.compile(r"<\|im_end\|>|<\|endoftext\|>|<\|im_start\|>")
+_RE_TURN_MARKERS = re.compile(
+    r"<\|im_end\|>|<\|endoftext\|>|<\|im_start\|>"
+    r"|<｜start▁of▁sentence｜>|<｜end▁of▁sentence｜>"
+    r"|<\|User\|>|<\|Bot\|>|<\|System\|>|<\|Tool\|>")
 
 
 def _strip_reply(text: str) -> str:
@@ -500,7 +503,8 @@ class InfiniteCurriculum:
                  top_p: float = 0.95,
                  task_queue_dir: str | None = None,
                  live_status=None,
-                 engine=None):
+                 engine=None,
+                 config_name: str = "forgelm_v2"):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
@@ -514,6 +518,10 @@ class InfiniteCurriculum:
         # are rendered in the GUI's canonical Jamba ChatML — the model is
         # chat-tuned, so raw completion prompts are off-distribution.
         self.engine = engine
+        # Chat-format preset (e.g. "spark_x26_1p7b") — selects the turn
+        # renderer in _render_chat so proposals use the model's trained
+        # chat dialect instead of always Jamba ChatML.
+        self.config_name = config_name
         # Lazily-encoded force-close suffix ids for the think-cap
         # processor, keyed by suffix text (needs the tokenizer).
         self._think_suffix_ids = {}
@@ -782,6 +790,7 @@ class InfiniteCurriculum:
         from forge.self_play.discovery.qwen_adapter import render_messages_for_config
         rendered = render_messages_for_config(
             [{"role": "user", "content": instruction}],
+            config_name=self.config_name,
             thinking=(prefill is None))
         return rendered + prefill if prefill else rendered
 
