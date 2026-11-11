@@ -1374,6 +1374,18 @@ class InfiniteCurriculum:
         """
         if self.engine is not None:
             rendered = self._render_chat(prompt, prefill=prefill)
+            # RoPE tables are built for 16384 — a runaway task prompt
+            # (observed: 78k tokens) crashes _apply_rope. Cap at 12000:
+            # keep the system/header head + task tail, drop the middle.
+            ids = self.engine.tokenizer.encode(
+                rendered, add_special_tokens=False)
+            if len(ids) > 12000:
+                n_orig = len(ids)
+                ids = ids[:4000] + ids[-8000:]
+                rendered = self.engine.tokenizer.decode(
+                    ids, skip_special_tokens=False)
+                print(f"  [Curriculum] prompt {n_orig} toks > 12000 — "
+                      f"truncated (head+tail kept)")
             raw = self.engine.generate_raw(
                 rendered,
                 max_new_tokens=max(self.max_gen_tokens, min_tokens),
