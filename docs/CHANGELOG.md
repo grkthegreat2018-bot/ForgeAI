@@ -47,6 +47,12 @@
   (early-stops at the learnable frontier — killed step 13 when loss hit
   floor), L2-SP anchor (λ=0.01): HELDOUT -0.008, ADJACENT +0.009 —
   generalization preserved, still DEMOTED at strict gate (-0.01 ≈ noise).
+- **v7 verification**: same recipe, fixed eval (240 heldout + 35
+  adjacent, no ban-list inversion): HELDOUT -0.012, ADJACENT +0.029,
+  overall -0.01 → DEMOTED at strict gate. Confirms: generalization
+  preserved (noise-level heldout), real in-domain gains, but margins
+  don't yet beat strict promotion. Next levers: more tasks/epoch,
+  `--lenient-promote --eval-threshold 0.05`, or wider loss-band LO.
 - **Failure notes**: `--ft-anchor` takes a safetensors FILE not a dir;
   loss-band [0.3,8.0] + SIFT-N (2 passes, 4 calib batches on 14 rows)
   → nan first loss → total cull; RAM-guard (90%) silently zeroes epochs
