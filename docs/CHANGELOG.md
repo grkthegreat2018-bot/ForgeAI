@@ -25,9 +25,32 @@
   FT `state_dict()` save needs ~4-9GB free RAM headroom; eval engine
   needs a leaner activation profile (quant-restore + compile + graphs
   left 0MB free → KV cap 64 tokens).
-- **Not yet wired**: the loop's FT cmd builds LoRA+muon_sf only —
-  `--sift*` flags are not plumbed into `_finetune`, so SIFT/SIFT-N/ES
-  gains are NOT exercised by RSI runs yet.
+- **SIFT now wired** (`b3d2482`): `--ft-sift`, `--ft-sift-score-mode`,
+  `--ft-sift-calib-batches`, `--ft-sift-newton-passes`,
+  `--ft-sift-es-polish`, `--ft-sift-lr`, `--ft-loss-band` pass through
+  LoopConfig → CLI → `_finetune` cmd. fast_eval neutralizes the Jamba
+  identity preamble for non-forgelm configs and loads with
+  `auto_activate=False` (was stacking quant+graphs to 0MB free →
+  64-token KV cap).
+- **Large held-out eval** (uncommitted→): `--eval-online N` samples N
+  items each from real downloaded DBs (GSM8K/MMLU/ARC-Easy/BoolQ, HF
+  datasets, disk-cached, per-DB fallback), `--eval-scale` multiplies
+  procedural generators, `--eval-seed` fixes the suite. 299 tests at
+  scale=2/online=60 vs the old ~35 fixed. Comparison prints HELDOUT
+  (real DBs, disjoint from self-play) vs ADJACENT (self-play-family)
+  splits + exports both to results dict — catches memorize-vs-generalize
+  directly.
+- **Measured: SIFT-RSI overfit fix** (v4→v6 same shape):
+  naive 20-step SIFT on 14 self-play rows → loss 0.0001 (99 data-epochs
+  over 1 packed seq), HELDOUT -0.071 / ADJACENT -0.257 (damaged
+  everywhere). Adding GSM8K-train replay (52 rows), loss-band [0.4,6.0]
+  (early-stops at the learnable frontier — killed step 13 when loss hit
+  floor), L2-SP anchor (λ=0.01): HELDOUT -0.008, ADJACENT +0.009 —
+  generalization preserved, still DEMOTED at strict gate (-0.01 ≈ noise).
+- **Failure notes**: `--ft-anchor` takes a safetensors FILE not a dir;
+  loss-band [0.3,8.0] + SIFT-N (2 passes, 4 calib batches on 14 rows)
+  → nan first loss → total cull; RAM-guard (90%) silently zeroes epochs
+  when foreign procs hold ~20GB — check `python.exe` zombies on repeats.
 
 #### SIFT — Structured Importance-ranked Fine-Tuning (R70 — train real weight slices, not adapters)
 

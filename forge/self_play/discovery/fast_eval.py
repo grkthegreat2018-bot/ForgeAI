@@ -687,8 +687,12 @@ def _run_tests_on_engine(engine, name, device="cuda", verbose=False,
                 preview = preview.encode('ascii', 'replace').decode('ascii')
                 print(f"      -> {preview}")
             # Ban high-score questions to prevent overfitting (anti-contamination)
-            # Questions scoring 1.0 are likely memorized — ban from future runs
-            if use_dynamic and m.quality >= 1.0:
+            # Questions scoring 1.0 are likely memorized — ban from future runs.
+            # NEVER ban real-benchmark items: they're a fixed external set
+            # (resampled per seed anyway), and banning base's passes leaves
+            # only its failures → survivorship inversion → fake promotions.
+            if (use_dynamic and m.quality >= 1.0
+                    and cat_name not in HELDOUT_CATS):
                 _ban_question(test["name"])
         result.per_category[cat_name] = metrics_list
 
