@@ -1,4 +1,34 @@
 
+#### RSI loop on Spark — chat-format/tokenizer fixes + first end-to-end epoch (R72)
+
+- **Two hard blockers found + fixed**: (a) `render_messages_for_config`
+  ignored `config_name` — every non-llama preset was rendered in Jamba
+  ChatML, so Spark proposals never parsed (0/112 attempts over two
+  runs). Added `spark_render_messages` (faithful port of Spark's
+  chat_template.jinja: sentence-marker turns, System/User/Bot/Tool,
+  think/direct generation prompts) and wired `config_name` through
+  `InfiniteCurriculum._render_chat`. (b) `_load_engine` and the
+  fast_eval fresh-load path pinned `forgelm_v2_tokenizer`, so Spark's
+  131k-vocab outputs decoded as garbage — pin is now forgelm-only,
+  other presets auto-dispatch to the checkpoint's own tokenizer.
+- **fast_eval Spark support**: hardcoded ChatML eval prompts are
+  translated to the target config's format at the single generation
+  chokepoint; non-forgelm configs use the tokenizer's eos id.
+- **First working Spark epoch** (`spark_x26_1p7b.sft6_src`, 6 tasks,
+  16 ft steps, LoRA+muon_sf): propose 6/6 validated, solve 4/6 (57%),
+  16 examples exported, eval BASE vs CANDIDATE quality TIE 0.63/0.63,
+  promoted (candidate decode 9.4× faster — warmup artifact, not a
+  capability gain). Honest verdict: the loop now *works* on Spark;
+  one tiny epoch cannot measurably improve the model.
+- **Infra notes**: 3 orphaned `infinite_loop` children from killed
+  runs held ~10GB RAM → process kill list should reap stale loop PIDs;
+  FT `state_dict()` save needs ~4-9GB free RAM headroom; eval engine
+  needs a leaner activation profile (quant-restore + compile + graphs
+  left 0MB free → KV cap 64 tokens).
+- **Not yet wired**: the loop's FT cmd builds LoRA+muon_sf only —
+  `--sift*` flags are not plumbed into `_finetune`, so SIFT/SIFT-N/ES
+  gains are NOT exercised by RSI runs yet.
+
 #### SIFT — Structured Importance-ranked Fine-Tuning (R70 — train real weight slices, not adapters)
 
 - **The idea**: LoRA trains adapter params bolted onto every layer;

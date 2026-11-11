@@ -2726,3 +2726,27 @@ Q4 full reinvention: NO — transformer is the hardware equilibrium; SSM/
 - machinery all works: deterministic load (diff 0.0), best-snapshot, lr decay, --adapter eval
 - NEXT IDEAS: (a) ES on pass@k reward instead of CE (binary signal, ~80 gen/step too slow?); (b) train on sft9_external instead; (c) LoopGates RSI-depth training still untried
 
+
+## 2026-11-10 — RSI loop on Spark (commit ef1f2f0)
+
+Raw base spark_x26_1p7b + sft6_src both produced 0 validated tasks.
+Root causes (2 stacked bugs, both Jamba-assumption):
+1. render_messages_for_config ignored config_name -> Jamba ChatML for
+   all presets. Added spark_render_messages (port of chat_template.jinja).
+   InfiniteCurriculum(config_name) -> _render_chat. forge_server already
+   passed config_name so Spark serving fixed for free.
+2. _load_engine + fast_eval pinned forgelm_v2_tokenizer (65k vocab) ->
+   Spark 131k token ids decoded as garbage. Pin now forgelm-only.
+Also: fast_eval ChatML->config prompt translation + per-config eos;
+_RE_TURN_MARKERS strips Spark markers.
+
+Result (sft6, 1 epoch, 6 tasks, 16 LoRA steps): propose 6/6, solve
+4/6 (57%), eval TIE 0.63/0.63, PROMOTED. Not a measurable gain -
+infrastructure proof only. "who_made_you" PASS is NOT a data leak:
+_SYS prompt literally contains 'built by GRKTheGreat' -> parroting.
+Corpus scan: 0 hits grkthegreat/tmk68/forgelm/paths/keys across all
+data/sft/*.jsonl; emails/password/api_key hits are fictional/tutorial.
+
+Open: --sift not plumbed into loop _finetune (RSI used LoRA+muon_sf);
+eval engine needs leaner activation (0MB free -> KV cap 64 toks);
+orphaned infinite_loop children hold RAM across kills - reap by cmdline.
