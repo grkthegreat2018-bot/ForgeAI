@@ -452,6 +452,13 @@ def _translate_prompt(prompt: str, config_name: str | None) -> str:
     msgs = [(m.group(1), m.group(2)) for m in _RE_CHATML_SEG.finditer(prompt)]
     if not msgs:
         return prompt
+    # The Jamba _SYS preamble claims ForgeLM identity — under a different
+    # model those checks trivially parrot the prompt instead of measuring
+    # anything. Neutralize it; tool-test system prompts carry no identity
+    # and pass through untouched.
+    msgs = [(r, "You are a helpful assistant."
+             if r == "system" and "ForgeLM" in c else c)
+            for r, c in msgs]
     from .qwen_adapter import render_messages_for_config
     return render_messages_for_config(
         [{"role": r, "content": c} for r, c in msgs],
@@ -578,6 +585,10 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
                 "research/checkpoints/forgelm_v2_tokenizer"
                 if config_name.startswith("forgelm") else None),
             device=device,
+            # auto_activate=True would stack quant-restore buffers + CUDA
+            # graphs + learned prefix cache on top of full weights — on a
+            # 12GB card that left 0MB free and capped KV at 64 tokens.
+            auto_activate=False,
         )
         engine.activate(kv_cache="hadamard_int4", decoding="standard",
                         use_triton_conv=True,

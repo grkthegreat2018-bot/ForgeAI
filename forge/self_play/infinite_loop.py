@@ -151,6 +151,15 @@ class LoopConfig:
     ft_async_prefetch: bool = True   # async background prefetcher (2-3× throughput)
     ft_prefetch_count: int = 4       # batches to prefetch ahead
 
+    # ── SIFT slice fine-tuning (replaces LoRA when enabled) ──
+    ft_sift: bool = False            # SIFT structured slice training (not LoRA)
+    ft_sift_score_mode: str = "fro"  # fro|smean|obs importance scoring
+    ft_sift_calib_batches: int = 4
+    ft_sift_newton_passes: int = 0   # guarded diag Gauss-Newton init (0=off)
+    ft_sift_es_polish: int = 0       # forward-only ES polish rounds (0=off)
+    ft_sift_lr: float = 0.0          # slice LR (0 = sft_train default)
+    ft_loss_band: str = ""           # "LO HI" mid-loss-band batch culling
+
     # Loop control
     max_epochs: int = 50
     eval_threshold: float = 0.5      # lenient mode: max fractional quality regression
@@ -1998,6 +2007,24 @@ class InfiniteSelfPlayLoop:
             "--ram-limit-percent", "90",
         ]
 
+        # ── SIFT slice training (mutually exclusive with LoRA) ──
+        if c.ft_sift:
+            cmd.append("--sift")
+            if c.ft_sift_score_mode != "fro":
+                cmd.extend(["--sift-score-mode", c.ft_sift_score_mode])
+            if c.ft_sift_calib_batches != 4:
+                cmd.extend(["--sift-calib-batches", str(c.ft_sift_calib_batches)])
+            if c.ft_sift_newton_passes > 0:
+                cmd.extend(["--sift-newton-passes", str(c.ft_sift_newton_passes)])
+            if c.ft_sift_es_polish > 0:
+                cmd.extend(["--sift-es-polish", str(c.ft_sift_es_polish)])
+            if c.ft_sift_lr > 0:
+                cmd.extend(["--sift-lr", str(c.ft_sift_lr)])
+        # ── Loss-band culling ──
+        if c.ft_loss_band.strip():
+            parts = c.ft_loss_band.split()
+            cmd.extend(["--loss-band", parts[0], parts[1]])
+
         # ── LoRA / BitNet ──
         if c.ft_lora:
             cmd.extend(["--lora-r", str(c.ft_lora_r),
@@ -2984,6 +3011,18 @@ def main():
     parser.add_argument("--ft-bitnet-everywhere", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="BitNet ternary QAT (1.58 bits, 2.39x vs AdamW)")
+    parser.add_argument("--ft-sift", action="store_true",
+                        help="SIFT structured slice training instead of LoRA")
+    parser.add_argument("--ft-sift-score-mode", type=str, default="fro",
+                        choices=["fro", "smean", "obs"])
+    parser.add_argument("--ft-sift-calib-batches", type=int, default=4)
+    parser.add_argument("--ft-sift-newton-passes", type=int, default=0,
+                        help="Guarded diag Gauss-Newton init passes (0=off)")
+    parser.add_argument("--ft-sift-es-polish", type=int, default=0,
+                        help="Forward-only ES polish rounds (0=off)")
+    parser.add_argument("--ft-sift-lr", type=float, default=0.0)
+    parser.add_argument("--ft-loss-band", type=str, default="",
+                        help="'LO HI' mid-loss-band batch culling")
 
     # ── Live telemetry ──
     parser.add_argument("--status-dir", type=str,
@@ -3030,6 +3069,13 @@ def main():
         ft_freetoken=args.ft_freetoken,
         ft_compile=args.ft_compile,
         ft_bitnet_everywhere=args.ft_bitnet_everywhere,
+        ft_sift=args.ft_sift,
+        ft_sift_score_mode=args.ft_sift_score_mode,
+        ft_sift_calib_batches=args.ft_sift_calib_batches,
+        ft_sift_newton_passes=args.ft_sift_newton_passes,
+        ft_sift_es_polish=args.ft_sift_es_polish,
+        ft_sift_lr=args.ft_sift_lr,
+        ft_loss_band=args.ft_loss_band,
         # V10 inference features
         use_forge_engine=not args.no_forge_engine,
         kv_cache=args.kv_cache,
