@@ -2750,3 +2750,39 @@ data/sft/*.jsonl; emails/password/api_key hits are fictional/tutorial.
 Open: --sift not plumbed into loop _finetune (RSI used LoRA+muon_sf);
 eval engine needs leaner activation (0MB free -> KV cap 64 toks);
 orphaned infinite_loop children hold RAM across kills - reap by cmdline.
+
+## Maintenance audit notes (2026-11-13)
+
+Dead-code sweep (whole repo): codebase is well-wired - feature_registry /
+kv_backend / configure_optimizer lazy-import nearly everything. Findings:
+
+- forge/decoding/edit_decode.py: ONLY truly unreferenced file. Deliberately
+  parked V14-RSI CopySpan decode driver (model side IS wired: edit_head,
+  use_edit_head, copy_span_loss). V14_RSI_DESIGN.md P3 = wire it into the
+  engine decoding registry. Do NOT delete; either wire or accept rot.
+- forge/training/optim/flashoptim.py vs flash_optim.py: two DIFFERENT
+  FlashOptim variants, both wired (names flashoptim vs flash_adamw/
+  flash_lion). flashoptim = per-tensor companded int8 m+v; flash_optim =
+  blockwise companding + 24-bit master + Triton fused + gradient release +
+  Lion. Merge = real R&D (train-parity bench needed), not janitorial.
+- Test-only production files (exercised by tests, no prod importer):
+  self_play/data_quality.py, self_play/replay_buffer.py, quant/ecq_codec.py,
+  model/strata/ (7 files), engine/quant/novel_quant_r50.py (script-only).
+  Keep unless their test coverage is judged worthless.
+- novel_quant_r{44,45,46,48,50}.py versioned series: cross-dependent,
+  r48 wired into engine_activation + sft_train. Consolidation needs care.
+- Wiki: Home/Decoding/ForgeEngine/Quantization.md were mixed CP1252/UTF-8 -
+  converted to UTF-8 (wiki now renders em-dashes correctly).
+
+## Pre-existing test failures (2026-11-13 full unit run: 5 failed / 3823 passed)
+
+NOT regressions from the 2026-11-13 maintenance commits (all in modules
+untouched by the diff). Persistent on isolated rerun:
+- tests/unit/test_distill_quant_patch.py::test_collate_no_teacher_logp_returns_none
+  (rw None, expected .item()==1.0 - distill collate path)
+- tests/unit/test_r60_kv.py::test_decode_loop_invokes_bridge
+  (source-inspection assert: _maybe_compact_past_kv missing from decode src)
+- tests/unit/test_flux.py::test_cuda_forward_deterministic (CUDA determinism)
+Flaky (fail in full run, pass isolated):
+- test_sandbox_escapes.py::TestFilesystemJail::test_env_scrubbed (env ordering)
+- test_round32_quant.py::TestForgeQuant::test_forge_quant_fused_gemm
