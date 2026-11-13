@@ -2795,6 +2795,9 @@ def main():
     parser.add_argument("--ft-batch-size", type=int, default=1)
     parser.add_argument("--ft-grad-accum", type=int, default=5,
                         help="Gradient accumulation steps (evolution: 5)")
+    parser.add_argument("--ft-warmup-steps", type=int, default=20,
+                        help="LR warmup steps — keep well below --ft-steps "
+                             "(default 20 eats a whole 20-step epoch)")
     parser.add_argument("--ft-optimizer", type=str, default="muon_sf",
                         choices=["fused", "bnb", "lion", "muon", "muon_sf",
                                  "muon_sf_plain", "flash_adamw", "flash_lion",
@@ -3060,6 +3063,7 @@ def main():
         ft_lr=args.ft_lr,
         ft_batch_size=args.ft_batch_size,
         ft_grad_accum=args.ft_grad_accum,
+        ft_warmup_steps=args.ft_warmup_steps,
         ft_optimizer=args.ft_optimizer,
         ft_lora=not args.ft_no_lora,
         ft_grad_checkpoint=args.ft_grad_checkpoint,
