@@ -41,8 +41,8 @@ unless the user explicitly overrides them for a specific task.
 ### C. R&D Is The Default Mode — Push For Novel Improvements
 - **No area is "solved"**. Every existing technique (attention, KV cache,
   quantization, decoding, optimizer, loss, scheduler) is fair game for a
-  novel variation. The codebase already has 13 R&D rounds; round 14+ is
-  expected, not exceptional.
+  novel variation. The codebase already has 70+ R&D rounds (R72 logged);
+  the next round is expected, not exceptional.
 - **Prefer novel over copy**: when implementing a known technique, always
   ask "what's the novel twist that could beat the paper's number on our
   specific hardware (RTX 5070, 12GB, SM120, Blackwell)?" Implement the
@@ -86,7 +86,7 @@ unless the user explicitly overrides them for a specific task.
   after the aggressive refactor (was 908); the odds are high that a related
   implementation exists.
 - **Prefer upgrading an existing file over spawning a new one.** If
-  `forge/inference/kv/snapkv.py` exists and you want "smarter SnapKV",
+  `forge/engine/kv/snapkv.py` exists and you want "smarter SnapKV",
   edit that file — do not create `snapkv_v2.py` or `smart_snapkv.py`.
   Versioned filenames fragment the codebase and hide the canonical path.
 - **If two files end up doing the same thing, merge them** and delete the
@@ -210,7 +210,7 @@ Hard guarantees now enforced:
   project roots + FORGE_AUX_MODULE_ROOTS (was arbitrary class
   instantiation = RCE via remote manifest).
 - `forge/evolution/llm_domain_gen.py`: AST gate before in-process exec.
-- `forge/training/crash_recovery.py`: RLock (signal-handler deadlock),
+- `forge/engine/crash_recovery.py`: RLock (signal-handler deadlock),
   weights_only fallbacks now warn loudly everywhere.
 
 Honest residuals — NOT guaranteed:
@@ -1355,7 +1355,26 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   records every generation (rendered prompt, raw pre-strip output,
   per-token ids), prints it live, and dumps
   `status_dir/debug_round_ep*.txt|.jsonl`. Use it to check model behavior
-  before a real RSI run.
+  before a real RSI run. R72 SIFT-RSI surface: `--ft-sift` +
+  `--ft-sift-score-mode fro|smean|obs` / `--ft-sift-calib-batches` /
+  `--ft-sift-newton-passes` / `--ft-sift-es-polish` / `--ft-sift-lr`
+  replace LoRA with slice FT; `--ft-loss-band "LO HI"` culls out-of-band
+  batches; `--ft-anchor FILE` + `ft_l2_lambda` = L2-SP anti-drift (takes
+  a safetensors FILE, not a dir); `--ft-warmup-steps` (default 20 — keep
+  well below --ft-steps). Eval: `self_play/discovery/fast_eval.py` runs
+  in-process base-vs-candidate on ONE shared question set
+  (`heldout_q`/`adjacent_q` splits) — `--eval-online N` samples real
+  downloaded DBs (GSM8K/MMLU/ARC-Easy/BoolQ, HF datasets, disk-cached),
+  `--eval-scale` multiplies procedural generators, `--eval-seed` fixes
+  the suite; real-benchmark items (`HELDOUT_CATS`) are NEVER banned
+  (survivorship inversion → fake promotions); eval engines are freed
+  post-eval and fresh loads use `auto_activate=False` (stacked
+  quant+graphs → 0MB free → 64-token KV cap). Curriculum prompts >12000
+  tokens truncate head(4000)+tail(8000) (RoPE tables are built for
+  16384). All prompts render via `render_messages_for_config` —
+  `spark*`→`spark_render_messages`, `llama*`→ChatML no-think, forgelm→
+  Jamba think-ChatML (`qwen_adapter.py`); `--lenient-promote` flips
+  strict_promote off (`eval_threshold` = max fractional regression).
 - `forge_gui/` — Qt-free domain layer (`api/` only; PySide6 shell removed).
   Web tools live in `forge_gui/api/web_tools.py` (defs + dispatch) backed by
   stdlib-only `forge/web_primitives.py`: `web_search` (multi-engine chain:

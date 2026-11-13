@@ -13,12 +13,16 @@
 - **docs/EVOLVE_ROADMAP.md** — Evolve-loop roadmap: shipped/queued work + theory
 - **docs/ENGINE_IMPROVEMENT_PLAN.md** — ForgeEngine improvement plan (research-complete, awaiting execution)
 - **docs/ENGINE_CRITIQUE_DB.md** — Living catalogue of ForgeEngine weaknesses, dead code, and improvement opportunities
+- **docs/FAILURE_CATALOG.md** — Hardware/environment failure log (SMR drive, zombie procs, VRAM traps)
+- **docs/COMPETITIVE_AUDIT_2026-10-31.md** — External-model competitive audit driving directives + eval anchors
 
 ## Design Documents
 - **docs/V14_RSI_DESIGN.md** — ForgeLM V14-RSI ~2.5B RSI-loop coder design (preset `forgelm_v14_rsi`)
 - **docs/LIVET_DESIGN.md** — LiveT live-training design (journaled GDN2/Titan/NGram live surfaces)
 - **docs/STRATA_M1_DESIGN.md** — STRATA M1 model-dynamics design (FluxLM successor)
 - **docs/STRATA_VS_FLUXLM.md** — STRATA vs FluxLM division-of-labor decision (audit A12) + consolidation trigger
+- **docs/FLUXLM_V2_DESIGN.md** — FluxLM V2 design notes
+- **docs/R71_STREAMED_INTELLIGENCE_DESIGN.md** — R71: StreamHead streaming, ECQ codec, FisherFold, LoRA-ES, LoopThink
 
 ## R&D Round Notes (chronological)
 - `rd_round_32.md` through `rd_round_49_plan.md` — Per-round research notes
