@@ -10,8 +10,8 @@ Output: research/data/v7_train/
   - manifest.json (dataset stats, source counts, token counts)
 
 Usage:
-  python -m research.sandbox.process_v7_data --max-per-source 200 --seq-len 2048
-  python -m research.sandbox.process_v7_data --max-per-source 5000 --seq-len 4096
+  python -m forge.training.data.process_v7_data --max-per-source 200 --seq-len 2048
+  python -m forge.training.data.process_v7_data --max-per-source 5000 --seq-len 4096
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ if sys.platform == "win32":
 
 import torch
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 DATA = ROOT / "research" / "data"
 OUT = DATA / "v7_train"
 
