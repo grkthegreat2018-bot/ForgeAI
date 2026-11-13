@@ -105,6 +105,9 @@ def test(ns):
     if not callable(fn):
         return {"ok": False, "detail": f"no {REQUIRED[0]}"}
     ref = _ref()
+    # Fresh OS-entropy seed per eval — fixed corpora let candidates
+    # specialize to known inputs. Same seed for both calls: candidate and
+    # reference see paired (independent-copy) inputs.
     _s = random.Random().getrandbits(63)
     cases_a = _gen_cases(_s)
     cases_b = _gen_cases(_s)          # fresh inputs — mutation-safe
