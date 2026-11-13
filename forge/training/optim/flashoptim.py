@@ -17,7 +17,6 @@ Memory comparison for 8B model:
   - bitsandbytes 8-bit: 2 bytes/param * 8B = 16 GB (uint8 m + v)
   - FlashOptim 8-bit: 2 bytes/param * 8B = 16 GB (companded uint8 m + v)
     + per-tensor scale (negligible) = ~16 GB
-  - FlashOptim 4-bit: 1 byte/param * 8B = 8 GB (companded uint4 m + v, packed)
 
 The advantage of FlashOptim over bitsandbytes 8-bit is tighter error bounds
 via companding: the sqrt companding function gives ~2x better precision on
@@ -84,7 +83,8 @@ class FlashOptimAdamW(Optimizer):
         betas: AdamW beta1, beta2 (default: 0.9, 0.999)
         eps: epsilon for denominator stability (default: 1e-8)
         weight_decay: decoupled weight decay (default: 0.01)
-        bits: 8 (int8 companded) or 4 (int4 companded, packed 2 per byte)
+        bits: 8 (int8 companded). Only 8 is implemented — other values
+            raise rather than silently train at the wrong precision.
         companding: "sqrt" (default) or "log" companding function
     """
 
@@ -94,6 +94,8 @@ class FlashOptimAdamW(Optimizer):
             raise ValueError(f"Invalid learning rate: {lr}")
         if not eps >= 0.0:
             raise ValueError(f"Invalid epsilon: {eps}")
+        if bits != 8:
+            raise ValueError(f"FlashOptimAdamW implements int8 states only (bits={bits})")
         defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay,
                         "bits": bits, "companding": companding}
         super().__init__(params, defaults)
@@ -110,7 +112,6 @@ class FlashOptimAdamW(Optimizer):
             beta1, beta2 = group["betas"]
             eps = group["eps"]
             wd = group["weight_decay"]
-            group["bits"]
             companding = group["companding"]
 
             for p in group["params"]:

@@ -399,6 +399,15 @@ class TestFlashOptim:
             opt.step()
         assert loss.item() < 5.0  # should decrease somewhat
 
+    def test_flashoptim_bits_not8_raises(self):
+        """bits!=8 must raise — int4 packing is not implemented (was silently ignored)."""
+        import pytest
+        from forge.training.optim.flashoptim import FlashOptimAdamW
+
+        p = nn.Parameter(torch.randn(4, 8, dtype=torch.float32, device=DEVICE))
+        with pytest.raises(ValueError, match="int8"):
+            FlashOptimAdamW([p], bits=4)
+
     def test_flashoptim_state_is_int8(self):
         """FlashOptim optimizer states should be int8 (1 byte/param)."""
         from forge.training.optim.flashoptim import FlashOptimAdamW
