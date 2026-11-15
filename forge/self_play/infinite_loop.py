@@ -171,6 +171,10 @@ class LoopConfig:
     max_epochs: int = 50
     eval_threshold: float = 0.5      # lenient mode: max fractional quality regression
     strict_promote: bool = True      # promote only if candidate beats/ties best
+    # Anti-ratchet margin: candidate must beat base quality by this much to
+    # promote. ~46 eval tests means one question is ≈0.02 of quality —
+    # any-positive-delta promotion ratchets on noise over a long run.
+    promote_margin: float = 0.02
     device: str = "cuda"
     # Capability trajectory (COMPETITIVE_AUDIT A14): score a FROZEN probe
     # on the candidate every epoch inside _evaluate (engine still loaded),
@@ -2500,10 +2504,12 @@ class InfiniteSelfPlayLoop:
         cand_q = results.get("candidate", {}).get("quality", 0)
         winner = results.get("winner", "BASE")
 
-        # Promote if candidate wins. In strict mode (default) that is the
-        # only way through — the new model must beat or tie the old one.
+        # Promote if candidate wins. In strict mode (default) the win must
+        # also clear promote_margin — otherwise single-question noise
+        # (≈1/46 ≈ 0.022 of quality) promotes checkpoints and the gate
+        # ratchets on eval luck across a long unattended run.
         if winner == "CANDIDATE":
-            passed = True
+            passed = cand_q >= base_q + self.config.promote_margin
         elif self.config.strict_promote:
             passed = False
         elif cand_q >= base_q * (1 - self.config.eval_threshold):
@@ -2873,6 +2879,10 @@ def main():
                         help="Allow promotion when candidate merely stays within "
                              "--eval-threshold of base (default: strict — must "
                              "beat or tie the old checkpoint)")
+    parser.add_argument("--promote-margin", type=float, default=0.02,
+                        help="Min quality gain over base required to promote "
+                             "(strict mode). ~46 eval tests ⇒ one question is "
+                             "≈0.02 — below this a 'win' is noise. 0 = any win.")
     parser.add_argument("--no-capability-probe", action="store_true",
                         help="Skip the frozen per-epoch capability probe "
                              "(A14 telemetry; default: on)")
@@ -3139,6 +3149,7 @@ def main():
         task_source=args.task_source,
         eval_threshold=args.eval_threshold,
         strict_promote=not args.lenient_promote,
+        promote_margin=args.promote_margin,
         capability_probe=not args.no_capability_probe,
         training_mode=args.training_mode,
         flux_group_size=args.flux_group_size,
