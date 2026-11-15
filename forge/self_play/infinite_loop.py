@@ -637,6 +637,12 @@ class InfiniteSelfPlayLoop:
         self._monitor = None
         # Capability trajectory (A14): one {"epoch", "score"} per epoch.
         self._capability_history: list[dict] = []
+        # fast_eval base-result cache: the base checkpoint only changes on
+        # promotion, so its ~46-test eval pass is identical work every
+        # epoch until then. Caching (question set + scores) halves the
+        # per-epoch eval cost while keeping base/candidate paired on the
+        # frozen set — see fast_eval(base_cache=) docstring.
+        self._eval_base_cache: dict = {}
 
     def _init_status_writer(self) -> None:
         """Create the live telemetry writer + failure-mode monitor (idempotent)."""
@@ -2527,6 +2533,7 @@ class InfiniteSelfPlayLoop:
                 eval_scale=self.config.eval_scale,
                 eval_online=self.config.eval_online,
                 eval_seed=self.config.eval_seed,
+                base_cache=self._eval_base_cache,
             )
             # Engine still holds the candidate weights here — run the
             # frozen capability probe before _free_engine() (A14).

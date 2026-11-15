@@ -725,7 +725,8 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
               device: str = "cuda", verbose: bool = False,
               engine=None, config_name: str = "forgelm_v2",
               eval_scale: float = 1.0, eval_online: int = 0,
-              eval_seed: int | None = None) -> dict:
+              eval_seed: int | None = None,
+              base_cache: dict | None = None) -> dict:
     """Run in-process eval with weight swapping.
 
     If engine is provided (from self-play), reuses it to skip model reload (~40s saved).
@@ -736,6 +737,18 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
     Args:
         config_name: model config name (default: forgelm_v2). Used
             only when engine is None (fresh load path).
+        base_cache: optional caller-owned dict enabling base-result reuse.
+            The base checkpoint only changes on promotion, so re-running
+            its ~46 generations every epoch burns ~half the eval budget on
+            a number that cannot move. When the cache key
+            (path+mtime+seed+scale+online+config) matches the stored
+            entry, the base pass is skipped entirely and the candidate is
+            evaluated on the FROZEN question set the base was scored on —
+            pairing is preserved (that is the whole point of building cats
+            once) and the fixed yardstick makes cross-epoch scores MORE
+            comparable, not less. Eval items never enter the SFT corpus,
+            so a frozen set is not an overfit channel. A promotion changes
+            the key → next epoch re-baselines automatically.
     """
     t_total = time.perf_counter()
 
@@ -743,6 +756,20 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
     # `engine` variable gets reassigned below, so a plain `engine is None`
     # check at the end would never fire — use a separate flag.
     engine_created_here = engine is None
+
+    cache_key = None
+    reuse_base = False
+    if isinstance(base_cache, dict):
+        try:
+            _mtime = os.path.getmtime(base_checkpoint)
+        except OSError:
+            _mtime = None
+        cache_key = (os.path.abspath(base_checkpoint), _mtime,
+                     eval_seed, float(eval_scale), int(eval_online),
+                     config_name)
+        reuse_base = (base_cache.get("key") == cache_key
+                      and base_cache.get("base_result") is not None
+                      and base_cache.get("cats") is not None)
 
     if engine is not None:
         # Reuse existing engine from self-play — just re-activate with standard decoding
@@ -752,9 +779,15 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
                         use_triton_conv=True,
                         kv_cache_tokens=4096, warmup=True)
     else:
-        # Load engine fresh with base checkpoint
+        # Load engine fresh. With a cached base the base weights are never
+        # touched — load the CANDIDATE directly and skip the post-base
+        # weight swap along with the entire base pass.
+        load_ckpt = (candidate_checkpoint if reuse_base else base_checkpoint)
+        if reuse_base:
+            print("  [FastEval] Base cached — loading candidate directly "
+                  "(no base pass, no weight swap)")
         engine = ForgeEngine.from_checkpoint(
-            checkpoint=base_checkpoint,
+            checkpoint=load_ckpt,
             config_name=config_name,
             tokenizer_path=(
                 "research/checkpoints/forgelm_v2_tokenizer"
@@ -774,41 +807,56 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
     # scorers got banned before the candidate's categories were built),
     # so base and candidate used to face different question sets —
     # observed live: bit-identical checkpoints scored 0.54 vs 0.34.
-    cats = _build_dynamic_categories(seed=eval_seed, scale=eval_scale,
-                                     online_n=eval_online)
-    n_tests = sum(len(v) for v in cats.values())
-    print(f"  [FastEval] {n_tests} tests across {len(cats)} categories "
-          f"(online={eval_online}/db, scale={eval_scale})")
+    if reuse_base:
+        cats = base_cache["cats"]
+        base_result = base_cache["base_result"]
+        n_tests = sum(len(v) for v in cats.values())
+        print(f"  [FastEval] Reusing frozen eval set: {n_tests} tests "
+              f"(base quality {base_result.total_quality:.3f} cached)")
+    else:
+        cats = _build_dynamic_categories(seed=eval_seed, scale=eval_scale,
+                                         online_n=eval_online)
+        n_tests = sum(len(v) for v in cats.values())
+        print(f"  [FastEval] {n_tests} tests across {len(cats)} categories "
+              f"(online={eval_online}/db, scale={eval_scale})")
 
-    # Run base tests
-    base_result = _run_tests_on_engine(engine, "BASE (V10)", device,
-                                       verbose, cats=cats,
-                                       config_name=config_name)
-    base_result.checkpoint = base_checkpoint
+        # Run base tests
+        base_result = _run_tests_on_engine(engine, "BASE (V10)", device,
+                                           verbose, cats=cats,
+                                           config_name=config_name)
+        base_result.checkpoint = base_checkpoint
+        if isinstance(base_cache, dict) and cache_key is not None:
+            base_cache.clear()
+            base_cache.update(key=cache_key, cats=cats,
+                              base_result=base_result)
 
-    # Swap to candidate weights (load directly to GPU)
-    print("\n  [FastEval] Swapping weights to candidate...")
-    t_swap = time.perf_counter()
-    candidate_state = _load_state_dict_on_device(candidate_checkpoint, device)
-    with torch.no_grad():
-        for name, param in engine.model.named_parameters():
-            if name in candidate_state:
-                param.data.copy_(candidate_state[name])
-    del candidate_state
+    # Swap to candidate weights — needed only while the engine still holds
+    # base weights: after a live base pass, or when the caller supplied an
+    # engine (it arrived holding some other weights). A fresh engine that
+    # loaded the candidate directly is already there.
+    if not reuse_base or not engine_created_here:
+        print("\n  [FastEval] Swapping weights to candidate...")
+        t_swap = time.perf_counter()
+        candidate_state = _load_state_dict_on_device(candidate_checkpoint, device)
+        with torch.no_grad():
+            for name, param in engine.model.named_parameters():
+                if name in candidate_state:
+                    param.data.copy_(candidate_state[name])
+        del candidate_state
 
-    # Invalidate cached KV — prefix-cache and CacheBlend entries were
-    # computed under the base weights; reusing them would contaminate the
-    # candidate pass with stale states.
-    for cache in (getattr(engine, "_prefix_cache", None),
-                  getattr(engine, "_cache_blend", None)):
-        if cache is not None and hasattr(cache, "clear"):
-            cache.clear()
+        # Invalidate cached KV — prefix-cache and CacheBlend entries were
+        # computed under the base weights; reusing them would contaminate the
+        # candidate pass with stale states.
+        for cache in (getattr(engine, "_prefix_cache", None),
+                      getattr(engine, "_cache_blend", None)):
+            if cache is not None and hasattr(cache, "clear"):
+                cache.clear()
 
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-    print(f"  [FastEval] Weight swap done in {time.perf_counter() - t_swap:.1f}s")
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        print(f"  [FastEval] Weight swap done in {time.perf_counter() - t_swap:.1f}s")
 
     # Run candidate tests — same question set as base
     candidate_result = _run_tests_on_engine(engine, "CANDIDATE (SFT)",
