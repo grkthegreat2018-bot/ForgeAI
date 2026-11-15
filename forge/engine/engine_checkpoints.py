@@ -454,6 +454,12 @@ class _CheckpointLoadingMixin:
 
         # VRAM-aware feature selection
         if self.device.type == "cuda":
+            # Settle load-time H2D + allocator slack before probing — a
+            # mid-load read can report ~0 free (freed-but-cached loader
+            # staging still counts as used) and wrongly take the tight-VRAM
+            # path; the same transient starves the KV cap downstream.
+            torch.cuda.synchronize(self.device)
+            torch.cuda.empty_cache()
             vram_free, vram_total = self._memory_info(self.device)
             vram_ratio = vram_free / vram_total if vram_total > 0 else 0
 

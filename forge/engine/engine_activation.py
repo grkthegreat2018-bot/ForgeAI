@@ -314,15 +314,26 @@ class _ActivationMixin:
                 from forge.runtime.vram_manager import VRAMManager
                 n_layers = getattr(cfg, "n_layers", 16)
                 dtype_bytes = self.dtype.itemsize if hasattr(self.dtype, 'itemsize') else 2
+                # Settle the allocator before probing: activation can run
+                # while loader staging / quant-repack blocks are still
+                # cached (freed but not released to the driver), so
+                # mem_get_info reads ~0 free and starves the cache at the
+                # 64-token emergency floor.
+                torch.cuda.synchronize(self.device)
+                torch.cuda.empty_cache()
                 vram_mgr = VRAMManager(safety_margin_gb=0.5)
                 vram_max = vram_mgr.max_gen_tokens(
                     n_layers=n_layers, n_heads=n_kv,
                     head_dim=head_dim, dtype_bytes=dtype_bytes,
                     overhead_mb=256,
                 )
+                # Floor: a sub-1k cap is never useful (starves 640+ token
+                # generations on a bogus near-zero probe). A genuinely tight
+                # GPU still fails safely via the init fallback chain below.
+                vram_max = max(vram_max, 1024)
+                self._log(f"VRAM-aware KV cap: {vram_max} tokens "
+                          f"(requested {max_seq})")
                 if vram_max < max_seq:
-                    self._log(f"VRAM-aware KV cap: {vram_max} tokens "
-                              f"(was {max_seq}, free VRAM limited)")
                     max_seq = vram_max
             except Exception as e:
                 self._log(f"VRAM-aware KV sizing skipped: {e}", level="warn")
@@ -431,6 +442,10 @@ class _ActivationMixin:
             decode_kwargs["k"] = 4
             if hasattr(self.model, "mtp_head"):
                 decode_kwargs["mtp_module"] = self.model.mtp_head
+            else:
+                self._log("mtp_selfspec requested but model has no "
+                          "mtp_head — silently degrades to standard "
+                          "decoding (no speedup)")
         elif decoding == "eagle3":
             if hasattr(self.model, "eagle_head"):
                 decode_kwargs["eagle_head"] = self.model.eagle_head
