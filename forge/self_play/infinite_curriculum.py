@@ -104,6 +104,23 @@ def _get_sandbox_pool():
     return _SANDBOX_POOL
 
 
+def shutdown_sandbox_pool():
+    """Close the persistent sandbox ThreadPool at loop shutdown.
+
+    Pool threads are daemons so a missing close never blocks exit, but an
+    explicit close/join reclaims the workers + pipe handles promptly and
+    keeps a second ``run()`` in the same process from inheriting a stale
+    pool. Sandbox security posture is untouched — this is lifecycle only.
+    """
+    global _SANDBOX_POOL
+    pool = _SANDBOX_POOL
+    _SANDBOX_POOL = None
+    if pool is not None:
+        with contextlib.suppress(Exception):
+            pool.close()
+            pool.join()
+
+
 # ─── Data structures ──────────────────────────────────────────────────
 
 @dataclass

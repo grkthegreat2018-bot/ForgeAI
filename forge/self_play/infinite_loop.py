@@ -2747,6 +2747,15 @@ class InfiniteSelfPlayLoop:
                     sw.alert("error", f"epoch {self.epoch} crashed: {e}")
 
         self._print_summary()
+        # Reclaim the module-global sandbox ThreadPool (workers + pipe
+        # handles) at the same lifecycle boundary as the status writer —
+        # otherwise it lingers for the life of the process.
+        try:
+            from forge.self_play.infinite_curriculum import (
+                shutdown_sandbox_pool)
+            shutdown_sandbox_pool()
+        except Exception:
+            logger.debug("sandbox pool shutdown failed", exc_info=True)
         if sw:
             sw.close(status=run_status, reason=reason)
         return self.history
