@@ -3302,3 +3302,58 @@ packed train examples; heldout CE every 10 steps.
 ### batch gen (scripts/bench_spark_genmatrix.py batch, BLIST="16 32")
 B=16: 883.8 tok/s | B=32: **913.4 tok/s** | peak 4.98 GB — meets ~900+
 target at B=32 (prior best 918.7, within noise).
+
+
+## epoch smoke + longrun
+
+### Yardstick (coding pass@1, scripts/eval_runnable_tasks.py artifacts)
+- gen_he_base.jsonl (HumanEval-style, n=80): PASS@1 22/80 = 27.5%
+- gen_humaneval_sft6ff.jsonl (n=80): 23/80 = 28.8%
+- gen_mbpp_base.jsonl (MBPP-style, n=80): 16/80 = 20.0% (fn-emission 50%)
+- gen_he_pissa.jsonl: 11/80 = 13.8% (negative adapter result, not used)
+- Qwen2.5-7B reference (published-style): Instruct ~60-70% HumanEval,
+  base ~50-60%. Spark is base-like => gap ~22.5-42.5 pp vs HumanEval.
+- Loop-level eval is fast_eval (46 tests/10 cats, mixed quality score),
+  NOT coding pass@1 - do not conflate.
+
+### Smoke epochs (spark_x26_1p7b.sft6_src, 12 tasks, 30 SFT steps)
+Run A (pre-fix), 461.4s total:
+  engine load ~7.8s | propose+validate ~62.7s (3 attempts -> 13 tasks)
+  solve ~94.8s (5/13 = 38.5%) | finetune+save ~129.2s | eval ~167.0s
+  fast_eval: base 0.71 vs cand 0.68 -> DEMOTED (adjacent +0.036)
+Run B (post-fix, no --no-ft-bitnet-everywhere needed), 350.9s total:
+  solve 1/13 (7.7%) | finetune | eval 100.4s
+  base 0.70 vs cand 0.65 -> DEMOTED. Process EXITED CLEANLY (was the
+  verification for the close() deadlock fix).
+
+### Long-run blockers found + fixed
+1. LiveStatusWriter.close() deadlock: held non-reentrant Lock while
+   _write_heartbeat() re-acquired it -> process parked forever after
+   LOOP COMPLETE (~10.8GB RSS, 97 threads; py-spy confirmed both threads
+   idle at live_status.py:91). Lock->RLock.      commit 20cac6d
+2. Module-global sandbox ThreadPool never closed -> added
+   shutdown_sandbox_pool(), called at run() boundary.  commit c9620b2
+3. _load_engine() could stack a 2nd ~4GB engine on a crashed-epoch
+   leftover (stale KV/prefix caches for replaced weights) -> free first.
+                                                    commit 5109d34
+4. fast_eval ban list also ate static CATEGORIES (yardstick shrank every
+   epoch -> cross-epoch scores incomparable) -> procedural names only.
+                                                    commit 586c9c2
+5. Strict promote accepted any positive delta (1 question ~= 0.022 ->
+   noise ratchet over a long run) -> promote_margin 0.02 required.
+                                                    commit fde983b
+6. ft_bitnet_everywhere defaulted ON everywhere: spark QAT = loss ~26,
+   ~24s/step, guaranteed demote. Now ON only for forgelm*/lfm*.
+   --ft-pack-sequences exposed (was hardwired on).   commit 65f9e04
+Wiki Self-Play.md synced: scratch/wiki_repo commit 2497a10.
+
+### Remaining blockers (not fixed)
+- Eval is the epoch bottleneck: ~100-167s of 350-460s (~30-36%).
+- Full merged save ~110s/epoch on the SMR USB drive; LoRA-only save
+  can't skip it because fast_eval weight-swaps a standalone safetensors.
+- archive/ grows ~4.3GB/demoted epoch (+sidecars) - manageable but
+  unbounded on a multi-day run.
+- mtp_selfspec silently no-ops on spark (no mtp_head) -> standard decode.
+- fastsafetensors DLLs absent on this box -> standard safetensors load.
+- Solve success is high-variance (38% vs 8% on same ckpt); SFT corpus
+  per epoch is 1-17 examples -> candidates regress as often as improve.
