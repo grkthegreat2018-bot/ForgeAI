@@ -302,7 +302,9 @@ class FusedQKNormRopeCacheWrapper:
 
             # Attention
             if attention_bias is not None:
-                out = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=attention_bias)
+                out = F.scaled_dot_product_attention(
+                    q, k_full, v_full,
+                    attn_mask=attention_bias.contiguous())
             elif T > 1 and k_full.shape[-2] > T:
                 # Continuation forward over a cached prefix: is_causal
                 # anchors top-left on non-square shapes — use an
@@ -312,7 +314,7 @@ class FusedQKNormRopeCacheWrapper:
                                     k_full.shape[-2] - T,
                                     q.device, q.dtype)
                 out = F.scaled_dot_product_attention(
-                    q, k_full, v_full, attn_mask=mask)
+                    q, k_full, v_full, attn_mask=mask.contiguous())
             else:
                 out = F.scaled_dot_product_attention(q, k_full, v_full, is_causal=T > 1)
             # Route through _finish_attn so the LFM3 per-head sigmoid

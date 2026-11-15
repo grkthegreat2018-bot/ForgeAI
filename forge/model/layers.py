@@ -477,7 +477,12 @@ class GroupedQueryAttention(nn.Module):
                 swa = swa + attention_bias
             if self.sinks is not None and self.sinks.abs().max().item() != 0.0:
                 swa = swa + self.sinks.view(1, self.n_heads, 1, 1).to(swa.dtype)
-            out = F.scaled_dot_product_attention(q, k, v, attn_mask=swa)
+            # mem_eff SDPA requires attn_mask.stride(-1) == 1 — broadcast
+            # adds/graph-pool views can hand a stride-0 or non-contiguous
+            # last dim (errors as `(*bias): last dimension must be
+            # contiguous`); contiguous() is a no-op when already dense.
+            out = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=swa.contiguous())
             return self._finish_attn(x, out, gate_logits), new_kv
         # CSA (Compressed Sparse Attention): for long sequences, use top-k
         # position selection to reduce O(S^2) → O(S*k). Short sequences
@@ -500,7 +505,11 @@ class GroupedQueryAttention(nn.Module):
         if attention_bias is not None:
             if sink_bias is not None:
                 attention_bias = attention_bias + sink_bias.to(attention_bias.dtype)
-            out = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_bias)
+            # .contiguous(): caller-supplied mask may be a non-contiguous
+            # view (static-KV graph bucket slice) or stride-0 expand —
+            # mem_eff SDPA rejects stride(-1) != 1 with `(*bias)`.
+            out = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attention_bias.contiguous())
         elif sink_bias is not None:
             # Build a combined bias: causal + sink
             if T == 1 and total_len > 1:
@@ -509,7 +518,8 @@ class GroupedQueryAttention(nn.Module):
                 causal = _causal_mask(T, total_len, total_len - T,
                                       q.device, q.dtype)
                 bias = causal + sink_bias.to(q.dtype).expand(B, self.n_heads, T, total_len)
-            out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+            out = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=bias.contiguous())
         elif T == 1 and total_len > 1:
             out = flash_attention(q, k, v, is_causal=False)
         elif total_len == T:
@@ -521,7 +531,8 @@ class GroupedQueryAttention(nn.Module):
             # causal mask bottom-right via an explicit mask instead.
             mask = _causal_mask(T, total_len, total_len - T,
                                 q.device, q.dtype)
-            out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+            out = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=mask.contiguous())
         return self._finish_attn(x, out, gate_logits), new_kv
 
     def _finish_attn(self, x: torch.Tensor, out: torch.Tensor,
