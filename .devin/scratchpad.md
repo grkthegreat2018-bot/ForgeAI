@@ -2786,3 +2786,519 @@ untouched by the diff). Persistent on isolated rerun:
 Flaky (fail in full run, pass isolated):
 - test_sandbox_escapes.py::TestFilesystemJail::test_env_scrubbed (env ordering)
 - test_round32_quant.py::TestForgeQuant::test_forge_quant_fused_gemm
+
+## External research sweep (2026-11-15, user-requested reading list)
+
+### SteerDistill (arXiv 2611.13410, Tsinghua AIR, Nov 2026)
+- Quantization-aware distillation for LLM *agents*: closed-loop teacher steering.
+- Frozen BF16 teacher guides quantized student to retry divergent turns from
+  pre-error state; teacher refines guidance from execution feedback until the
+  correction passes local verification. Only verified corrections are kept.
+- Internalization: student trains WITHOUT guidance — matches steered student's
+  predictions at corrected turns, BF16 teacher's at other turns → unassisted
+  inference at deploy time.
+- Results: W4A16 within <1 pt of BF16 across BFCL-V4, tau2-Bench, WebShop,
+  ALFWorld, SearchQA (Qwen3-8B W4A16/W4A8/W2A16, Qwen3.5-4B, Gemma-4-12B).
+  Beats QeRL by 1.84pp on tau2-Bench with 67% fewer GPU-hours.
+- ForgeAI relevance: direct analog for our QAT/distill paths —
+  "teacher-steered trajectory repair then distill corrections" is a novel twist
+  on our existing distill infrastructure. Applies to tool-use SFT of quantized
+  ForgeLM variants.
+
+### Effective Teacher Support for Reasoning Distillation (arXiv 2611.14850)
+- Forward-KL distillation from teacher top-k vocab ONLY, sweeping support
+  100%→0.01%. Qwen3 4B→1.7B main; 8B→4B + Nemotron-Nano 12B→9B confirmations.
+- Qwen3: k≈15 of 151,936 (0.01% support) → NO MMLU-Pro degradation vs full-vocab
+  KL. Nemotron needs 0.1% (smaller → misses closing reasoning tag; cutoff is
+  family-dependent).
+- At 0.01%: caching retained teacher scores cuts step time 38%; restricting
+  student output head to retained tokens cuts peak mem 24%.
+- ForgeAI relevance: cheap distillation — our distill collate caches teacher
+  logprobs; storing only top-15..top-1k makes cached teacher targets tiny and
+  lets the student LM head run narrow. Directly applicable to sft_train
+  distill path (note existing test failure in test_distill_quant_patch.py).
+
+### llama.cpp v1.0.0 (released 2026-11-13, ggml v1.0.0 too)
+- Semantic versioning contract: MAJOR = public C API break in ./include;
+  MINOR = backward-compat features/backends/models; PATCH = bugfix.
+- Removed 35 deprecated functions, defrag_thold; NextN/speculative API promoted
+  llama-ext.h → llama.h; llama_set_embd_state_src → llama_set_ctx_state_src.
+- OCP FP8 KV caches (-ctk/-ctv f8_e4m3, optional static per-tensor scales).
+- Host-memory MoE expert cache: moe_cache_size + moe_cache_cpu_share in
+  llama_context_params; LRFU/ClassLRU replacement; no CPU wait on cached
+  experts — same direction as ForgeAI hybrid_offload/cpu_kv_offload.
+- External PLE/engram loading from separate GGUF shards.
+- New archs: Kimi-K3.1-Pro (DSA replacing full-attn MLA), Ripple-65B (dense),
+  xing4_0 (mHC+MLA+MoE+MTP), drama-3 TTS; MageVL-Cowork + Kimi-K3.1 vision.
+- Server hardening: SSRF, CORS, DNS-rebinding, MCP tool cancellation;
+  /v1/audio/speech endpoint; redesigned web UI (chat groups, md editor).
+
+### Strata (external — NOT our forge/model/strata)
+- ro99/strata + Niko1221/Strata: C++20/CUDA MoE inference engine for models
+  larger than VRAM/RAM. No Python/ML framework at runtime; CLI + OpenAI/HTTP.
+- Three-tier split: GPU VRAM (dense parts, routers, shared experts, MTP draft,
+  hot KV, adaptive expert cache) + pinned host RAM (full expert pool, CPU
+  computes cache-misses in place, concurrent with GPU) + read-only NVMe
+  (n-gram table shard mmap'd, ~16 row reads/tok issued a step ahead).
+- Fidelity stance: checkpoint-declared precision/router/expert-count/top-k;
+  predictors may reorder work but never change what is computed; "exact mode
+  completes or fails." (NOTE: ro99 README claims never below 4-bit, but the
+  Niko1221 Strata paper reports Q2_0/IQ2_XS/IQ3_XXS results — either a
+  downstream fork or a policy change; verify before citing the 4-bit floor.)
+- Headline bench (Niko1221 paper): Qwen3.8-Flash-Next 125B MoE (6B active,
+  24,576 experts, top-10) on **RTX 5070 12GB + Ryzen 7600 + 64GB DDR5** —
+  95 tok/s at 4K ctx with 2-bit file, 45-95 tok/s across quants to 262K ctx,
+  prompt read 285-571 tok/s. Expert traffic ~0.66 GB/tok over PCIe 4.0 x16.
+- Third-party check: 16GB V100 + 2016 Xeon ran 111GB 4-bit file ~20 tok/s vs
+  ~9 tok/s llama.cpp (claimed ~2x).
+- Multi-GPU: pipeline/layer-split (token crosses cards once per verify window),
+  no NVLink needed; split adds capacity not speed.
+- Also note amperor-strata (separate): Apple-Silicon MLX MoE expert-streaming
+  lib, different project, same name.
+- ForgeAI relevance: architectural twin of our hybrid_offload design goal —
+  CPU computes expert misses in-place (no PCIe copy) is the key differentiator
+  vs naive offload; MTP-as-spec-verify = our speculative path. Their n-gram
+  table on NVMe mirrors DiskTokenCache philosophy (sequential NVMe reads OK on
+  SMR/USB? — n-gram rows are small random reads, better on C: NVMe).
+
+### Cerebras inference
+- Wafer-scale: WSE-3 = 4T transistors, ~900k cores, 44GB on-chip SRAM,
+  21 PB/s aggregate SRAM bandwidth (~7000x H100 HBM BW). Whole model lives
+  on-chip → decode never crosses a memory bus.
+- Reported: 1,800 tok/s Llama3.1-8B, 450 tok/s 70B (native 16-bit weights),
+  ~2.4x Groq at launch; current claims up to 30x GPU systems. Models >1 wafer
+  split at layer boundaries across CS-3/CS-4 systems (70B on ~4 systems).
+- CS-4: 3x WSE-3 Turbo wafers/system, 2µs wafer-to-wafer interconnect,
+  >1,000 tok/s on >50T-param models, ~10x throughput/watt vs CS-3. Nexus
+  rack-scale platform, wafer-scale "backpack" packaging.
+- Service via API + on-prem; pitch is latency-first (single-second reasoning
+  makes test-time-compute loops practical) — they now argue fast inference
+  itself is a capability unlock for agentic/reasoning loops.
+- ForgeAI relevance: validates "bandwidth is the whole game" thesis our
+  quant+offload stack is built on; useful counterpoint when justifying why
+  12GB VRAM forces tiered memory designs (we can't buy bandwidth, we tier it).
+
+### OPAL — ambiguous, three live candidates
+- (a) **On-Policy Attention Linearization (Opal)** — arXiv 2609.31947
+  (CMU/Cornell). Distills hybrid linear-attention students from frozen
+  full-attention teachers, on-policy: student samples own long-context
+  trajectories, gets dense per-position teacher supervision. Qwen3-4B +
+  MiMo-7B-RL: 87-94% commonsense, 100% NIAH retrieval, 83-93% math with only
+  3B tokens, no SFT/RLVR. Fixes the off-policy drift problem (linear-attn
+  layers' fixed-state compression errors compound; teacher-forced training
+  never teaches recovery). STRONGEST ForgeAI match — direct recipe for
+  V13-GDN2/V14 linear side-path distillation from our Jamba checkpoints.
+- (b) **Reactive Optimizers (OPAL)** — arXiv 2610.33826 (MIT, Sitzmann group).
+  Pretrained LM agent inspects training dynamics and rewrites executable
+  optimizer code mid-run (per-param-group update rules/schedules/precision/
+  momentum), no optimizer meta-training. Matches/beats fixed recipes on
+  untuned settings; adapts to data corruption, reduces overfitting.
+  code at github.com/xingjian-bai/opal. Relevant to our optimizer R&D
+  (muon_sf_plain, flash_optim family) — "LLM-mutating optimizer" is a
+  self-play-flavored twist we could bolt onto evolution/eval_pool.
+- (c) **OPAL: Outlier-Preserved Microscaling Quantization Accelerator** —
+  arXiv 2409.05902 (2024, DGIST/KoreaU). HW-SW codesign: MX-format activation
+  quant keeping ~4/128 outliers per block, mixed 3/5-bit by layer sensitivity,
+  log2-approx softmax (shift+subtract only). 1.6-2.2x energy, 2.4-3.1x area,
+  <1 ppl hit. Older but the outlier-per-subblock trick overlaps our
+  activation-quant rounds.
+- (d) Long tail: OPAL oversampling-for-imbalanced-data (2406.03628),
+  ontology-aware TOD (2209.04595), Opal private-memory ORAM (2604.02522),
+  Opal perf-analytics+LLM kernel optimization (2510.00932 — relevant-ish:
+  19-52% kernel speedups from feeding roofline/PC-stall diagnostics to LLM).
+- Recommendation: (a) is almost certainly the intended one given our
+  linear-attention program; (b) and the kernel-tuning (d) are secondary hits.
+
+### TPU v8 (Google, 8th gen — 4 SKUs, first time 4 in one year)
+- 8t (training): 9,600 chips/superpod, 2 PB shared HBM, 121 EF/pod, 2x interchip
+  BW vs 7x, ~3x compute/pod; 2.8x perf/$, 2x perf/W vs TPU 7x (Ironwood).
+- 8i (inference): hierarchical butterfly topology, 80% perf/$ gain, 2x latency
+  cut vs 7x; tuned for low-latency large-MoE reasoning/agentic.
+- 8i Max (Nov 9, 2026): 2x compute, 2x SRAM, 2x HBM BW of 8i in same rack
+  footprint — aimed at massive context windows.
+- 8tx (Nov 9, 2026): confidential/secure inference + small-scale training,
+  hardware-level data protection for regulated/gov.
+- Announced: 8t/8i at Cloud Next (April 2026), 8i Max/8tx Nov 9, 2026.
+  Availability "later this year" per announcement.
+
+### "Team of experts" — ambiguous, best candidates
+- (a) **"Scaling Inference-Time Compute with Teams of Coding Agents"**
+  (arXiv 2610.17471): team design as compute allocation. Findings: delegating
+  only PLANNING to workers + lead implements/verifies alone = half cost at
+  same reward; cheap planners OK, cheap implementers hurt; planner reward
+  scales with team size, implementer/verifier gains plateau >4 workers;
+  heterogeneous 17-agent team within 1.4pts of homogeneous 5-agent at 70%
+  less cost. Most likely match if user meant a recent paper.
+- (b) MoA/MoE-flavored: Mixture-of-Agents lineage → DMoA (differentiable
+  mixture-of-agents, 2605.15706), MOSAIC (MoA scheduling, 2606.03014),
+  Skill-MoE (skill-inferred routing, PMLR v306).
+- (c) Possibly colloquial for MoE itself ("team of 24,576 experts" is the
+  exact phrasing Strata coverage uses for Qwen3.8-Flash-Next) or for
+  Nemotron-3-Super LatentMoE (22/512 experts active).
+- TODO: ask user which they meant.
+
+## 2026-11-15 — Spark RSI-loop gen/train probe (MEASURED on this box)
+
+Goal: train spark_x26_1p7b in an RSI loop (FLINT-style); gen must
+brute-force candidates fast, train step must be short.
+
+### Gen matrix (scripts/bench_spark_genmatrix.py, real runs, temp0.7/160tok)
+| mode | B=1 tok/s | B=8 | B=16 | B=32 | peakGB |
+|---|---|---|---|---|---|
+| plain bf16 | 36.9 | | | | 3.91 |
+| bf16+BCG | 87.7 | | | | 3.91 |
+| bf16+BCG+ngram_spec | 29.2 | | | | 3.91 |
+| bf16+BCG+suffix_draft | 43.9 | | | | 3.91 |
+| bf16+BCG batch | 81.9 | 223.9 | 815.3 | **918.7** | 4.98 |
+| _fq (no BCG) | 12.0 | | | | 2.12 |
+| _fq+BCG batch | 59.8 | 150.2 | 274.5 | | 3.08 |
+- bf16+BCG+B=32 = **919 tok/s aggregate** ≈ 25x plain, ~11x B=1.
+- ngram/suffix spec HURTS on Spark (python verify overhead > gain).
+- _fq quant slower than bf16 on this GPU — memory lever only.
+- Loop today: decoding="mtp_selfspec" silently no-ops (Spark has NO
+  mtp_module) → loop effectively runs plain-path decode.
+- B=8 dip (224 vs 816/919 at B=16/32) — bucket/batch-path artifact.
+- forge_quant auto-activate on bf16 ckpt = 15+min single-core CPU
+  conversion at load (killed) — use _fq prepacked dir or auto_activate=F.
+- CPU use during load ~1 core (NOT parallel); decode is GPU+launch-bound.
+
+### Supervision probe (scripts/probe_spark_supervision.py)
+LoRA-r32 (working targets: qkv_proj/out_proj/w_gate/w_up/w_down — the
+default list hits spark's fused qkv and yields ZERO-grad adapters),
+AdamW fused lr2e-5, bs2xseq1024, 20 steps, v9 corpus, base heldout
+0.7068:
+| arm | ms/step | heldout | note |
+|---|---|---|---|
+| ce | 317 | 0.580 | production chunked-CE |
+| ent05 | 375 | 0.579 | entropy-weight — no gain at this budget |
+| focal g4.93 | 319 | 0.591 | single-pass custom impl ≈ ce |
+| band[0.4,6] | 474 | 0.589 | skipped 6/22 batches FREE (NaN/hard cull) |
+| confdrop CE<0.3 | 317 | 0.589 | dropping confident tokens ~FREE |
+| anslast (last-16 tok) | 318 | 0.624 | only ~0.04 worse — answer-only nearly free |
+| seq512 | **198** | 0.499* | −38% step; *eval-set differs (36 vs 40 rows) |
+| full_kl | 432 | 0.584 | teacher=sft10_src, fwd cost inside step |
+| topk256 kl | 413 | 0.586 | ≈ full_kl |
+| topk256 kl+0.3ce | 414 | 0.585 | |
+| **topk15 kl+0.3ce** | **409** | **0.579** | ≈ full-KL, tiny teacher cache |
+- massprobe (teacher=sft10, heldout positions): top-1=88.1% mass,
+  top-15=99.0%, top-256=99.84%; gold-token inside teacher top-15 at
+  98.9% of positions, top-256 at 99.97%, top-1024 at 100%.
+- head GEMM [2048,2048]@[2048,131072]=16.1ms vs @[2048,256]=0.12ms (137x).
+- VERDICT: at 20-step RSI budget on v9 data, supervision diet barely
+  matters (0.578-0.62 band) → pick the FASTEST correct recipe:
+  seq512 + band + confdrop-style token thinning ≈ free throughput.
+
+### Theorized tricks for ForgeAI (ranked by evidence strength)
+1. BATCH-BRUTE-FORCE: propose+solve+retries through generate_batch at
+   B=16-32 + BCG → ~919 tok/s vs ~37-82 now = 11-25x candidates/sec.
+   Retries are currently serial (infinite_curriculum) — batch them too.
+2. TOPK-15 TEACHER CACHE: extend score_teacher_logprobs →
+   score_teacher_topk: store (idx15, logp15) fp16 per supervised token
+   (~8700x smaller than full-vocab, richer than scalar advantage).
+   New chunked_ce fn = _ChunkedKL topk path (probe shows heldout parity
+   w/ full KL; grad flows only through k head columns). In-loop: teacher
+   scoring is OFFLINE (amortized), student step ≈ CE step.
+3. STEERDISTILL x AZR: failed solves get teacher-steered repair from the
+   pre-error state, executor-verified, exported tagged "corrected" →
+   distill corrected turns to teacher dist (topk15), other turns to
+   self-dist — maps 1:1 onto propose→solve→verify→export.
+4. CONFIDENCE-THIN SUPERVISION: anslast/confdrop measured ~free → thin
+   supervision 5-10x, then either shorten epochs or multiply epochs.
+5. seq512+no-pack+band recipe = fastest measured (198ms) — validate on
+   real loop exports (gen<=256tok fits).
+6. FIX THE LOOP'S DEAD/WRONG KNOBS (measured bad): mtp_selfspec no-op
+   (train a real 1-head MTP via --mtp-n-heads 1 = 640ms/step → real
+   self-spec decode); warmup=20 flatlines <=20-step epochs (use 3-5);
+   ft steps are OPTIMIZER steps (100x5=500 presentations on ~60 rows =
+   overfit engine; rely on loss-band frontier stop); BitNet-everywhere
+   = destructive on spark; LoRA default targets = zero-grad on fused
+   qkv (use SIFT or the working target list); packing w/o cu_seqlens =
+   loss-10 (no-pack or wire cu_seqlens); dead flags --sync-freq,
+   --grad-compression int4, --distill-topk|truncate|prefix.
+7. EVAL IS THE EPOCH BOTTLENECK: ~600 gens vs ~30s of SIFT steps.
+   Brute-force phase: --eval-seed + small --eval-online/--eval-scale,
+   full suite only at promotion candidates.
+8. OPAL on-policy linearization (arXiv 2609.31947): when we port
+   Jamba→GDN2/V14 linear side-paths, distill via student-sampled
+   trajectories + dense teacher supervision (87-94% recovery vs
+   off-policy collapse) — the recipe for linear-attn conversion.
+9. OPAL reactive-optimizer (arXiv 2610.33826): LLM agent rewrites
+   optimizer config mid-run. Safe variant for us: evolve mutates
+   LoopConfig recipe per epoch on eval deltas (tagged adapters,
+   already-sandboxed proposer path) — not free code exec.
+10. STRATA-style CPU-expert-miss-in-place + NVMe n-gram table: future
+    MoE/hybrid-offload direction (their RTX5070+64GB numbers validate
+    our tiered-memory thesis; Spark is dense so only relevant for
+    larger models).
+11. ENGINE DOUBLE-LOAD: loop loads engine per epoch AND sft_train
+    reloads inside runner → 2 full loads/epoch. Reuse/sleep-wake.
+
+## 2026-11-15 — research batch 2 (few-shot/meta + arch/curr/distill)
+
+### low-resource NLP (survey 2411.09539; sysreview 2505.04531/54 studies)
+- Consensus: PEFT dominates <10k samples; augmentation + self-training
+  (confidence-filtered pseudo-labels) = biggest levers; forgetting
+  mitigation via replay/low-LR/few epochs; gains <1-3% often noise.
+- Spark's loop already IS the modern recipe (synthetic + self-training).
+  Adds: confidence-filtered self-labeling, replay buffer, per-skill LoRA.
+
+### DistilBERT → modern KD
+- Classic: student-init from teacher every-other-layer; triple loss
+  (soft KL + MLM + cosine hidden). Decoder-era upgrades: reverse-KL
+  (MiniLLM 2306.08543), on-policy GKD (2306.13649) — student generates,
+  teacher scores; off-policy logit matching = exposure bias.
+- CAUTION 2509.01649: pretrain-distill can hurt ICL/induction heads.
+- Ours: offline stored-logprob = teacher-prefix KD; adding a GKD-style
+  on-policy fraction is cheap since gen is already in-loop.
+
+### MAML — dead for LMs; surviving descendants
+- Reptile (1803.02999): move init toward post-SGD weights ≈ MAML,
+  trivially cheap → CHECKPOINT-AVERAGING across per-skill SFTs.
+- ANIL (1909.09157): inner loop on head only ≈ full MAML — MAML mostly
+  learns feature reuse, not rapid learning → adapter-only adaptation.
+- MAML-en-LLM (2405.11446): true 2nd-order on LLMs, +2% at big cost —
+  skip. MetaICL line = multitask outer loop (what self-play already is).
+
+### Domain homogeneity (2 interps)
+- A) data-mixture lit: DoReMi 2305.10429 (+6.5pt, 2.6x fewer steps via
+  proxy-fitted mixture), Data Mixing Laws 2403.16952 (mixture→perf is
+  fit-predictable), DEMIX 2108.05036. Specialist = narrow homogeneous
+  buckets; global = forgetting risk. Cheap action: proxy-sweep mixture
+  weights instead of hand-tuned sampling.
+- B) MoE microbatch homogeneity (2501.11873): per-microbatch LBL blocks
+  expert specialization; global-batch LBL + domain experts fix it —
+  relevant to MoE-FFN side-paths later.
+
+### TinyFS-IDS (Fusco/Palmieri/Ficco, Internet of Things v34, Nov 2025)
+- Few-shot federated IDS: Siamese nets + ε-greedy RL bandit picking
+  gradient-sparsification rate per round. Transferable PATTERN only:
+  bandit-per-round hyperparam (LR/mix/replay per epoch on measured
+  reward) — cheap pair w/ reactive-optimizer idea.
+
+### FastKAN-Tiny
+- FastKAN (2405.06721): RBF-approx KAN, 3.33x vs other KANs but still
+  slower than param-matched MLP matmul (~Gx FLOPs, G≈8 RBF centers).
+  "Tiny" = tiny impl or TinyML variants (XTiny-FastKAN, FastKAN-DDD).
+- 10M BabyLM audit (2607.15525): KAN≈SwiGLU≈MLP parity, no density
+  advantage at LM scale; no credible >=1B result. KAN-FFN = non-lossless
+  preset key → LOWEST priority, small ablation shard only.
+
+### Curriculum + intrinsic motivation (maps onto our loop)
+- Easy→hard ordering: −18..45% steps at <=100B-tok scale (EACL'26,
+  200+ models); gains shrink >=1B — test don't assume. Best difficulty
+  proxies: compression ratio, MTLD, Flesch. (One counter-study: hard→
+  easy on doc-level — metric-dependent.)
+- AZR (2505.03335 NeurIPS'25): proposer reward = LEARNABILITY (MC solver
+  success ~50% sweet spot) — our verifier emits this signal FOR FREE;
+  sort propose queue by it = emergent curriculum.
+- eva (Ye'25): asymmetric self-play prompt-evolver, gemma-9b Arena-Hard
+  51.6→60.1/62.4 no human prompts. MERCI (2510.16614): pseudo-count
+  novelty vs repetitive CoT. i-MENTOR (2505.17621): dense traj rewards.
+
+### distillation x PEFT
+- Prompt distillation (2412.14964): teacher = same weights + privileged
+  prompt; adapter toggle → no 2nd model in VRAM (fits 12GB); self-
+  distill, offline logit cache suffices — DIRECT FIT to our pipeline.
+- KD-LoRA (2410.20777), LLM-NEO (2411.06839): distill into LoRA works.
+- Tina (2504.15777): LoRA+RL on 1.5B → 43.3% AIME24, $9 — OUR SCALE;
+  "Are Reasoning Abilities Low-Rank?": r=64 LoRA-of-GRPO-delta BEATS
+  the full-FT ckpt. LoRID (2508.13037): multi-LoRA roles +16.1% GSM8K.
+- TRAP — "Illusion of Equivalence" (NeurIPS'25): LoRA intruder dims
+  ACCUMULATE under sequential FT → merge + re-init adapter each epoch.
+- FFT > LoRA +7.3% GSM8K on 7B (2505.22355) — gap on reasoning tasks.
+- Structural: CASS shares teacher A-matrix (+5.7% ROUGE-L, 0.0004%
+  params); SAD-LoRA aligns span(B) to teacher subspace.
+
+### New tricks added to ranked list
+12. LEARNABILITY CURRICULUM: verifier success-rate already gives the
+    AZR proposer reward — sort task queue toward ~50% success items.
+13. EASY→HARD in-epoch ordering via compression/perplexity proxy —
+    cheap sweep, possible −18..45% steps (verify at 1.7B scale).
+14. BANDIT-PER-ROUND recipe knob (TinyFS-IDS pattern): ε-greedy over
+    LR/mix/replay per epoch on measured reward — 30-line experiment.
+15. PROMPT-DISTILL SELF-TEACHER: adapter toggled same-weights teacher
+    w/ privileged context — zero extra VRAM, offline cache works.
+16. MERGE+REINIT LoRA each epoch (kill intruder dims); optional
+    REPTILE soup across per-skill SFTs (checkpoint averaging).
+17. TINA-STYLE LoRA-RL: validated at 1.5B; r=64 LoRA-of-delta can beat
+    FFT — plausible for solve-verified rewards in-loop.
+18. PROXY MIXTURE FIT (DoReMi): small sweeps to set domain mix for
+    exported corpora instead of hand ratios.
+19. KAN-FFN — parked: unproven at LM scale, +FLOPs hurts gen speed.
+
+## 2026-11-15 — probe round 2 RESULTS (gold setup: same LoRA-r32/AdamW/
+## 20-step/bs2x1024/v9 corpus, ce baseline heldout 0.580 @317ms)
+
+| arm | heldout | step_ms | extras | verdict |
+|---|---|---|---|---|
+| ord_easy | 0.626 | 226 | score pass 14.8s | WORSE — budget burned on known data (loss0 0.10) |
+| ord_hard | **0.566** | 338 | score pass 14.2s | BEST — hardest-first ordering |
+| ord_comp | 0.573 | 508 | proxy: distinct-tok ratio | ≈ce, slower steps (long rows first) |
+| learnband | 0.588 | 301 | band CE[0.31,0.84] kept 115/227 | ≈ce — mid-band excluded signal-rich hard rows |
+| reptile | 0.622 | 290 | 2 half-runs + LoRA soup | WORSE — souped adapters half-strength on each half |
+| selfteach15 | 0.685 | 344 | priv-context self-teacher 19.4s | WORSE — seeing the answer → near-delta dist, no new info |
+
+- READ: at micro-epoch budgets the binding constraint is signal/step —
+  hard→easy beats curriculum-lit easy→hard (matches the SustainNLP
+  doc-level counter-result; easy→hard applies to full-corpus sweeps,
+  not 40-of-227-example slices). AZR learnability's "~50% success"
+  sweet spot sits at the HARD end of a corpus the model mostly knows.
+- NEGATIVES recorded: reptile soup, privileged self-teacher,
+  easy-first, mid-band restriction, token-proxy ordering.
+
+### APPLIED to production this session
+- engine_activation.py: mtp_selfspec now LOGS when model lacks mtp_head
+  (was a silent no-op on Spark — the 2-4× claim never applied).
+- infinite_loop.py: warmup clamped to min(ft_warmup_steps,
+  max(2, steps//4)) — a 20-step warmup on a <=20-step epoch is flat LR.
+  ft_curriculum default "none" → "frontier"; CLI choices + comments.
+- curriculum_augment.py: new "frontier" strategy = hardest-first
+  (descending combined difficulty).
+- sft_train.py: FIXED curriculum dead-code — val-split random.shuffle
+  and AsyncPrefetcher(shuffle=True) silently discarded the ordering.
+  Curriculum now: order-preserving val pick + shuffle disabled.
+- Already-correct by design (verified, no change needed): per-epoch
+  merge_lora_adapters → fresh adapters each epoch (no intruder-dim
+  stacking); solve path already uses generate_batch; LoRA defaults
+  cover spark (v_proj matches fused qkv_proj + FFN targets).
+
+### still-unapplied candidates (need bigger wiring)
+- score_teacher_topk (idx+logp cache) + production _ChunkedKLTopk —
+  probe parity shown; needs scorer + collate + compute_loss plumbing.
+- TinyFS-IDS bandit-per-round recipe knob (LR/mix/replay per epoch).
+- Tina-style LoRA-RL on solve-verified rewards (needs RL trainer).
+
+## 2026-11-15 — probe round 3 RUNNING (anti-overfit + eval-axis arms)
+Arms: stepsweep(60 steps, heldout every 10 = overfit curve +
+gen_prefix), lr_hi 5e-5, lr_lo 5e-6, wd01 (AdamW wd=0.1), r8 (rank8),
+replay20 (20% out-of-window rows), evalgen (CE train + gen_prefix).
+
+- gen_prefix_eval = NEW second metric: greedy-decode 24 tok on 6 heldout
+  prompts, fraction matching gold completion token-for-token — a
+  task-level eval axis vs heldout-CE (token-level). For eval-score work:
+  check rank-correlation of heldout_ce vs gen_prefix across arms; if
+  they disagree, CE is lying about task quality.
+
+## NEXT — proposer-prompt experiment (queued, not yet run)
+Lever found: `_propose_prompt` -> CHAT_PROPOSE_PROMPT.format(domain,
+difficulty, signature, desc_hint); desc_hint drawn from a static
+per-domain bank (algos=10, math=10, strings=10, logic=5, ds=5).
+Arms to test (engine + _parse_proposal + executor validate):
+ a) baseline (1 desc_hint)
+ b) 2 desc_hints crossed (idea mixing → diversity)
+ c) constraint block: "3+ test cases incl. edge cases; solvable <30
+    lines; deterministic; stdlib only"
+ d) 1-shot exemplar: prepend a gold task spec
+Metric: parse-valid rate AND executor-validated rate (task's own tests
+pass on its reference solution) — the real proposer quality signal is
+"solvable-valid", not "well-formed". Small bank (logic/ds=5) is a
+diversity bottleneck — expanding it is near-free.
+
+## probe round 3 RESULTS (anti-overfit axis; ce baseline 0.580)
+| arm | heldout | read |
+|---|---|---|
+| stepsweep | **0.535** | curve 0.621→0.581→0.564→0.550→0.541→0.535 — STILL FALLING at 60 steps, no overfit upturn on 226-row corpus |
+| lr_hi 5e-5 | **0.539** | probe LR 2e-5 was underfit; +2.5x LR = free win, same cost |
+| lr_lo 5e-6 | 0.664 | badly underfit |
+| wd01 | 0.580 | neutral at 20 steps (epoch-accumulation guard only) |
+| r8 | 0.646 | rank 8 underfits — 32 is right |
+| replay20 | 0.580 | neutral single-epoch (protection is cross-epoch) |
+| evalgen | 0.580, gen_prefix 0.0625 | — |
+
+READS:
+- The "prevent overfitting" worry was INVERTED: at this budget the
+  model UNDERFITS (heldout still descending at 60 steps). Loop's
+  production defaults (ft_lr 5e-5, ft_max_steps 100) were already at
+  the measured sweet spot — probe's 2e-5/20-step grid was conservative.
+- Overfitting risk lives in EPOCH ACCUMULATION (repeated exposure to
+  near-identical self-play rows), not per-epoch steps — that's what
+  replay/L2-SP/merge-reinit exist for; they test neutral per-epoch
+  because the danger isn't per-epoch.
+- EVAL-AXIS finding: heldout-CE moves while gen_prefix stays ~0.06 —
+  distributional gains below argmax-flip threshold. Token-prefix match
+  is the WRONG task-metric at short horizons; the executor's pass@
+  (real code runs) is the right one. Don't promote on CE alone —
+  already handled by the loop's promotion eval, worth keeping.
+- wd/rank/replay: verified-neutral-to-negative, don't tune here.
+
+## proposer-prompt probe
+Probe: `scripts/probe_spark_proposer.py` — Spark-X2.6-1.7B engine, N=16
+proposals/variant (4 each algorithms/math/strings/logic), paired seeds,
+production `_generate_batch` path (propose prefill + think-cap).
+valid_rate = reference impl runs on own test inputs in sandbox
+(`_validate_task` + conf==1.0 — AZR derived-output).
+
+| variant    | parse | solvable-valid | tok/s |
+|------------|-------|----------------|-------|
+| baseline   | 16/16 | 14/16 (0.875)  | 688   |
+| dual       | 14/16 |  9/16 (0.562)  | 729   |
+| constraint | 15/16 | 10/16 (0.625)  | 717   |
+| exemplar   | 15/16 | 10/16 (0.625)  | 673   |
+
+- BASELINE wins decisively — every variant is -25 to -31 pts valid_rate.
+  The existing prompt (inline format example + bare `# solve(input)` AZR
+  format + "Reply with ONLY the code block") is already the sweet spot;
+  extra text dilutes the 1.7B's instruction-following. Dual's crossed
+  hints produced degenerate specs ("(" descs, parse fails in logic).
+- NO prompt change applied (winner must beat baseline by >5pts — none did).
+- APPLIED regardless (pure diversity fix): extracted the duplicated
+  `desc_hints` dicts (propose_tasks + _propose_one, had drifted apart —
+  strings 9 vs 10 entries) into module-level `_DESC_HINT_BANK`, and
+  expanded logic + data_structures 5 → 10 entries each.
+- Gen notes: all variants emitted exactly 16×640=10240 tok (no early EOS
+  — prefill-mode replies run to cap); B=16 ≈ 700 tok/s agg, ~15s/variant,
+  peak 6.0GB. Manual activate (standard KV + BCG) — auto_activate measured
+  0 free VRAM mid-load → capped KV at 64 tok + hit `(*bias): last
+  dimension must be contiguous` in seq_aware_split static-graph path
+  (fell back OK, but KV cap alone would have starved 640-tok prompts).
+
+## bugfixes + scale confirm
+
+### bugfix 1 � auto_activate KV-cap=64 (starved 640+ tok gen)
+- CAUSE: `_activate_kv_cache` probed free VRAM mid-activation while loader
+  staging / quant-repack blocks were still cached in the allocator �
+  `mem_get_info` read ~0 free ? `VRAMManager.max_gen_tokens` returned its
+  64-token emergency floor ? KV `max_seq_len=64`.
+- FIX `forge/engine/engine_activation.py:317-337`: `torch.cuda.synchronize`
+  + `empty_cache()` before `max_gen_tokens`, floor cap at 1024, log chosen
+  cap ("VRAM-aware KV cap: N tokens (requested M)").
+- FIX `forge/engine/engine_checkpoints.py:456-462`: same settle before the
+  `_auto_activate_optimal` free-VRAM ratio read.
+- VERIFY: real auto_activate run now logs `VRAM-aware KV cap: 77322 tokens
+  (requested 16384)` (bench path: 120038) � was 64. Gen 640+ tok OK.
+
+### bugfix 2 � seq_aware_split `(*bias): last dimension must be contiguous`
+- CAUSE: additive `attn_mask`/bias reaching `F.scaled_dot_product_attention`
+  could carry stride-0/sliced layout (expand views, graph-pool slices);
+  mem-eff SDPA kernel requires last-dim stride 1.
+- FIX: `.contiguous()` on the final bias at every SDPA call site �
+  `forge/model/layers.py:485,512,522,535` (sliding-window combined bias,
+  attention_bias, causal bias, explicit mask) and
+  `forge/engine/attention/fused_qk_norm_rope_cache.py:307,317`.
+- VERIFY: full auto_activate + BCG run captured all 5 kv buckets
+  (512/1024/2048/4096/8192) + B=16 batch gen � no crash. `py_compile OK`.
+
+### scale confirm (scripts/probe_spark_scale.py, NEW runner)
+N_TRAIN=512 N_EVAL=96 rows v9 corpus, 60 steps, lr5e-5, bs2xseq1024,
+LoRA r32/a64 on qkv_proj,out_proj,w_gate,w_up,w_down. 512 rows -> 448
+packed train examples; heldout CE every 10 steps.
+
+| arm | @10 | @20 | @40 | @60 | prior |
+|---|---|---|---|---|---|
+| ce (shuffled, seed0) | 0.6106 | 0.5869 | 0.5601 | **0.5467** | 0.535 @60 (stepsweep, 256 rows, lr2e-5) |
+| ord_hard (base-CE hardest-first) | 0.6093 | 0.5919 | 0.5600 | **0.5438** | 0.566 @20 (256 rows, lr2e-5, 20 steps) |
+
+- Both still descending at 60 � no plateau; 2x data + 2.5x lr did not
+  overfit (loss0: ce 0.287 vs ord_hard 2.0 = expected hard-first front).
+- ord_hard edges ce @60 (0.5438 vs 0.5467, -0.003) � ordering advantage
+  shrinks vs small-scale but direction holds; curves nearly identical
+  steps 30-60, ord_hard marginally ahead throughout.
+- ord_hard @20 (0.5919) looks worse than prior 0.566 @20 but is NOT a
+  regression: larger train window (448 vs ~227 ex) + higher lr shifts
+  the whole curve; compare same-budget @60 where ord_hard wins.
+- peak 5.26 GB both arms; ce 265.7 ms/step, ord_hard 409.6 (24.5s
+  one-time score pass + harder rows = longer avg seq).
+
+### batch gen (scripts/bench_spark_genmatrix.py batch, BLIST="16 32")
+B=16: 883.8 tok/s | B=32: **913.4 tok/s** | peak 4.98 GB � meets ~900+
+target at B=32 (prior best 918.7, within noise).
