@@ -321,6 +321,13 @@ class LoopConfig:
     checkpoint_dir: str = "research/checkpoints"
     data_dir: str = "research/data/finetune"
     config_name: str = "forgelm_v2"  # V2 (Jamba) default
+    # Demoted candidates are moved to <candidate_dir>/archive — nothing
+    # reads them back programmatically (the winner stays at
+    # best_checkpoint); they exist only for manual recovery. Unbounded
+    # growth (~4GB per demoted epoch) exhausts the disk on a multi-hour
+    # run, so only the newest `archive_keep` are retained. 0 = delete the
+    # candidate outright on demote.
+    archive_keep: int = 8
 
     # Replay buffer: mix in prior SFT data to prevent catastrophic forgetting
     replay_file: str = ""            # path to prior SFT JSONL
@@ -2563,6 +2570,46 @@ class InfiniteSelfPlayLoop:
 
     # ── Phase 4: Promote/Demote ──────────────────────────────────────
 
+    @staticmethod
+    def _move_with_sidecars(src: str, dst: str) -> None:
+        """Move a checkpoint plus its sidecars.
+
+        ``.meta.json`` (save_checkpoint metadata — tokenizer source) and
+        ``.train.pt`` (save_training_checkpoint optimizer/RNG state) must
+        travel with the weights or they orphan in the source dir each
+        epoch and the moved file loses self-describing metadata.
+        """
+        shutil.move(src, dst)
+        for suffix in (".meta.json", ".train.pt"):
+            sidecar = src + suffix
+            if os.path.exists(sidecar):
+                shutil.move(sidecar, dst + suffix)
+
+    @staticmethod
+    def _remove_with_sidecars(path: str) -> None:
+        """Delete a checkpoint plus its .meta.json/.train.pt sidecars."""
+        for suffix in ("", ".meta.json", ".train.pt"):
+            with contextlib.suppress(OSError):
+                os.remove(path + suffix)
+
+    def _rotate_archive(self, archive_dir: str, keep: int) -> None:
+        """Bound demoted-candidate disk: retain only the newest `keep`.
+
+        A demoted checkpoint is ~4GB+ of weights the eval already judged
+        worse — without rotation a multi-day run piles one up per epoch
+        until the disk fills (~4.3GB/epoch measured on spark).
+        """
+        try:
+            ckpts = [os.path.join(archive_dir, f)
+                     for f in os.listdir(archive_dir)
+                     if f.endswith(".safetensors")]
+            ckpts.sort(key=os.path.getmtime, reverse=True)
+            for old in ckpts[max(keep, 0):]:
+                self._remove_with_sidecars(old)
+                print(f"  [Archive] Rotated out {os.path.basename(old)}")
+        except OSError:
+            pass
+
     def _maybe_promote(self, candidate: str, eval_result: dict) -> bool:
         """Phase 4: Promote candidate if it passes evaluation."""
         if eval_result["passed"]:
@@ -2575,25 +2622,31 @@ class InfiniteSelfPlayLoop:
                     quality=eval_result.get("candidate_quality", 0))
             return True
         else:
-            archive_dir = os.path.join(self.config.checkpoint_dir, "archive")
-            os.makedirs(archive_dir, exist_ok=True)
-            archived = os.path.join(archive_dir, os.path.basename(candidate))
-            # Collision-safe: a demoted SP{epoch} from a previous run may
-            # already sit in archive/ — shutil.move would fail on Windows.
-            n = 1
-            while os.path.exists(archived):
-                n += 1
-                stem, ext = os.path.splitext(os.path.basename(candidate))
-                archived = os.path.join(archive_dir, f"{stem}_a{n}{ext}")
-            if os.path.exists(candidate):
-                shutil.move(candidate, archived)
-                # Move sidecars too — .meta.json (save_checkpoint) and
-                # .train.pt (save_training_checkpoint optimizer/RNG state)
-                # would otherwise be orphaned in checkpoint_dir each epoch.
-                for suffix in (".meta.json", ".train.pt"):
-                    sidecar = candidate + suffix
-                    if os.path.exists(sidecar):
-                        shutil.move(sidecar, archived + suffix)
+            keep = int(getattr(self.config, "archive_keep", 8))
+            if keep > 0 and os.path.exists(candidate):
+                # Archive next to the candidate (checkpoint_dir, or the
+                # staging dir when one is configured) so the move is
+                # always a same-volume rename — never a cross-drive copy.
+                archive_dir = os.path.join(
+                    os.path.dirname(candidate) or self.config.checkpoint_dir,
+                    "archive")
+                os.makedirs(archive_dir, exist_ok=True)
+                archived = os.path.join(
+                    archive_dir, os.path.basename(candidate))
+                # Collision-safe: a demoted SP{epoch} from a previous run may
+                # already sit in archive/ — shutil.move would fail on Windows.
+                n = 1
+                while os.path.exists(archived):
+                    n += 1
+                    stem, ext = os.path.splitext(os.path.basename(candidate))
+                    archived = os.path.join(
+                        archive_dir, f"{stem}_a{n}{ext}")
+                self._move_with_sidecars(candidate, archived)
+                self._rotate_archive(archive_dir, keep)
+            else:
+                # archive_keep=0 (or candidate already gone): dead weights —
+                # delete them so a long run stays disk-bounded.
+                self._remove_with_sidecars(candidate)
             print(f"  DEMOTED: reverted to {self.best_checkpoint}")
             if self._status_writer:
                 self._status_writer.event(
@@ -2879,6 +2932,11 @@ def main():
                         help="Allow promotion when candidate merely stays within "
                              "--eval-threshold of base (default: strict — must "
                              "beat or tie the old checkpoint)")
+    parser.add_argument("--archive-keep", type=int, default=8,
+                        help="Demoted candidates kept under "
+                             "checkpoint_dir/archive (older ones deleted). "
+                             "~4GB each — bounds archive disk on multi-hour "
+                             "runs. 0 = delete candidate on demote.")
     parser.add_argument("--promote-margin", type=float, default=0.02,
                         help="Min quality gain over base required to promote "
                              "(strict mode). ~46 eval tests ⇒ one question is "
@@ -3166,6 +3224,7 @@ def main():
         eval_threshold=args.eval_threshold,
         strict_promote=not args.lenient_promote,
         promote_margin=args.promote_margin,
+        archive_keep=args.archive_keep,
         capability_probe=not args.no_capability_probe,
         training_mode=args.training_mode,
         flux_group_size=args.flux_group_size,
