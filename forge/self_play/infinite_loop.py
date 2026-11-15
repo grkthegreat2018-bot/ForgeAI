@@ -682,6 +682,11 @@ class InfiniteSelfPlayLoop:
         When False, falls back to the bare ``load_default_model`` path
         (legacy, no V10 inference features — kept for debugging/ablation).
         """
+        # Drop any engine left over from a crashed epoch before loading —
+        # otherwise a second ~4GB engine stacks on the first (VRAM ratchet
+        # → OOM), and its KV/prefix caches belong to weights that a merged
+        # checkpoint may already have replaced.
+        self._free_engine()
         cfg = self.config
         if cfg.use_forge_engine:
             from forge.engine.forge_engine import ForgeEngine
