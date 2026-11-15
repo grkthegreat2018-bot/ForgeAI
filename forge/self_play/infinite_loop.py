@@ -77,8 +77,13 @@ class LoopConfig:
     # and activates these features instead of the bare model path.
     use_forge_engine: bool = True    # load via ForgeEngine (V10 features)
     kv_cache: str = "spectral"       # V10 SpectralKV (was: none / bare model)
-    decoding: str = "mtp_selfspec"   # MTP self-spec (2-4× IF model has an
-                                     # mtp_head — silent no-op on Spark)
+    decoding: str = "standard"       # honest default: _load_engine upgrades
+                                     # to mtp_selfspec only when the
+                                     # checkpoint actually carries mtp_head
+                                     # (keystack detection) — on mtp-less
+                                     # checkpoints (spark) the old
+                                     # mtp_selfspec default silently
+                                     # degraded to standard anyway.
     quantize: str | None = None      # weight quantization (None=bf16, "w8a8", "nvfp4")
     acceleration: str | None = None  # "cuda_graph", "megakernel", "flex_decoding"
     use_compile: bool = False        # torch.compile (experimental on Windows)
@@ -753,11 +758,18 @@ class InfiniteSelfPlayLoop:
                 auto_activate=False,  # we activate explicitly below
             )
             # Activate V10 inference features. SpectralKV is the V10 production
-            # KV cache (63× compression). MTP self-spec gives 2-4× decode
-            # speedup when the checkpoint has MTP heads (V10-growth configs).
+            # KV cache (63× compression). "standard" decoding auto-upgrades
+            # to mtp_selfspec when the checkpoint actually ships MTP heads
+            # (keystack detection — same signal _auto_activate_optimal
+            # uses); asking for mtp_selfspec on an mtp-less checkpoint
+            # silently degraded to standard anyway.
+            decoding = cfg.decoding
+            if (decoding == "standard"
+                    and "mtp" in getattr(engine, "keystack_features", ())):
+                decoding = "mtp_selfspec"
             engine.activate(
                 kv_cache=cfg.kv_cache,
-                decoding=cfg.decoding,
+                decoding=decoding,
                 quantize=cfg.quantize,
                 acceleration=cfg.acceleration,
                 kv_cache_tokens=cfg.kv_cache_tokens,
@@ -770,7 +782,7 @@ class InfiniteSelfPlayLoop:
                 warmup=cfg.warmup,
             )
             print(f"  [ForgeEngine] V10 features active: kv={cfg.kv_cache}, "
-                  f"decoding={cfg.decoding}, triton_conv={cfg.use_triton_conv}, "
+                  f"decoding={decoding}, triton_conv={cfg.use_triton_conv}, "
                   f"prefix_cache={cfg.use_prefix_cache}")
             return engine
 
@@ -3094,10 +3106,14 @@ def main():
                         help="Disable ForgeEngine (use bare model path, no V10 inference features)")
     parser.add_argument("--kv-cache", type=str, default="spectral",
                         help="KV cache strategy for self-play generation (V10 default: spectral)")
-    parser.add_argument("--decoding", type=str, default="mtp_selfspec",
+    parser.add_argument("--decoding", type=str, default="standard",
                         choices=["standard", "speculative", "medusa", "dspark",
                                  "eagle3", "mtp_selfspec", "specbound"],
-                        help="Decoding strategy (V10 default: mtp_selfspec)")
+                        help="Decoding strategy. Default 'standard' "
+                             "auto-upgrades to mtp_selfspec when the "
+                             "checkpoint ships MTP heads (keystack "
+                             "detection); explicit mtp_selfspec on an "
+                             "mtp-less model silently degrades.")
     parser.add_argument("--quantize", type=str, default=None,
                         choices=[None, "int8", "int4", "fp8", "w8a8", "nvfp4"],
                         help="Weight quantization for self-play generation")
