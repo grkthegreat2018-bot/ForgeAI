@@ -226,6 +226,15 @@ CATEGORIES = {
     "identity": IDENTITY_TESTS,
 }
 
+# Static yardstick names — the ban list is meant for procedurally
+# regenerated items (rand_*/needle_*/math_err_*) that re-randomize each
+# epoch. Banning a static test the base aces shrinks the fixed yardstick
+# every epoch: scores stop being comparable across a long run and the
+# survivor set concentrates on failures (the same survivorship inversion
+# the HELDOUT_CATS guard below exists to prevent).
+_STATIC_TEST_NAMES = frozenset(
+    t["name"] for tests in CATEGORIES.values() for t in tests)
+
 # Per-category token limits (actual usage is ~42 avg, was 256 for all)
 CATEGORY_MAX_TOKENS = {
     "tool_use": 128,
@@ -691,8 +700,11 @@ def _run_tests_on_engine(engine, name, device="cuda", verbose=False,
             # NEVER ban real-benchmark items: they're a fixed external set
             # (resampled per seed anyway), and banning base's passes leaves
             # only its failures → survivorship inversion → fake promotions.
+            # Same argument applies to the static CATEGORIES yardstick —
+            # only procedurally regenerated names are bannable.
             if (use_dynamic and m.quality >= 1.0
-                    and cat_name not in HELDOUT_CATS):
+                    and cat_name not in HELDOUT_CATS
+                    and test["name"] not in _STATIC_TEST_NAMES):
                 _ban_question(test["name"])
         result.per_category[cat_name] = metrics_list
 
