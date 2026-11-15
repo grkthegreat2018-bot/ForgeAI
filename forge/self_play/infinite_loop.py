@@ -328,6 +328,13 @@ class LoopConfig:
     # run, so only the newest `archive_keep` are retained. 0 = delete the
     # candidate outright on demote.
     archive_keep: int = 8
+    # Optional fast-local scratch dir (e.g. NVMe C:) for epoch candidate
+    # saves. checkpoint_dir sits on the SMR USB drive where a full merged
+    # save costs ~110s/epoch; a staged save takes ~15s, fast_eval reads it
+    # back from the fast drive, and only a PROMOTE ever pays the slow
+    # copy into checkpoint_dir (demotes rename/delete in place on the
+    # scratch volume). "" = save directly into checkpoint_dir.
+    staging_dir: str = ""
 
     # Replay buffer: mix in prior SFT data to prevent catastrophic forgetting
     replay_file: str = ""            # path to prior SFT JSONL
@@ -663,6 +670,10 @@ class InfiniteSelfPlayLoop:
             alerts = self._monitor.check_alerts()
             self._status_update(monitor_alerts=alerts)
 
+    def _candidate_dir(self) -> str:
+        """Dir epoch candidates are saved into — staging_dir when set."""
+        return self.config.staging_dir or self.config.checkpoint_dir
+
     def _epoch_checkpoint_path(self, epoch: int) -> str:
         """Unique per-epoch checkpoint path — never overwrites.
 
@@ -672,13 +683,34 @@ class InfiniteSelfPlayLoop:
         """
         cfg_tag = self.config.config_name.replace("forgelm_", "").upper() or "MODEL"
         stem = os.path.join(
-            self.config.checkpoint_dir, f"ForgeLM_{cfg_tag}_SP{epoch}")
+            self._candidate_dir(), f"ForgeLM_{cfg_tag}_SP{epoch}")
         path = f"{stem}.safetensors"
         n = 1
         while os.path.exists(path):
             n += 1
             path = f"{stem}_r{n}.safetensors"
         return os.path.normpath(path)
+
+    def _durable_path(self, candidate: str) -> str:
+        """Final resting path for a promoted candidate.
+
+        A staged candidate lives on the scratch volume — durable lineage
+        belongs in checkpoint_dir, so promotion moves it there (the only
+        epoch outcome that ever pays the slow-drive write). Returns
+        `candidate` unchanged when it is not under staging_dir.
+        """
+        staging = (self.config.staging_dir or "").strip()
+        cand_dir = os.path.normpath(os.path.dirname(candidate) or ".")
+        if not staging or cand_dir != os.path.normpath(staging):
+            return candidate
+        dest = os.path.normpath(os.path.join(
+            self.config.checkpoint_dir, os.path.basename(candidate)))
+        stem, ext = os.path.splitext(dest)
+        n = 1
+        while os.path.exists(dest):
+            n += 1
+            dest = f"{stem}_r{n}{ext}"
+        return dest
 
     def _load_engine(self):
         """Load a ForgeEngine with V10 inference features activated.
@@ -2613,12 +2645,18 @@ class InfiniteSelfPlayLoop:
     def _maybe_promote(self, candidate: str, eval_result: dict) -> bool:
         """Phase 4: Promote candidate if it passes evaluation."""
         if eval_result["passed"]:
-            self.best_checkpoint = candidate
+            best = self._durable_path(candidate)
+            if best != candidate and os.path.exists(candidate):
+                # Staged candidate: promote = move into checkpoint_dir
+                # (sidecars included) so the best lineage is durable.
+                os.makedirs(os.path.dirname(best), exist_ok=True)
+                self._move_with_sidecars(candidate, best)
+            self.best_checkpoint = best if os.path.exists(best) else candidate
             self.best_score = eval_result.get("candidate_quality", 0)
-            print(f"  PROMOTED: {candidate} is the new best checkpoint")
+            print(f"  PROMOTED: {self.best_checkpoint} is the new best checkpoint")
             if self._status_writer:
                 self._status_writer.event(
-                    "promote", checkpoint=candidate,
+                    "promote", checkpoint=self.best_checkpoint,
                     quality=eval_result.get("candidate_quality", 0))
             return True
         else:
@@ -2937,6 +2975,13 @@ def main():
                              "checkpoint_dir/archive (older ones deleted). "
                              "~4GB each — bounds archive disk on multi-hour "
                              "runs. 0 = delete candidate on demote.")
+    parser.add_argument("--staging-dir", type=str, default="",
+                        help="Fast scratch dir (NVMe) for epoch candidate "
+                             "saves: save+eval happen there, only a promote "
+                             "pays the slow copy into checkpoint_dir. "
+                             "checkpoint_dir on SMR/USB costs ~110s per "
+                             "full save; staged saves are ~15s. Empty = "
+                             "save directly into checkpoint_dir.")
     parser.add_argument("--promote-margin", type=float, default=0.02,
                         help="Min quality gain over base required to promote "
                              "(strict mode). ~46 eval tests ⇒ one question is "
@@ -3225,6 +3270,7 @@ def main():
         strict_promote=not args.lenient_promote,
         promote_margin=args.promote_margin,
         archive_keep=args.archive_keep,
+        staging_dir=args.staging_dir,
         capability_probe=not args.no_capability_probe,
         training_mode=args.training_mode,
         flux_group_size=args.flux_group_size,
