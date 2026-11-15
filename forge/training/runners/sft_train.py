@@ -1007,6 +1007,41 @@ def compute_sample_weights(model, dataset, pad_id, device, batch_size=1):
     return weights
 
 
+def _install_emergency_sigint(model, optimizer, save_path, current):
+    """Install a Ctrl-C emergency-save handler; returns the prior handler.
+
+    Caller should ``signal.signal(signal.SIGINT, <returned>)`` when training
+    completes so a stale handler can't save a dead model to an old path.
+
+    Weakrefs: the signal-handler table is a GC root and every
+    getsignal/signal pair links to the previously installed closure. Under
+    in-process self-play the prior closure chain used to retain each epoch's
+    model + optimizer — multi-GB RSS + VRAM growth per epoch, unbounded.
+    Holding weakrefs keeps the emergency-save contract (model is alive for
+    the whole training loop) without pinning it afterwards.
+    """
+    import weakref
+
+    old = signal.getsignal(signal.SIGINT)
+    model_wr = weakref.ref(model)
+    opt_wr = (weakref.ref(optimizer) if optimizer is not None
+              else lambda: None)
+
+    def _sigint_handler(sig, frame):
+        m = model_wr()
+        if m is not None:
+            emergency_save(m, save_path, "interrupt", current["step"],
+                           optimizer=opt_wr())
+        signal.signal(signal.SIGINT, old)
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGINT, _sigint_handler)
+    except (ValueError, OSError):
+        return None  # non-main thread — signals can't be installed anyway
+    return old
+
+
 def main():
     # Opt-in runtime configuration (import of `forge` is side-effect-free).
     from forge.runtime.configure import configure
@@ -2317,25 +2352,8 @@ def main():
 
     # Ctrl-C -> emergency checkpoint before dying (dpo_align pattern).
     current = {"step": start_step}
-    _old_sigint = signal.getsignal(signal.SIGINT)
-
-    # Weakref the heavy objects: the signal-handler table is a GC root, and
-    # each getsignal/signal pair chains to the previously installed closure —
-    # under in-process self-play that makes every epoch's handler pin its
-    # model + optimizer (multi-GB RSS/VRAM per epoch) forever.
-    import weakref as _weakref
-    _model_wr = _weakref.ref(model)
-    _opt_wr = _weakref.ref(optimizer)
-
-    def _sigint_handler(sig, frame):
-        _m = _model_wr()
-        if _m is not None:
-            emergency_save(_m, args.save, "interrupt", current["step"],
-                           optimizer=_opt_wr())
-        signal.signal(signal.SIGINT, _old_sigint)
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGINT, _sigint_handler)
+    _old_sigint = _install_emergency_sigint(
+        model, optimizer, args.save, current)
 
     # ── Grad accumulation ──
     grad_accum = max(1, args.grad_accum)
@@ -2954,10 +2972,11 @@ def main():
     # Uninstall the SIGINT handler — leaving it armed after main() returns
     # would emergency-save a stale/dead model to args.save on a later Ctrl-C,
     # and its slot in the signal table keeps this epoch's closure reachable.
-    try:
-        signal.signal(signal.SIGINT, _old_sigint)
-    except (ValueError, OSError):
-        pass  # non-main thread — nothing we can restore anyway
+    if _old_sigint is not None:
+        try:
+            signal.signal(signal.SIGINT, _old_sigint)
+        except (ValueError, OSError):
+            pass  # non-main thread — nothing we can restore anyway
 
 
 if __name__ == "__main__":
