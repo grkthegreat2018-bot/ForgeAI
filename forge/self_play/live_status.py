@@ -50,7 +50,12 @@ class LiveStatusWriter:
         self._hb_interval = max(0.5, heartbeat_interval)
         self._min_status = max(0.2, min_status_interval)
 
-        self._lock = threading.Lock()
+        # RLock, not Lock: close() calls _write_heartbeat() while holding
+        # the lock, and _write_heartbeat() itself takes it — a plain Lock
+        # self-deadlocks there (observed live: process hung indefinitely
+        # after LOOP COMPLETE, main + heartbeat threads both parked on
+        # this line via py-spy).
+        self._lock = threading.RLock()
         self._stop = threading.Event()
         self._status: dict = {"status": "running", "phase": "startup"}
         self._last_status_write = 0.0
