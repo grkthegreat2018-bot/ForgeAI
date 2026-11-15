@@ -3049,8 +3049,16 @@ def main():
     parser.add_argument("--ft-compile", action="store_true",
                         help="torch.compile the training model (experimental on Windows)")
     parser.add_argument("--ft-bitnet-everywhere", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="BitNet ternary QAT (1.58 bits, 2.39x vs AdamW). "
+                             "Default: ON for forgelm*/lfm* configs, OFF for "
+                             "others — QAT ternary conversion destroyed spark "
+                             "candidates (measured ~24s/step, loss ≈26).")
+    parser.add_argument("--ft-pack-sequences", action=argparse.BooleanOptionalAction,
                         default=True,
-                        help="BitNet ternary QAT (1.58 bits, 2.39x vs AdamW)")
+                        help="Pack variable-length sequences (Llama-3 style). "
+                             "--no- for configs without cu_seqlens isolation — "
+                             "packing leaks attention across packed docs.")
     parser.add_argument("--ft-sift", action="store_true",
                         help="SIFT structured slice training instead of LoRA")
     parser.add_argument("--ft-sift-score-mode", type=str, default="fro",
@@ -3116,7 +3124,15 @@ def main():
         ft_elastic_grad_accum=args.ft_elastic_grad_accum,
         ft_freetoken=args.ft_freetoken,
         ft_compile=args.ft_compile,
-        ft_bitnet_everywhere=args.ft_bitnet_everywhere,
+        ft_bitnet_everywhere=(
+            args.ft_bitnet_everywhere
+            if args.ft_bitnet_everywhere is not None
+            # BitNet QAT was validated on ForgeLM-family presets only;
+            # elsewhere the ternary conversion shock wrecks the base
+            # weights (spark: loss ≈26, ~24s/step — candidate always
+            # demoted, epoch compute wasted).
+            else args.config.startswith(("forgelm", "lfm"))),
+        ft_pack_sequences=args.ft_pack_sequences,
         ft_sift=args.ft_sift,
         ft_sift_score_mode=args.ft_sift_score_mode,
         ft_sift_calib_batches=args.ft_sift_calib_batches,
