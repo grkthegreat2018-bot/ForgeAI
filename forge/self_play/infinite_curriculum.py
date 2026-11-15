@@ -320,6 +320,72 @@ _CHAT_SOLVE_PREFILL = "```python\n"
 # because think_open is False once 542 lands).
 _POST_THINK_FENCE_DEADLINE = 48
 
+# Proposer task-seed bank: concrete, challenging desc_hint ideas per domain
+# (was duplicated inline in propose_tasks + _propose_one — one bank now).
+# The proposer samples one per proposal (or two crossed for idea mixing).
+_DESC_HINT_BANK = {
+    "algorithms": [
+        "Find the k-th smallest element using partitioning (not sorted())",
+        "Detect if a list contains a cycle using Floyd's algorithm",
+        "Merge two sorted lists into one sorted list (not using sorted())",
+        "Find the longest increasing subsequence length",
+        "Compute the running median of a stream",
+        "Rotate a matrix 90 degrees in-place",
+        "Find all pairs that sum to a target (no nested loops if possible)",
+        "Implement binary search on a rotated sorted array",
+        "Count inversions in a list using merge sort",
+        "Find the majority element (appears > n/2 times) in O(n) space",
+    ],
+    "math": [
+        "Compute the n-th prime number using the Sieve of Eratosthenes",
+        "Find all prime factors of n (not just check if prime)",
+        "Compute the digital root of n (recursive sum until single digit)",
+        "Check if n is a perfect number (sum of proper divisors equals n)",
+        "Compute the n-th Catalan number",
+        "Find the GCD of a list of numbers (not just two)",
+        "Compute the Euler totient function phi(n)",
+        "Check if n is a power of 2 using bit manipulation",
+        "Compute the continued fraction representation of sqrt(n)",
+        "Find the modular inverse of a mod m using extended Euclidean",
+    ],
+    "strings": [
+        "Find the longest palindromic substring (not just check palindrome)",
+        "Compress a string using run-length encoding",
+        "Check if two strings are anagrams without sorting",
+        "Find the first non-repeating character in a string",
+        "Implement string matching using KMP algorithm",
+        "Convert a string to title case handling edge cases",
+        "Find the minimum window in s that contains all chars of t",
+        "Validate if a string is a valid IPv4 address",
+        "Count distinct palindromic substrings",
+        "Implement regex for basic pattern matching (., *, +)",
+    ],
+    "logic": [
+        "Evaluate a boolean expression string with AND/OR/NOT",
+        "Check if a number is a valid Luhn checksum",
+        "Determine if a Sudoku row/column is valid",
+        "Check if parentheses/brackets are balanced",
+        "Evaluate a simple arithmetic expression string (no eval)",
+        "Determine the winner of a tic-tac-toe board (X, O, draw, ongoing)",
+        "Check if a date string is valid including leap-year rules (no datetime)",
+        "Evaluate a truth-table row for a boolean formula over a, b, c",
+        "Check if three 2D points are collinear using integer cross product",
+        "Resolve a chain of if-then rules over a set of facts (forward chaining)",
+    ],
+    "data_structures": [
+        "Implement a min-stack (push/pop/min in O(1))",
+        "Evaluate reverse polish notation",
+        "Implement a circular queue with wraparound",
+        "Flatten a nested list (arbitrary depth) iteratively",
+        "Detect if a binary tree is a valid BST",
+        "Implement an LRU cache simulated over a list of get/put ops",
+        "Implement a queue using two stacks (enqueue O(n), dequeue O(1))",
+        "Merge all overlapping intervals in a list",
+        "Implement a binary-heap priority queue (push/pop min in O(log n))",
+        "Find the next greater element for each list element using a stack",
+    ],
+}
+
 
 # Structural markers that may survive decode when skip_special_tokens=False.
 # </think> is needed for the reasoning split, so decode must preserve it;
@@ -622,57 +688,7 @@ class InfiniteCurriculum:
             for _ in range(current_batch):
                 sig_hint = self._random_signature(domain)
                 _t_args, _t_expected = self._example_test_cases(domain, sig_hint)
-                desc_hints = {
-                    "algorithms": [
-                        "Find the k-th smallest element using partitioning (not sorted())",
-                        "Detect if a list contains a cycle using Floyd's algorithm",
-                        "Merge two sorted lists into one sorted list (not using sorted())",
-                        "Find the longest increasing subsequence length",
-                        "Compute the running median of a stream",
-                        "Rotate a matrix 90 degrees in-place",
-                        "Find all pairs that sum to a target (no nested loops if possible)",
-                        "Implement binary search on a rotated sorted array",
-                        "Count inversions in a list using merge sort",
-                        "Find the majority element (appears > n/2 times) in O(n) space",
-                    ],
-                    "math": [
-                        "Compute the n-th prime number using the Sieve of Eratosthenes",
-                        "Find all prime factors of n (not just check if prime)",
-                        "Compute the digital root of n (recursive sum until single digit)",
-                        "Check if n is a perfect number (sum of proper divisors equals n)",
-                        "Compute the n-th Catalan number",
-                        "Find the GCD of a list of numbers (not just two)",
-                        "Compute the Euler totient function phi(n)",
-                        "Check if n is a power of 2 using bit manipulation",
-                        "Compute the continued fraction representation of sqrt(n)",
-                        "Find the modular inverse of a mod m using extended Euclidean",
-                    ],
-                    "strings": [
-                        "Find the longest palindromic substring (not just check palindrome)",
-                        "Compress a string using run-length encoding",
-                        "Check if two strings are anagrams without sorting",
-                        "Find the first non-repeating character in a string",
-                        "Implement string matching using KMP algorithm",
-                        "Convert a string to title case handling edge cases",
-                        "Find the minimum window in s that contains all chars of t",
-                        "Validate if a string is a valid IPv4 address",
-                        "Count distinct palindromic substrings",
-                    ],
-                    "logic": [
-                        "Evaluate a boolean expression string with AND/OR/NOT",
-                        "Check if a number is a valid Luhn checksum",
-                        "Determine if a Sudoku row/column is valid",
-                        "Check if parentheses/brackets are balanced",
-                        "Evaluate a simple arithmetic expression string (no eval)",
-                    ],
-                    "data_structures": [
-                        "Implement a min-stack (push/pop/min in O(1))",
-                        "Evaluate reverse polish notation",
-                        "Implement a circular queue with wraparound",
-                        "Flatten a nested list (arbitrary depth) iteratively",
-                        "Detect if a binary tree is a valid BST",
-                    ],
-                }
+                desc_hints = _DESC_HINT_BANK
                 # Sample desc_hint without replacement within a batch to
                 # encourage diverse prompts (prevents identical prompts → clone tasks)
                 available_hints = desc_hints.get(domain, desc_hints["algorithms"])
@@ -1003,58 +1019,7 @@ class InfiniteCurriculum:
         _t_args, _t_expected = self._example_test_cases(domain, sig_hint)
 
         # Description hint — challenging, non-trivial tasks that push the model
-        desc_hints = {
-            "algorithms": [
-                "Find the k-th smallest element using partitioning (not sorted())",
-                "Detect if a list contains a cycle using Floyd's algorithm",
-                "Merge two sorted lists into one sorted list (not using sorted())",
-                "Find the longest increasing subsequence length",
-                "Compute the running median of a stream",
-                "Rotate a matrix 90 degrees in-place",
-                "Find all pairs that sum to a target (no nested loops if possible)",
-                "Implement binary search on a rotated sorted array",
-                "Count inversions in a list using merge sort",
-                "Find the majority element (appears > n/2 times) in O(n) space",
-            ],
-            "math": [
-                "Compute the n-th prime number using the Sieve of Eratosthenes",
-                "Find all prime factors of n (not just check if prime)",
-                "Compute the digital root of n (recursive sum until single digit)",
-                "Check if n is a perfect number (sum of proper divisors equals n)",
-                "Compute the n-th Catalan number",
-                "Find the GCD of a list of numbers (not just two)",
-                "Compute the Euler totient function phi(n)",
-                "Check if n is a power of 2 using bit manipulation",
-                "Compute the continued fraction representation of sqrt(n)",
-                "Find the modular inverse of a mod m using extended Euclidean",
-            ],
-            "strings": [
-                "Find the longest palindromic substring (not just check palindrome)",
-                "Compress a string using run-length encoding",
-                "Check if two strings are anagrams without sorting",
-                "Find the first non-repeating character in a string",
-                "Implement string matching using KMP algorithm",
-                "Convert a string to title case handling edge cases",
-                "Find the minimum window in s that contains all chars of t",
-                "Validate if a string is a valid IPv4 address",
-                "Count distinct palindromic substrings",
-                "Implement regex for basic pattern matching (., *, +)",
-            ],
-            "logic": [
-                "Evaluate a boolean expression string with AND/OR/NOT",
-                "Check if a number is a valid Luhn checksum",
-                "Determine if a Sudoku row/column is valid",
-                "Check if parentheses/brackets are balanced",
-                "Evaluate a simple arithmetic expression string (no eval)",
-            ],
-            "data_structures": [
-                "Implement a min-stack (push/pop/min in O(1))",
-                "Evaluate reverse polish notation",
-                "Implement a circular queue with wraparound",
-                "Flatten a nested list (arbitrary depth) iteratively",
-                "Detect if a binary tree is a valid BST",
-            ],
-        }
+        desc_hints = _DESC_HINT_BANK
         desc_hint = self.rng.choice(desc_hints.get(domain, desc_hints["algorithms"]))
 
         prompt = self._propose_prompt(domain, difficulty, sig_hint, desc_hint)
