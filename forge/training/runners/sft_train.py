@@ -2319,9 +2319,19 @@ def main():
     current = {"step": start_step}
     _old_sigint = signal.getsignal(signal.SIGINT)
 
+    # Weakref the heavy objects: the signal-handler table is a GC root, and
+    # each getsignal/signal pair chains to the previously installed closure —
+    # under in-process self-play that makes every epoch's handler pin its
+    # model + optimizer (multi-GB RSS/VRAM per epoch) forever.
+    import weakref as _weakref
+    _model_wr = _weakref.ref(model)
+    _opt_wr = _weakref.ref(optimizer)
+
     def _sigint_handler(sig, frame):
-        emergency_save(model, args.save, "interrupt", current["step"],
-                       optimizer=optimizer)
+        _m = _model_wr()
+        if _m is not None:
+            emergency_save(_m, args.save, "interrupt", current["step"],
+                           optimizer=_opt_wr())
         signal.signal(signal.SIGINT, _old_sigint)
         raise KeyboardInterrupt
 
@@ -2940,6 +2950,14 @@ def main():
                                            "tokenizer_path": tok_source})
             print(f"\nSaved SFT model to {args.save}")
             print(f"  Trained {step} steps on {len(dataset)} examples")
+
+    # Uninstall the SIGINT handler — leaving it armed after main() returns
+    # would emergency-save a stale/dead model to args.save on a later Ctrl-C,
+    # and its slot in the signal table keeps this epoch's closure reachable.
+    try:
+        signal.signal(signal.SIGINT, _old_sigint)
+    except (ValueError, OSError):
+        pass  # non-main thread — nothing we can restore anyway
 
 
 if __name__ == "__main__":
