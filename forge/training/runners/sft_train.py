@@ -1137,11 +1137,14 @@ def main():
                         "exact every 50 steps). Avoids global norm computation when "
                         "optimizer states are offloaded to CPU.")
     p.add_argument("--curriculum", default="none",
-                   choices=["none", "vanilla", "pacing", "interleaved", "warmup"],
-                   help="Curriculum learning strategy: order training data easy→hard. "
-                        "18-45%% fewer steps to reach baseline performance. "
-                        "'pacing' gradually increases difficulty, 'warmup' does easy "
-                        "warmup then random, 'interleaved' mixes with increasing hard ratio.")
+                   choices=["none", "vanilla", "pacing", "interleaved",
+                            "warmup", "frontier"],
+                   help="Curriculum learning strategy: order training data. "
+                        "easy→hard modes: 'pacing' gradually increases "
+                        "difficulty, 'warmup' does easy warmup then random, "
+                        "'interleaved' mixes with increasing hard ratio. "
+                        "'frontier' = hardest first (best at micro-epoch "
+                        "budgets — spark/v9 probe 0.566 vs 0.580 shuffled).")
     p.add_argument("--augment", action="store_true",
                    help="Enable training-time data augmentation (token noise, FIM, "
                         "target offset). Regularizes against overfitting in "
@@ -1615,9 +1618,17 @@ def main():
     val_dataset = None
     if args.val_every > 0:
         n_val = max(1, int(len(dataset) * args.val_size))
-        random.shuffle(dataset)
-        val_dataset = dataset[:n_val]
-        dataset = dataset[n_val:]
+        if args.curriculum != "none":
+            # Pick val rows randomly but PRESERVE dataset order — a plain
+            # shuffle here silently discards the curriculum ordering.
+            val_idx = set(random.sample(range(len(dataset)), n_val))
+            val_dataset = [dataset[i] for i in sorted(val_idx)]
+            dataset = [dataset[i] for i in range(len(dataset))
+                       if i not in val_idx]
+        else:
+            random.shuffle(dataset)
+            val_dataset = dataset[:n_val]
+            dataset = dataset[n_val:]
         print(f"Validation: {len(val_dataset)} examples held out "
               f"(train: {len(dataset)}, val_every={args.val_every})")
 
@@ -2378,7 +2389,7 @@ def main():
             prefetcher = AsyncPrefetcher(
                 dataset, batch_size=args.batch_size, device=device,
                 collate_fn=collate_batch, prefetch_count=args.prefetch_count,
-                shuffle=True, pad_id=pad_id)
+                shuffle=(args.curriculum == "none"), pad_id=pad_id)
             # R&D round 25: CPU-first collate + consumer-side H2D transfer.
             # The background thread produces pinned CPU tensors; the main
             # thread does .to(device, non_blocking=True) which overlaps the

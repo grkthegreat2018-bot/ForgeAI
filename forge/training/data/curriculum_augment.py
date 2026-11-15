@@ -190,6 +190,13 @@ class CurriculumScheduler:
             rest = sorted_indices[n_warmup:]
             random.shuffle(rest)
             self._order = warmup + rest
+        elif self.strategy == "frontier":
+            # Hardest first. At micro-epoch budgets (~20 steps on a
+            # fraction of the corpus) the binding constraint is signal
+            # per step, not pacing: the spark/v9 probe measured
+            # hard→easy ordering at heldout 0.566 vs 0.580 shuffled
+            # (easy→hard: 0.626 — it spends the budget on known data).
+            self._order = list(reversed(sorted_indices))
         else:
             self._order = list(range(len(samples)))
 

@@ -77,7 +77,8 @@ class LoopConfig:
     # and activates these features instead of the bare model path.
     use_forge_engine: bool = True    # load via ForgeEngine (V10 features)
     kv_cache: str = "spectral"       # V10 SpectralKV (was: none / bare model)
-    decoding: str = "mtp_selfspec"   # MTP self-speculative (2-4× decode speedup)
+    decoding: str = "mtp_selfspec"   # MTP self-spec (2-4× IF model has an
+                                     # mtp_head — silent no-op on Spark)
     quantize: str | None = None      # weight quantization (None=bf16, "w8a8", "nvfp4")
     acceleration: str | None = None  # "cuda_graph", "megakernel", "flex_decoding"
     use_compile: bool = False        # torch.compile (experimental on Windows)
@@ -122,7 +123,8 @@ class LoopConfig:
 
     # ── Training tricks (R&D round 14+, wired to sft_train) ──
     ft_grad_mixup: int = 1           # N-batch grad averaging (1=off, 3=1.25× convergence)
-    ft_curriculum: str = "none"      # "vanilla", "pacing", "interleaved", "warmup"
+    ft_curriculum: str = "frontier"  # hardest-first (probe winner); see
+                                     # sft_train --curriculum for all modes
     ft_augment: bool = False         # token noise + FIM + target offset (anti-overfit)
     ft_synpro: bool = False          # SYNPRO synthetic data (3.7-5.2× effective tokens)
     ft_norm_type: str = "rmsnorm"    # "seednorm", "dyt" (Muon-compatible)
@@ -1998,7 +2000,8 @@ class InfiniteSelfPlayLoop:
             "--grad-accum", str(c.ft_grad_accum),
             "--sync-freq", str(c.ft_sync_freq),
             "--seq-len", str(c.ft_seq_len),
-            "--warmup-steps", str(c.ft_warmup_steps),
+            "--warmup-steps", str(min(
+                c.ft_warmup_steps, max(2, c.ft_max_steps // 4))),
             "--optimizer", c.ft_optimizer,
             "--grad-compression", c.ft_grad_compression,
             "--entropy-alpha", str(c.ft_entropy_alpha),
@@ -2987,9 +2990,11 @@ def main():
                         help="Token entropy weighting alpha (0 disables)")
     parser.add_argument("--ft-grad-mixup", type=int, default=1,
                         help="N-batch grad averaging (1=off, 3=1.25x convergence)")
-    parser.add_argument("--ft-curriculum", type=str, default="none",
-                        choices=["none", "vanilla", "pacing", "interleaved", "warmup"],
-                        help="Curriculum learning strategy (18-45%% fewer steps)")
+    parser.add_argument("--ft-curriculum", type=str, default="frontier",
+                        choices=["none", "vanilla", "pacing", "interleaved",
+                                 "warmup", "frontier"],
+                        help="Curriculum strategy; 'frontier' = hardest-first "
+                             "(measured best at micro-epoch budgets)")
     parser.add_argument("--ft-augment", action="store_true",
                         help="Training-time data augmentation (token noise, FIM, target offset)")
     parser.add_argument("--ft-synpro", action="store_true",
