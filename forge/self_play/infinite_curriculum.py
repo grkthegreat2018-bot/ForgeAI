@@ -641,6 +641,17 @@ class InfiniteCurriculum:
         self._seen_fingerprints: set[str] = set()
         self._seen_fp_path = self.task_queue_dir / "seen_fingerprints.json"
 
+        # Per-prompt solve-rate DB: persistent record of how often each
+        # prompt (by functional fingerprint, else normalized description)
+        # has been attempted + solved. Saturated prompts (>=3 attempts,
+        # >=80% solve) are banned from re-appearing — prevents training on
+        # solved-out tasks (overfit) and forces the proposer to stay
+        # novel. Persists across restarts via prompt_scores.json; delete
+        # that file to reset (e.g. after a major capability jump).
+        self._prompt_scores: dict[str, dict] = {}
+        self._scores_path = self.task_queue_dir / "prompt_scores.json"
+        self._load_prompt_scores()
+
         # Forward cache for repeated prompt prefixes (C2 — 20-40% fewer forward passes)
         from forge.runtime.forward_cache import ForwardCache
         self.fwd_cache = ForwardCache(max_entries=200, device=device)
@@ -787,6 +798,10 @@ class InfiniteCurriculum:
                         continue
                     if fp is not None:
                         self._seen_fingerprints.add(fp)
+                    if self.is_saturated(task):
+                        print("    -> REJECTED (saturated prompt — "
+                              ">=80% solve over 3+ attempts)")
+                        continue
                     task.validated = True
                     self.stats.total_validated += 1
                     validated_count += 1
@@ -2498,6 +2513,42 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
         if len(self.stats.proposer_rewards) > 1000:
             self.stats.proposer_rewards = self.stats.proposer_rewards[-1000:]
 
+        # Solve-rate DB update — feeds the saturation ban.
+        key = self._score_key(task)
+        rec = self._prompt_scores.setdefault(key, {"n": 0, "wins": 0})
+        rec["n"] += 1
+        rec["wins"] += int(success)
+        if rec["n"] <= 3 or rec["n"] % 8 == 0:
+            self._save_prompt_scores()
+
+    def _score_key(self, task: "ProposedTask") -> str:
+        fp = (task.raw_output
+              and self._functional_fingerprint(
+                  self._extract_reference_code(task.raw_output), task))
+        return fp or "desc:" + " ".join(
+            task.description.lower().split())[:120]
+
+    def _load_prompt_scores(self):
+        try:
+            self._prompt_scores = json.loads(
+                self._scores_path.read_text(encoding="utf-8"))
+        except Exception:
+            self._prompt_scores = {}
+
+    def _save_prompt_scores(self):
+        try:
+            self._scores_path.write_text(
+                json.dumps(self._prompt_scores), encoding="utf-8")
+        except OSError:
+            pass
+
+    def is_saturated(self, task: "ProposedTask") -> bool:
+        """True when this prompt has been solved >=80% over >=3 recorded
+        attempts — banned from re-appearing (overfit guard)."""
+        rec = self._prompt_scores.get(self._score_key(task))
+        return (rec is not None and rec.get("n", 0) >= 3
+                and rec.get("wins", 0) / max(rec["n"], 1) >= 0.8)
+
     def record_task_embedding(self, task: ProposedTask, embedding: list[float]):
         """Record a task embedding for diversity tracking.
         Call this after a task is validated. Embedding can be a simple
@@ -2540,10 +2591,11 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
 
         Returns tasks sorted by difficulty (easy first = curriculum order).
         """
-        # Filter queue
+        # Filter queue (saturated prompts banned — overfit guard)
         candidates = [t for t in self._task_queue
                       if (domain is None or t.domain == domain)
-                      and (difficulty is None or t.difficulty == difficulty)]
+                      and (difficulty is None or t.difficulty == difficulty)
+                      and not self.is_saturated(t)]
 
         # Sort by difficulty (curriculum: easy → medium → hard)
         diff_order = {"easy": 0, "medium": 1, "hard": 2}
@@ -2575,7 +2627,8 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
             list of ProposedTask, ELO-matched to the model's skill level.
         """
         candidates = [t for t in self._task_queue
-                      if domain is None or t.domain == domain]
+                      if (domain is None or t.domain == domain)
+                      and not self.is_saturated(t)]
         if not candidates:
             return []
 
