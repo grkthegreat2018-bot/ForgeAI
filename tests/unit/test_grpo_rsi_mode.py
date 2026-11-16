@@ -520,6 +520,80 @@ class TestStrictPromote:
         assert r["passed"] is False
 
 
+class TestEfficiencyPromote:
+    """Lexicographic 2nd objective: quality tie inside the noise band +
+    meaningful token savings + NO split regression -> promote. A terse
+    candidate that starved reasoning regresses on heldout/adjacent splits
+    and stays demoted."""
+
+    def _loop(self, eff=True):
+        loop = InfiniteSelfPlayLoop(
+            "fake.ckpt",
+            LoopConfig(strict_promote=True, efficiency_promote=eff,
+                       efficiency_margin=0.15, promote_margin=0.02))
+        loop._free_engine = MagicMock()
+        return loop
+
+    def _eval(self, loop, base, cand, winner="BASE"):
+        results = {"base": base, "candidate": cand, "winner": winner}
+        with patch(
+            "forge.self_play.discovery.fast_eval.fast_eval",
+            return_value=results,
+        ):
+            return loop._evaluate("cand.safetensors")
+
+    def _side(self, q, tok, held=0.8, adj=0.9):
+        return {"quality": q, "tokens": tok,
+                "heldout_q": held, "adjacent_q": adj}
+
+    def test_tie_plus_savings_promotes(self):
+        r = self._eval(self._loop(),
+                       self._side(0.72, 2500), self._side(0.71, 2000))
+        assert r["passed"] is True
+        assert r["efficiency_promotion"] is True
+
+    def test_terseness_regression_blocks(self):
+        """Held-out split regression = starved reasoning — no promotion
+        even with big token savings."""
+        r = self._eval(self._loop(),
+                       self._side(0.72, 2500, held=0.80),
+                       self._side(0.71, 1800, held=0.70))
+        assert r["passed"] is False
+        assert r["efficiency_promotion"] is False
+
+    def test_adjacent_regression_blocks(self):
+        r = self._eval(self._loop(),
+                       self._side(0.72, 2500, adj=0.90),
+                       self._side(0.71, 1800, adj=0.80))
+        assert r["passed"] is False
+
+    def test_small_savings_no_promote(self):
+        """10% savings < 15% margin — can't ratchet on verbosity noise."""
+        r = self._eval(self._loop(),
+                       self._side(0.72, 2500), self._side(0.71, 2300))
+        assert r["passed"] is False
+
+    def test_quality_regression_blocks(self):
+        """Below the noise band, no amount of savings promotes."""
+        r = self._eval(self._loop(),
+                       self._side(0.72, 2500), self._side(0.60, 1000))
+        assert r["passed"] is False
+
+    def test_disabled_flag(self):
+        r = self._eval(self._loop(eff=False),
+                       self._side(0.72, 2500), self._side(0.71, 1500))
+        assert r["passed"] is False
+
+    def test_quality_win_unaffected(self):
+        """Real quality wins promote through the primary gate — the
+        efficiency path must not mark them."""
+        r = self._eval(self._loop(),
+                       self._side(0.70, 2500), self._side(0.75, 2400),
+                       winner="CANDIDATE")
+        assert r["passed"] is True
+        assert r["efficiency_promotion"] is False
+
+
 class TestCanonicalSftRender:
     """SFT examples must render in canonical Jamba ChatML (<|im_start|>/
     <|im_end|>, <tool_call>) — the format eval + inference use.

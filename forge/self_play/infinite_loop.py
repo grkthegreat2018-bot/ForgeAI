@@ -192,6 +192,11 @@ class LoopConfig:
     # promote. ~46 eval tests means one question is ≈0.02 of quality —
     # any-positive-delta promotion ratchets on noise over a long run.
     promote_margin: float = 0.02
+    efficiency_promote: bool = True  # lexicographic 2nd objective: quality
+                                     # tie + token savings + no held-out/
+                                     # adjacent split regression -> promote
+    efficiency_margin: float = 0.15  # cand tokens <= base*(1-margin); above
+                                     # per-eval verbosity noise so no ratchet
     device: str = "cuda"
     # Capability trajectory (COMPETITIVE_AUDIT A14): score a FROZEN probe
     # on the candidate every epoch inside _evaluate (engine still loaded),
@@ -315,6 +320,10 @@ class LoopConfig:
     # ── GRPO config (only used when training_mode="grpo") ──
     grpo_max_steps: int = 50         # GRPO steps per epoch
     grpo_group_size: int = 4         # G completions per prompt (MC-GRPO)
+    solve_group_size: int = 1        # rollouts per task in sft mode — >1
+                                     # activates shortest-pass export
+                                     # (terse verified data) + raises
+                                     # solve yield; costs K× solve gen
     grpo_lr: float = 5e-6            # GRPO learning rate
     grpo_kl_coeff: float = 0.02      # KL penalty coefficient (β)
     grpo_clip_range: float = 0.2     # PPO clip range (ε)
@@ -1764,7 +1773,8 @@ class InfiniteSelfPlayLoop:
         # within-group reward variance is what produces nonzero advantage.
         # (Cross-task pairing collapsed to identical rewards → loss 0.)
         group_k = (self.config.grpo_group_size
-                   if self.config.training_mode == "grpo" else 1)
+                   if self.config.training_mode == "grpo"
+                   else max(1, self.config.solve_group_size))
         results_ordered = curriculum.solve_tasks_batch(
             validated, group_size=group_k)
 
@@ -2599,6 +2609,7 @@ class InfiniteSelfPlayLoop:
         # also clear promote_margin — otherwise single-question noise
         # (≈1/46 ≈ 0.022 of quality) promotes checkpoints and the gate
         # ratchets on eval luck across a long unattended run.
+        eff_promotion = False
         if winner == "CANDIDATE":
             passed = cand_q >= base_q + self.config.promote_margin
         elif self.config.strict_promote:
@@ -2609,11 +2620,39 @@ class InfiniteSelfPlayLoop:
         else:
             passed = False
 
+        # Lexicographic objective — quality first, token usage second
+        # (SWE-1.6-style savings): a quality tie inside the noise band
+        # promotes when the candidate is meaningfully more token-efficient
+        # AND shows no regression on held-out OR self-play-adjacent splits.
+        # The split guard is what keeps this adaptive rather than global
+        # terseness: a candidate that saved tokens by starving reasoning
+        # regresses on the held-out benchmarks it never trained on and
+        # stays demoted. eff_margin sits above eval verbosity noise so
+        # this cannot ratchet on luck either.
+        if not passed and self.config.efficiency_promote:
+            b = results.get("base", {})
+            c = results.get("candidate", {})
+            b_tok, c_tok = b.get("tokens", 0), c.get("tokens", 0)
+            margin = self.config.promote_margin
+            splits_clean = all(
+                c.get(k, 0.0) >= b.get(k, 0.0) - margin
+                for k in ("heldout_q", "adjacent_q") if b.get(k, 0.0) > 0)
+            if (splits_clean and b_tok > 0
+                    and cand_q >= base_q - margin
+                    and c_tok <= b_tok * (1 - self.config.efficiency_margin)):
+                passed = True
+                eff_promotion = True
+                print(f"  [Promote] Efficiency win: quality tie "
+                      f"({cand_q:.2f} vs {base_q:.2f}), tokens "
+                      f"{c_tok} vs {b_tok} "
+                      f"({100 * (1 - c_tok / b_tok):.0f}% saved)")
+
         return {
             "passed": passed,
             "base_quality": base_q,
             "candidate_quality": cand_q,
             "winner": winner,
+            "efficiency_promotion": eff_promotion,
             "capability_probe": capability,
             "details": results,
         }
@@ -3069,6 +3108,10 @@ def main():
                         help="GRPO steps per epoch (training_mode=grpo)")
     parser.add_argument("--grpo-lr", type=float, default=5e-6,
                         help="GRPO learning rate")
+    parser.add_argument("--solve-group-size", type=int, default=1,
+                        help="Rollouts per task in SFT mode — >1 activates "
+                             "shortest-pass export and raises solve yield "
+                             "(K× solve gen cost)")
     parser.add_argument("--grpo-group-size", type=int, default=4,
                         help="GRPO group size (G completions per prompt)")
     parser.add_argument("--grpo-kl", type=float, default=0.02,
@@ -3365,6 +3408,7 @@ def main():
         grpo_max_steps=args.grpo_steps,
         grpo_lr=args.grpo_lr,
         grpo_group_size=args.grpo_group_size,
+        solve_group_size=args.solve_group_size,
         grpo_kl_coeff=args.grpo_kl,
         grpo_clip_range=args.grpo_clip,
         grpo_rl_algorithm=args.grpo_algorithm,
