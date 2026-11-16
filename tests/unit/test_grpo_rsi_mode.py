@@ -51,7 +51,8 @@ class TestGRPOTrainingModeBranch:
         """SFT mode should call _finetune (not _grpo_train)."""
         loop = InfiniteSelfPlayLoop("fake.ckpt", LoopConfig(training_mode="sft"))
         loop._run_self_play = MagicMock(return_value={"success_rate": 0.5})
-        loop._export_trajectories = MagicMock(return_value="/tmp/data.jsonl")
+        loop._export_trajectories = MagicMock(
+            return_value=("/tmp/data.jsonl", 5))
         loop._finetune = MagicMock(return_value="/tmp/candidate.safetensors")
         loop._evaluate = MagicMock(return_value={"passed": True})
         loop._maybe_promote = MagicMock(return_value=True)
@@ -370,7 +371,8 @@ class TestEngineCleanup:
         """Too-few-examples path must free the engine."""
         loop = InfiniteSelfPlayLoop("fake.ckpt", LoopConfig(training_mode="sft"))
         loop._run_self_play = MagicMock(return_value={"success_rate": 0.0})
-        loop._export_trajectories = MagicMock(return_value="/tmp/data.jsonl")
+        loop._export_trajectories = MagicMock(
+            return_value=("/tmp/data.jsonl", 0))
         loop._finetune = MagicMock()
         loop._evaluate = MagicMock()
         loop._free_engine = MagicMock()
@@ -382,11 +384,53 @@ class TestEngineCleanup:
         loop._finetune.assert_not_called()
         assert result["finetune"]["skipped"] is True
 
+    def test_min_fresh_skips_finetune(self):
+        """Fresh solves < ft_min_fresh skips finetune even when the padded
+        corpus clears ft_min_examples — padding must not count as signal."""
+        loop = InfiniteSelfPlayLoop(
+            "fake.ckpt",
+            LoopConfig(training_mode="sft", ft_min_fresh=2))
+        loop._run_self_play = MagicMock(return_value={"success_rate": 0.1})
+        loop._export_trajectories = MagicMock(
+            return_value=("/tmp/data.jsonl", 1))  # 1 fresh < 2
+        loop._finetune = MagicMock()
+        loop._evaluate = MagicMock()
+        loop._free_engine = MagicMock()
+
+        with patch("builtins.open", self._MockFile(["line"] * 13)):
+            result = loop.run_epoch()
+
+        loop._free_engine.assert_called_once()
+        loop._finetune.assert_not_called()
+        loop._evaluate.assert_not_called()
+        assert result["finetune"]["skipped"] is True
+        assert result["finetune"]["reason"] == "min_fresh"
+        assert result["finetune"]["n_fresh"] == 1
+
+    def test_min_fresh_boundary_runs_finetune(self):
+        """Exactly ft_min_fresh fresh solves must proceed to finetune."""
+        loop = InfiniteSelfPlayLoop(
+            "fake.ckpt",
+            LoopConfig(training_mode="sft", ft_min_fresh=2))
+        loop._run_self_play = MagicMock(return_value={"success_rate": 0.2})
+        loop._export_trajectories = MagicMock(
+            return_value=("/tmp/data.jsonl", 2))
+        loop._finetune = MagicMock(return_value="/tmp/candidate.safetensors")
+        loop._evaluate = MagicMock(return_value={"passed": True})
+        loop._maybe_promote = MagicMock(return_value=False)
+
+        with patch("builtins.open", self._MockFile(["line"] * 14)):
+            result = loop.run_epoch()
+
+        loop._finetune.assert_called_once()
+        assert result["finetune"]["n_fresh"] == 2
+
     def test_train_exception_frees_engine(self):
         """Exception in Phase 2 must free the engine."""
         loop = InfiniteSelfPlayLoop("fake.ckpt", LoopConfig(training_mode="sft"))
         loop._run_self_play = MagicMock(return_value={"success_rate": 0.5})
-        loop._export_trajectories = MagicMock(side_effect=RuntimeError("export boom"))
+        loop._export_trajectories = MagicMock(
+            side_effect=RuntimeError("export boom"))
         loop._free_engine = MagicMock()
 
         result = loop.run_epoch()
@@ -409,7 +453,8 @@ class TestEngineCleanup:
         """Full path: _evaluate frees the engine (called there, not here)."""
         loop = InfiniteSelfPlayLoop("fake.ckpt", LoopConfig(training_mode="sft"))
         loop._run_self_play = MagicMock(return_value={"success_rate": 0.5})
-        loop._export_trajectories = MagicMock(return_value="/tmp/data.jsonl")
+        loop._export_trajectories = MagicMock(
+            return_value=("/tmp/data.jsonl", 5))
         loop._finetune = MagicMock(return_value="/tmp/candidate.safetensors")
         loop._evaluate = MagicMock(return_value={"passed": True})
         loop._maybe_promote = MagicMock(return_value=True)
@@ -646,9 +691,10 @@ class TestConciseQAStream:
                 "reward": 1.0,
             }
         ]
-        path = loop._export_trajectories(epoch=1)
+        path, n_fresh = loop._export_trajectories(epoch=1)
         import json as _json
 
+        assert n_fresh == 1
         with open(path, encoding="utf-8") as f:
             rows = [_json.loads(line) for line in f]
         # 1 trajectory + 6 QA pairs
@@ -671,7 +717,8 @@ class TestConciseQAStream:
                 "reward": 1.0,
             }
         ]
-        path = loop._export_trajectories(epoch=1)
+        path, n_fresh = loop._export_trajectories(epoch=1)
+        assert n_fresh == 1
         with open(path) as f:
             assert sum(1 for _ in f) == 1
 

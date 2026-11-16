@@ -125,6 +125,9 @@ class LoopConfig:
     ft_grad_compression: str = "int4"  # evolution-discovered: int4 for CPU offload
     ft_vram_limit_gb: float = 11.0
     ft_min_examples: int = 8         # skip finetune if fewer than this
+    ft_min_fresh: int = 2            # skip finetune+eval when fresh solves
+                                     # this epoch fall below — replay and
+                                     # concise-QA padding do not count; 0=off
 
     # ── Training tricks (R&D round 14+, wired to sft_train) ──
     ft_grad_mixup: int = 1           # N-batch grad averaging (1=off, 3=1.25× convergence)
@@ -2021,7 +2024,7 @@ class InfiniteSelfPlayLoop:
         print(f"  [Export] {len(successful)} successful + "
               f"{len(examples) - len(successful)} replay = "
               f"{len(examples)} total -> {output_path}")
-        return output_path
+        return output_path, len(successful)
 
     def _finetune(self, data_path: str, epoch: int) -> str:
         """Phase 2b: SFT continuation from best checkpoint.
@@ -2760,7 +2763,7 @@ class InfiniteSelfPlayLoop:
                     phases["promoted"] = promoted
             else:
                 # SFT mode (default): export → finetune → eval → promote
-                data_path = self._export_trajectories(self.epoch)
+                data_path, n_fresh = self._export_trajectories(self.epoch)
                 with open(data_path, encoding='utf-8') as _f:
                     n_examples = sum(1 for _ in _f)
 
@@ -2770,9 +2773,20 @@ class InfiniteSelfPlayLoop:
                     # Free the self-play engine — otherwise it stays resident
                     # and the next epoch loads a second engine on top (OOM).
                     self._free_engine()
+                elif n_fresh < self.config.ft_min_fresh:
+                    print(f"  Too few fresh solves ({n_fresh} < "
+                          f"{self.config.ft_min_fresh}), skipping "
+                          "finetune+eval — corpus would be all padding")
+                    phases["finetune"] = {"skipped": True,
+                                          "n_examples": n_examples,
+                                          "n_fresh": n_fresh,
+                                          "reason": "min_fresh"}
+                    self._free_engine()
                 else:
                     candidate = self._finetune(data_path, self.epoch)
-                    phases["finetune"] = {"checkpoint": candidate, "n_examples": n_examples}
+                    phases["finetune"] = {"checkpoint": candidate,
+                                          "n_examples": n_examples,
+                                          "n_fresh": n_fresh}
 
                     # Phase 3: Evaluate
                     eval_result = self._evaluate(candidate)
@@ -2931,6 +2945,10 @@ def main():
     parser.add_argument("--ft-warmup-steps", type=int, default=20,
                         help="LR warmup steps — keep well below --ft-steps "
                              "(default 20 eats a whole 20-step epoch)")
+    parser.add_argument("--ft-min-fresh", type=int, default=2,
+                        help="Skip finetune+eval when fresh verified solves "
+                             "this epoch fall below N — replay/concise-QA "
+                             "padding does not count (0 disables, default 2)")
     parser.add_argument("--ft-optimizer", type=str, default="muon_sf",
                         choices=["fused", "bnb", "lion", "muon", "muon_sf",
                                  "muon_sf_plain", "flash_adamw", "flash_lion",
@@ -3227,6 +3245,7 @@ def main():
         ft_batch_size=args.ft_batch_size,
         ft_grad_accum=args.ft_grad_accum,
         ft_warmup_steps=args.ft_warmup_steps,
+        ft_min_fresh=args.ft_min_fresh,
         ft_optimizer=args.ft_optimizer,
         ft_lora=not args.ft_no_lora,
         ft_grad_checkpoint=args.ft_grad_checkpoint,
