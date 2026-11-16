@@ -2039,6 +2039,55 @@ class InfiniteCurriculum:
         )
         return success, result
 
+    # ── anti-hardcode: hidden-input agreement vs reference ──────────
+    # The solve prompt shows the same tests _verify_solution runs, so a
+    # lookup-table "solution" passes every visible assert. The proposer's
+    # reference impl is already validated — hold it out as an oracle and
+    # require the candidate to match it on inputs the model never saw.
+
+    def _mutate_arg(self, a, rng):
+        if isinstance(a, bool):
+            return rng.choice([True, False])
+        if isinstance(a, int):
+            return rng.choice([a + 1, a - 1, a * 2, -a, 0, 97])
+        if isinstance(a, float):
+            return rng.choice([a + 1.5, a / 2.0, -a])
+        if isinstance(a, str):
+            return rng.choice([a[::-1], a * 2, a.upper(), a + "x", ""])
+        if isinstance(a, list):
+            m = list(a)
+            rng.shuffle(m)
+            return rng.choice([m, a + a, a[::-1], a[:1]])
+        if isinstance(a, tuple):
+            return tuple(self._mutate_arg(list(a), rng))
+        if isinstance(a, dict):
+            return {k: self._mutate_arg(v, rng) for k, v in a.items()}
+        return a
+
+    def _fuzz_verify(self, task, candidate_code, n_fuzz=4) -> bool:
+        """Candidate must agree with the proposer's reference impl on
+        mutated inputs it never saw (kills lookup-table wins). Returns
+        True when no reference is extractable — fuzz is additive, not a
+        new failure mode for tasks without a clean oracle."""
+        ref = self._extract_reference_code(
+            getattr(task, "raw_output", "") or "")
+        if not ref:
+            return True
+        rng = random.Random(7919)
+        name = re.escape(task.solve_name)
+        ref_code = re.sub(rf"\b{name}\b", "_ref_fn", ref)
+        lines = [candidate_code, ref_code]
+        for tc in task.test_cases[:n_fuzz]:
+            for _ in range(n_fuzz):
+                mut = ", ".join(
+                    repr(self._mutate_arg(a, rng)) for a in tc["args"])
+                lines.append(
+                    f"assert {task.solve_name}({mut}) == _ref_fn({mut})")
+        lines.append("print('FUZZ_PASS')")
+        res = self._execute_sandbox("\n".join(lines), timeout_s=10.0)
+        return (res.get("returncode") == 0
+                and "FUZZ_PASS" in res.get("stdout", ""))
+
     def _solve_direct(self, task: GoalTask) -> dict:
         """Solve a task with self-modeling retry (D5).
 
@@ -2140,6 +2189,9 @@ class InfiniteCurriculum:
                     goal_task, prompts[i], completion)
                 success, result = self._verify_solution(
                     goal_task, full_solution)
+                if success and not self._fuzz_verify(
+                        task, full_solution):
+                    success, result = False, {"stderr": "FUZZ_MISMATCH"}
                 attempts.append({
                     "code": full_solution, "success": success,
                     "error": result.get("stderr", ""),
@@ -2164,6 +2216,9 @@ class InfiniteCurriculum:
                     goal_task, prompts[i], retry_completion)
                 success, result = self._verify_solution(
                     goal_task, full_solution)
+                if success and not self._fuzz_verify(
+                        task, full_solution):
+                    success, result = False, {"stderr": "FUZZ_MISMATCH"}
                 attempts.append({
                     "code": full_solution, "success": success,
                     "error": result.get("stderr", ""),
