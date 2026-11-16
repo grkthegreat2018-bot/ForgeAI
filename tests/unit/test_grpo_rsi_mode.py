@@ -899,5 +899,102 @@ class TestSaveTaskSerialization:
         assert _json_default(object()).startswith("<")
 
 
+class TestFrontierRequeue:
+    """get_frontier_batch re-offers learnable-band backlog tasks:
+    attempted-but-not-saturated tasks weighted by AZR learnability,
+    never-consumed validated tasks at a mid prior, saturated excluded."""
+
+    def _task(self, tid, desc, domain="math"):
+        from forge.self_play.infinite_curriculum import ProposedTask
+        return ProposedTask(
+            id=tid, domain=domain, difficulty="medium",
+            description=desc, signature="(n: int)",
+            test_cases=[{"args": (1,), "expected": 2}],
+            validated=True)
+
+    def _cur(self, tmp_path):
+        from forge.self_play.infinite_curriculum import InfiniteCurriculum
+        return InfiniteCurriculum(
+            model=None, tokenizer=None, device="cpu",
+            task_queue_dir=str(tmp_path))
+
+    def test_saturated_excluded(self, tmp_path):
+        cur = self._cur(tmp_path)
+        sat = self._task("t_sat", "task saturated")
+        fresh = self._task("t_new", "task fresh")
+        cur._task_queue = [sat, fresh]
+        cur._prompt_scores = {"desc:task saturated": {"n": 5, "wins": 5}}
+        batch = cur.get_frontier_batch(5)
+        assert fresh in batch
+        assert sat not in batch
+
+    def test_unattempted_backlog_included(self, tmp_path):
+        cur = self._cur(tmp_path)
+        t = self._task("t_free", "validated overflow never attempted")
+        cur._task_queue = [t]
+        cur._prompt_scores = {}
+        assert cur.get_frontier_batch(1) == [t]
+
+    def test_frontier_band_preferred(self, tmp_path):
+        """A ~50%-solve task must be re-offered far more often than a
+        0%-after-10-attempts task (learnability weighting)."""
+        import random
+        cur = self._cur(tmp_path)
+        frontier = self._task("t_front", "frontier task")
+        hard = self._task("t_hard", "too hard task")
+        cur._task_queue = [frontier, hard]
+        cur._prompt_scores = {
+            "desc:frontier task": {"n": 4, "wins": 2},   # rate 0.5 -> w=1.0
+            "desc:too hard task": {"n": 10, "wins": 0},  # rate 0.0 -> w=0.2
+        }
+        cur.rng = random.Random(11)
+        picks = [cur.get_frontier_batch(1)[0].id for _ in range(200)]
+        assert picks.count("t_front") > 3 * picks.count("t_hard")
+        assert picks.count("t_hard") > 0  # hard tasks keep exploration share
+
+    def test_dedup_by_score_key(self, tmp_path):
+        cur = self._cur(tmp_path)
+        a = self._task("t1", "same task desc")
+        b = self._task("t2", "same task desc")
+        cur._task_queue = [a, b]
+        batch = cur.get_frontier_batch(10)
+        assert len(batch) == 1
+
+    def test_empty_and_zero(self, tmp_path):
+        cur = self._cur(tmp_path)
+        assert cur.get_frontier_batch(0) == []
+        assert cur.get_frontier_batch(5) == []
+
+    def test_score_key_stable_across_restart(self, tmp_path):
+        """ref_code/fp_key persist through _save_task + load_queue so a
+        re-queued task scores under the SAME key it earned originally —
+        otherwise the score record is missed and the task looks unattempted."""
+        cur = self._cur(tmp_path)
+        t = self._task("t_fp", "fp task")
+        t.ref_code = "def solve(n):\n    return n + 1"
+        t.fp_key = "fp:deadbeef"
+        cur._save_task(t)
+
+        cur2 = self._cur(tmp_path)
+        cur2.load_queue()
+        loaded = [x for x in cur2._task_queue if x.id == "t_fp"][0]
+        assert loaded.ref_code == t.ref_code
+        assert loaded.fp_key == "fp:deadbeef"
+        assert cur2._score_key(loaded) == "fp:deadbeef"
+        # saturation record under the fp key must be honored post-restart
+        cur2._prompt_scores = {"fp:deadbeef": {"n": 4, "wins": 4}}
+        assert cur2.is_saturated(loaded)
+
+    def test_legacy_task_falls_back_to_desc_key(self, tmp_path):
+        """Tasks saved before ref_code/fp_key existed still score by
+        description — never crash, never silently re-fingerprint."""
+        cur = self._cur(tmp_path)
+        t = self._task("t_old", "legacy task desc")
+        cur._task_queue = [t]
+        cur._prompt_scores = {"desc:legacy task desc": {"n": 4, "wins": 4}}
+        assert cur.is_saturated(t)
+        assert cur.get_frontier_batch(5) == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

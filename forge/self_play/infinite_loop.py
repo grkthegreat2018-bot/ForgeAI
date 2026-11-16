@@ -71,6 +71,15 @@ class LoopConfig:
     propose_batch_size: int = 8      # parallel task proposal
     domains: tuple = ("algorithms", "math", "strings", "logic", "data_structures")
 
+    # Frontier re-queue: re-offer backlog tasks in the learnable band
+    # (attempted, not saturated) before proposing fresh ones — measured
+    # difficulty instead of proposed-and-guessed (AZR learnability applied
+    # at the task pool, not just the proposer reward).
+    frontier_requeue: bool = True
+    frontier_requeue_frac: float = 0.34  # share of tasks_per_epoch
+    frontier_requeue_max: int = 6        # cap per epoch
+    frontier_backlog: int = 400          # most-recent disk tasks to scan
+
     # ── ForgeEngine inference features (self-play generation phase) ──
     # V10: SpectralKV is the production KV cache (63× compression at 0.095 error).
     # When use_forge_engine=True, the self-play phase loads via ForgeEngine
@@ -1646,6 +1655,26 @@ class InfiniteSelfPlayLoop:
         # ── Propose + validate tasks ──
         n_target = self.config.tasks_per_epoch
         validated: list = []
+
+        # Frontier re-queue: seed the epoch with learnable-band backlog
+        # tasks before paying propose-tokens for fresh ones. Score-key
+        # dedup + the saturation ban keep repeats out; a task that reaches
+        # saturation through re-attempts bans itself naturally.
+        n_frontier = 0
+        if (self.config.frontier_requeue
+                and self.config.task_source != "api"):
+            curriculum.load_queue(max_tasks=self.config.frontier_backlog)
+            frontier = curriculum.get_frontier_batch(min(
+                int(n_target * self.config.frontier_requeue_frac),
+                self.config.frontier_requeue_max))
+            for t in frontier:
+                t.archetype = "frontier_requeue"
+            validated.extend(frontier)
+            n_frontier = len(frontier)
+            if frontier:
+                print(f"  [Frontier] Re-queued {n_frontier} learnable-band "
+                      f"tasks from backlog")
+
         if sw:
             sw.set_phase("proposing", detail=f"epoch {self.epoch}: target {n_target} tasks")
 
@@ -1833,6 +1862,7 @@ class InfiniteSelfPlayLoop:
 
         stats = {
             "n_proposed": len(validated),
+            "n_frontier_requeued": n_frontier,
             "n_solved": successes,
             "n_failed": failures,
             "success_rate": successes / max(len(validated), 1),

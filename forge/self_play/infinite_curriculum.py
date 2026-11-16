@@ -144,6 +144,11 @@ class ProposedTask:
     archetype: str = "model_proposed"    # marks this as model-generated
     raw_output: str = ""                 # full model output for debugging
     generation_mode: str = "induction"   # induction/abduction/deduction
+    ref_code: str = ""                   # extracted reference impl (persisted
+                                         # so disk-loaded tasks keep their
+                                         # oracle + fingerprint identity)
+    fp_key: str = ""                     # cached functional fingerprint —
+                                         # stable score-DB key across restarts
 
 
 @dataclass
@@ -789,8 +794,7 @@ class InfiniteCurriculum:
                     # Functional clone guard: run the ref impl on fixed
                     # probes — identical output signature = same function
                     # regardless of description wording.
-                    fp = self._functional_fingerprint(
-                        self._extract_reference_code(task.raw_output), task)
+                    fp = self._task_fp(task)
                     if fp is not None and fp in self._seen_fingerprints:
                         self._mark_description_seen(task.description)
                         print("    -> REJECTED (functional clone — same "
@@ -2084,8 +2088,7 @@ class InfiniteCurriculum:
         mutated inputs it never saw (kills lookup-table wins). Returns
         True when no reference is extractable — fuzz is additive, not a
         new failure mode for tasks without a clean oracle."""
-        ref = self._extract_reference_code(
-            getattr(task, "raw_output", "") or "")
+        ref = self._task_ref(task)
         if not ref:
             return True
         rng = random.Random(7919)
@@ -2521,10 +2524,24 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
         if rec["n"] <= 3 or rec["n"] % 8 == 0:
             self._save_prompt_scores()
 
+    def _task_ref(self, task: "ProposedTask") -> str:
+        """Memoized reference-impl extraction — disk-loaded tasks carry it
+        in ref_code; fresh tasks extract once from raw_output."""
+        if not task.ref_code:
+            task.ref_code = self._extract_reference_code(
+                getattr(task, "raw_output", "") or "") or ""
+        return task.ref_code
+
+    def _task_fp(self, task: "ProposedTask") -> str | None:
+        """Memoized functional fingerprint — avoids re-executing the
+        reference impl on probe inputs for every score/saturation lookup."""
+        if not task.fp_key:
+            task.fp_key = self._functional_fingerprint(
+                self._task_ref(task), task) or ""
+        return task.fp_key or None
+
     def _score_key(self, task: "ProposedTask") -> str:
-        fp = (task.raw_output
-              and self._functional_fingerprint(
-                  self._extract_reference_code(task.raw_output), task))
+        fp = self._task_fp(task)
         return fp or "desc:" + " ".join(
             task.description.lower().split())[:120]
 
@@ -2641,6 +2658,52 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
         id_to_task = {t.id: t for t in candidates}
         return [id_to_task[pid] for pid in selected_ids if pid in id_to_task]
 
+    def get_frontier_batch(self, n: int,
+                           domain: str | None = None) -> list[ProposedTask]:
+        """Re-offer backlog tasks in the learnable band — previously
+        attempted but not saturated — plus validated-but-never-consumed
+        overflow tasks. These are the highest-signal curriculum items
+        available: their difficulty is measured, not guessed.
+
+        Weighting (AZR learnability, peaks at 50% historical solve):
+          attempted, win-rate r  -> max(0.08, 1 - |r - 0.5| * 1.6)
+          never attempted        -> 0.6  (free task: already validated)
+          saturated (>=80% / >=3 tries) -> excluded (handled by ban)
+
+        Sampling: Efraimidis-Spirakis weighted draw without replacement,
+        so the frontier is revisited stochastically rather than the same
+        top-N every epoch.
+        """
+        if n <= 0:
+            return []
+        weighted = []
+        seen_keys = set()
+        for t in self._task_queue:
+            if domain is not None and t.domain != domain:
+                continue
+            key = self._score_key(t)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            rec = self._prompt_scores.get(key)
+            n_att = rec.get("n", 0) if rec else 0
+            wins = rec.get("wins", 0) if rec else 0
+            if n_att >= 3 and wins / n_att >= 0.8:
+                continue  # saturated — the ban's job is done elsewhere
+            if n_att == 0:
+                w = 0.6
+            else:
+                rate = wins / n_att
+                w = max(0.08, 1.0 - abs(rate - 0.5) * 1.6)
+            weighted.append((w, t))
+        if not weighted:
+            return []
+        picks = sorted(
+            weighted,
+            key=lambda wt: self.rng.random() ** (1.0 / wt[0]),
+            reverse=True)[:n]
+        return [t for _, t in picks]
+
     def queue_size(self, domain: str | None = None) -> int:
         """Number of validated tasks in the queue."""
         if domain is None:
@@ -2662,6 +2725,8 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
             "archetype": task.archetype,
             "generation_mode": task.generation_mode,
             "proposer_confidence": task.proposer_confidence,
+            "ref_code": task.ref_code,
+            "fp_key": task.fp_key,
             "timestamp": datetime.now().isoformat(),
         }
         try:
@@ -2673,10 +2738,18 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
             # self-play epoch mid-propose via TypeError here).
             print(f"  [Curriculum] _save_task failed for {task.id}: {e}")
 
+    _QUEUE_FILE_DENY = frozenset(
+        ["prompt_scores.json", "seen_descriptions.json",
+         "seen_fingerprints.json"])
+
     def load_queue(self, max_tasks: int = 1000):
-        """Load previously saved tasks from disk into the queue."""
-        files = sorted(self.task_queue_dir.glob("*.json"))[:max_tasks]
-        for f in files:
+        """Load previously saved tasks from disk into the queue — most
+        recent first (frontier re-queue wants tasks near current
+        capability, not stale history)."""
+        files = [f for f in self.task_queue_dir.glob("*.json")
+                 if f.name not in self._QUEUE_FILE_DENY]
+        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        for f in files[:max_tasks]:
             try:
                 data = loads(f.read_text())
                 task = ProposedTask(
@@ -2692,6 +2765,8 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
                     generation_mode=data.get("generation_mode", "induction"),
                     proposer_confidence=data.get("proposer_confidence", 0),
                     validated=True,
+                    ref_code=data.get("ref_code", ""),
+                    fp_key=data.get("fp_key", ""),
                 )
                 self._task_queue.append(task)
             except (json.JSONDecodeError, KeyError):
