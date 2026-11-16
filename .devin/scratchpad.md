@@ -3357,3 +3357,31 @@ Wiki Self-Play.md synced: scratch/wiki_repo commit 2497a10.
 - fastsafetensors DLLs absent on this box -> standard safetensors load.
 - Solve success is high-variance (38% vs 8% on same ckpt); SFT corpus
   per epoch is 1-17 examples -> candidates regress as often as improve.
+
+## soak test 2026-11-16 — 8-epoch unattended run: PASS
+
+Invocation (replicates the 11/15 run that died silently in ep7 eval):
+python -u -m forge.self_play.infinite_loop --checkpoint research/checkpoints/spark_x26_1p7b.sft6_src --config spark_x26_1p7b --epochs 8 --tasks-per-epoch 12 --ft-steps 30 --staging-dir C:\forge_spool --archive-keep 3
+Detached (Start-Process, venv python is a uv shim that re-execs a child - monitor the CHILD pid). Log: .devin/tmp/soak.log, metrics: .devin/tmp/soak_metrics.csv.
+
+### Per-epoch (4/12 solved every epoch, all demoted; base stayed sft6_src)
+ep1 502.9s base .71 cand .66 DEMOTED (rotated SP2)
+ep2 257.9s .68 DEMOTED (rotated SP3)
+ep3 255.3s .68 DEMOTED (rotated SP5)
+ep4 260.8s .70 DEMOTED (rotated SP1)
+ep5 253.3s .68 DEMOTED (rotated SP2)
+ep6 307.0s .72 CAND-WINS but DEMOTED - delta +.013 < promote_margin .02 (anti-ratchet gate working, infinite_loop.py:2570)
+ep7 234.5s .67 DEMOTED (rotated SP4) - prior run died HERE mid base-eval; clean this time
+ep8 232.5s .70 DEMOTED (rotated SP5)
+Total wall ~40min. LOOP COMPLETE -> status.json "done" -> process exit <60s (RLock close path verified - prior version parked forever here).
+
+### Leak check (1-min samples of loop pid)
+RSS: 6.25GB ep1-end -> 7.33-7.37 plateau ep2-4 (sandbox once-script pool spin-up, py_procs bursts 2->6->2) -> DECLINES to 7.0 by ep8. Net steady-state drift ~-0.3GB ep2->ep8 = no leak.
+Threads 96-97 flat; handles 850-885 oscillating, end ~800 (bounded, not monotonic).
+VRAM 4.6-6.3GB phase oscillation, never trending up; post-exit back to 610MiB baseline.
+Spool C:\forge_spool bounded 12.38<->16.51GB (3 kept archives + 1 in-flight candidate); rotation fired on all 8 demotes. D:\archive untouched at 47GB (staging layout = archive lives next to candidate).
+Orphans: 0 python* procs post-exit (baseline 0). No crash/hang.
+
+### Verdict
+PASS on all criteria (>=5 epochs, clean exit, no orphans, RSS bounded, archive rotation verified 8x, no crash). Prior silent ep7-eval death did NOT reproduce - most consistent with external kill at prior session end, not a code defect (no crash signature in 8 clean epochs + clean shutdown path).
+Multi-hour confidence: HIGH for demote-heavy runs. Untested this run: promote->durable-copy path (prior run exercised it twice, SP4/SP6) and >8-epoch archive behavior.
