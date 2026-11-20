@@ -57,3 +57,16 @@ def test_decode_step_runs_and_updates_cache():
 def test_loopgates_init_zero():
     g = LoopGates(3, device="cpu")
     assert torch.all(g() == 0)
+
+
+def test_looped_prefill_respects_embed_and_logit_scaling():
+    # Granite-style multipliers: embed() and head() are unscaled; the
+    # model's forward applies _embed_mult/_logit_scale itself. The
+    # looped path must do the same or parity breaks (2026-11 audit bug).
+    model = _tiny_attn_model()
+    model._embed_mult = 3.0
+    model._logit_scale = 7.0
+    ids = torch.randint(0, 256, (1, 32))
+    logits_ref = model(ids)[0]
+    logits, _, _ = looped_prefill(model, ids, 1, 3, max_iters=1)
+    assert torch.allclose(logits, logits_ref, atol=1e-5)

@@ -1,8 +1,8 @@
-"""E-loop: recurrent-depth (looped transformer) on a pretrained AR model.
+﻿"""E-loop: recurrent-depth (looped transformer) on a pretrained AR model.
 
 Runs the middle block range of ConfigurableResearchLLM for multiple
 iterations at prefill (use_cache=True only commits KV from the LAST
-iteration — decode then sees the converged representation).
+iteration â€” decode then sees the converged representation).
 
 Optional learned LoopGates: h <- h + g_i * (B_i(h) - h) per looped layer.
 g=0 init -> loop is a no-op (lossless); a few dozen scalar params trained
@@ -16,9 +16,16 @@ import torch.nn as nn
 
 def _embed(model, ids):
     x = model.embed(ids)
+    x = x * getattr(model, "_embed_mult", 1.0)  # granite embeds x M
     if getattr(model, "embed_norm", None) is not None:
         x = model.embed_norm(x)
     return x
+
+
+def _head(model, h):
+    logits = model.head(h)
+    s = getattr(model, "_logit_scale", 1.0)
+    return logits / s if s != 1.0 else logits
 
 
 @torch.no_grad()
@@ -62,7 +69,7 @@ def looped_prefill(model, ids, loop_lo: int, loop_hi: int,
         x, pasts[i] = model.blocks[i](x, past_key_value=None,
                                       use_cache=True, layer_idx=i)
     hidden = model.ln_f(x) if model.ln_f is not None else x
-    logits = model.head(hidden)
+    logits = _head(model, hidden)
     stats = {"iters_run": it + 1, "deltas": deltas}
     return logits, pasts, stats
 
@@ -91,14 +98,14 @@ def looped_decode_step(model, tok, pasts, loop_lo: int, loop_hi: int,
         x, pasts[i] = model.blocks[i](x, past_key_value=pasts[i],
                                       use_cache=True, layer_idx=i)
     hidden = model.ln_f(x) if model.ln_f is not None else x
-    return model.head(hidden[:, -1:]), pasts
+    return _head(model, hidden[:, -1:]), pasts
 
 
 class VerifierGate:
     """Output-level early-stop for looped blocks (R71/B5).
 
-    Stops the loop when the next-token distribution has CONVERGED —
-    the model stopped changing its mind — rather than when hidden-state
+    Stops the loop when the next-token distribution has CONVERGED â€”
+    the model stopped changing its mind â€” rather than when hidden-state
     drift is small (the old `tol` criterion, which can fire while logits
     still move). Cheaper than a learned verifier head: head+ln_f on one
     position is ~0.3% of a layer's FLOPs.
@@ -167,7 +174,7 @@ def looped_prefill_verified(model, ids, loop_lo: int, loop_hi: int,
         x = h
         if gate is not None and it >= 1:
             hh = model.ln_f(h) if model.ln_f is not None else h
-            lg = model.head(hh[:, -1:])
+            lg = _head(model, hh[:, -1:])
             if gate.update(lg):
                 stop = f"verified@{it}"
                 break
@@ -175,7 +182,7 @@ def looped_prefill_verified(model, ids, loop_lo: int, loop_hi: int,
         x, pasts[i] = model.blocks[i](x, past_key_value=None,
                                       use_cache=True, layer_idx=i)
     hidden = model.ln_f(x) if model.ln_f is not None else x
-    logits = model.head(hidden)
+    logits = _head(model, hidden)
     stats = {"iters_run": it + 1, "deltas": deltas, "stop_reason": stop}
     return logits, pasts, stats
 
@@ -193,7 +200,7 @@ class LoopGates(nn.Module):
 
 def train_loop_gates(model, ids_list, loop_lo: int, loop_hi: int,
                      max_iters: int = 2, steps: int = 300, lr: float = 3e-2):
-    """Train only the loop gates (frozen model) — asks 'does any recurrent
+    """Train only the loop gates (frozen model) â€” asks 'does any recurrent
     depth help?' Gates init 0 -> lossless start; optimizer decides."""
     gates = LoopGates(loop_hi - loop_lo, device=ids_list[0].device)
     opt = torch.optim.Adam(gates.parameters(), lr=lr)
@@ -216,7 +223,7 @@ def train_loop_gates(model, ids_list, loop_lo: int, loop_hi: int,
             x, _ = model.blocks[i](x, past_key_value=None,
                                    use_cache=False, layer_idx=i)
         h = model.ln_f(x) if model.ln_f is not None else x
-        return model.head(h)
+        return _head(model, h)
 
     losses = []
     step = 0
@@ -237,3 +244,4 @@ def train_loop_gates(model, ids_list, loop_lo: int, loop_hi: int,
     for p in model.parameters():
         p.requires_grad_(True)
     return gates, losses
+

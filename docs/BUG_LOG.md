@@ -868,3 +868,28 @@ When train loss ~10 but eval CE <1 on the same ckpt+data, check WHICH tokenizer 
 
 ### Lesson
 'Last-line-wins' parsing is a forge oracle whenever hostile code can outlive the real writer. Pair output-position rules with an unforgeable token AND a hard exit that skips user-registered cleanup.
+
+## 2026-11-17 — continuous-batching refill corruption: mask-cumsum position semantics (Spark)
+
+### Symptom
+- Slotted `generate_batch` (N>64 windows at WIDE_CAP=64, or N>32 pre-widening) produced collapsed/spam output on refilled streams: refill at decode pos=131 gave repeated `def`/`**A**` fragments, pos~60 degraded, pos~8 near-perfect — error grew with the position shift. Spark checkpoint itself healthy (standalone outputs clean).
+
+### Root cause
+- `forge/model/llm.py` derives `position_ids = attention_mask.cumsum(-1) - 1` — RoPE positions come from the MASK's real-token count, not the physical cache slot index. Three stacked defects in the refill splice (`forge/engine/batched_decoding.py`):
+  1. KV copied with an absolute-position RoPE rebase — but the refilled row's mask `{base..pos}` re-numbers its stream 0,1,2,..., so K must keep R(src) verbatim; the rebase rotated queries/keys into mismatched distances.
+  2. The dead stream's EOS KV left at `pos` and masked = a permanent +1 hole shifting every prompt->gen distance (B=1 repro: even one masked hole degrades output).
+  3. Stale SWA-ring slots got FABRICATED gap content (tiled prompt tail, BOS-wall) — every fabrication injected a repetition prior the model echoed. Also latent: left-pad slots stayed attended on ring layers in every unequal-length batch (ring decode ignored m_buf), and refilled rows' first token was sampled under the DEAD stream's temp/top-k/seed (metadata updated after sampling).
+
+### Fix
+- Scratch prefill always at position 0 (a nonzero scratch position leaves an attended zero-KV prefix on every layer type); padded batched scratch prefill (<=16/call, deferred until >=6 free slots) amortizes the ~50ms eager launch stall.
+- Verbatim `index_copy_` of scratch KV — no rebase anywhere; verified 100/100 token-exact refilled-vs-standalone greedy at pos=131.
+- First refilled token pre-sampled from scratch prefill logits under the NEW stream's params, fed as `next_ids[i]` so its KV lands at `pos` — contiguous stream, no hole.
+- Per-row `ring_valid[B,W]` on ring layers (append/append_t mark, reset clears; decode mask uses it) — stale slots masked not fabricated; left-pad slots unmarked after prefill.
+- `_compact()`: once the pending queue drains, gather surviving rows (KV + m_buf + ring_valid + all sampling metadata) into the next-smaller captured graph 64->32->16->8->4->2->1 (B=1 reuses the activation-time graphs, prefix ""). Tail cost proportional to live rows.
+- Also in this pass: `_fused_gemv=False`+`_cache_w=True` (cuBLAS > fused int4 GEMM 3.3x at B>1), WIDE_CAP=64 lazy per-B graphs (5.1 vs 3.1 tok/ms), GPU suppress_ids replaces Python processors, k-subset sampling over top-k survivors + temp-folded-into-top_v.
+
+### Lesson
+When a model derives positions from mask-cumsum, KV slots are not positions — every cache-splicing scheme that thinks in absolute slot indices (rebase, gap-fill, dead-token masking) is wrong by construction. Verify refilled-vs-standalone output TOKEN-EXACT at a late decode position; near-correct output at early positions hides position-dependent bugs.
+
+### Tests
+- `tests/unit/test_swa_ring_kv.py`: `test_ring_valid_tracks_written_slots`, `test_ring_valid_append_t_marks_wrapped_slot`. Debug harnesses in `.devin/dbg_refill*.py` cover the end-to-end splice (100/100 prefix match gate).
