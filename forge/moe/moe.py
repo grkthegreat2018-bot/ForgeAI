@@ -139,8 +139,10 @@ class Router(nn.Module):
         if self.mode == "aux_free":
             # DeepSeek-V3 auxiliary-loss-free balance loss.
             # Uses FULL softmax probabilities (differentiable through all
-            # experts, not truncated to top-k). Computed per-sequence then
-            # averaged, matching DeepSeek-V3's sequence-wise formulation.
+            # experts, not truncated to top-k). Computed over the flattened
+            # B*T token batch (batch-global), NOT per-sequence — Q65 audit:
+            # granularity matters (Demons-in-the-Detail ACL'25); per-seq
+            # vs batch-global is an untested knob for this codebase.
             #   f_i = fraction of tokens dispatched to expert i (detached)
             #   P_i = softmax(gating_logits)_i   (full, not top-k)
             #   loss = n_experts * sum(f_i * P_i)
