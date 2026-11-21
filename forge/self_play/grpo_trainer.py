@@ -342,13 +342,23 @@ class GRPOTrainer:
         self.stats = GRPOStats()
         self.replay_buffer = replay_buffer  # FOREVER-style replay buffer
 
-        # Freeze reference model
-        for param in self.ref_model.parameters():
-            param.requires_grad = False
-        self.ref_model.eval()
+        # Freeze reference model (None → KL falls back to the LoRA-disabled
+        # base forward on self.model — the adapter-off policy IS the
+        # reference, no second model in memory).
+        if self.ref_model is not None:
+            for param in self.ref_model.parameters():
+                param.requires_grad = False
+            self.ref_model.eval()
 
         # Optimizer (only trainable params — assumes LoRA or similar)
         trainable = [p for p in self.model.parameters() if p.requires_grad]
+        self._trainable = trainable  # hoisted for clip_grad_norm_ calls
+        # Per-epoch caches: input_ids per full_text (the same trajectories
+        # repeat every step) and frozen-ref per-token log-probs — the
+        # reference is constant across steps, so one forward per
+        # completion per EPOCH replaces the old per-step ref pass.
+        self._tok_cache: dict = {}
+        self._ref_lp_cache: dict = {}
         if trainable:
             if getattr(config, 'optimizer', 'adamw') == 'cpu_offload':
                 from forge.training.optim.hybrid_offload import CPUAdamW
@@ -583,6 +593,107 @@ class GRPOTrainer:
                     p, return_tensors="pt").input_ids.shape[1]
         return cache
 
+    def _cached_ids(self, full_text: str) -> torch.Tensor:
+        """Tokenize once per unique full_text — the same trajectories
+        repeat across every train_step of an epoch."""
+        ids = self._tok_cache.get(full_text)
+        if ids is None:
+            if len(self._tok_cache) > 8192:
+                self._tok_cache.clear()
+            ids = self.tokenizer(
+                full_text, return_tensors="pt", truncation=True,
+                max_length=self.config.max_seq_len).input_ids.to(self.device)
+            self._tok_cache[full_text] = ids
+        return ids
+
+    def _hidden_forward(self, batch_ids, attn_mask=None, use_ref=False):
+        """Forward returning (model, tensor, is_hidden). Preferred path:
+        post-norm hidden states WITHOUT materializing [B,T,V] logits —
+        sets the model's transient _skip_head flag (Q101 memory fix).
+        Falls back to a plain logits forward for models without
+        return_hidden support (test mocks, legacy wrappers)."""
+        model = self.ref_model if (use_ref and self.ref_model is not None) \
+            else self.model
+        model._skip_head = True
+        try:
+            try:
+                out = model(batch_ids, attention_mask=attn_mask,
+                            return_hidden=True)
+                return model, out[2], True
+            except TypeError:
+                out = model(batch_ids, attention_mask=attn_mask)
+                return model, out[0], False
+        finally:
+            model._skip_head = False
+
+    def _head_weight(self, model):
+        w = getattr(model.head, 'weight', None)
+        if w is None:
+            w = model.embed.weight  # tied-embedding fallback
+        return w, float(getattr(model, '_logit_scale', 1.0) or 1.0)
+
+    def _sol_entropy(self, sol_tensor, model, is_hidden=True):
+        """Per-token entropy over the solution span. Hidden path is chunked
+        (no [T,V] probs buffer); logits fallback keeps the old math."""
+        w, scale = self._head_weight(model)
+        if is_hidden and sol_tensor.shape[-1] == w.shape[1]:
+            from forge.training.losses.chunked_ce import (
+                chunked_token_entropy)
+            return chunked_token_entropy(sol_tensor, w, chunk_size=512,
+                                         logit_scale=scale)
+        lp = F.log_softmax(sol_tensor.float(), dim=-1)
+        return -(lp.exp() * lp).sum(dim=-1)
+
+    def _gather_sol_logp(self, sol_tensor, model, targets,
+                         is_hidden=True):
+        """Per-token log-probs over the solution span. Hidden path is
+        chunked over tokens ([T,V] logits never materialize); logits
+        fallback keeps the old log_softmax+gather for mocks."""
+        w, scale = self._head_weight(model)
+        if is_hidden and sol_tensor.shape[-1] == w.shape[1]:
+            from forge.training.losses.chunked_ce import (
+                chunked_gather_logprobs)
+            return chunked_gather_logprobs(sol_tensor, w, targets,
+                                           chunk_size=512,
+                                           logit_scale=scale)
+        lp = F.log_softmax(sol_tensor.float(), dim=-1)
+        return lp.gather(1, targets.unsqueeze(0)).squeeze(0)
+
+    def _ensure_ref_lps(self, seqs: list, prompt_len: int):
+        """Fill _ref_lp_cache for any seqs missing it — ONE padded ref
+        forward per group (vs one B=1 forward per completion per step).
+
+        The reference is frozen for the whole epoch, so per-token ref
+        log-probs over the solution span are constant and cacheable."""
+        missing = [s for s in seqs if s["full_text"] not in self._ref_lp_cache]
+        if not missing:
+            return
+        max_seq = max(s["ids"].shape[1] for s in missing)
+        pad_id = self.tokenizer.pad_token_id or 0
+        batch_ids = torch.full((len(missing), max_seq), pad_id,
+                               dtype=torch.long, device=self.device)
+        attn_mask = torch.zeros_like(batch_ids)
+        for i, s in enumerate(missing):
+            n = s["ids"].shape[1]
+            batch_ids[i, :n] = s["ids"][0]
+            attn_mask[i, :n] = 1
+        with torch.inference_mode():
+            if self.ref_model is not None:
+                ref_model, ref_out, ref_is_h = self._hidden_forward(
+                    batch_ids, attn_mask, use_ref=True)
+            else:
+                from forge.training.bitnet_lora import lora_disabled
+                with lora_disabled(self.model):
+                    ref_model, ref_out, ref_is_h = self._hidden_forward(
+                        batch_ids, attn_mask)
+            for i, s in enumerate(missing):
+                n = s["ids"].shape[1]
+                sol_h = ref_out[i, prompt_len - 1:n - 1, :]
+                tgt = s["ids"][0, prompt_len:].long()
+                lp = self._gather_sol_logp(sol_h, ref_model, tgt,
+                                           is_hidden=ref_is_h)
+                self._ref_lp_cache[s["full_text"]] = lp.detach()
+
     def compute_kl_penalty(self, input_ids: torch.Tensor,
                            current_logits: torch.Tensor) -> torch.Tensor:
         """Compute KL(π_current || π_ref) per token.
@@ -591,9 +702,13 @@ class GRPOTrainer:
         Approximated per-token, averaged over sequence.
         """
         with torch.inference_mode():
-            ref_logits, _ = self.ref_model(input_ids)
+            if self.ref_model is not None:
+                ref_logits, _ = self.ref_model(input_ids)
+            else:
+                from forge.training.bitnet_lora import lora_disabled
+                with lora_disabled(self.model):
+                    ref_logits, _ = self.model(input_ids)
             ref_log_probs = F.log_softmax(ref_logits, dim=-1)
-            ref_log_probs.exp()
 
         curr_log_probs = F.log_softmax(current_logits, dim=-1)
         curr_probs = curr_log_probs.exp()
@@ -873,53 +988,96 @@ class GRPOTrainer:
                 gtpo_lam_masks = self._gtpo_compute_conflict_masks(
                     comp_token_ids, advantages)
 
+            # Resolve prompt length once per group (cache to avoid
+            # re-tokenizing the same prompt G times).
+            if prompt_token_lens:
+                prompt_len = prompt_token_lens[prompt_idx]
+            elif prompt_len_cache is not None:
+                prompt_len = prompt_len_cache[prompt]
+            else:
+                prompt_len = self.tokenizer(
+                    prompt, return_tensors="pt").input_ids.shape[1]
+
+            # Collect trainable completions (nonzero advantage + long
+            # enough), tokenizing each unique full_text once.
+            seqs = []
             for comp_idx, (completion, reward, advantage) in enumerate(
                     zip(comps, rews, advantages)):
-                # Skip zero-advantage samples (no gradient signal)
                 if abs(advantage) < 1e-6:
                     continue
-
-                # Tokenize full sequence
                 full_text = prompt + completion
-                enc = self.tokenizer(full_text, return_tensors="pt",
-                                     truncation=True, max_length=self.config.max_seq_len)
-                input_ids = enc.input_ids.to(self.device)
-
-                # Find prompt boundary (use cache to avoid re-tokenizing prompt)
-                if prompt_token_lens:
-                    prompt_len = prompt_token_lens[prompt_idx]
-                elif prompt_len_cache is not None:
-                    prompt_len = prompt_len_cache[prompt]
-                else:
-                    prompt_len = self.tokenizer(
-                        prompt, return_tensors="pt").input_ids.shape[1]
-
+                input_ids = self._cached_ids(full_text)
                 if input_ids.shape[1] <= prompt_len + 1:
-                    continue  # completion too short
+                    continue
+                seqs.append({"comp_idx": comp_idx, "full_text": full_text,
+                             "ids": input_ids, "reward": reward,
+                             "adv": advantage})
+            if not seqs:
+                continue
 
-                with oom_guard(self.device, label="grpo_fwd") as safe:
-                    # Forward pass (current policy) — autocast for bf16 efficiency
-                    with torch.autocast(
-                        device_type="cuda", dtype=torch.bfloat16,
-                        enabled=("cuda" in str(self.device)),
-                    ):
-                        logits, _ = self.model(input_ids)
-                    solution_logits = logits[0, prompt_len - 1:-1, :]
+            with oom_guard(self.device, label="grpo_fwd") as safe:
+                # ONE padded group forward replaces G sequential B=1
+                # forwards — same per-token logits (causal + right-pad
+                # attention mask keeps padded slots invisible).
+                max_seq = max(s["ids"].shape[1] for s in seqs)
+                pad_id = self.tokenizer.pad_token_id or 0
+                batch_ids = torch.full((len(seqs), max_seq), pad_id,
+                                       dtype=torch.long, device=self.device)
+                attn_mask = torch.zeros_like(batch_ids)
+                for i, s in enumerate(seqs):
+                    n = s["ids"].shape[1]
+                    batch_ids[i, :n] = s["ids"][0]
+                    attn_mask[i, :n] = 1
+
+                # Forward pass (current policy) — hidden-only via _skip_head
+                # so the [G,T,V] logits tensor never materializes (Q101).
+                with torch.autocast(
+                    device_type="cuda", dtype=torch.bfloat16,
+                    enabled=("cuda" in str(self.device)),
+                ):
+                    _, policy_tensor, policy_is_h = self._hidden_forward(
+                        batch_ids, attn_mask)
+
+                # Frozen-ref log-probs for the KL term — cached per
+                # full_text so the ref pass runs once per EPOCH, not
+                # once per completion per step (~800 fwd → ~60).
+                use_kl = self.config.rl_algorithm not in ("gtpo", "cispo")
+                if use_kl:
+                    self._ensure_ref_lps(seqs, prompt_len)
+
+                group_losses = []
+                group_kls = []
+                for i, s in enumerate(seqs):
+                    comp_idx = s["comp_idx"]
+                    full_text = s["full_text"]
+                    input_ids = s["ids"]
+                    reward = s["reward"]
+                    advantage = s["adv"]
+                    seq_len = input_ids.shape[1]
+
+                    sol_hidden = policy_tensor[
+                        i, prompt_len - 1:seq_len - 1, :]
                     solution_targets = input_ids[0, prompt_len:].long()
 
-                    if solution_logits.shape[0] == 0:
+                    if sol_hidden.shape[0] == 0:
                         continue  # completion too short
 
-                    # Compute log probabilities for the generated tokens
-                    log_probs = F.log_softmax(solution_logits, dim=-1)
-                    token_log_probs = log_probs.gather(1, solution_targets.unsqueeze(0)).squeeze(0)
+                    # Chunked gather-logp: no [T,V] logits/log_softmax buffer
+                    token_log_probs = self._gather_sol_logp(
+                        sol_hidden, self.model, solution_targets,
+                        is_hidden=policy_is_h)
 
-                    # Compute old log probs (for PPO ratio)
+                    # Compute old log probs (for PPO ratio). Require an
+                    # exact-length match — empty (invalid completion) or
+                    # truncated-mismatch tensors fall back to the detached
+                    # path rather than broadcasting wrong.
                     if (old_log_probs is not None
                             and prompt_idx < len(old_log_probs)
-                            and comp_idx < len(old_log_probs[prompt_idx])):
-                        old_lp = old_log_probs[prompt_idx][comp_idx]
-                        old_lp = old_lp[:token_log_probs.shape[0]]
+                            and comp_idx < len(old_log_probs[prompt_idx])
+                            and old_log_probs[prompt_idx][comp_idx].numel()
+                                == token_log_probs.shape[0]):
+                        old_lp = old_log_probs[prompt_idx][comp_idx].to(
+                            token_log_probs.device)
                         ratio = (token_log_probs - old_lp).exp()
                     else:
                         if old_log_probs is None and prompt_idx == 0 and comp_idx == 0:
@@ -942,8 +1100,9 @@ class GRPOTrainer:
                     # trend across the completion (converging reasoning).
                     if self.config.use_etr_reward:
                         with torch.no_grad():
-                            _probs = log_probs.exp()
-                            _ent = -(_probs * log_probs).sum(dim=-1)  # (T,)
+                            _ent = self._sol_entropy(
+                                sol_hidden, self.model,
+                                is_hidden=policy_is_h)
                             _half = max(1, _ent.shape[0] // 2)
                             _trend = ((_ent[:_half].mean() - _ent[_half:].mean())
                                       / _ent.mean().clamp_min(1e-6))
@@ -964,8 +1123,9 @@ class GRPOTrainer:
 
                         # Entropy regularization: γ * ⟨H⟩_i
                         with torch.no_grad():
-                            probs = log_probs.exp()
-                            entropy_per_token = -(probs * log_probs).sum(dim=-1)
+                            entropy_per_token = self._sol_entropy(
+                                sol_hidden, self.model,
+                                is_hidden=policy_is_h)
                             avg_entropy = entropy_per_token.mean()
                         # GTPO loss: -(A - γ*H) * mean(ratio * λ)
                         adjusted_adv = advantage - self.config.gtpo_entropy_gamma * avg_entropy.item()
@@ -986,8 +1146,14 @@ class GRPOTrainer:
                     else:
                         pg_loss = -torch.min(ratio * advantage, clipped_ratio * advantage).mean()
 
-                        # KL penalty
-                        kl = self.compute_kl_penalty(input_ids, logits)
+                        # KL(π||π_ref) — k3 estimator (Schulman/DeepSeek):
+                        # exp(ref-cur) - (ref-cur) - 1. Unbiased and
+                        # non-negative, needs only per-token ref log-probs
+                        # (the full-softmax KL would require an
+                        # uncacheable [T,V] ref tensor per completion).
+                        ref_lp = self._ref_lp_cache[full_text]
+                        diff = ref_lp - token_log_probs
+                        kl = (diff.exp() - diff - 1).mean()
                         kl_loss = self.config.kl_coefficient * kl
 
                     # MoE load-balancing aux loss (prevents router collapse during RL).
@@ -1000,29 +1166,38 @@ class GRPOTrainer:
                     if moe_aux is not None and moe_aux.requires_grad:
                         moe_aux_term = moe_aux * getattr(self.config, 'moe_aux_weight', 0.01)
 
-                    # Total loss
-                    loss = (pg_loss + kl_loss + moe_aux_term) / self.config.grad_accum_steps
-                    loss.backward()
-                if safe.skipped:
-                    continue
-                accum_count += 1
+                    # Total loss — accumulated per group, single backward
+                    # (backward is linear: sum-of-losses ≡ per-comp grads).
+                    group_losses.append(
+                        (pg_loss + kl_loss + moe_aux_term)
+                        / self.config.grad_accum_steps)
+                    group_kls.append(kl.detach())
+                    total_reward += reward
 
-                total_loss += loss.detach() * self.config.grad_accum_steps
-                total_kl += kl.detach()
-                total_reward += reward
-                n_updates += 1
+                if group_losses:
+                    sum(group_losses).backward()
+            if safe.skipped:
+                continue
+            n_done = len(group_losses)
+            accum_count += n_done
 
-                # Gradient step
-                if accum_count >= self.config.grad_accum_steps:
-                    torch.nn.utils.clip_grad_norm_(
-                        [p for p in self.model.parameters() if p.requires_grad],
-                        self.config.max_grad_norm)
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
-                    # DeepSeek-V3 aux-loss-free: update expert bias after step.
-                    from forge.moe.moe import update_moe_biases
-                    update_moe_biases(self.model)
-                    accum_count = 0
+            total_loss += sum(l.detach() for l in group_losses) * \
+                self.config.grad_accum_steps
+            if group_kls:
+                total_kl += sum(group_kls)
+            n_updates += n_done
+
+            # Gradient step
+            if accum_count >= self.config.grad_accum_steps:
+                torch.nn.utils.clip_grad_norm_(
+                    self._trainable,
+                    self.config.max_grad_norm)
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+                # DeepSeek-V3 aux-loss-free: update expert bias after step.
+                from forge.moe.moe import update_moe_biases
+                update_moe_biases(self.model)
+                accum_count = 0
 
         # Final step
         if accum_count > 0:
@@ -1095,7 +1270,10 @@ class GRPOTrainer:
         prompt_len_cache = self._pretokenize_prompt_lens(prompts) if not prompt_token_lens else None
         with torch.inference_mode():
             for prompt_idx, (prompt, comps) in enumerate(zip(prompts, completions)):
-                group_lps: list[torch.Tensor] = []
+                # Positional: group_lps[comp_idx] MUST align with comps —
+                # an early invalid completion can't shift later entries.
+                group_lps: list[torch.Tensor] = [
+                    torch.tensor([], device=self.device) for _ in comps]
                 # Determine prompt length from cache
                 if prompt_token_lens:
                     prompt_len = prompt_token_lens[prompt_idx]
@@ -1115,13 +1293,11 @@ class GRPOTrainer:
                     input_ids = enc.input_ids.to(self.device)
                     sol_len = input_ids.shape[1] - prompt_len
                     if input_ids.shape[1] <= prompt_len + 1 or sol_len <= 0:
-                        group_lps.append(torch.tensor([], device=self.device))
                         continue
                     valid_seqs.append((comp_idx, input_ids, sol_len))
 
                 if not valid_seqs:
-                    all_log_probs.append(group_lps if group_lps else
-                                         [torch.tensor([], device=self.device)] * len(comps))
+                    all_log_probs.append(group_lps)
                     continue
 
                 # Batch forward pass for all valid completions of this prompt
@@ -1135,23 +1311,21 @@ class GRPOTrainer:
                     batch_ids[i, :seq_len] = ids[0]
                     attn_mask[i, :seq_len] = 1
 
-                logits, _ = self.model(batch_ids, attention_mask=attn_mask)
+                _, roll_out, roll_is_h = self._hidden_forward(
+                    batch_ids, attn_mask)
 
                 for i, (comp_idx, ids, sol_len) in enumerate(valid_seqs):
                     seq_len = ids.shape[1]
-                    solution_logits = logits[i, prompt_len - 1:seq_len - 1, :]
+                    sol_hidden = roll_out[
+                        i, prompt_len - 1:seq_len - 1, :]
                     solution_targets = ids[0, prompt_len:].long()
-                    if solution_logits.shape[0] == 0:
-                        group_lps.append(torch.tensor([], device=self.device))
+                    if sol_hidden.shape[0] == 0:
                         continue
-                    log_probs = F.log_softmax(solution_logits, dim=-1)
-                    token_log_probs = log_probs.gather(
-                        1, solution_targets.unsqueeze(0)).squeeze(0)
-                    group_lps.append(token_log_probs.detach())
+                    token_log_probs = self._gather_sol_logp(
+                        sol_hidden, self.model, solution_targets,
+                        is_hidden=roll_is_h)
+                    group_lps[comp_idx] = token_log_probs.detach()
 
-                # Pad group_lps to match completions count
-                while len(group_lps) < len(comps):
-                    group_lps.append(torch.tensor([], device=self.device))
                 all_log_probs.append(group_lps)
         return all_log_probs
 

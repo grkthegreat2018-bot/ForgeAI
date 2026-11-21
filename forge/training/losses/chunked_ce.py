@@ -298,6 +298,81 @@ class ChunkedDistillCE(Function):
         return grad_input, grad_weight, None, None, None, None, None, None
 
 
+class ChunkedGatherLogProbs(Function):
+    """Gather per-token log-probs of chosen targets, chunked over tokens.
+
+    Computes: out[i] = log_softmax(x[i] @ weight.t())[target[i]]
+    without materializing the full [N, V] logits or [N, V] log-prob
+    tensors — the standard GRPO/RLHF bottleneck (logp gather feeds the
+    PPO ratio, so the result MUST carry gradients to x).
+
+    Args (forward):
+        x:       [N, H]  hidden states (requires_grad for policy updates)
+        weight:  [V, H]  LM head weight
+        target:  [N]     token ids to score
+        chunk_size: tokens per chunk
+
+    Returns:
+        logp: [N] float32 tensor with autograd support via custom backward.
+        d(logp_target)/d(logits) = one_hot(target) - softmax, so
+        grad_input[i] = g[i] * (one_hot(t_i) - p_i) @ weight.
+    """
+
+    @staticmethod
+    def forward(ctx, x, weight, target, chunk_size=512, logit_scale=1.0):
+        N, _H = x.shape
+        weight_cast = weight.to(x.dtype)
+        logp = torch.empty(N, device=x.device, dtype=torch.float32)
+
+        for start in range(0, N, chunk_size):
+            end = min(start + chunk_size, N)
+            x_chunk = x[start:end]
+            t_chunk = target[start:end].long()
+            # logit_scale mirrors the model's post-head scaling (granite ÷10)
+            logits_chunk = (x_chunk @ weight_cast.t()).float() \
+                / float(logit_scale)  # [cs, V]
+            lse = logits_chunk.logsumexp(dim=-1)                # [cs]
+            z_t = logits_chunk.gather(
+                1, t_chunk.unsqueeze(1)).squeeze(1)             # [cs]
+            logp[start:end] = z_t - lse
+
+        ctx.save_for_backward(x, weight, target)
+        ctx.chunk_size = chunk_size
+        ctx.logit_scale = float(logit_scale)
+        return logp.to(x.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Per-token grads require the per-chunk softmax again: recompute the
+        # chunk matmuls (one extra head pass) rather than store [N,V].
+        x, weight, target = ctx.saved_tensors
+        N, _H = x.shape
+        scale = ctx.logit_scale
+        weight_cast = weight.to(x.dtype)
+        grad_input = torch.zeros_like(x) if x.requires_grad else None
+        grad_weight = (torch.zeros_like(weight)
+                       if weight.requires_grad else None)
+
+        for start in range(0, N, ctx.chunk_size):
+            end = min(start + ctx.chunk_size, N)
+            x_chunk = x[start:end]
+            t_chunk = target[start:end].long()
+            go_chunk = grad_output[start:end]
+            with torch.no_grad():
+                logits_chunk = (x_chunk @ weight_cast.t()).float() / scale
+                probs = F.softmax(logits_chunk, dim=-1)
+                probs.scatter_add_(
+                    1, t_chunk.unsqueeze(1),
+                    torch.full_like(probs[:, :1], -1.0))
+                g = -probs * go_chunk.unsqueeze(-1)  # [cs,V] scaled dL/dz
+            if grad_input is not None:
+                grad_input[start:end] = (g.to(x.dtype) @ weight_cast) / scale
+            if grad_weight is not None:
+                grad_weight += (g.to(x.dtype).t() @ x_chunk) / scale
+
+        return grad_input, grad_weight, None, None, None
+
+
 # Sentinel written by score_teacher_logprobs.py for student tokens it could
 # not map to teacher logprobs. Treated as "neutral CE weight" by ChunkedDistillCE.
 ChunkedDistillCE.TEACHER_LOGP_MISSING = -99.0
@@ -317,6 +392,35 @@ def chunked_distill_ce(x, weight, target, teacher_logp, chunk_size=512,
     """
     return ChunkedDistillCE.apply(x, weight, target, teacher_logp,
                                   chunk_size, alpha, clip, floor)
+
+
+def chunked_token_entropy(x, weight, chunk_size=512, logit_scale=1.0):
+    """Per-token Shannon entropy of softmax(x @ weight.t() / logit_scale),
+    chunked over tokens — forward-only (call under no_grad/inference_mode).
+    Returns [N] float32. Same [N,V]-never-materialized guarantee as the CE
+    family; used by GTPO/ETR entropy terms in the GRPO trainer."""
+    N = x.shape[0]
+    out = torch.empty(N, device=x.device, dtype=torch.float32)
+    weight_cast = weight.to(x.dtype)
+    with torch.no_grad():
+        for start in range(0, N, chunk_size):
+            end = min(start + chunk_size, N)
+            logits = (x[start:end] @ weight_cast.t()).float() / logit_scale
+            lp = F.log_softmax(logits, dim=-1)
+            out[start:end] = -(lp.exp() * lp).sum(dim=-1)
+    return out
+
+
+def chunked_gather_logprobs(x, weight, target, chunk_size=512,
+                            logit_scale=1.0):
+    """Functional interface for ChunkedGatherLogProbs.
+
+    Returns [N] log-probs of `target` tokens under x @ weight.t() —
+    gradient-capable (for policy-gradient ratio terms) and ~Vx less
+    memory than materializing logits + log_softmax + gather.
+    """
+    return ChunkedGatherLogProbs.apply(x, weight, target, chunk_size,
+                                       logit_scale)
 
 
 def chunked_entropy_weighted_ce(x, weight, target, chunk_size=512, entropy_alpha=0.5):
