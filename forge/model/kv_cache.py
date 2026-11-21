@@ -44,8 +44,14 @@ class PreAllocatedKVCache:
         self.max_seq_len = max_seq_len
         self.n_layers = n_layers
         self.position = 0  # current fill position (shared across layers)
-        self.quantize = quantize  # "none", "int8"
+        self.quantize = quantize  # "none", "int8", "int4"
         self._dtype = dtype
+        # int4: packed nibbles in uint8 (Q6/Q77 — per-channel K, per-token
+        # V, verified ~lossless at 4-bit on full-attn layers). K channel
+        # scales are a RUNNING absmax [B,nkv,1,D]; when a new token grows
+        # a channel's max the stored K column is requantized (rare after
+        # warm-up). V scales are per-token [B,nkv,T,1] — fully incremental.
+        self._k4_absmax: list | None = None
 
         # Support per-layer head counts (e.g. GQA with different n_kv_heads)
         if n_kv_heads_per_layer is None:
@@ -70,6 +76,13 @@ class PreAllocatedKVCache:
             # Memory: 1 byte/element + 2 bytes/scale per (B, n_kv, T) = ~50% of fp16
             cache_dtype = torch.int8
             scale_dtype = torch.float16
+        elif quantize == "int4":
+            # INT4 packed cache: 2 nibbles per byte — [B,nkv,T,D//2] uint8.
+            cache_dtype = torch.uint8
+            scale_dtype = torch.float16
+            if head_dim % 2:
+                raise ValueError("int4 KV cache requires even head_dim")
+            self._k4_absmax = []
         else:
             cache_dtype = dtype
             scale_dtype = dtype
@@ -88,11 +101,20 @@ class PreAllocatedKVCache:
                 self.v_scales.append(None)
                 continue
             cap = self.ring_caps[i] or max_seq_len
-            k = torch.zeros(batch, nkvh, cap, head_dim, dtype=cache_dtype, device=device)
-            v = torch.zeros(batch, nkvh, cap, head_dim, dtype=cache_dtype, device=device)
+            store_dim = head_dim // 2 if quantize == "int4" else head_dim
+            k = torch.zeros(batch, nkvh, cap, store_dim, dtype=cache_dtype, device=device)
+            v = torch.zeros(batch, nkvh, cap, store_dim, dtype=cache_dtype, device=device)
             self.k_caches.append(k)
             self.v_caches.append(v)
-            if quantize == "int8":
+            if quantize == "int4":
+                # V per-token scales [B,nkv,T,1]; K channel absmax [B,nkv,1,D].
+                self.k_scales.append(None)
+                self.v_scales.append(torch.zeros(
+                    batch, nkvh, cap, 1, dtype=scale_dtype, device=device))
+                self._k4_absmax.append(torch.zeros(
+                    batch, nkvh, 1, head_dim, dtype=scale_dtype,
+                    device=device))
+            elif quantize == "int8":
                 # Per-token scale: (B, n_kv, max_seq_len, 1)
                 ks = torch.zeros(batch, nkvh, max_seq_len, 1, dtype=scale_dtype, device=device)
                 vs = torch.zeros(batch, nkvh, max_seq_len, 1, dtype=scale_dtype, device=device)
@@ -101,6 +123,18 @@ class PreAllocatedKVCache:
             else:
                 self.k_scales.append(None)
                 self.v_scales.append(None)
+
+        # Per-row slot validity for ring layers: the CUDA-graph decode
+        # mask is a broadcast ``slot <= pos`` allow that cannot express
+        # "this row's stream only occupies some slots" (batched left-pad
+        # or continuous-batching refill). Every append marks the slots it
+        # wrote, so un-refined rows reproduce the broadcast mask exactly;
+        # callers may unmark per row to exclude stale KV. [B, W] bool.
+        self.ring_valid = [
+            (torch.zeros(batch, self.ring_caps[i], dtype=torch.bool,
+                         device=device)
+             if self.ring_caps[i] is not None else None)
+            for i in range(n_layers)]
 
     def ring_cap(self, layer_idx: int) -> int | None:
         """Ring-buffer capacity for a sliding-window layer, else None."""
@@ -126,13 +160,8 @@ class PreAllocatedKVCache:
             return (k, v)
         if ring_c is not None:
             pos = min(pos, ring_c)
-        if self.quantize == "int8":
-            # Dequantize: int8 * scale → original dtype
-            k = self.k_caches[layer_idx][:, :, :pos].to(self._dtype) * \
-                self.k_scales[layer_idx][:, :, :pos].to(self._dtype)
-            v = self.v_caches[layer_idx][:, :, :pos].to(self._dtype) * \
-                self.v_scales[layer_idx][:, :, :pos].to(self._dtype)
-            return (k, v)
+        if self.quantize != "none":
+            return self.kv_slice(layer_idx, pos)
         k = self.k_caches[layer_idx][:, :, :pos]
         v = self.v_caches[layer_idx][:, :, :pos]
         return (k, v)
@@ -153,6 +182,9 @@ class PreAllocatedKVCache:
                                device=k_new.device) % ring_c
             self.k_caches[layer_idx].index_copy_(2, idx, k_new[..., -n:, :])
             self.v_caches[layer_idx].index_copy_(2, idx, v_new[..., -n:, :])
+            rv = self.ring_valid[layer_idx]
+            if rv is not None:
+                rv.index_fill_(1, idx, True)
             return
         if pos + T > self.max_seq_len:
             raise ValueError(
@@ -169,9 +201,76 @@ class PreAllocatedKVCache:
             self.v_caches[layer_idx][:, :, pos:pos + T] = v_q
             self.k_scales[layer_idx][:, :, pos:pos + T] = k_scale.to(torch.float16)
             self.v_scales[layer_idx][:, :, pos:pos + T] = v_scale.to(torch.float16)
+        elif self.quantize == "int4":
+            self._append_int4(layer_idx, k_new, v_new, pos, T)
         else:
             self.k_caches[layer_idx][:, :, pos:pos + T] = k_new
             self.v_caches[layer_idx][:, :, pos:pos + T] = v_new
+
+    # ── int4 packed storage ──────────────────────────────────────────
+
+    @staticmethod
+    def _pack4(q: torch.Tensor) -> torch.Tensor:
+        """int8 values in [-8,7] -> packed uint8 [..., D//2] (2 nibbles/byte)."""
+        u = (q + 8).to(torch.uint8)
+        return u[..., 0::2] | (u[..., 1::2] << 4)
+
+    @staticmethod
+    def _unpack4(p: torch.Tensor, head_dim: int) -> torch.Tensor:
+        """packed uint8 [..., D//2] -> int8 values in [-8,7] [..., D]."""
+        lo = (p & 0x0F).to(torch.int16) - 8
+        hi = (p >> 4).to(torch.int16) - 8
+        out = torch.stack([lo, hi], dim=-1).reshape(*p.shape[:-1], head_dim)
+        return out.to(torch.int8)
+
+    def _append_int4(self, i: int, k_new: torch.Tensor,
+                     v_new: torch.Tensor, pos: int, T: int):
+        absmax = self._k4_absmax[i]
+        new_max = k_new.abs().amax(dim=2, keepdim=True)          # [B,nkv,1,D]
+        upd = torch.maximum(absmax, new_max.to(absmax.dtype))
+        grew = (upd > absmax).any(-1, keepdim=False)             # [B,nkv,1]
+        if pos and bool(grew.any()):
+            # A channel's running max grew -> stored K column was packed
+            # under the old scale; dequant + repack only that channel's
+            # entries. Rare after the first few hundred tokens.
+            old = self._unpack4(self.k_caches[i][:, :, :pos],
+                                self.k_caches[i].shape[-1] * 2)
+            s_old = absmax.float() / 7.0
+            s_new = upd.float() / 7.0
+            q = torch.clamp(torch.round(
+                old.float() * s_old / s_new.clamp(min=1e-8)),
+                -8, 7).to(torch.int8)
+            self.k_caches[i][:, :, :pos] = self._pack4(q)
+        self._k4_absmax[i] = upd
+        k_scale = upd.float() / 7.0
+        k_q = torch.clamp(torch.round(
+            k_new.float() / k_scale.clamp(min=1e-8)), -8, 7).to(torch.int8)
+        v_scale = v_new.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / 7.0
+        v_q = torch.clamp(torch.round(
+            v_new.float() / v_scale), -8, 7).to(torch.int8)
+        self.k_caches[i][:, :, pos:pos + T] = self._pack4(k_q)
+        self.v_caches[i][:, :, pos:pos + T] = self._pack4(v_q)
+        self.v_scales[i][:, :, pos:pos + T] = v_scale.to(torch.float16)
+
+    def kv_slice(self, layer_idx: int, n: int):
+        """First n entries dequantized — the read path for attention.
+
+        Replaces direct ``k_caches[i][:, :, :n]`` reads which silently
+        returned int8/packed buffers under quantize!=none."""
+        k = self.k_caches[layer_idx][:, :, :n]
+        v = self.v_caches[layer_idx][:, :, :n]
+        if self.quantize == "int8":
+            k = k.to(self._dtype) * \
+                self.k_scales[layer_idx][:, :, :n].to(self._dtype)
+            v = v.to(self._dtype) * \
+                self.v_scales[layer_idx][:, :, :n].to(self._dtype)
+        elif self.quantize == "int4":
+            hd = k.shape[-1] * 2
+            ks = (self._k4_absmax[layer_idx].float() / 7.0)
+            k = (self._unpack4(k, hd).float() * ks).to(self._dtype)
+            v = (self._unpack4(v, hd).float() *
+                 self.v_scales[layer_idx][:, :, :n].float()).to(self._dtype)
+        return k, v
 
     def advance(self, n: int = 1):
         """Advance the fill position by n tokens."""
@@ -182,6 +281,9 @@ class PreAllocatedKVCache:
         self.position = 0
         if self.pos_t is not None:
             self.pos_t.zero_()
+        for rv in getattr(self, 'ring_valid', []):
+            if rv is not None:
+                rv.zero_()
 
     # ── Graph-safe tensor-position mode ──────────────────────────────────
     # For CUDA-graph decode capture: python-int `position` and `[:pos]`
@@ -200,6 +302,10 @@ class PreAllocatedKVCache:
 
     def enable_tensor_pos(self):
         """Switch to device-tensor position mode for graph capture."""
+        if self.quantize != "none":
+            raise ValueError(
+                "quantized KV cache is incompatible with pos_t/CUDA-graph "
+                "path (kv_view returns raw packed storage)")
         dev = next((k.device for k in self.k_caches if k is not None),
                    torch.device('cuda'))
         self.pos_t = torch.zeros(1, dtype=torch.long, device=dev)
@@ -222,6 +328,10 @@ class PreAllocatedKVCache:
             idx = self.pos_t
         self.k_caches[layer_idx].index_copy_(2, idx, k_new)
         self.v_caches[layer_idx].index_copy_(2, idx, v_new)
+        if ring_c is not None:
+            rv = self.ring_valid[layer_idx]
+            if rv is not None:
+                rv.index_fill_(1, idx, True)
 
     def kv_view(self, layer_idx: int):
         """k/v read view honoring view_len (pos_t path only)."""
@@ -249,11 +359,15 @@ class PreAllocatedKVCache:
             if self.quantize == "int8":
                 total += self.k_scales[i].element_size() * self.k_scales[i].numel()
                 total += self.v_scales[i].element_size() * self.v_scales[i].numel()
+            elif self.quantize == "int4":
+                total += self._k4_absmax[i].element_size() * self._k4_absmax[i].numel()
+                total += self.v_scales[i].element_size() * self.v_scales[i].numel()
         return total / 1e6
 
 
 def create_kv_cache(model: nn.Module, max_total: int, batch: int = 1,
-                    device: torch.device | None = None) -> PreAllocatedKVCache:
+                    device: torch.device | None = None,
+                    quantize: str = "none") -> PreAllocatedKVCache:
     """Build a PreAllocatedKVCache sized for *model* with per-layer head counts.
 
     Handles hybrid conv/attention architectures (e.g. LFM2.5): conv layers get
@@ -301,6 +415,7 @@ def create_kv_cache(model: nn.Module, max_total: int, batch: int = 1,
         head_dim=head_dim, dtype=dtype, device=device,
         n_kv_heads_per_layer=n_kv_heads_per_layer,
         ring_windows=ring_windows,
+        quantize=quantize,
     )
 
 

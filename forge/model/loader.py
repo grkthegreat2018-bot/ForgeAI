@@ -1481,6 +1481,7 @@ class ModelLoader:
         max_new_tokens: int = 64,
         temperature: float = 0.7,
         top_k: int | None = None,
+        kv_quantize: str = "none",
     ) -> str:
         """Generate text with pre-allocated KV cache and batched EOS check.
 
@@ -1506,7 +1507,8 @@ class ModelLoader:
         out_ids = torch.zeros(B, max_total, dtype=prompt_ids.dtype, device=device)
         out_ids[:, :prompt_len] = prompt_ids
 
-        cache = create_kv_cache(model, max_total, batch=B, device=device)
+        cache = create_kv_cache(model, max_total, batch=B, device=device,
+                                quantize=kv_quantize)
 
         with torch.no_grad():
             for step in range(max_new_tokens):

@@ -253,6 +253,13 @@ class GroupedQueryAttention(nn.Module):
         self.rope = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len, base=base, rope_scaling=rope_scaling,
                                     partial_rotary_factor=rope_partial_factor,
                                     partial_rotary_mode=rope_partial_mode) if use_rope else None
+        # Fixed attention logit scale (config.attn_scale; Granite
+        # attention_multiplier). Applied to Q after norm/RoPE so every
+        # downstream SDPA/flash/varlen path inherits it via its default
+        # 1/sqrt(head_dim): q×(attn_scale×sqrt(dh)) then scores×1/sqrt(dh)
+        # = scores×attn_scale. For granite 0.015625×8=0.125=2^-3 the whole
+        # chain is power-of-2 — bit-exact vs HF's scores×0.015625.
+        self._attn_scale = attn_scale
 
         # QK-norm: RMSNorm on Q and K before RoPE (LFM2 / Gemma3 / Qwen3 style).
         # When weights are identity (all 1.0), skip — it's a no-op.
@@ -360,6 +367,11 @@ class GroupedQueryAttention(nn.Module):
                     q = self.rope(q, offset=past_len, position_ids=position_ids)
                     k = self.rope(k, offset=past_len, position_ids=position_ids)
 
+        # Fixed attn logit scale (Granite attention_multiplier): fold into
+        # Q so the default 1/sqrt(dh) SDPA scale yields attn_scale overall.
+        if self._attn_scale is not None:
+            q = q * (self._attn_scale * self.head_dim ** 0.5)
+
         # Cache append + KV retrieval (same for both paths)
         if preallocated_cache is not None:
             if preallocated_cache.pos_t is not None and T == 1:
@@ -393,17 +405,49 @@ class GroupedQueryAttention(nn.Module):
                         v = torch.cat([pv, v], dim=2)
                 else:
                     preallocated_cache.append(layer_idx, k, v)
-                    k = preallocated_cache.k_caches[layer_idx][:, :, :past_len + T]
-                    v = preallocated_cache.v_caches[layer_idx][:, :, :past_len + T]
+                    k, v = preallocated_cache.kv_slice(
+                        layer_idx, past_len + T)
         elif past_key_value is not None and not _use_fused:
             k = torch.cat([past_key_value[0], k], dim=-2)
             v = torch.cat([past_key_value[1], v], dim=-2)
 
         new_kv = (k, v) if use_cache else None
 
-        # Repeat KV heads to match Q heads.
-        k = self._repeat_kv(k)
-        v = self._repeat_kv(v)
+        # GQA head-fold for single-token decode: fold each KV group's
+        # n_rep query heads into the query dim so SDPA runs directly on
+        # [B,H_kv,S,D] K/V. The old repeat_interleave materialized
+        # [B,H,S,D] per layer per step — ~12.6ms at B=32 (~40% of the
+        # decode step); the fold is bit-identical and ~8x faster.
+        _fold_gqa = (T == 1 and self.n_rep > 1 and q.is_cuda
+                     and cu_seqlens is None)
+        if _fold_gqa:
+            q = q.transpose(1, 2).reshape(
+                B, self.n_kv_heads, self.n_rep, self.head_dim)
+
+            def _fold_bias(m):
+                # [.,H,1,S] per-head bias → (B,H_kv,n_rep,S) against the
+                # folded query; head-uniform biases broadcast for free.
+                if m is None or m.size(-2) != 1:
+                    return m
+                if m.size(1) == self.n_heads:
+                    if m.stride(1) == 0:
+                        return m[:, :1]
+                    return m.reshape(m.size(0), self.n_kv_heads,
+                                     self.n_rep, m.size(-1))
+                return m
+
+            def _unfold(out_):
+                return out_.reshape(B, 1, self.n_heads,
+                                    self.head_dim).transpose(1, 2)
+        else:
+            k = self._repeat_kv(k)
+            v = self._repeat_kv(v)
+
+            def _fold_bias(m):
+                return m
+
+            def _unfold(out_):
+                return out_
 
         # QK-Clip monitoring (training-only, opt-in): record per-head max |logit|.
         if self._qk_clip_monitor is not None and self.training:
@@ -441,15 +485,32 @@ class GroupedQueryAttention(nn.Module):
                 q_pos = preallocated_cache.pos_t.reshape(1)
             else:
                 q_pos = _past_len + torch.arange(T, device=q.device)
+            swa = None
             if pos_t_path and ring_c is not None:
                 # Ring buffer: every resident key is in-window by
                 # construction. Slots > q_pos are stale only before the
                 # ring fills (slot == position while pos < C).
-                k_pos = torch.arange(total_len, device=q.device)
-                allow = k_pos[None, :] <= q_pos.clamp(max=ring_c - 1)[:, None]
+                rvl = getattr(preallocated_cache, 'ring_valid', None)
+                rvl = (rvl[layer_idx]
+                       if rvl is not None and layer_idx < len(rvl)
+                       else None)
                 # The shared bucket bias encodes POSITION-based validity —
                 # wrong (and wrong-sized) for a slot-indexed ring buffer.
                 attention_bias = None
+                if rvl is not None:
+                    # Per-row slot validity — every written slot is
+                    # marked by append/append_t; batched left-pad and
+                    # continuous-batching refills unmark stale slots so
+                    # another stream's KV is never attended.
+                    swa = torch.zeros(
+                        B, 1, 1, total_len, device=q.device,
+                        dtype=q.dtype)
+                    swa = swa.masked_fill(
+                        ~rvl[:, None, None, :total_len], float('-inf'))
+                else:
+                    k_pos = torch.arange(total_len, device=q.device)
+                    allow = k_pos[None, :] <= q_pos.clamp(
+                        max=ring_c - 1)[:, None]
             elif pos_t_path:
                 # pos_t (CUDA-graph decode) on a LINEAR buffer: slot index
                 # == position index — derive k_pos from arange, NOT
@@ -467,8 +528,13 @@ class GroupedQueryAttention(nn.Module):
                                      _past_len + T, device=q.device)
                 allow = (k_pos[None, :] <= q_pos[:, None]) & \
                         ((q_pos[:, None] - k_pos[None, :]) < self.sliding_window)
-            swa = torch.zeros(T, total_len, device=q.device, dtype=q.dtype)
-            swa = swa.masked_fill(~allow, float('-inf')).view(1, 1, T, total_len)
+            if swa is None:
+                swa = torch.zeros(T, total_len, device=q.device,
+                                  dtype=q.dtype)
+                swa = swa.masked_fill(
+                    ~allow, float('-inf')).view(1, 1, T, total_len)
+            else:
+                swa = swa.expand(B, 1, T, total_len)
             if attention_bias is not None:
                 if attention_bias.shape[-1] != total_len:
                     # Position-ordered ring read ↔ last-total_len columns of
@@ -481,8 +547,8 @@ class GroupedQueryAttention(nn.Module):
             # adds/graph-pool views can hand a stride-0 or non-contiguous
             # last dim (errors as `(*bias): last dimension must be
             # contiguous`); contiguous() is a no-op when already dense.
-            out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=swa.contiguous())
+            out = _unfold(F.scaled_dot_product_attention(
+                q, k, v, attn_mask=_fold_bias(swa).contiguous()))
             return self._finish_attn(x, out, gate_logits), new_kv
         # CSA (Compressed Sparse Attention): for long sequences, use top-k
         # position selection to reduce O(S^2) → O(S*k). Short sequences
@@ -508,8 +574,8 @@ class GroupedQueryAttention(nn.Module):
             # .contiguous(): caller-supplied mask may be a non-contiguous
             # view (static-KV graph bucket slice) or stride-0 expand —
             # mem_eff SDPA rejects stride(-1) != 1 with `(*bias)`.
-            out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=attention_bias.contiguous())
+            out = _unfold(F.scaled_dot_product_attention(
+                q, k, v, attn_mask=_fold_bias(attention_bias).contiguous()))
         elif sink_bias is not None:
             # Build a combined bias: causal + sink
             if T == 1 and total_len > 1:
@@ -518,12 +584,18 @@ class GroupedQueryAttention(nn.Module):
                 causal = _causal_mask(T, total_len, total_len - T,
                                       q.device, q.dtype)
                 bias = causal + sink_bias.to(q.dtype).expand(B, self.n_heads, T, total_len)
-            out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=bias.contiguous())
+            out = _unfold(F.scaled_dot_product_attention(
+                q, k, v, attn_mask=_fold_bias(bias).contiguous()))
         elif T == 1 and total_len > 1:
-            out = flash_attention(q, k, v, is_causal=False)
+            if _fold_gqa:
+                out = _unfold(F.scaled_dot_product_attention(q, k, v))
+            else:
+                out = flash_attention(q, k, v, is_causal=False)
         elif total_len == T:
-            out = flash_attention(q, k, v, is_causal=True)
+            if _fold_gqa:
+                out = _unfold(F.scaled_dot_product_attention(q, k, v))
+            else:
+                out = flash_attention(q, k, v, is_causal=True)
         else:
             # Continuation forward (T>1 over a cached prefix): SDPA's
             # is_causal anchors the mask TOP-LEFT on non-square shapes,
@@ -857,6 +929,9 @@ class ModularBlock(nn.Module):
         _norm_type = getattr(config, 'norm_type', 'rmsnorm')
         _norm_eps = getattr(config, 'norm_eps', 1e-6)
         _zc = getattr(config, 'zero_centered_norm', False)
+        # Granite residual_multiplier: block outputs are scaled by R on the
+        # residual add (x = x + out*R). 1.0 = standard add (all other models).
+        self._res_mult = float(getattr(config, 'residual_multiplier', 1.0) or 1.0)
         if self._use_adaln:
             from forge.training.losses.adaln_zero import AdaLNZero
             self.ln1 = AdaLNZero(config.d_model, _cond_dim,
@@ -1008,7 +1083,7 @@ class ModularBlock(nn.Module):
 
         # FFN-SkipLLM: skip FFN on saturated layers during eval.
         # Disabled by default — calibration shows no saturation in V3 (16 layers).
-        # See docs/FFN_RESEARCH.md. Infrastructure kept for future 32+ layer models.
+        # See FFN-SkipLLM research notes. Infrastructure kept for future 32+ layer models.
         self._ffn_skip_threshold = getattr(config, 'ffn_skip_threshold', 0.0)
         self._ffn_skip_count = 0
         self._static_skip_layers: set[int] = set()  # populated when threshold > 0
@@ -1087,6 +1162,8 @@ class ModularBlock(nn.Module):
         pre_residual (LFM3): x + post_attn_norm(attn_out)
         post_residual:       post_attn_norm(x + attn_out)   (no-op if off)
         """
+        if self._res_mult != 1.0:
+            attn_out = attn_out * self._res_mult
         if self._use_sandwich and self._sandwich_pre:
             return x + self.post_attn_norm(attn_out)
         x = x + attn_out
@@ -1096,6 +1173,8 @@ class ModularBlock(nn.Module):
 
     def _add_ffn(self, x: torch.Tensor, ffn_out: torch.Tensor) -> torch.Tensor:
         """Residual add for the FFN branch (same mode rules as _add_attn)."""
+        if self._res_mult != 1.0:
+            ffn_out = ffn_out * self._res_mult
         if self._use_sandwich and self._sandwich_pre:
             return x + self.post_ffn_norm(ffn_out)
         x = x + ffn_out
@@ -1267,7 +1346,7 @@ class ModularBlock(nn.Module):
             # FFN-SkipLLM: skip FFN on saturated layers during eval.
             # Uses a static skip set (calibrated via cosine similarity).
             # Safe with KV cache: FFN doesn't touch KV state, only attention.
-            # Disabled by default — V3 has no saturation region (see docs/FFN_RESEARCH.md).
+            # Disabled by default — V3 has no saturation region (see FFN-SkipLLM research notes).
             if (self._ffn_skip_threshold > 0.0 and not self.training
                     and self.layer_idx in self._static_skip_layers):
                 self._ffn_skip_count += 1
