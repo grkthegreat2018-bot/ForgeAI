@@ -695,13 +695,29 @@ class GRPOTrainer:
                 self._ref_lp_cache[s["full_text"]] = lp.detach()
 
     def compute_kl_penalty(self, input_ids: torch.Tensor,
-                           current_logits: torch.Tensor) -> torch.Tensor:
+                           current_tensor: torch.Tensor,
+                           is_hidden: bool = False) -> torch.Tensor:
         """Compute KL(π_current || π_ref) per token.
 
         KL = Σ p_current * log(p_current / p_ref)
-        Approximated per-token, averaged over sequence.
-        """
-        with torch.inference_mode():
+        Approximated per-token, averaged over sequence. Hidden path is
+        chunked (ChunkedKLDiv) — no [T,V] logits on either model."""
+        w, scale = self._head_weight(self.model)
+        if is_hidden and current_tensor.shape[-1] == w.shape[1]:
+            with torch.no_grad():
+                ref_model, ref_hidden, ref_is_h = self._hidden_forward(
+                    input_ids)
+            if ref_is_h:
+                from forge.training.losses.chunked_ce import (
+                    chunked_kl_divergence)
+                N = current_tensor.shape[0] * current_tensor.shape[1]
+                kl_tok = chunked_kl_divergence(
+                    current_tensor.reshape(N, -1),
+                    ref_hidden.reshape(N, -1), w,
+                    chunk_size=512, logit_scale=scale)
+                return kl_tok.mean()
+
+        with torch.no_grad():
             if self.ref_model is not None:
                 ref_logits, _ = self.ref_model(input_ids)
             else:
@@ -710,7 +726,7 @@ class GRPOTrainer:
                     ref_logits, _ = self.model(input_ids)
             ref_log_probs = F.log_softmax(ref_logits, dim=-1)
 
-        curr_log_probs = F.log_softmax(current_logits, dim=-1)
+        curr_log_probs = F.log_softmax(current_tensor, dim=-1)
         curr_probs = curr_log_probs.exp()
 
         # KL divergence per token: sum over vocab
@@ -975,8 +991,13 @@ class GRPOTrainer:
                             truncation=True, max_length=self.config.max_seq_len
                         ).input_ids.to(self.device)
                         with torch.no_grad():
-                            _logits, _ = self.model(_enc)
-                        self._gtpo_init_entropy = self._gtpo_compute_entropy(_logits)
+                            _m, _t, _ih = self._hidden_forward(_enc)
+                        if _ih:
+                            self._gtpo_init_entropy = float(
+                                self._sol_entropy(_t[0], _m).mean())
+                        else:
+                            self._gtpo_init_entropy = \
+                                self._gtpo_compute_entropy(_t)
                         print(f"  [GTPO] Initial entropy: {self._gtpo_init_entropy:.4f} "
                               f"(threshold: {self.config.gtpo_entropy_threshold:.4f})")
 
@@ -1356,12 +1377,15 @@ class GRPOTrainer:
                 input_ids = enc.input_ids.to(self.device)
                 if input_ids.shape[1] <= prompt_len + 1:
                     continue
-                logits, _ = self.model(input_ids)
-                sol_logits = logits[0, prompt_len - 1:-1, :]
-                if sol_logits.shape[0] == 0:
+                _m, _t, _ih = self._hidden_forward(input_ids)
+                sol_tensor = _t[0, prompt_len - 1:-1, :]
+                if sol_tensor.shape[0] == 0:
                     continue
-                lp = F.log_softmax(sol_logits.float(), dim=-1)
-                ent = -(lp.exp() * lp).sum(dim=-1).mean()
+                if _ih:
+                    ent = self._sol_entropy(sol_tensor, _m).mean()
+                else:
+                    lp = F.log_softmax(sol_tensor.float(), dim=-1)
+                    ent = -(lp.exp() * lp).sum(dim=-1).mean()
                 entropies.append(float(ent.item()))
         return sum(entropies) / len(entropies) if entropies else 0.0
 
@@ -1653,17 +1677,18 @@ class GRPOTrainer:
                 if sol_len <= 0:
                     continue
 
-                # Forward pass (current policy).
-                logits, _ = self.model(input_ids)
-                solution_logits = logits[0, prompt_len - 1:-1, :]
+                # Forward pass (current policy) — hidden-only when
+                # supported so [1,T,V] logits never materialize (Q101).
+                _, adv_tensor, adv_is_h = self._hidden_forward(input_ids)
+                sol_tensor = adv_tensor[0, prompt_len - 1:-1, :]
                 solution_targets = input_ids[0, prompt_len:].long()
 
-                if solution_logits.shape[0] == 0:
+                if sol_tensor.shape[0] == 0:
                     continue
 
-                log_probs = F.log_softmax(solution_logits, dim=-1)
-                token_log_probs = log_probs.gather(
-                    1, solution_targets.unsqueeze(0)).squeeze(0)
+                token_log_probs = self._gather_sol_logp(
+                    sol_tensor, self.model, solution_targets,
+                    is_hidden=adv_is_h)
 
                 with torch.no_grad():
                     old_log_probs = token_log_probs.detach()
@@ -1687,8 +1712,9 @@ class GRPOTrainer:
 
                 pg_loss = pg_loss.mean()
 
-                # KL penalty.
-                kl = self.compute_kl_penalty(input_ids, logits)
+                # KL penalty — hidden path is chunked end-to-end.
+                kl = self.compute_kl_penalty(input_ids, adv_tensor,
+                                             is_hidden=adv_is_h)
                 kl_loss = self.config.kl_coefficient * kl
 
                 # MoE load-balancing aux loss (prevents router collapse during RL).

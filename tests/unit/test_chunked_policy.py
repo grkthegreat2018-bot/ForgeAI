@@ -48,6 +48,25 @@ def test_gather_logprobs_grad_matches():
     assert torch.allclose(w2.grad, w.grad, atol=1e-4)
 
 
+def test_kl_divergence_matches_full_path_and_grads():
+    from forge.training.losses.chunked_ce import chunked_kl_divergence
+    x, w, _ = _rand()
+    xr = torch.randn_like(x)  # detached reference
+    lp_c = F.log_softmax(x @ w.t(), dim=-1)
+    lp_r = F.log_softmax(xr @ w.t(), dim=-1)
+    ref = (lp_c.exp() * (lp_c - lp_r)).sum(-1)
+    got = chunked_kl_divergence(x, xr, w, chunk_size=8)
+    assert torch.allclose(got, ref, atol=1e-5)
+    # grads: ref path via autograd vs chunked custom backward
+    x2, xr2 = x.detach().clone().requires_grad_(True), \
+        xr.detach().clone().requires_grad_(True)
+    kl = chunked_kl_divergence(x2, xr2, w, chunk_size=8)
+    kl.sum().backward()
+    ref.sum().backward()
+    assert torch.allclose(x2.grad, x.grad, atol=1e-4)
+    assert xr2.grad is None  # reference carries no gradient
+
+
 def test_token_entropy_matches_full_path():
     x, w, _ = _rand()
     lp = F.log_softmax((x @ w.t()), dim=-1)

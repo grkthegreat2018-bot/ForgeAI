@@ -394,6 +394,67 @@ def chunked_distill_ce(x, weight, target, teacher_logp, chunk_size=512,
                                   chunk_size, alpha, clip, floor)
 
 
+class ChunkedKLDiv(Function):
+    """Per-token KL(pi_cur || pi_ref) over hidden states, chunked.
+
+    Computes kl[i] = sum_j p_j * (lp_j - r_j) where p/lp come from
+    x_cur @ W.t() and r from x_ref @ W.t() — no [N,V] logits or
+    log-prob tensors ever exist. Gradients flow to x_cur only
+    (x_ref is a detached reference).
+
+    Closed-form d(kl)/dz_k = p_k * (d_k - kl) — recompute per chunk in
+    backward rather than store [N,V] (same pattern as
+    ChunkedGatherLogProbs).
+    """
+
+    @staticmethod
+    def forward(ctx, x_cur, x_ref, weight, chunk_size=512,
+                logit_scale=1.0):
+        N, _H = x_cur.shape
+        w = weight.to(x_cur.dtype)
+        scale = float(logit_scale)
+        kl = torch.empty(N, device=x_cur.device, dtype=torch.float32)
+        with torch.no_grad():
+            for s in range(0, N, chunk_size):
+                e = min(s + chunk_size, N)
+                lp_c = F.log_softmax(
+                    (x_cur[s:e] @ w.t()).float() / scale, dim=-1)
+                lp_r = F.log_softmax(
+                    (x_ref[s:e] @ w.t()).float() / scale, dim=-1)
+                kl[s:e] = (lp_c.exp() * (lp_c - lp_r)).sum(dim=-1)
+        ctx.save_for_backward(x_cur, x_ref, weight)
+        ctx.chunk_size = chunk_size
+        ctx.logit_scale = scale
+        return kl.to(x_cur.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x_cur, x_ref, weight = ctx.saved_tensors
+        N, _H = x_cur.shape
+        scale = ctx.logit_scale
+        w = weight.to(x_cur.dtype)
+        grad_cur = torch.zeros_like(x_cur) if x_cur.requires_grad else None
+        grad_weight = (torch.zeros_like(weight)
+                       if weight.requires_grad else None)
+        for s in range(0, N, ctx.chunk_size):
+            e = min(s + ctx.chunk_size, N)
+            go = grad_output[s:e]
+            with torch.no_grad():
+                lp_c = F.log_softmax(
+                    (x_cur[s:e] @ w.t()).float() / scale, dim=-1)
+                lp_r = F.log_softmax(
+                    (x_ref[s:e] @ w.t()).float() / scale, dim=-1)
+                p = lp_c.exp()
+                d = lp_c - lp_r
+                kl = (p * d).sum(dim=-1, keepdim=True)
+                g = (p * (d - kl) * go.unsqueeze(-1)).to(x_cur.dtype)
+            if grad_cur is not None:
+                grad_cur[s:e] = (g @ w) / scale
+            if grad_weight is not None:
+                grad_weight += (g.t() @ x_cur[s:e]) / scale
+        return grad_cur, None, grad_weight, None, None
+
+
 def chunked_token_entropy(x, weight, chunk_size=512, logit_scale=1.0):
     """Per-token Shannon entropy of softmax(x @ weight.t() / logit_scale),
     chunked over tokens — forward-only (call under no_grad/inference_mode).
@@ -409,6 +470,14 @@ def chunked_token_entropy(x, weight, chunk_size=512, logit_scale=1.0):
             lp = F.log_softmax(logits, dim=-1)
             out[start:end] = -(lp.exp() * lp).sum(dim=-1)
     return out
+
+
+def chunked_kl_divergence(x_cur, x_ref, weight, chunk_size=512,
+                          logit_scale=1.0):
+    """Functional interface for ChunkedKLDiv — returns [N] per-token
+    KL(pi_cur||pi_ref), grad-capable on x_cur."""
+    return ChunkedKLDiv.apply(x_cur, x_ref, weight, chunk_size,
+                              logit_scale)
 
 
 def chunked_gather_logprobs(x, weight, target, chunk_size=512,
