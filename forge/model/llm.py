@@ -116,6 +116,10 @@ class ConfigurableResearchLLM(nn.Module):
         # V_0 is captured from layer 0's first attention forward and stored
         # as a buffer (detached, no grad) for use by subsequent layers.
         self._use_value_residual = getattr(config, 'use_value_residual', False)
+        # Granite multipliers: embeds×M at input, head logits÷S.
+        # (residual_multiplier is applied per-block — see ModularBlock.)
+        self._embed_mult = float(getattr(config, 'embedding_multiplier', 1.0) or 1.0)
+        self._logit_scale = float(getattr(config, 'logits_scaling', 1.0) or 1.0)
         self._v0_mode = getattr(config, 'value_residual_mode', 'resformer')
         self._v0: torch.Tensor | None = None  # captured during first forward
         self._v0_gates = None
@@ -547,6 +551,9 @@ class ConfigurableResearchLLM(nn.Module):
                         f"tokenizer/vocab mismatch between the data and "
                         f"this checkpoint.")
         x = self.embed(idx)
+        # Granite embedding_multiplier: scaled embeds (×12 on granite-4.1).
+        if self._embed_mult != 1.0:
+            x = x * self._embed_mult
         # LFM2.5: apply embedding norm after embedding, before layers
         if self.embed_norm is not None:
             x = self.embed_norm(x)
@@ -860,9 +867,22 @@ class ConfigurableResearchLLM(nn.Module):
             )
             logits = None
         else:
-            logits = self.head(
-                hidden[:, -1:] if logits_last_only and targets is None
-                else hidden)
+            # _skip_head (transient, consumed on read): caller wants only the
+            # post-norm hidden states (return_hidden=True) and computes
+            # vocab-side terms itself in chunks — avoids materializing the
+            # full [B, T, V] logits tensor (GRPO/GTPO paths, ~2-3GB at
+            # G=8,T=1024,V=131k). Follows the _sift_start_layer convention.
+            _skip = bool(getattr(self, '_skip_head', False))
+            self._skip_head = False
+            if _skip and targets is None:
+                logits = None
+            else:
+                logits = self.head(
+                    hidden[:, -1:] if logits_last_only and targets is None
+                    else hidden)
+                # Granite logits_scaling: HF divides head logits by S (÷10).
+                if self._logit_scale != 1.0:
+                    logits = logits / self._logit_scale
             loss = None
             if targets is not None:
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
