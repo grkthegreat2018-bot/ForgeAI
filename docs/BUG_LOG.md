@@ -893,3 +893,21 @@ When a model derives positions from mask-cumsum, KV slots are not positions â€” 
 
 ### Tests
 - `tests/unit/test_swa_ring_kv.py`: `test_ring_valid_tracks_written_slots`, `test_ring_valid_append_t_marks_wrapped_slot`. Debug harnesses in `.devin/dbg_refill*.py` cover the end-to-end splice (100/100 prefix match gate).
+
+## 2026-11-21 — quantized KV cache silently returned raw ints (dead `quantize` path)
+
+### Symptom
+- `PreAllocatedKVCache(quantize="int8")` allocated integer K/V buffers + scales, but attention read `cache.k_caches`/`v_caches` directly — receiving int8 values interpreted as bf16/fp32. The `quantize` option was effectively dead code; any caller using it got silent garbage attention (no error, no warning).
+
+### Root cause
+- Append path quantized into int storage, but the read path (`forge/model/layers.py` attention) had no dequant step — the two halves were wired independently and nothing exercised the quantized branch end-to-end. No test covered `quantize!="none"`.
+
+### Fix
+- `kv_slice()` accessor on `PreAllocatedKVCache` returns dequantized K/V views for integer-backed modes; attention reads through it (`forge/model/layers.py`).
+- Wired a real `quantize="int4"` mode while repairing: packed nibbles, per-channel K scales (running absmax + requant-on-grow), per-token V scales. Granite-verified: CE 2.343?2.371 (+0.028), 3.9x cache memory cut, greedy generation coherent. `generate_text(kv_quantize="int4")` exposes it; the pos_t/CUDA-graph path explicitly rejects quantized caches (they need raw graph-safe buffers).
+
+### Lesson
+An option whose write path works but read path ignores it is worse than no option — it fails *successfully*. Any "mode" flag needs at least one end-to-end test through the mode, not just unit tests of each half.
+
+### Tests
+- `tests/unit/test_kv_int4.py`: packed round-trip bounded by scale/2, running-absmax requant on growth, generation-path smoke. Commit `0a5c85e`.
