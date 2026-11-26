@@ -1,4 +1,22 @@
 
+#### EXP-XTAL — rule crystallization testbed: memorization vs. machinery (2026-11-26)
+
+- **New harness**: orge/exp/xtal_grammar.py + xtal_probe.py — synthetic
+  grammar (V=256, 8 latent classes x members dial, tagged rules
+  noise/A-agree/B-rare/C-copy/D-class-copy/R-relational; holdout members are
+  successors-only), grouped-backward gradient alignment, embedding geometry,
+  per-layer linear readout probes. Driver scripts/exp_xtal.py.
+- **Findings**: memorization is a first-mover absorbing equilibrium (floor
+  loss kills the gradient — error is the only fuel); class geometry forms in
+  embeddings for free but is never used by readout (depth probes: enters
+  1.000, destroyed to 0.091 by L4 in memorized contexts, assembled 0.097 to
+  1.000 in rule-D contexts — context-gated mode multiplexing); paid-for
+  machinery generalizes distributionally but erodes under memorization
+  pressure invisible to train metrics; relational rule-R confirms the
+  lookup-feasibility threshold — m64 forced genuine class-composition
+  machinery (holdout excess 1.19 vs ceiling 2.08), m8 memorized and stayed
+  at ceiling. Full writeup: wiki XTAL-Rule-Crystallization.
+
 #### RSI loop on Spark — chat-format/tokenizer fixes + first end-to-end epoch (R72)
 
 - **Two hard blockers found + fixed**: (a) `render_messages_for_config`

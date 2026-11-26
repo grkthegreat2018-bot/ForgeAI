@@ -3914,3 +3914,16 @@ Runs v3dm8/v3dm64 in flight. Probe probe_xtal_readout.py in flight:
 linear probes per layer, successor-class vs trigger-class targets,
 train-trigger vs holdout-trigger positions. Decides WHERE the decoupling
 lives (readout-only vs end-to-end).
+
+## EXP-XTAL v5 relational rule-R results (2026-11-26)
+
+v5rm8 (members=8, lookup surface 4096 pairs): ruleR crystallized on train
+(xs 0.019) but RH holdout stuck AT ceiling (xs 1.955 vs blind-ceiling 2.08)
+— memorized per-pair lookup, zero generalization.
+v5rm64 (members=64, surface 262144 pairs): RH xs fell 2.46 -> 1.19 by step
+6000 then partially ERODED to 1.59 at 7999 — forced class-composition
+machinery + the same erosion signature as rule-D. Copy slightly damaged
+(xs 0.152 vs 0.074 in m8): capacity competition real but secondary.
+Rule-A holdout flat at ceiling in both: modes never cross-recruit.
+=> THE control knob is lookup feasibility. Program pivot: interventions
+(mode-injection, backward-gating, memory-as-pressure-valve).

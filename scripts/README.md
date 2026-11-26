@@ -63,7 +63,7 @@ real tests live in `tests/`) · `download_`/`gen_` data pipelines ·
 | `dbg_step_profile.py` | Profile the BatchedDecoding step: replay time vs python/sampling overhead. Times graph replay alone on the liv |
 | `dbg_weight_path.py` | Replay-time comparison: int4-fused GEMM vs bf16-cached cuBLAS at B=16. Flags must be set BEFORE batch-graph ca |
 
-## Probes & diagnostics (14)
+## Probes & diagnostics (15)
 
 | Script | Purpose |
 |---|---|
@@ -80,9 +80,10 @@ real tests live in `tests/`) · `download_`/`gen_` data pipelines ·
 | `probe_spark_scale.py` | Spark supervision scale-confirm — winners at N_TRAIN=512 / 60 steps. Reuses probe_spark_supervision helpers; o |
 | `probe_spark_supervision.py` | Spark supervision probe — what does 20-step LoRA-SFT actually need? Uses PRODUCTION loss paths where they exis |
 | `probe_weight_entropy.py` | probe_weight_entropy.py — information floor of trained weights. Any storage scheme claiming IDENTICAL output m |
+| `probe_xtal_readout.py` | Probe the decoupling: does the network INTERNALLY compute successor class for holdout triggers, or is the clas |
 | `show_winners.py` | Dump verified winning programs from the evolve DB for human review. Usage: python scripts/show_winners.py <db> |
 
-## EXP experiment surfaces (20)
+## EXP experiment surfaces (22)
 
 | Script | Purpose |
 |---|---|
@@ -106,6 +107,8 @@ real tests live in `tests/`) · `download_`/`gen_` data pipelines ·
 | `exp_ndp.py` | EXP-1 NDP: exact attention split across GPU-window + host-tier KV. Compares per-token cost of: A) full attenti |
 | `exp_prevtok.py` | EXP-prevtok driver: prev-token head + self-correcting decode on Qwen2.5-0.5B. Phase 1: train PrevTokenHead (ti |
 | `exp_trainless.py` | EXP-1 train-less generalization: live memory surfaces on stock Qwen2.5-0.5B. Attaches TitanMemory fast-weight  |
+| `exp_xtal.py` | EXP-XTAL driver â€” rule crystallization dynamics on the synthetic grammar. Trains a vanilla tiny transformer  |
+| `exp_xtal_read.py` | Read EXP-XTAL curve files — extract crystallization transitions. Usage: python scripts/exp_xtal_read.py result |
 
 ## Port & parity checks (6)
 
@@ -164,7 +167,7 @@ real tests live in `tests/`) · `download_`/`gen_` data pipelines ·
 | `generate_synthetic_data.py` | Pure-Python training data generator for ForgeAI V7 8B from-scratch training. Generates JSONL training data usi |
 | `make_xp_shards.py` | Split a checkpoint into xp_shards/ for AirLLMStreamer. Layout the streamer expects (forge/param name space): < |
 
-## Evolve-loop drivers (10)
+## Evolve-loop drivers (11)
 
 | Script | Purpose |
 |---|---|
@@ -176,6 +179,7 @@ real tests live in `tests/`) · `download_`/`gen_` data pipelines ·
 | `fn_evolve.py` | Code evolution - feed a function/script, get a verified-better one back. The loop: generator (small coder LLM) |
 | `ledger_audit.py` | Promotion-ledger audit (COMPETITIVE_AUDIT A11b): what fraction of evolution output ever got WIRED IN — run qua |
 | `rsi_evolve.py` | RSI campaign: evolve ForgeAI LLM-research kernels, then hone the proposer on its own verified wins — recursive |
+| `rsi_supervisor.py` | Supervised wrapper for the RSI self-play loop. A CUDA device-side assert (OOB gather / index_select) poisons t |
 | `run_evolve.py` | ForgeEvolve runner — single entry point for all evolution runs. Driven by JSON configs in forge/evolution/conf |
 | `scout_loop.py` | Scout — lightweight goal-driven discovery loop (OpenEvolve-lite). Searches the existing ForgeEvolve domain spe |
 

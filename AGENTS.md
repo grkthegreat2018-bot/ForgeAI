@@ -2049,6 +2049,32 @@ fibonacci structure — base-Qwen-0.5B serving quality.  Serve with
 `learn=False` (learn=True self-poisons: emitted tokens write cells,
 the gate then fires on the model's own output).
 
+## EXP-XTAL rule crystallization — memorization vs. machinery testbed
+
+Controlled synthetic grammar measuring when tiny transformers learn per-token
+lookup vs. class-based rule machinery. Harness: `forge/exp/xtal_grammar.py`
+(V=256, 8 latent classes x members dial, tagged rules A/B/C/D/R, holdout
+members appear as successors but never triggers), `forge/exp/xtal_probe.py`
+(gradient alignment + embedding geometry), `scripts/exp_xtal.py` (driver,
+`--members/--rule-d/--rule-r/--wd` flags), `scripts/probe_xtal_readout.py`
+(per-layer linear probes), tests in `tests/unit/test_xtal.py` (12 passing).
+Curves `results/xtal/*.jsonl`; findings logged in `.devin/scratchpad.md`;
+full writeup on wiki page `XTAL-Rule-Crystallization`.
+
+Key results (2026-11): lookup crystallizes 10-20x faster than machinery and
+kills the gradient that would fund rules (error is the only fuel); class
+geometry forms in embeddings as a free byproduct but is never used by the
+readout — depth probes show class info entering perfectly (embed 1.000) then
+destroyed with depth (L4 0.091) in memorized contexts, while rule-D contexts
+assemble it (0.097→1.000): context-gated mode multiplexing. Paid-for
+machinery generalizes distributionally (rule-D holdout 4.8→2.27) but erodes
+under memorization pressure (2.27→2.50 drift, invisible in train metrics).
+Relational rule-R v5: lookup-feasibility threshold confirmed — m64 (262k-pair
+lookup surface, infeasible) forced genuine class-composition machinery with
+holdout excess 1.19 vs ceiling 2.08; m8 (4k pairs, memorizable) stayed at
+ceiling. Next interventions: mode-injection, backward-gating,
+memory-as-pressure-valve.
+
 ## Build & Test Commands
 
 ```powershell
