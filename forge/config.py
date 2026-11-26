@@ -160,7 +160,7 @@ class ModelConfig:
     # NOTE: Calibration on ForgeLM V3 (1.2B, 16 layers) shows NO FFN saturation
     # — cosine similarities are all low/negative (FFN actively transforms in all
     # layers). This technique requires 32+ layer models to have a non-cold region.
-    # Kept in config for future larger models. See docs/FFN_RESEARCH.md.
+    # Kept in config for future larger models. See FFN-SkipLLM research notes.
     ffn_skip_threshold: float = 0.0  # 0.0 = disabled
 
     # === V4: Hardware-efficient inference keys (2026-08) ===
@@ -456,6 +456,12 @@ class ModelConfig:
     checkpoint_block_size: int = 512
     # Fixed attention scale (0.12 from NanoGPT speedrun) instead of head_dim**-0.5.
     attn_scale: float = None
+    # Granite-family multipliers (HF GraniteConfig): embeds×M at input,
+    # each block's operator/FFN output×R on the residual add, head logits/S.
+    # 1.0/1.0/1.0 = standard llama semantics (all existing presets).
+    embedding_multiplier: float = 1.0
+    residual_multiplier: float = 1.0
+    logits_scaling: float = 1.0
 
     # === Training extensions ===
     # OEC (Output Embedding Centering): suppresses anisotropic common-mode shift.
@@ -818,7 +824,7 @@ MODEL_CONFIGS["forgelm_v13_gdn2"] = ModelConfig(
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# ForgeLM V14-RSI: purpose-built ~2.5B RSI-loop coder (docs/V14_RSI_DESIGN.md).
+# ForgeLM V14-RSI: purpose-built ~2.5B RSI-loop coder (docs/design/V14_RSI_DESIGN.md).
 #
 # Derived from forgelm_v13_gdn2 (carries forward V12+V13 keys). NEW topology —
 # intentionally NON-lossless vs V13 (24 layers, hybrid conv/mamba3/GLA mix,
@@ -925,6 +931,38 @@ MODEL_CONFIGS["qwen25_05b"] = ModelConfig(
     max_seq_len=32768,
     use_qk_norm=False,             # Qwen2.5 has no q_norm/k_norm (Qwen3 only)
     tie_word_embeddings=True,      # 0.5B ties embed/head (no lm_head.weight in ckpt)
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Qwen2.5-Coder-1.5B-Instruct (HF compat) — self-play solver/proposer
+# upgrade over spark_x26_1p7b: code-specialized weights at similar speed,
+# smaller footprint (~3.1GB bf16 vs spark's ~4.1GB).
+#
+# Matches Qwen/Qwen2.5-Coder-1.5B-Instruct exactly: GQA 12Q/2KV, head_dim
+# 128 (=1536/12), QKV bias, SwiGLU intermediate 8960, RMSNorm eps 1e-6,
+# RoPE base 1M, 32K context, tied embed/head, vocab 151936. Same arch
+# family as qwen25_05b — _remap_hf_keys covers all HF key names, so the
+# raw HF safetensors loads bit-exact. Instruct variant: eos is
+# <|im_end|> 151645 and the chat format is ChatML = the loop's "jamba"
+# template, so --chat-format jamba needs no change.
+# ──────────────────────────────────────────────────────────────────────────────
+MODEL_CONFIGS["qwen25_coder_1p5b"] = ModelConfig(
+    vocab_size=151936,
+    d_model=1536,
+    n_layers=28,
+    n_heads=12,
+    n_kv_heads=2,
+    head_dim=128,
+    intermediate_size=8960,
+    attn_type="gqa",
+    attn_bias=True,                # Qwen2.5 QKV bias (q/k/v_proj.bias)
+    ffn_type="swiglu",
+    norm_type="rmsnorm",
+    norm_eps=1e-6,
+    rope_base=1_000_000.0,
+    max_seq_len=32768,
+    use_qk_norm=False,
+    tie_word_embeddings=True,
 )
 
 # Qwen2.5-0.5B → MLA+MoE port (ForgeLM-v1 recipe, updated): GQA→latent-KV
@@ -1293,6 +1331,49 @@ MODEL_CONFIGS["spark_x26_1p7b"] = ModelConfig(
     warmup_steps=50,
     max_lr=2e-4,
     min_lr=2e-5,
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Parable-Granite-4.1-3B port (AnkitAI, Claude-Fable-5 agent-trace
+# distillation on ibm-granite/granite-4.1-3b) — self-play solver candidate.
+#
+# GraniteForCausalLM (llama family): 40 layers, d_model 2560, GQA 40Q/8KV
+# head_dim 64, SwiGLU inter 8192, RMSNorm eps 1e-5, RoPE theta 10M full
+# rotary, tied embeds, vocab 100352, NO biases, HF max_position 131072
+# (RoPE tables clamp to 16384 like spark).
+#
+# Granite multiplier semantics (HF modeling_granite):
+#   embeds × 12 at input, each block out × 0.22 on the residual add,
+#   attn logits × 0.015625 (attention_multiplier — NOT 1/sqrt(64)=0.125),
+#   head logits ÷ 10 (logits_scaling). All wired via attn_scale /
+#   embedding_multiplier / residual_multiplier / logits_scaling.
+# Keys remap via ModelLoader._remap_hf_keys (llama-style names — no
+# structural transform). NOTE: keep use_chunked_ce OFF — CE must see
+# logits AFTER the ÷10 scaling to match HF loss semantics.
+# ──────────────────────────────────────────────────────────────────────────────
+MODEL_CONFIGS["parable_granite41_3b"] = ModelConfig(
+    vocab_size=100_352,
+    d_model=2560,
+    n_layers=40,
+    n_heads=40,
+    n_kv_heads=8,
+    head_dim=64,
+    intermediate_size=8192,
+    attn_type="gqa",
+    attn_bias=False,
+    ffn_type="swiglu",
+    norm_type="rmsnorm",
+    norm_eps=1e-5,
+    rope_base=10_000_000.0,
+    max_seq_len=16_384,
+    use_qk_norm=False,
+    tie_word_embeddings=True,
+    attn_scale=0.015625,           # granite attention_multiplier (1/64)
+    embedding_multiplier=12.0,
+    residual_multiplier=0.22,
+    logits_scaling=10.0,
+    batch_size=4,
+    seq_len=2048,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────

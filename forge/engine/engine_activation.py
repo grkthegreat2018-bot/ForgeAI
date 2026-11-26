@@ -147,7 +147,7 @@ class _ActivationMixin:
                       "mtp_selfspec", "self_speculative_sparse", "specbound"
             quantize: None, "int8", "int4", "fp8", "w8a8", "nvfp4",
                       "forge_quant", "grinqh", "mixllm", "acbq", "quamba2",
-                      "awq_fp4", "nanoquant", "btc", "ternary_ptq"
+                      "awq_fp4", "nanoquant", "btc", "ternary_ptq", "littlebit2"
             acceleration: None, "cuda_graph", "airllm_streaming", "megakernel", "flex_decoding"
             mrl_keep_ratio: if set (e.g. 0.75), truncate to that fraction of dims
             kv_bits: 4 or 8, for KV cache quantization
@@ -780,6 +780,7 @@ class _ActivationMixin:
         "awq_fp4": ["nvfp4", "w8a8", "int8", "int4", None],
         "nanoquant": ["awq_fp4", "nvfp4", "int4", None],
         "btc": ["awq_fp4", "nvfp4", "int4", None],
+        "littlebit2": ["nanoquant", "awq_fp4", "nvfp4", "int4", None],
         "ternary_ptq": ["awq_fp4", "int4", None],
         "forge_quant": ["nvfp4", "w8a8", "int8", "int4", None],
         "grinqh": ["forge_quant", "int4", None],
@@ -1092,6 +1093,50 @@ class _ActivationMixin:
                                      use_rotation=True, verbose=True)
             self._log(f"BTC-LLM: {n_q} layers quantized (binary codebook, "
                       f"K={K}). Sub-1-bit via pattern clustering.")
+        elif mode == "littlebit2":
+            from forge.engine.quant.littlebit2 import (
+                load_littlebit2_state, quantize_model_littlebit2,
+                save_littlebit2_state)
+            cfg = getattr(self.model, "config", None)
+            eff = getattr(cfg, "littlebit2_eff_bit", 1.0) if cfg else 1.0
+            sdim = getattr(cfg, "littlebit2_split_dim", None) if cfg else None
+            res = getattr(cfg, "littlebit2_residual", False) if cfg else False
+            itq = getattr(cfg, "littlebit2_use_itq", True) if cfg else True
+            iters = getattr(cfg, "littlebit2_iters", 50) if cfg else 50
+            kvr = getattr(cfg, "littlebit2_kv_ratio", None) if cfg else None
+            # Sidecar cache: conversion is ~7min of SVD+ITQ on a 3B; keyed
+            # to the checkpoint file so promoted candidates get their own.
+            _ck = getattr(self, "checkpoint_path", None)
+            _sidecar = (f"{_ck}.lb2_e{eff:g}_r{int(res)}"
+                        f"_i{int(itq)}.safetensors") if _ck else None
+            if _sidecar and os.path.exists(_sidecar):
+                n_q = load_littlebit2_state(self.model, _sidecar)
+                self._log(f"LittleBit-2: {n_q} factorized layers loaded "
+                          f"from sidecar (skipped SVD+ITQ)")
+            else:
+                n_q = quantize_model_littlebit2(
+                    self.model, split_dim=sdim, eff_bit=eff, residual=res,
+                    use_itq=itq, itq_n_iter=iters, kv_ratio=kvr,
+                    verbose=True)
+                if _sidecar:
+                    try:
+                        save_littlebit2_state(self.model, _sidecar)
+                    except Exception as _se:
+                        self._log(f"LittleBit-2 sidecar save failed: {_se}")
+            self._log(f"LittleBit-2: {n_q} layers quantized (latent binary "
+                      f"factors, eff_bit={eff}, residual={res}, itq={itq}). "
+                      "Sub-1-bit via Dual-SVID + Joint-ITQ. QAT-ready; PTQ "
+                      "quality at <1 BPW is limited without finetuning.")
+            # Freeze factors for inference: snaps latents to +/-1 in the
+            # model's compute dtype (halves the fp32-factor footprint and
+            # kills a per-step int8->bf16 materialization on every layer).
+            from forge.engine.quant.littlebit2 import LittleBitLinear
+            _emb = getattr(getattr(self.model, "embed", None), "weight",
+                           None)
+            _dt = _emb.dtype if _emb is not None else torch.bfloat16
+            for _m in self.model.modules():
+                if isinstance(_m, LittleBitLinear):
+                    _m.freeze_binarized(dtype=_dt)
         elif mode == "ternary_ptq":
             from forge.engine.quant.novel_quant_r48 import (
                 quantize_model_ternary_ptq,

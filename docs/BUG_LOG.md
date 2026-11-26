@@ -911,3 +911,116 @@ An option whose write path works but read path ignores it is worse than no optio
 
 ### Tests
 - `tests/unit/test_kv_int4.py`: packed round-trip bounded by scale/2, running-absmax requant on growth, generation-path smoke. Commit `0a5c85e`.
+
+## 2026-11-24 - Intermittent python311.dll 0xc0000005 at first generate (BCG graph-pool heap corruption)
+
+### Symptom
+- ~45% of proposer/bench processes died with `EXIT=-1073741819` (STATUS_ACCESS_VIOLATION)
+  at or just after "[cevolve] batch decode graphs warm-captured" - i.e. first real decode.
+- faulthandler caught one instance inside `top_p_filter_logits` during GC; WER reports
+  show six different fault offsets, all in python311.dll.
+- Crash dumps: faulting instruction reads `obj->ob_type->tp_flags`; the "object" is a
+  dangling pointer - freed PyObject memory reused by raw data (use-after-free /
+  wild-write into the CPython heap).
+
+### Bisect (bench_proposer.py, 6 prompts x N runs)
+- gc.disable():               no change (cyclic GC is victim, not cause)
+- FORGE_NO_COMPILE=1:         no change (~50% crash)
+- triton import blocked:      5/6 pass (partial - TritonConv not the corruptor)
+- PYTHONMALLOC=debug:         clean at n=4 (inconclusive)
+- `use_breakable_cuda_graph=False`: 5/5 clean, all other features on
+
+### Root cause (high confidence, not line-level proven)
+The Breakable CUDA Graph decode subsystem. Tensors allocated inside a captured
+graph's private memory pool escape into Python (`bufs['output']` views,
+decode-step state). When a graph/pool is evicted or re-captured while Python
+still holds references (see the known freed-buffer hazard already handled at
+`feature_registry._ensure_static_batch` - "old graphs replay on the OLD
+cache/mask storage"), the caching allocator's CPU-side bookkeeping corrupts ->
+dangling PyObject refs -> python311.dll AV at whatever touches them next.
+Hardware excluded: 8GB RAM + 8GB VRAM pattern stress clean. Also: triton-windows
+upgraded 3.4.0 -> 3.6.0.post26 this session (fixes the documented SM12x tl.dot
+scratch-in-graph bug - latent corruption source regardless of this bug).
+
+### Fix applied
+- `CodeEvolveConfig.proposer_bcg` (default False) gates
+  `use_breakable_cuda_graph` in `LLMProposer._load_engine_obj`.
+- KNOWN EXPOSURE: `infinite_loop` auto-enables BCG for spark/qwen/granite/
+  parable solver engines (`cfg.use_breakable_cuda_graph` fallback at ~L973) -
+  same crash risk on this stack. Decide per-run via `--bcg` flag until root
+  cause is fixed.
+
+### TODO (root cause)
+Suspects inside BCG: tensors escaping `torch.cuda.graph()` capture into Python
+refs; `_static_buffers` output views surviving pool transitions; `b{B}_` bucket
+graph eviction ordering; torch 2.11 caching-allocator graph-pool free paths.
+Proper fix needs pageheap/verifier or a minimal capture/free/replay repro.
+
+### Tests
+- `scripts/bench_proposer.py` used as the repro harness (12-prompt gate bench).
+
+### Update (same session): second corruption vector found â€” proposer_prewarm
+After `proposer_bcg=False` (real proposer path): residual ~25% crash rate (3/4
+runs). With the `proposer_prewarm` daemon thread ALSO disabled: **6/6 clean**.
+The prewarm thread builds the engine concurrently with main-thread Python work
+(pool boot / seed eval); the overlap window is the second corruption vector â€”
+consistent with a GIL/refcount race on objects created/freed on the build
+thread. Both flags now default OFF (`proposer_bcg`, `proposer_prewarm`); the
+~15-25s prewarm saving is traded for correctness. Root-cause TODO stands â€”
+prewarm itself is just the trigger surface, the underlying bug (whichever C
+extension is not thread-safe inside engine build: torch 2.11 internals,
+tokenizers, Triton compile workers, or our own native code) is still open.
+
+
+### Update 2 (same session): BCG exonerated â€” prewarm was the sole corruptor
+Missing bisect cell run: **BCG on + prewarm off = 5/5 clean** (~30s/6 gens,
+graphs warm-captured each run). Every crash in the earlier data ran with
+proposer_prewarm ON; the "BCG on = ~45% / BCG off = ~25%" gradient was
+sampling noise over the single real variable. Root cause revised:
+ForgeEngine build on a daemon thread races main-thread torch/GC traffic
+(suspects: torch 2.11 refcount paths, tokenizers Rust objects, Triton
+compile workers â€” any GIL-release window during build). Fix revision:
+- proposer_bcg restored to default True (perf recovered: ~56s vs ~74s
+  per 12-prompt bench = ~32% e2e proposer speed).
+- proposer_prewarm stays False; replaced by proposer_prefetch
+  (default True): a daemon thread that only READS checkpoint files into
+  OS page cache â€” pure file I/O, zero torch/CUDA objects, no cross-thread
+  refcount surface. Recovers disk-read overlap on repeat builds.
+- infinite_loop solver engines (spark/qwen/granite/parable) build
+  synchronously on the main thread â€” no race surface â€” BCG there is fine;
+  earlier "known exposure" note rescinded.
+
+## 2026-11-24 — RSI loop epoch-1 device assert ? 99 dead epochs
+
+**Symptom.** `Assertion 'srcIndex < srcSelectDimSize'` (Indexing.cu) /
+`vectorized gather kernel index out of bounds` (IndexKernelUtils.cu) mid
+propose batch on lfm3; loop "recovered" per-epoch but every later CUDA
+call failed ? all 100 epochs no-op'd.
+
+**Root cause.** A stored curriculum task (`azr_algorithms_medium_14.json`,
+13.8MB — a `(n:int)` task whose `expected` is a literal 654k-element list)
+serialized into a ~22k-token solve prompt. Batch prefill left-pads B rows
+to T=max_prompt_len and builds `[B,1,T,T]` pad_bias ? 48GiB alloc at B=24
+? OOM ? per-wave serial fallback ? decode positions past RoPE tables
+(lfm3 max_seq_len=16384) / KV cap ? gather/index asserts. `Indexing.cu`
+assert also fired without OOM on another run — same class, different
+kernel site.
+
+**Fixes.**
+- `engine_generation._effective_prompt_cap(n)`: batch + raw tokenization
+  now clamps prompts to min(max_context_tokens, kv_cache_tokens,
+  cfg.max_seq_len, ~4GiB pad-bias cap / B). Applied at generate_batch
+  (:~878) and generate_raw (:~262).
+- `infinite_curriculum._validate_task`: reject test_cases whose
+  args+expected repr exceeds `_MAX_TEST_PAYLOAD` (8KB) — covers both
+  proposed and executor-derived cases (solve(654321) ? 654k-elem list).
+- `load_queue`: skips over-payloaded stored tasks (the 13.8MB file).
+- `_solve_prompt_text`: per-case repr truncated at 384 chars.
+- Defensive clamps: `llm.py` conv `_pad_mask` index_select and
+  `kv_cache.append_t` index_copy_ clamp index to view/cap width —
+  degrades a stray pos_t to one bad row instead of a poisoned context.
+- `scripts/rsi_supervisor.py`: NEW — subprocess-per-chunk supervisor.
+  A device assert poisons the process context unrecoverably; supervisor
+  counts PHASE-epoch markers in the child log, respawns from the newest
+  durable `ForgeLM_<TAG>_SP*.safetensors`, aborts after N zero-epoch
+  chunks. Overnight runs should ALWAYS go through it.

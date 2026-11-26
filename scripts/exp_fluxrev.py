@@ -59,7 +59,7 @@ def text_corpus():
     """docs/research/*.md as a byte stream — real prose, V=256."""
     data = b""
     for p in sorted((ROOT / "docs" / "research").glob("*.md")) + \
-             [ROOT / "docs" / "CODEBASE_CRITIQUE_2026-09-16.md"]:
+             [ROOT / "docs" / "archive" / "CODEBASE_CRITIQUE_2026-09-16.md"]:
         data += p.read_bytes()
     return list(data)
 

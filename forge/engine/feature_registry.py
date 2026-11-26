@@ -216,7 +216,13 @@ def _h_breakable_cuda_graph(eng, _flags):
         # cache storage (see PreAllocatedKVCache.view_len) — a full-buffer
         # read costs ~30x wasted attention at short contexts.  Switching
         # buckets at decode time is free: the views share storage.
-        buckets = [b for b in (512, 1024, 2048, 4096, 8192)
+        # Denser buckets <=4096 (the self-play/decode range): 2x
+        # stair-steps cost up to ~30% wasted attention math on
+        # in-between lengths; midpoint buckets keep the ratio <=~1.5x.
+        # Each extra bucket is only a lazily-captured graph over a VIEW
+        # of the same cache storage — no extra KV allocation.
+        buckets = [b for b in (512, 768, 1024, 1536, 2048, 3072,
+                             4096, 6144, 8192)
                    if b <= cache.max_seq_len]
         if cache.max_seq_len not in buckets:
             buckets.append(cache.max_seq_len)
@@ -271,7 +277,7 @@ def _h_breakable_cuda_graph(eng, _flags):
             {'cache','mask','prefix','buckets'} or None (functional
             fallback).  B=1 uses the eagerly-captured state instead.
             """
-            if (eng._decode_state is None or B <= 1 or B > 32
+            if (eng._decode_state is None or B > 64
                     or not buckets):
                 return None
             hi = next((b for b in buckets if b >= need_len), None)
@@ -280,6 +286,18 @@ def _h_breakable_cuda_graph(eng, _flags):
             want = [b for b in buckets if b >= plen and b <= need_len]
             if hi not in want:
                 want.append(hi)
+            if B == 1:
+                # B=1 reuses the activation-captured state (prefix '',
+                # kv{b} graphs over the shared cache/mask) — no extra
+                # allocation. Lets single-row generate_batch calls keep
+                # O(1) KV appends instead of the O(L^2) functional path.
+                have = [b for b in want
+                        if f"kv{b}" in eng._bcg._decode_graphs]
+                if sorted(have) != sorted(want):
+                    return None
+                return {'cache': eng._decode_state['cache'],
+                        'mask': eng._decode_state['mask'],
+                        'prefix': '', 'buckets': want}
             bs_map = eng._decode_state['batch']
             bs = bs_map.get(B)
             if bs is not None and not bs:
@@ -291,6 +309,12 @@ def _h_breakable_cuda_graph(eng, _flags):
                 # evict them before recapture or decode reads freed
                 # buffers.
                 try:
+                    if eng.device.type == "cuda":
+                        free_b = _t.cuda.mem_get_info(eng.device)[0]
+                        est = B * hi * (64 << 10) + (1 << 30)
+                        if free_b < est:
+                            bs_map[B] = {}
+                            return None
                     for _tag in [t for t in eng._bcg._decode_graphs
                                  if t.startswith(f"b{B}_")]:
                         eng._bcg._decode_graphs.pop(_tag, None)
@@ -306,6 +330,20 @@ def _h_breakable_cuda_graph(eng, _flags):
                     return None
             if bs is None:
                 try:
+                    # Preflight: a B-wide cache OOMing INSIDE capture leaves
+                    # the allocator's private pool in the abandoned state
+                    # (torch #190308) — later decode reads corrupted slots
+                    # (observed: vectorized-gather OOB in the serial
+                    # fallback after a B=20 OOM, 2026-11-24). Conservative
+                    # estimate: 64KiB/token/row + 1GiB forward-activation
+                    # headroom. Underestimate → functional path (slower,
+                    # correct) — never enter the OOM-capture path.
+                    if eng.device.type == "cuda" and B > 1:
+                        free_b = _t.cuda.mem_get_info(eng.device)[0]
+                        est = B * hi * (64 << 10) + (1 << 30)
+                        if free_b < est:
+                            bs_map[B] = {}
+                            return None
                     # Size the cache to the request horizon (hi), not the
                     # global max — B=16+ at full max_len wastes GBs of KV
                     # that the bucket views never touch.
@@ -322,12 +360,32 @@ def _h_breakable_cuda_graph(eng, _flags):
             missing = [b for b in want
                        if f"{bs['prefix']}kv{b}"
                        not in eng._bcg._decode_graphs]
-            _capture_buckets(bs['cache'], bs['mask'], B, missing,
-                             bs['prefix'])
+            try:
+                _capture_buckets(bs['cache'], bs['mask'], B, missing,
+                                 bs['prefix'])
+            except Exception:
+                pass
             have = [b for b in want
                     if f"{bs['prefix']}kv{b}" in eng._bcg._decode_graphs]
             if sorted(have) != sorted(want):
-                return None  # partial coverage — decode would stall
+                # Partial coverage: a failed/OOM'd capture left the
+                # graph pool in an abandoned state (torch #190308 —
+                # capture errors keep the private mempool reserved).
+                # Drop EVERY partial b{B}_ graph + free the batch cache
+                # so nothing later replays on poisoned storage, and mark
+                # the batch size failed so we stay functional instead of
+                # retrying the same OOM every request.
+                for _tag in [t for t in eng._bcg._decode_graphs
+                             if t.startswith(bs['prefix'])]:
+                    eng._bcg._decode_graphs.pop(_tag, None)
+                    eng._bcg._static_buffers.pop(_tag, None)
+                bs_map[B] = {}
+                try:
+                    _t.cuda.synchronize()
+                    _t.cuda.empty_cache()
+                except Exception:
+                    pass
+                return None  # decode would stall — go functional
             bs['buckets'] = want
             return bs
 

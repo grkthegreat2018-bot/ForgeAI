@@ -124,7 +124,7 @@ def main() -> int:
                     help="stop after N evals with no verified promotion")
     ap.add_argument("--hop-after", type=int, default=12)
     ap.add_argument("--proposer", choices=["mut", "mix", "llm", "basin",
-                                         "api", "none"],
+                                         "api", "bes", "none"],
                     default="mut",
                     help="mut=free AST mutations (default, no model), "
                          "mix=mutations + LLM leap every --llm-every, "
@@ -132,7 +132,9 @@ def main() -> int:
                          "+ deterministic mutator fan-out, api=remote "
                          "teacher via OpenAI-compatible endpoint "
                          "(zero VRAM; reasoning captured to "
-                         "api_proposer_traces.jsonl), none=seed only")
+                         "api_proposer_traces.jsonl), bes=backward "
+                         "goal-decomposition + joint solve (2 LLM "
+                         "passes/proposal), none=seed only")
     ap.add_argument("--api-model", default="deepseek-flash",
                     help="api proposer: remote model id")
     ap.add_argument("--api-url", default="",

@@ -1,4 +1,4 @@
-"""V14-RSI work-acceleration heads (docs/V14_RSI_DESIGN.md §3).
+"""V14-RSI work-acceleration heads (docs/design/V14_RSI_DESIGN.md §3).
 
 Two read-only taps on the model's final hidden states. They never perturb
 the base forward: an untrained model simply never emits the <copy> op and

@@ -22,7 +22,7 @@ the gate. GDN-style parameterization for the warm start:
 Recurrence is evaluated in fp32 (state drift in low precision when
 gate~1). On CUDA it dispatches to fla-org's chunked KDA Triton kernel
 (fla_delta.kda_scan — same recurrence); the sequential Python loop is
-the CPU/fallback reference (rd_round_49_plan.md Phase 2, landed via
+the CPU/fallback reference (R49 plan Phase 2, landed via
 fla vendor — AUDIT A4).
 
 Usage:

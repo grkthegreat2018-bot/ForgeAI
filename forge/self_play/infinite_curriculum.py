@@ -85,6 +85,26 @@ _RE_CONTROL_TOKEN = re.compile(r'^<(?!0x[0-9A-Fa-f]{2}>)[^>\n]+>$')
 # Ids generation legitimately needs: <|endoftext|> EOS, <|im_end|> turn end,
 # </think> (the model must be able to close its own think block).
 _CONTROL_TOKEN_KEEP = frozenset({2, 519, 542})
+# Token STRINGS that must stay legal when they exist as single vocab
+# entries — resolved per-tokenizer in _control_keep_ids / _gen_stop_ids.
+_LB = "<" + "|"
+_IM_END = _LB + "im_end|>"
+_ENDOFTEXT = _LB + "endoftext|>"
+_SPARK_EOS = "<｜end▁of▁sentence｜>"
+_KEEP_SPECIAL_TOKENS = frozenset([_IM_END, _ENDOFTEXT, _SPARK_EOS, "</think>"])
+_STOP_SPECIAL_TOKENS = frozenset([_IM_END, _ENDOFTEXT, _SPARK_EOS])
+
+
+def _last_subseq_index(seq: list[int], sub: tuple) -> int | None:
+    """Index where ``sub`` last begins inside ``seq``, or None."""
+    n = len(sub)
+    if n == 0 or len(seq) < n:
+        return None
+    first = sub[0]
+    for i in range(len(seq) - n, -1, -1):
+        if seq[i] == first and tuple(seq[i:i + n]) == sub:
+            return i
+    return None
 
 from forge.evaluation.goal_tasks import GoalTask
 import contextlib
@@ -93,6 +113,32 @@ import contextlib
 # Module-level ThreadPool reused across sandbox executions to avoid the
 # overhead of creating/destroying threads for every validation run.
 _SANDBOX_POOL = None
+
+# Thread-local PersistentCodeExecutor workers: each pool thread (and the
+# main thread) owns ONE persistent sandboxed worker process — same
+# audit-hook jail + Job Object containment as the old one-shot path, but
+# the interpreter boots once and serves every exec via file IPC instead
+# of a ~150-300ms cold spawn per test case. _EXEC_REGISTRY tracks them
+# for explicit shutdown.
+import threading as _threading
+_SANDBOX_TLS = _threading.local()
+_EXEC_REGISTRY: list = []
+_EXEC_REGISTRY_LOCK = _threading.Lock()
+# Cached once-script path for the subprocess fallback (build_once_script
+# output is constant — write once per process, reuse across calls).
+_ONCE_SCRIPT_PATH: str | None = None
+
+
+def _thread_executor():
+    """Return this thread's persistent sandbox worker (lazily spawned)."""
+    ex = getattr(_SANDBOX_TLS, "executor", None)
+    if ex is None:
+        from research.persistent_executor import PersistentCodeExecutor
+        ex = PersistentCodeExecutor(timeout_s=5.0, memory_limit_mb=1024)
+        _SANDBOX_TLS.executor = ex
+        with _EXEC_REGISTRY_LOCK:
+            _EXEC_REGISTRY.append(ex)
+    return ex
 
 
 def _get_sandbox_pool():
@@ -105,7 +151,8 @@ def _get_sandbox_pool():
 
 
 def shutdown_sandbox_pool():
-    """Close the persistent sandbox ThreadPool at loop shutdown.
+    """Close the persistent sandbox ThreadPool + worker processes at loop
+    shutdown.
 
     Pool threads are daemons so a missing close never blocks exit, but an
     explicit close/join reclaims the workers + pipe handles promptly and
@@ -119,6 +166,13 @@ def shutdown_sandbox_pool():
         with contextlib.suppress(Exception):
             pool.close()
             pool.join()
+    with _EXEC_REGISTRY_LOCK:
+        executors, _EXEC_REGISTRY[:] = list(_EXEC_REGISTRY), []
+    for ex in executors:
+        with contextlib.suppress(Exception):
+            ex.close()
+    with contextlib.suppress(Exception):
+        _SANDBOX_TLS.executor = None
 
 
 # ─── Data structures ──────────────────────────────────────────────────
@@ -275,9 +329,12 @@ SOLVER_PROMPT = """# Goal: {description}
 # continuation. The content requirements are identical to the completion
 # prompts above; only the surface format differs (single ```python block).
 
-CHAT_PROPOSE_PROMPT = """Here is an EXAMPLE of a Python programming task — study the format, do NOT copy it:
-
-```python
+# Rotating few-shot example bank for the propose prompt — sampled per call
+# (a single fixed digit-sum example anchored the model into proposing
+# nothing but arithmetic variants; different domains prime different task
+# families).
+_PROPOSE_EXAMPLE_BANK = [
+    """```python
 # Task: Return the sum of the digits of n.
 def solve(n: int) -> int:
     total = 0
@@ -291,9 +348,101 @@ def solve(n: int) -> int:
 # solve(123)
 # solve(-45)
 # solve(9999)
-```
+```""",
+    """```python
+# Task: Reverse the words in a string, keeping punctuation attached.
+def solve(s: str) -> str:
+    words = s.split()
+    return " ".join(w[::-1] for w in words)
 
-Now create ONE DIFFERENT {difficulty} task in the {domain} domain (idea: "{desc_hint}", or invent your own). Same format exactly: a `# Task:` line, a `def solve{signature}:` implementation using loops/conditionals (not just a builtin call), then 4+ `# solve(input)` test-INPUT lines covering edge cases. Expected outputs are computed automatically — do NOT write `== <expected>`. Reply with ONLY the code block."""
+# solve("hello world")
+# solve("")
+# solve("a")
+# solve("one  two")
+```""",
+    """```python
+# Task: Return the first index where a sorted list changes value, or -1.
+def solve(lst: list) -> int:
+    if len(lst) < 2:
+        return -1
+    for i in range(1, len(lst)):
+        if lst[i] != lst[0]:
+            return i
+    return -1
+
+# solve([1, 1, 1, 2])
+# solve([5])
+# solve([])
+# solve([3, 4, 4])
+```""",
+    """```python
+# Task: Count cells in a grid equal to the sum of their orthogonal neighbors.
+def solve(grid: list) -> int:
+    rows = len(grid)
+    if rows == 0:
+        return 0
+    cols = len(grid[0])
+    count = 0
+    for r in range(rows):
+        for c in range(cols):
+            total = 0
+            if r > 0:
+                total += grid[r - 1][c]
+            if r + 1 < rows:
+                total += grid[r + 1][c]
+            if c > 0:
+                total += grid[r][c - 1]
+            if c + 1 < cols:
+                total += grid[r][c + 1]
+            if grid[r][c] == total:
+                count += 1
+    return count
+
+# solve([[1, 1], [1, 1]])
+# solve([[0]])
+# solve([])
+# solve([[2, 1], [1, 2]])
+```""",
+    """```python
+# Task: Group words by their sorted-letter signature and return groups of 2+.
+def solve(words: list) -> list:
+    groups = {}
+    for w in words:
+        key = "".join(sorted(w))
+        groups.setdefault(key, []).append(w)
+    return [sorted(g) for g in groups.values() if len(g) > 1]
+
+# solve(["eat", "tea", "tan"])
+# solve([])
+# solve(["abc"])
+# solve(["a", "a"])
+```""",
+    """```python
+# Task: Decode a run-length string like 'a3b2' into 'aaabb'.
+def solve(s: str) -> str:
+    out = []
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        j = i + 1
+        while j < len(s) and s[j].isdigit():
+            j += 1
+        out.append(ch * int(s[i + 1:j] or "1"))
+        i = j
+    return "".join(out)
+
+# solve("a3b2")
+# solve("x")
+# solve("")
+# solve("z10")
+```""",
+]
+
+CHAT_PROPOSE_PROMPT = """Here is an EXAMPLE of a Python programming task — study the format, do NOT copy it:
+
+{example}
+
+Now create ONE DIFFERENT {difficulty} task in the {domain} domain (idea: "{desc_hint}", or invent your own).{avoid_hint} Same format exactly: a `# Task:` line, a `def solve{signature}:` implementation using loops/conditionals (not just a builtin call), then 4+ `# solve(input)` test-INPUT lines covering edge cases. Expected outputs are computed automatically — do NOT write `== <expected>`. Reply with ONLY the code block."""
 
 CHAT_SOLVE_PROMPT = """{description}
 
@@ -318,6 +467,10 @@ _RE_ANSWER_ANCHOR = re.compile(r"^\s*(?:Final\s+)?Answer\s*:\s*\n?")
 # bans tool markers outright (no tools exist).
 _CHAT_MIN_SOLVE_TOKENS = 384
 _CHAT_MIN_PROPOSE_TOKENS = 640
+# Serialized test-case payload cap (repr chars, args+expected summed).
+# Larger cases are unlearnable for the solver and blow the prompt past
+# every context cap — see _validate_task.
+_MAX_TEST_PAYLOAD = 8192
 _CHAT_SOLVE_THINK_BUDGET = 192
 _CHAT_PROPOSE_THINK_BUDGET = 320
 # Force-close suffixes for the think-cap: instead of the chat "Answer:"
@@ -357,6 +510,18 @@ _DESC_HINT_BANK = {
         "Implement binary search on a rotated sorted array",
         "Count inversions in a list using merge sort",
         "Find the majority element (appears > n/2 times) in O(n) space",
+        "Count subarrays whose sum is divisible by k",
+        "Find the longest span with equal 0s and 1s in a binary list",
+        "Compute the edit distance between two short strings",
+        "Find the smallest range covering one element from each of k lists",
+        "Simulate a round-robin scheduler returning completion order",
+        "Find the longest arithmetic subsequence in a list",
+        "Bucket-sort positive floats and return the k-th largest gap",
+        "Sliding-window maximum over a list with window size k",
+        "Two-pointer trap: water held between bars of a height list",
+        "Next permutation of a list of ints in-place (no itertools)",
+        "Longest consecutive run of a value in a stream window",
+        "Top-k frequent elements using a dict + bucket pass",
     ],
     "math": [
         "Compute the n-th prime number using the Sieve of Eratosthenes",
@@ -369,6 +534,18 @@ _DESC_HINT_BANK = {
         "Check if n is a power of 2 using bit manipulation",
         "Compute the continued fraction representation of sqrt(n)",
         "Find the modular inverse of a mod m using extended Euclidean",
+        "Convert an integer to Roman numerals and validate ranges",
+        "Count trailing zeros of n! without computing the factorial",
+        "Simulate Josephus elimination returning the survivor index",
+        "Compute binomial coefficient C(n,k) with Pascal's triangle",
+        "Find the smallest number with exactly d divisors",
+        "Armstrong/narcissistic numbers below a bound",
+        "Convert between bases 2..36 for a digit string",
+        "Simulate Collatz steps, returning cycle length per n",
+        "Integer square root via Newton's method (no isqrt)",
+        "Chinese-remainder combine of two congruences",
+        "Count numbers < n coprime to n using totient logic",
+        "Simulate dice: expected sum of k fair d-sided rolls scaled",
     ],
     "strings": [
         "Find the longest palindromic substring (not just check palindrome)",
@@ -381,6 +558,18 @@ _DESC_HINT_BANK = {
         "Validate if a string is a valid IPv4 address",
         "Count distinct palindromic substrings",
         "Implement regex for basic pattern matching (., *, +)",
+        "Decode a run-length string 'a3b2' into 'aaabb'",
+        "Group anagram words by sorted-letter signature",
+        "Zigzag-convert a string over k rows and read off",
+        "Check if one string is a rotation of another",
+        "Longest common substring of two strings (not subsequence)",
+        "Strip balanced nested quotes/parens from an expression",
+        "Word-frequency map ignoring punctuation and case",
+        "Interleave two strings char-by-char, shorter pads end",
+        "Find all indices where pattern p occurs in text t (naive ok)",
+        "CamelCase <-> snake_case bidirectional converter",
+        "Longest prefix common to all strings in a list",
+        "Validate a simple arithmetic expression's parentheses+nesting",
     ],
     "logic": [
         "Evaluate a boolean expression string with AND/OR/NOT",
@@ -393,6 +582,16 @@ _DESC_HINT_BANK = {
         "Evaluate a truth-table row for a boolean formula over a, b, c",
         "Check if three 2D points are collinear using integer cross product",
         "Resolve a chain of if-then rules over a set of facts (forward chaining)",
+        "Simulate a two-player nim game optimal move (xor rule)",
+        "Score a bowling frame sequence (no spares/strikes needed)",
+        "Knight's move legality on an 8x8 board coordinate pair",
+        "Minesweeper neighbor-mine count for a cell",
+        "Verify a 4x4 mini-Sudoku solution grid",
+        "Simulate rock-paper-scissors tournament winner",
+        "Validate a poker hand category from 5 card codes",
+        "Conway's Game of Life: next-state of one cell",
+        "Check if a grid path string (NSEW) returns to origin",
+        "Simulate traffic light state machine over k ticks",
     ],
     "data_structures": [
         "Implement a min-stack (push/pop/min in O(1))",
@@ -405,6 +604,69 @@ _DESC_HINT_BANK = {
         "Merge all overlapping intervals in a list",
         "Implement a binary-heap priority queue (push/pop min in O(log n))",
         "Find the next greater element for each list element using a stack",
+        "Serialize a dict of lists to a canonical sorted string",
+        "Sparse vector dot product over index->value dicts",
+        "Simulate a deque with only list append/pop allowed",
+        "Union-find over edge list: count connected components",
+        "Topologically sort a small dependency dict (Kahn's)",
+        "Sliding-window dedup: keep last k unique items",
+        "Histogram binning of a float list into n equal buckets",
+        "Trie-free autocomplete: prefix match over a word list",
+        "Chunk a list into n contiguous parts, balanced sizes",
+        "Invert a multimap: value->keys preserving order",
+        "Simulate stack-based HTML tag matching (open/close pairs)",
+        "Fenwick tree point-update + prefix-sum over ops list",
+    ],
+    "bit_manipulation": [
+        "Count set bits (popcount) without builtin bin()",
+        "Isolate the lowest set bit of n (n & -n variants)",
+        "Swap the i-th and j-th bits of n",
+        "Reverse the bits of a 16-bit integer",
+        "Count trailing zeros via de Bruijn-style mask loop",
+        "Find the single non-duplicated number via XOR",
+        "Check if n is a power of two and return its log2",
+        "Pack four bytes into one 32-bit int and unpack",
+        "Rotate a 32-bit value left by k positions",
+        "Compute parity of n via XOR fold",
+        "Next higher integer with the same popcount",
+        "Enumerate all submasks of a bitmask",
+        "XOR of all integers in range [a, b] without looping",
+        "Add two ints using only bitwise ops (no +)",
+        "Extract a bit-field between positions lo and hi",
+    ],
+    "geometry": [
+        "Shoelace formula: polygon area from vertex list",
+        "Point-in-polygon via ray-casting parity",
+        "Convex hull of points (Andrew monotone chain)",
+        "Intersection point of two line segments (or None)",
+        "Overlap area of two axis-aligned rectangles",
+        "Centroid of a polygon vertex list",
+        "Angle between two vectors in degrees",
+        "Shortest distance from point to segment",
+        "Smallest axis-aligned bounding box of points",
+        "Triangle validity + area from three side lengths",
+        "Count lattice points on segment (gcd trick)",
+        "Rotate a point k degrees around the origin",
+        "Perimeter of polygon given vertex list",
+        "Determine turn direction (left/right/collinear) of 3 points",
+        "Farthest pair distance over a point list",
+    ],
+    "simulation": [
+        "Simulate a 1-D random walk: steps to return to origin",
+        "Galton board: final bin distribution over trials",
+        "Coupon-collector: draws until all k kinds seen",
+        "Bank-account ledger: apply ops, flag first overdraft",
+        "Simulate a queue: arrivals/served per tick, return waits",
+        "Elevator: floors visited given request list",
+        "Dice race: first player to reach target wins, return turns",
+        "Forest-fire spread: grid after k burn steps (4-neighbor)",
+        "Traffic light queue: cars remaining after k cycles",
+        "Ant on grid: position after NSEW move string",
+        "Vending machine: greedy change coins per price",
+        "LRU cache trace: hit count over op list",
+        "Predator-prey step: populations after k rounds",
+        "Monty-Hall simulation: win rate of switching",
+        "Round-robin tournament scoreboard over match list",
     ],
 }
 
@@ -415,7 +677,9 @@ _DESC_HINT_BANK = {
 _RE_TURN_MARKERS = re.compile(
     r"<\|im_end\|>|<\|endoftext\|>|<\|im_start\|>"
     r"|<｜start▁of▁sentence｜>|<｜end▁of▁sentence｜>"
-    r"|<\|User\|>|<\|Bot\|>|<\|System\|>|<\|Tool\|>")
+    r"|<｜start▁of▁text｜>|<｜end▁of▁text｜>"
+    r"|<｜fim▁begin｜>|<｜fim▁hole｜>|<｜fim▁end｜>"
+    r"|<\|User\|>|<\|Bot\|>|<\|System\|>|<\|Tool\|>|<\|Developer\|>")
 
 
 def _strip_reply(text: str) -> str:
@@ -557,8 +821,11 @@ class InfiniteCurriculum:
     difficulty adjustment (Goldilocks zone: 40-60% solver success).
     """
 
-    # Domains and their difficulty progression
-    DOMAINS = ["algorithms", "math", "strings", "logic", "data_structures"]
+    # Domains and their difficulty progression — extended set keeps pace
+    # with _DESC_HINT_BANK (coverage steering can route proposals to any
+    # bank domain, not just the rotation's).
+    DOMAINS = ["algorithms", "math", "strings", "logic", "data_structures",
+               "bit_manipulation", "geometry", "simulation"]
     DIFFICULTIES = ["easy", "medium", "hard"]
 
     # AZR-optimal Goldilocks zone (NeurIPS 2025 Spotlight + "Survive or Collapse"
@@ -616,6 +883,14 @@ class InfiniteCurriculum:
         # Lazily-built list of control-looking vocab ids banned in
         # generated text (see _banned_special_ids).
         self._banned_ids = None
+        # Tokenizer-derived id caches (see _control_keep_ids / _gen_stop_ids /
+        # _think_end_ids) — the hardcoded Jamba id sets kept pad/random ids
+        # legal while banning the model's REAL eos on non-Jamba tokenizers
+        # (spark: eos=<｜end▁of▁sentence｜>=1 was banned + missing from stops,
+        # so every generation ran to cap).
+        self._keep_ids = None
+        self._stop_ids = None
+        self._think_end_id_cache = None
         # Debug-round generation tracer (LoopConfig.debug_round) — None in
         # normal runs; _generate/_generate_batch record every call when set.
         self.gen_trace: GenTracer | None = None
@@ -645,6 +920,20 @@ class InfiniteCurriculum:
         # digits" are the same function → same fingerprint → reject).
         self._seen_fingerprints: set[str] = set()
         self._seen_fp_path = self.task_queue_dir / "seen_fingerprints.json"
+
+        # Validated-task archive (OMNI-EPIC stepping-stone pool): every
+        # description that passed validation lands here — the proposer's
+        # goal space then GROWS with each accepted task instead of being
+        # capped by the fixed seed bank. Variants/mixes sampled from this
+        # pool are what keep the curriculum open-ended (Prism: diversity
+        # collapse is the failure mode; a growing archive is the fix).
+        self._validated_descs: list[dict] = []   # {"desc","domain"}
+        self._validated_path = (self.task_queue_dir
+                                / "validated_descriptions.json")
+        self._load_validated_descs()
+        # Domain propose counts — the coverage signal steering
+        # _coverage_domain toward underrepresented regions.
+        self._domain_counts: dict[str, int] = {}
 
         # Per-prompt solve-rate DB: persistent record of how often each
         # prompt (by functional fingerprint, else normalized description)
@@ -700,6 +989,12 @@ class InfiniteCurriculum:
         if difficulty is None:
             difficulty = self._adaptive_difficulty(domain)
 
+        # Coverage steering (Prism): bias toward underrepresented domains
+        # when one saturates — a fixed rotation can't adapt to clone
+        # rejection storms; the count signal can.
+        domain = self._coverage_domain(domain)
+        self._domain_counts[domain] = self._domain_counts.get(domain, 0) + 1
+
         self._trace_phase = "propose"
         valid_tasks = []
         proposed = 0
@@ -721,18 +1016,12 @@ class InfiniteCurriculum:
             for _ in range(current_batch):
                 sig_hint = self._random_signature(domain)
                 _t_args, _t_expected = self._example_test_cases(domain, sig_hint)
-                desc_hints = _DESC_HINT_BANK
-                # Sample desc_hint without replacement within a batch to
-                # encourage diverse prompts (prevents identical prompts → clone tasks)
-                available_hints = desc_hints.get(domain, desc_hints["algorithms"])
-                unused = [h for h in available_hints
-                          if h not in self._batch_used_hints]
-                if unused:
-                    desc_hint = self.rng.choice(unused)
-                else:
-                    # All used — reset and pick fresh
-                    self._batch_used_hints = set()
-                    desc_hint = self.rng.choice(available_hints)
+                # Goal hint from the infinite-goal sampler (bank | archive
+                # stepping-stone variant | cross-domain mix). Retry once
+                # on a within-batch collision to keep prompts diverse.
+                desc_hint = self._sample_desc_hint(domain)
+                if desc_hint in self._batch_used_hints:
+                    desc_hint = self._sample_desc_hint(domain)
                 self._batch_used_hints.add(desc_hint)
                 prompts.append(self._propose_prompt(
                     domain, difficulty, sig_hint, desc_hint))
@@ -813,6 +1102,7 @@ class InfiniteCurriculum:
                     self._task_queue.append(task)
                     self._save_task(task)
                     self._mark_description_seen(task.description)
+                    self._note_validated(task)
                     print(f"    -> VALIDATED (conf={task.proposer_confidence})")
                 else:
                     self._rejected_signatures.add(task.signature)
@@ -869,19 +1159,34 @@ class InfiniteCurriculum:
         if self.engine is not None:
             rendered = [self._render_chat(p, prefill=prefill)
                         for p in prompts]
-            # One think-cap processor per sequence — each holds its own
-            # force-injection queue, so instances can't be shared.
-            # Prefill mode: budget=None — no think block to cap, the
-            # processor only applies the structural bans.
-            caps = [self._think_cap(
-                None if prefill else think_budget, close_suffix)
-                for _ in rendered]
+            if self._model_terminates():
+                # Spark-class models: the model's own response tokens
+                # carry the turn structure — ``` fence closer, real eos
+                # (<｜end▁of▁sentence｜>=1). No Python logits processors:
+                # every processor forces a growing gen_ids .tolist()
+                # D2H per decode step — quadratic CPU cost that makes
+                # throughput decay instead of staying flat. The banned
+                # special set applies in ONE batched index_fill kernel;
+                # the "```" stop string ends the reply on the model's
+                # own closing fence (the prefill already opened it).
+                caps = None
+                suppress = self._banned_special_ids()
+                stops = [["```"]] * len(rendered) if prefill else None
+            else:
+                # Think-cap processors (Jamba path): each row's
+                # force-injection queue is private, so instances can't
+                # be shared. Prefill mode: budget=None — no think block
+                # to cap, the processor only applies structural bans.
+                caps = [self._think_cap(
+                    None if prefill else think_budget, close_suffix)
+                    for _ in rendered]
+                suppress = stops = None
             replies = self.engine.generate_batch(
                 rendered,
                 max_new_tokens=max(self.max_gen_tokens, min_tokens),
                 temperature=self.temperature, top_p=self.top_p,
-                top_k=self.top_k, seeds=seeds,
-                logits_processors=caps,
+                top_k=self.top_k, seeds=seeds, stops=stops,
+                logits_processors=caps, suppress_ids=suppress,
                 # Preserve </think> for the reasoning split.
                 skip_special_tokens=False)
             stripped = [_strip_reply(r) for r in replies]
@@ -1017,15 +1322,10 @@ class InfiniteCurriculum:
                                 probs / row_sums.clamp(min=1e-8),
                                 torch.softmax(scaled, dim=-1))
 
-        # Per-sequence sampling with different seeds to prevent cloning.
-        B = probs.shape[0]
-        out = torch.empty(B, dtype=torch.long, device=probs.device)
-        for b in range(B):
-            seed = int(torch.randint(0, 2**31 - 1, (1,), device=probs.device).item())
-            gen = torch.Generator(device=probs.device)
-            gen.manual_seed(seed)
-            out[b] = torch.multinomial(probs[b], num_samples=1, generator=gen).squeeze()
-        return out
+        # Batched multinomial — one RNG stream still draws independent
+        # samples per row (the old per-row generators + .item() seeds cost
+        # 2B GPU syncs per decode step).
+        return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
     def _propose_prompt(self, domain: str, difficulty: str,
                         sig_hint: str, desc_hint: str) -> str:
@@ -1038,10 +1338,130 @@ class InfiniteCurriculum:
         if self.engine is not None:
             return CHAT_PROPOSE_PROMPT.format(
                 domain=domain, difficulty=difficulty,
-                signature=sig_hint, desc_hint=desc_hint)
+                signature=sig_hint, desc_hint=desc_hint,
+                example=self.rng.choice(_PROPOSE_EXAMPLE_BANK),
+                avoid_hint=self._avoid_hint(domain=domain))
         return INDUCTION_PROMPT.format(
             domain=domain, difficulty=difficulty,
             signature=sig_hint, desc_hint=desc_hint)
+
+    def _avoid_hint(self, n: int = 8, domain: str | None = None) -> str:
+        """Feed already-used task descriptions back as banned topics —
+        the dedup rejects clones anyway, so telling the model upfront
+        converts a wasted 640-token generation into a fresh proposal.
+        Also steers off the ~10 canonical tasks a 3B anchors on. When
+        ``domain`` is given, prefer same-domain banned topics — those
+        are the ones the proposer is about to collide with."""
+        if domain:
+            same = [r["desc"] for r in self._validated_descs
+                    if r["domain"] == domain]
+            rest = [r["desc"] for r in self._validated_descs
+                    if r["domain"] != domain]
+            pool = same + rest if same else None
+        else:
+            pool = None
+        seen = pool or sorted(self._seen_descriptions)
+        if not seen:
+            return (" Avoid the overused basics (digit sums, GCD, primes,"
+                    " Fibonacci, palindromes) unless the hint asks.")
+        picks = self.rng.sample(seen, k=min(n, len(seen)))
+        topics = "; ".join(
+            " ".join(p.split()[:8]) for p in picks)
+        return (f" Do NOT repeat these already-proposed tasks: {topics}."
+                f" Pick a different angle.")
+
+    # ── Infinite-goal machinery (OMNI-EPIC + Prism + in-context QD) ────
+    # The fixed seed bank alone caps the goal space at ~155 ideas — after
+    # enough epochs the proposer exhausts it and saturates on clones
+    # (observed: 2/12 valid at attempt 4). Three mechanisms keep the goal
+    # space unbounded:
+    #   1. Archive stepping-stones (OMNI-EPIC): validated tasks feed back
+    #      as mutation seeds — "harder/orthogonal variant of X" — so the
+    #      reachable goal space grows with every accepted task.
+    #   2. Coverage steering (Prism 2603.13309): per-domain propose counts
+    #      bias sampling toward underrepresented domains — including the
+    #      extended bank domains the caller's rotation doesn't know.
+    #   3. Cross-domain combination (in-context QD): fuse two hints from
+    #      different domains into one composite idea.
+    _GOAL_VARIANT_P = 0.35   # archive stepping-stone variant
+    _GOAL_MIX_P = 0.20       # cross-domain combination (of remaining)
+    _GOAL_COVERAGE_P = 0.35  # domain-override probability
+    _VALIDATED_CAP = 400     # rolling archive size
+
+    def _note_validated(self, task) -> None:
+        """Record a validated task into the stepping-stone archive."""
+        desc = " ".join(str(task.description).split())
+        if not desc:
+            return
+        self._validated_descs.append(
+            {"desc": desc, "domain": task.domain})
+        if len(self._validated_descs) > self._VALIDATED_CAP:
+            del self._validated_descs[:len(self._validated_descs)
+                                     - self._VALIDATED_CAP]
+        self._save_validated_descs()
+
+    def _load_validated_descs(self) -> None:
+        try:
+            rows = json.loads(self._validated_path.read_text())
+            if isinstance(rows, list):
+                self._validated_descs = [
+                    r for r in rows
+                    if isinstance(r, dict) and r.get("desc")]
+        except Exception:
+            self._validated_descs = []
+
+    def _save_validated_descs(self) -> None:
+        try:
+            self._validated_path.write_text(
+                json.dumps(self._validated_descs))
+        except OSError:
+            pass
+
+    def _coverage_domain(self, domain: str) -> str:
+        """Prism-style coverage override: with probability
+        ``_GOAL_COVERAGE_P``, swap the requested domain for the least-
+        proposed domain in the extended bank. Balanced exploration of
+        underrepresented regions is what prevents the diversity collapse
+        Prism documents — a fixed rotation cannot adapt when one domain
+        saturates (its clones get rejected, wasting whole propose calls).
+        """
+        domains = list(_DESC_HINT_BANK)
+        if domain not in domains:
+            return domain
+        if self.rng.random() >= self._GOAL_COVERAGE_P:
+            return domain
+        counts = self._domain_counts
+        least = min(domains, key=lambda d: (counts.get(d, 0), d))
+        most_count = counts.get(domain, 0)
+        if most_count - counts.get(least, 0) < 4:
+            return domain  # roughly balanced already
+        return least
+
+    def _sample_desc_hint(self, domain: str) -> str:
+        """Pick the goal hint: archive variant | cross-domain mix | bank.
+
+        Returns the ``desc_hint`` string for CHAT_PROPOSE_PROMPT — either
+        a raw bank hint or a composite instruction built from validated
+        tasks / multiple domains.
+        """
+        roll = self.rng.random()
+        if roll < self._GOAL_VARIANT_P and self._validated_descs:
+            base = self.rng.choice(self._validated_descs)
+            short = " ".join(base["desc"].split()[:16])
+            twist = self.rng.choice((
+                "a HARDER variant of", "an ORTHOGONAL variant of",
+                "the inverse problem of", "a generalization of"))
+            return f'{twist}: "{short}"'
+        bank_domains = list(_DESC_HINT_BANK)
+        if roll < self._GOAL_VARIANT_P + self._GOAL_MIX_P:
+            d2 = self.rng.choice(
+                [d for d in bank_domains if d != domain] or bank_domains)
+            h1 = self.rng.choice(
+                _DESC_HINT_BANK.get(domain, _DESC_HINT_BANK["algorithms"]))
+            h2 = self.rng.choice(_DESC_HINT_BANK[d2])
+            return (f'combine the ideas: "{h1}" with "{h2}"')
+        return self.rng.choice(
+            _DESC_HINT_BANK.get(domain, _DESC_HINT_BANK["algorithms"]))
 
     def _propose_one(self, domain: str, difficulty: str,
                      mode: str = "induction") -> ProposedTask | None:
@@ -1054,9 +1474,9 @@ class InfiniteCurriculum:
         # These are EXAMPLES — the model will replace them with its own
         _t_args, _t_expected = self._example_test_cases(domain, sig_hint)
 
-        # Description hint — challenging, non-trivial tasks that push the model
-        desc_hints = _DESC_HINT_BANK
-        desc_hint = self.rng.choice(desc_hints.get(domain, desc_hints["algorithms"]))
+        # Description hint — infinite-goal sampler (bank | archive
+        # stepping-stone variant | cross-domain mix)
+        desc_hint = self._sample_desc_hint(domain)
 
         prompt = self._propose_prompt(domain, difficulty, sig_hint, desc_hint)
 
@@ -1239,25 +1659,143 @@ class InfiniteCurriculum:
             self._seen_descriptions.add(desc_key)
 
             valid_tasks.append(task)
+            self._note_validated(task)
 
         print(f"  [API-Propose] {len(valid_tasks)}/{len(raw_tasks)} tasks "
               f"validated from API teachers")
         return valid_tasks
+
+    # ─── External verified task pools (HF datasets) ────────────────────
+
+    def external_propose_tasks(self, n: int, pool_path: str,
+                               domain: str = "algorithms",
+                               difficulty: str = "medium",
+                               ) -> list[ProposedTask]:
+        """Draw pre-verified tasks from an external pool JSON.
+
+        Model-authored proposals are a documented dead end at 1.7B
+        (AGENTS.md "Spark selfgen staged plan" — step 3 is ONLINE DBs).
+        This supply bypasses the proposer entirely: pool rows carry a
+        compiler-checked reference + literal asserts, so tasks arrive
+        validated=True with ref_code set — the oracle also enables
+        STaR-style ref_fill when the solver misses.
+
+        A persistent cursor under task_queue_dir walks the pool so each
+        call/epoch/restart sees a fresh slice, wrapping at pool end.
+        Pool format (scripts/fetch_external_tasks.py):
+        ``{name, code, desc, tests:[{args, expected}], signature, key}``
+        where args/expected are literal-eval strings.
+        """
+        try:
+            rows = json.loads(Path(pool_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"  [Ext-Propose] pool unreadable ({pool_path}): {e}")
+            return []
+        if not isinstance(rows, list) or not rows:
+            print(f"  [Ext-Propose] empty pool: {pool_path}")
+            return []
+
+        cursor_path = self.task_queue_dir / "external_cursor.json"
+        offset = 0
+        try:
+            cur = json.loads(cursor_path.read_text())
+            if cur.get("pool") == str(pool_path):
+                offset = int(cur.get("offset", 0))
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+
+        out: list[ProposedTask] = []
+        scanned = 0
+        i = offset % len(rows)
+        while len(out) < n and scanned < len(rows):
+            row = rows[i]
+            i = (i + 1) % len(rows)
+            scanned += 1
+            name = (row.get("name") or "").strip()
+            code = (row.get("code") or "").strip()
+            desc = (row.get("desc") or "").strip()
+            if not name or not code or not desc:
+                continue
+            # selfgen-format tests are literal strings — eval to values
+            test_cases = []
+            for tc in row.get("tests") or []:
+                try:
+                    args = ast.literal_eval(f"({tc['args']},)")
+                    expected = ast.literal_eval(str(tc["expected"]))
+                except (ValueError, SyntaxError, TypeError, KeyError):
+                    continue
+                test_cases.append(
+                    {"args": tuple(args), "expected": expected})
+            if len(test_cases) < 2:
+                continue
+            desc_key = desc.lower().strip()[:80]
+            if desc_key in self._seen_descriptions:
+                continue
+            self._seen_descriptions.add(desc_key)
+            self._task_counter += 1
+            task = ProposedTask(
+                id=f"ext_{row.get('key') or self._task_counter}",
+                domain=domain,
+                difficulty=difficulty,
+                description=desc,
+                signature=row.get("signature") or "(...)",
+                solve_name=name,
+                test_cases=test_cases,
+                stress_index=len(test_cases) - 1
+                if len(test_cases) > 2 else None,
+                proposer_confidence=1.0,
+                validated=True,
+                archetype="external_db",
+                raw_output="",
+                generation_mode="external",
+                ref_code=code,
+            )
+            self._save_task(task)
+            out.append(task)
+
+        try:
+            cursor_path.write_text(
+                json.dumps({"pool": str(pool_path), "offset": i}))
+        except OSError:
+            pass
+        print(f"  [Ext-Propose] {len(out)} tasks from {pool_path} "
+              f"(cursor {offset}->{i}, scanned {scanned})")
+        return out
 
     def _random_signature(self, domain: str) -> str:
         """Return a random function signature hint for the domain."""
         sigs = {
             "algorithms": ["(n: int) -> int", "(lst: list) -> int",
                           "(lst: list) -> list", "(n: int) -> list",
-                          "(a: int, b: int) -> int"],
+                          "(a: int, b: int) -> int",
+                          "(lst: list, k: int) -> int",
+                          "(grid: list) -> int",
+                          "(lst: list, target: int) -> list"],
             "math": ["(n: int) -> int", "(x: int, y: int) -> int",
-                    "(n: int) -> bool", "(n: int) -> float"],
+                    "(n: int) -> bool", "(n: int) -> float",
+                    "(n: int, k: int) -> int", "(s: str) -> int"],
             "strings": ["(s: str) -> str", "(s: str) -> int",
-                       "(s: str, t: str) -> str", "(s: str) -> bool"],
+                       "(s: str, t: str) -> str", "(s: str) -> bool",
+                       "(s: str, k: int) -> str", "(words: list) -> list",
+                       "(s: str) -> dict"],
             "logic": ["(n: int) -> bool", "(a: int, b: int) -> bool",
-                     "(lst: list) -> bool"],
+                     "(lst: list) -> bool", "(grid: list) -> bool",
+                     "(s: str) -> bool", "(moves: list) -> str"],
             "data_structures": ["(lst: list) -> list", "(lst: list, n: int) -> list",
-                               "(lst: list) -> int", "(matrix: list) -> list"],
+                               "(lst: list) -> int", "(matrix: list) -> list",
+                               "(d: dict) -> list", "(ops: list) -> list",
+                               "(pairs: list) -> int"],
+            "bit_manipulation": ["(n: int) -> int", "(n: int) -> bool",
+                                "(n: int, k: int) -> int",
+                                "(a: int, b: int) -> int",
+                                "(lst: list) -> int", "(n: int) -> list"],
+            "geometry": ["(pts: list) -> float", "(x1: float, y1: float, x2: float, y2: float) -> float",
+                        "(pts: list) -> list", "(a: float, b: float, c: float) -> bool",
+                        "(pts: list, p: list) -> bool", "(r: float) -> float"],
+            "simulation": ["(n: int, k: int) -> float", "(ops: list) -> int",
+                          "(grid: list, steps: int) -> list",
+                          "(n: int) -> int", "(ops: list) -> list",
+                          "(moves: list) -> list"],
         }
         return self.rng.choice(sigs.get(domain, sigs["algorithms"]))
 
@@ -1298,15 +1836,36 @@ class InfiniteCurriculum:
         ``tool_calls_allowed=False`` the ban set is exactly the self-play
         structural set {518, 531, 532, 539, 540, 541}.
         """
-        from forge_gui_server.services.chat_loop import _THINK_END_ID, _think_cap_processor
+        from forge_gui_server.services.chat_loop import (
+            _BANNED_IDS, _THINK_START_ID, _TOOL_CALL_START_ID,
+            _TOOL_CALL_END_ID, _think_cap_processor)
         ids = self._think_suffix_ids.get(close_suffix)
         if ids is None:
             ids = self.tokenizer.encode(
                 close_suffix, add_special_tokens=False)
             self._think_suffix_ids[close_suffix] = ids
-        cap = _think_cap_processor(
-            budget, ids, tool_calls_allowed=False)
         banned = self._banned_special_ids()
+        # The inner cap's ban list is hardcoded Jamba ids ({518,531,532,
+        # 539,540,541}); on other tokenizers (spark) those are ordinary
+        # BPE tokens — banning them corrupts every sampled step. Pass the
+        # sets filtered to what this tokenizer's own scan actually bans
+        # (no-op on Jamba, where they're all real special tokens).
+        _bset = set(banned)
+        cap = _think_cap_processor(
+            budget, ids, tool_calls_allowed=False,
+            ban_ids=[i for i in (*_BANNED_IDS, _THINK_START_ID)
+                     if i in _bset],
+            tool_ids=tuple(
+                i for i in (_TOOL_CALL_START_ID, _TOOL_CALL_END_ID)
+                if i in _bset))
+        # Prefill-mode early stop: the prompt already opened the code
+        # fence, so the first emitted ``` id is the block CLOSER — the
+        # model otherwise muses to the token cap every rollout (observed:
+        # all rows run to 640). Force the real eos one step later;
+        # _extract_code discards post-fence text anyway.
+        _eos = getattr(self.tokenizer, "eos_token_id", None)
+        gen_eos_ids = ([_eos] if isinstance(_eos, int)
+                       else sorted(self._gen_stop_ids()))
 
         # Post-think fence deadline — when the model self-closes </think>
         # then muses instead of emitting a code block, force the fence part
@@ -1324,40 +1883,149 @@ class InfiniteCurriculum:
         except Exception:
             fence_start = None
         extra_queue: list[int] = []
+        banned_t: torch.Tensor | None = None
+        # Hoisted out of the per-step proc: think_end is fixed for the
+        # batch, and the </think> position scan is incremental — each call
+        # only rescans the newly-appended tail, not the whole O(L) list.
+        think_end = self._think_end_ids() if fence_start is not None else ()
+        _found_last: int | None = None
+        _scanned = 0
 
         def proc(logits, generated_ids):
+            nonlocal banned_t, _found_last, _scanned
             masked = cap(logits, generated_ids)
             if banned:
-                masked[..., banned] = float("-inf")
+                if banned_t is None or banned_t.device != logits.device:
+                    banned_t = torch.tensor(
+                        banned, dtype=torch.long, device=logits.device)
+                masked.index_fill_(-1, banned_t, float("-inf"))
             if extra_queue:
                 tid = extra_queue.pop(0)
                 forced = torch.full_like(masked, float("-inf"))
                 forced[..., tid] = logits[..., tid]
                 return forced
-            if fence_start is not None and _THINK_END_ID in generated_ids:
-                last = (len(generated_ids) - 1
-                        - generated_ids[::-1].index(_THINK_END_ID))
-                post = generated_ids[last + 1:]
+            glist = generated_ids
+            if think_end:
+                start = max(0, _scanned - len(think_end) + 1)
+                rel = _last_subseq_index(glist[start:], think_end)
+                if rel is not None:
+                    _found_last = start + rel
+                _scanned = len(glist)
+                last = _found_last
+            else:
+                last = None
+            if last is not None:
+                post = glist[last + len(think_end):]
                 if (len(post) >= _POST_THINK_FENCE_DEADLINE
                         and fence_start not in post):
                     extra_queue.extend(fence_ids)
+            if (budget is None and fence_start is not None
+                    and glist and glist[-1] == fence_start):
+                extra_queue.extend(gen_eos_ids)
             return masked
         return proc
 
+    def _control_keep_ids(self) -> set[int]:
+        """Control-looking ids that generation must keep legal, derived from
+        THIS tokenizer: its real eos plus im_end/endoftext/</think> when
+        they exist as single tokens. Replaces the hardcoded Jamba keep set
+        {2,519,542} — on the spark tokenizer that set kept a pad token and
+        a random BPE id while the scan banned the true eos (id 1).
+        """
+        if getattr(self, "_keep_ids", None) is None:
+            keep: set[int] = set()
+            eos = getattr(self.tokenizer, "eos_token_id", None)
+            if isinstance(eos, int):
+                keep.add(eos)
+            elif isinstance(eos, (list, tuple, set)):
+                keep.update(t for t in eos if isinstance(t, int))
+            try:
+                vocab = self.tokenizer.get_vocab()
+            except Exception:
+                vocab = {}
+            for tok in _KEEP_SPECIAL_TOKENS:
+                tid = vocab.get(tok)
+                if isinstance(tid, int):
+                    keep.add(tid)
+            self._keep_ids = keep or set(_CONTROL_TOKEN_KEEP)
+        return self._keep_ids
+
     def _banned_special_ids(self) -> list[int]:
         """Every control-looking vocab id minus the legitimate terminators
-        in _CONTROL_TOKEN_KEEP. One-time scan — the reserved-token class is
-        too large to enumerate in the GUI's six-id structural set."""
-        if self._banned_ids is None:
+        this tokenizer actually needs (see _control_keep_ids). One-time
+        scan — the reserved-token class is too large to enumerate by hand.
+        """
+        if getattr(self, "_banned_ids", None) is None:
+            keep = self._control_keep_ids()
             try:
                 vocab = self.tokenizer.get_vocab()
             except Exception:
                 vocab = {}
             self._banned_ids = [
                 tid for tok, tid in vocab.items()
-                if tid not in _CONTROL_TOKEN_KEEP
-                and _RE_CONTROL_TOKEN.match(tok)]
+                if tid not in keep and _RE_CONTROL_TOKEN.match(tok)]
+            if not vocab:
+                # Vocab-less tokenizer (stubs, minimal wrappers): the
+                # scan can't run — fall back to the Jamba structural set
+                # the think-cap contract was built on.
+                self._banned_ids = sorted(
+                    {518, 531, 532, 539, 540, 541} - set(keep))
         return self._banned_ids
+
+    def _gen_stop_ids(self) -> set[int]:
+        """EOS stop ids for generation, derived from this tokenizer —
+        replaces hardcoded Jamba [2, 519] which named a pad token and a
+        random BPE id on spark (real eos <｜end▁of▁sentence｜>=id 1).
+        """
+        if getattr(self, "_stop_ids", None) is None:
+            ids: set[int] = set()
+            eos = getattr(self.tokenizer, "eos_token_id", None)
+            if isinstance(eos, int):
+                ids.add(eos)
+            elif isinstance(eos, (list, tuple, set)):
+                ids.update(t for t in eos if isinstance(t, int))
+            try:
+                vocab = self.tokenizer.get_vocab()
+            except Exception:
+                vocab = {}
+            for tok in _STOP_SPECIAL_TOKENS:
+                tid = vocab.get(tok)
+                if isinstance(tid, int):
+                    ids.add(tid)
+            self._stop_ids = ids or {2, 519}
+        return self._stop_ids
+
+    def _model_terminates(self) -> bool:
+        """True when the model's own response tokens carry turn structure.
+
+        Spark-family configs render the trained sentence-marker template
+        and the SFT'd model reliably emits ``` fence closers and its real
+        eos (<｜end▁of▁sentence｜>=1) — so generation terminates on model
+        tokens, not stitched force-injection. Qwen-family instruct models
+        self-terminate the same way on <|im_end|>; LFM3 emits <|im_end|>
+        (124900) / <|endoftext|> (124895) through its native ChatML
+        template — resolved per-tokenizer by _gen_stop_ids. The Jamba path
+        still needs think-cap processors (observed meta-musing to the
+        token cap).
+        """
+        return bool(self.config_name
+                    and self.config_name.startswith(
+                        ("spark", "qwen", "lfm")))
+
+    def _think_end_ids(self) -> tuple:
+        """Token ids encoding "</think>" for this tokenizer — one id on
+        Jamba (542), a multi-token suffix on spark where it is plain text.
+        Replaces the hardcoded _THINK_END_ID membership check.
+        """
+        cache = getattr(self, "_think_end_id_cache", None)
+        if cache is None:
+            try:
+                cache = tuple(self.tokenizer.encode(
+                    "</think>", add_special_tokens=False))
+            except Exception:
+                cache = ()
+            self._think_end_id_cache = cache
+        return cache
 
     def _generate(self, prompt: str,
                   min_tokens: int = _CHAT_MIN_SOLVE_TOKENS,
@@ -1366,12 +2034,12 @@ class InfiniteCurriculum:
                   prefill: str | None = None) -> str:
         """Generate text — through the ForgeEngine when attached.
 
-        Engine path: ChatML think-mode render via generate_raw (activated
-        features: prefix cache, mtp_selfspec, spectral KV, DRY, think-cap +
-        structural token bans, EOS on <|im_end|>=519/<|endoftext|>=2); the
-        reply is reasoning-stripped via _strip_reply. ``min_tokens`` raises
-        the gen cap because chat replies carry the <think> block. Legacy
-        path: raw model() with KV cache + async D2H.
+        Engine path: chat-format render via generate_raw (activated
+        features: prefix cache, spectral KV, DRY, think-cap + structural
+        token bans, EOS on the tokenizer's real eos + im_end/endoftext
+        when present); the reply is reasoning-stripped via _strip_reply.
+        ``min_tokens`` raises the gen cap because chat replies carry the
+        <think> block. Legacy path: raw model() + async D2H.
         """
         if self.engine is not None:
             rendered = self._render_chat(prompt, prefill=prefill)
@@ -1387,20 +2055,52 @@ class InfiniteCurriculum:
                     ids, skip_special_tokens=False)
                 print(f"  [Curriculum] prompt {n_orig} toks > 12000 — "
                       f"truncated (head+tail kept)")
-            raw = self.engine.generate_raw(
-                rendered,
-                max_new_tokens=max(self.max_gen_tokens, min_tokens),
-                temperature=self.temperature,
-                top_p=self.top_p,
-                top_k=self.top_k,
-                repetition_penalty=1.05,
-                logits_processor=self._think_cap(
-                    None if prefill else think_budget, close_suffix),
-                eos_token_ids=[2, 519],
-                # Keep </think> visible — _strip_reply needs it for the
-                # reasoning/content split (GUI _split_reasoning parity).
-                skip_special_tokens=False,
-            )
+            spark = self._model_terminates()
+            _stops = ["```"] if (spark and prefill) else None
+            # Single-row through BatchedDecoding keeps O(1) KV appends
+            # via the b1 static graphs — generate_raw's functional path
+            # grows KV by torch.cat per step (O(L^2)). generate_batch's
+            # resolved EOS set already covers the tokenizer eos (=1 on
+            # spark) merged with the cross-model defaults. generate_raw
+            # stays only for multi-token stop strings, which the
+            # batched path can't express (it checks the last id).
+            _use_batch = spark and (
+                not _stops
+                or all(len(self.engine.tokenizer.encode(
+                    s, add_special_tokens=False)) == 1 for s in _stops))
+            if _use_batch:
+                raw = self.engine.generate_batch(
+                    [rendered],
+                    max_new_tokens=max(self.max_gen_tokens, min_tokens),
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    top_k=self.top_k,
+                    repetition_penalty=1.05,
+                    stops=[_stops] if _stops else None,
+                    suppress_ids=self._banned_special_ids(),
+                    skip_special_tokens=False,
+                )[0]
+            else:
+                raw = self.engine.generate_raw(
+                    rendered,
+                    max_new_tokens=max(self.max_gen_tokens, min_tokens),
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    top_k=self.top_k,
+                    repetition_penalty=1.05,
+                    logits_processor=(
+                        None if spark else self._think_cap(
+                            None if prefill else think_budget,
+                            close_suffix)),
+                    eos_token_ids=sorted(self._gen_stop_ids()),
+                    suppress_ids=(
+                        self._banned_special_ids() if spark else None),
+                    stop=_stops,
+                    # Keep </think> visible — _strip_reply needs it for
+                    # the reasoning/content split (GUI _split_reasoning
+                    # parity).
+                    skip_special_tokens=False,
+                )
             reply = _strip_reply(raw)
             if prefill:
                 reply = prefill + re.sub(r'^\s*```\w*\s*\n?', '', reply)
@@ -1706,15 +2406,31 @@ class InfiniteCurriculum:
         if not task.test_cases and not task.pending_inputs:
             return False
 
+        # Payload cap: a serialized test case bigger than a few KB is
+        # unlearnable (the solver can't emit it), blows the solve prompt
+        # past every context limit (a 5MB repr was observed producing a
+        # ~22k-token prompt → 48GiB pad_bias OOM → device assert), and
+        # makes validation/eval scripts megabyte-scale.
+        if sum(len(repr(tc.get("args"))) + len(repr(tc.get("expected")))
+               for tc in task.test_cases) > _MAX_TEST_PAYLOAD:
+            return False
+
         # Extract reference implementation from raw output
         ref_code = self._extract_reference_code(task.raw_output)
         if ref_code:
             derived = self._derive_outputs(ref_code, task)
             if derived:
-                task.test_cases = derived
-                task.pending_inputs = []
-                task.proposer_confidence = 1.0
-                return True
+                # Executor-derived outputs get the same payload cap —
+                # solve(654321) -> a 654k-element list is a valid run
+                # but an unlearnable, prompt-busting expected value.
+                if sum(len(repr(tc.get("args")))
+                       + len(repr(tc.get("expected")))
+                       for tc in derived) <= _MAX_TEST_PAYLOAD:
+                    task.test_cases = derived
+                    task.pending_inputs = []
+                    task.proposer_confidence = 1.0
+                    return True
+                return False
         if not task.test_cases:
             return False
         if not ref_code:
@@ -1876,8 +2592,41 @@ class InfiniteCurriculum:
         return ""
 
     def _execute_sandbox(self, code: str, timeout_s: float = 3.0) -> dict:
-        """Execute Python code in a sandboxed one-shot worker (audit hook +
-        jail dir + env scrub — model-generated code never runs unrestricted).
+        """Execute Python code in a sandboxed worker (audit hook + jail dir
+        + env scrub — model-generated code never runs unrestricted).
+
+        Default path: this thread's persistent ``PersistentCodeExecutor``
+        worker — identical security model to the old one-shot (the worker
+        script shares ``_run_code``: fresh restricted namespace per exec,
+        builtins/sys.modules restore, same audit events) but the
+        interpreter spawns once per thread instead of per call. On
+        Windows that removes ~150-300ms of cold interpreter boot from
+        EVERY test-case run — the dominant per-epoch verification cost.
+        Falls back to a one-shot subprocess when the worker can't run.
+        """
+        try:
+            ex = _thread_executor()
+        except Exception:
+            ex = None
+        if ex is not None:
+            try:
+                ex.timeout_s = timeout_s
+                r = ex.execute(code)
+                return {"stdout": r.get("stdout", ""),
+                        "stderr": r.get("stderr", ""),
+                        "returncode": r.get("returncode", -1)}
+            except Exception:
+                pass  # fall through to one-shot for THIS call
+        return self._execute_sandbox_oneshot(code, timeout_s=timeout_s)
+
+    def _execute_sandbox_oneshot(self, code: str,
+                                 timeout_s: float = 3.0) -> dict:
+        """One-shot subprocess fallback (cold interpreter boot per exec).
+
+        Kept for when the persistent worker cannot spawn or dies in a way
+        execute() can't recover from. build_once_script() output is
+        constant — cached module-level so we only write it once per
+        process instead of on every call.
         """
         temp_path = None
         once_path = None
@@ -1893,8 +2642,14 @@ class InfiniteCurriculum:
                 temp_path = f.name
             once_path = temp_path + '_once.py'
             result_path = temp_path + '_result.json'
-            with open(once_path, 'w', encoding='utf-8') as f:
-                f.write(build_once_script())
+            global _ONCE_SCRIPT_PATH
+            if _ONCE_SCRIPT_PATH is None or not os.path.exists(
+                    _ONCE_SCRIPT_PATH):
+                _ONCE_SCRIPT_PATH = os.path.join(
+                    scratch, 'forge_once_script.py')
+                with open(_ONCE_SCRIPT_PATH, 'w', encoding='utf-8') as f:
+                    f.write(build_once_script())
+            once_path = _ONCE_SCRIPT_PATH
 
             proc = subprocess.Popen(
                 [sys.executable, once_path, scratch, scratch,
@@ -1923,7 +2678,8 @@ class InfiniteCurriculum:
             return {"stdout": "", "stderr": f"sandbox error: {e}",
                     "returncode": -1}
         finally:
-            for p in (temp_path, once_path, result_path):
+            # once_path is the shared cached script — never unlinked.
+            for p in (temp_path, result_path):
                 if p is not None:
                     with contextlib.suppress(OSError):
                         os.unlink(p)
@@ -1984,9 +2740,12 @@ class InfiniteCurriculum:
         from forge.evaluation.goal_tasks import build_goal_prompt
         if self.engine is None:
             return build_goal_prompt(task)
+        def _tc_repr(x, limit=384):
+            r = repr(x)
+            return r if len(r) <= limit else r[:limit] + "...<trunc>"
         test_lines = "\n".join(
-            f"#   {task.solve_name}({', '.join(repr(a) for a in tc['args'])})"
-            f" == {tc['expected']!r}"
+            f"#   {task.solve_name}({', '.join(_tc_repr(a) for a in tc['args'])})"
+            f" == {_tc_repr(tc['expected'])}"
             for tc in task.test_cases)
         return CHAT_SOLVE_PROMPT.format(
             description=task.description,
@@ -2022,41 +2781,75 @@ class InfiniteCurriculum:
         # Raw mode: prompt ends mid-function; completion is the body.
         return prompt + body
 
-    def _verify_solution(self, task: "GoalTask",
-                         full_solution: str) -> tuple[bool, dict]:
-        """Run all test cases against a solution; (success, first_result)."""
-        test_codes = []
-        for tc in task.test_cases:
+    def _build_verify_script(self, task: "GoalTask",
+                             full_solution: str,
+                             nonce: int) -> str:
+        """Single-script verification: every test assert in ONE sandbox
+        exec with per-test nonce markers — replaces the old
+        one-process-per-test fan-out (~5 interpreter boots per solution).
+
+        The per-call nonce makes the PASS markers unforgeable: a
+        reward-hacking solution that prints the marker string itself
+        can't guess the nonce, so it can't fake a pass the way a static
+        ``print('PASS')`` marker would allow.
+        """
+        lines = [full_solution, ""]
+        for i, tc in enumerate(task.test_cases):
             args_str = ", ".join(repr(a) for a in tc["args"])
             expected_repr = repr(tc["expected"])
-            tc_code = (
-                full_solution + "\n"
-                f"assert {task.solve_name}({args_str}) == {expected_repr}, "
-                f"'{task.solve_name}({args_str}) failed'\n"
-                "print('PASS')"
-            )
-            test_codes.append(tc_code)
+            lines.append("try:")
+            lines.append(
+                f"    assert {task.solve_name}({args_str}) == "
+                f"{expected_repr}, '{task.solve_name}({args_str}) failed'")
+            lines.append(f"    print('__TC{i}_{nonce:08x}_PASS__')")
+            lines.append("except Exception as _e:")
+            lines.append(
+                f"    print('__TC{i}_{nonce:08x}_FAIL__', "
+                "type(_e).__name__, str(_e)[:120])")
+        return "\n".join(lines)
 
-        if not test_codes:
+    def _verify_solution(self, task: "GoalTask",
+                         full_solution: str) -> tuple[bool, dict]:
+        """Run all test cases against a solution; (success, first_result).
+
+        Single sandbox exec: the script carries every assert with
+        per-test try/except markers, so failure granularity matches the
+        old per-test-process version while costing one exec instead of
+        len(test_cases)."""
+        if not task.test_cases:
             return False, {"stdout": "", "stderr": "NO_TESTS",
                            "returncode": -1}
-        if len(test_codes) == 1:
-            result = self._execute_sandbox(test_codes[0], timeout_s=5.0)
-            success = (result.get("returncode") == 0
-                       and "PASS" in result.get("stdout", ""))
-            return success, result
-        tc_results = self._execute_sandbox_batch(test_codes, timeout_s=5.0)
-        success = all(
-            r.get("returncode") == 0 and "PASS" in r.get("stdout", "")
-            for r in tc_results
-        )
-        # Aggregate error from first failing test case
-        result = next(
-            (r for r in tc_results if not (
-                r.get("returncode") == 0 and "PASS" in r.get("stdout", ""))),
-            tc_results[0],
-        )
-        return success, result
+        nonce = random.getrandbits(32)
+        script = self._build_verify_script(task, full_solution, nonce)
+        res = self._execute_sandbox(script, timeout_s=10.0)
+        return self._parse_verify_result(task, res, nonce)
+
+    @staticmethod
+    def _parse_verify_result(task: "GoalTask", res: dict,
+                             nonce: int) -> tuple[bool, dict]:
+        """Score one verify-script result against its nonce markers."""
+        stdout = res.get("stdout", "")
+        fails = [
+            next((ln for ln in stdout.splitlines()
+                  if f"__TC{i}_{nonce:08x}_FAIL__" in ln), None)
+            for i in range(len(task.test_cases))]
+        n_fail = sum(f is not None for f in fails)
+        n_pass = sum(
+            f"__TC{i}_{nonce:08x}_PASS__" in stdout
+            for i in range(len(task.test_cases)))
+        # Every test must have produced exactly one marker — a missing
+        # marker means the script died mid-run (crash/exit/timeout).
+        success = (n_fail == 0
+                   and n_pass == len(task.test_cases)
+                   and res.get("returncode") == 0)
+        if success:
+            return True, res
+        err = next((f for f in fails if f is not None), None)
+        return False, {
+            "stdout": stdout,
+            "stderr": err or res.get("stderr", "") or "FAIL",
+            "returncode": res.get("returncode", -1),
+        }
 
     # ── anti-hardcode: hidden-input agreement vs reference ──────────
     # The solve prompt shows the same tests _verify_solution runs, so a
@@ -2083,15 +2876,21 @@ class InfiniteCurriculum:
             return {k: self._mutate_arg(v, rng) for k, v in a.items()}
         return a
 
-    def _fuzz_verify(self, task, candidate_code, n_fuzz=4) -> bool:
-        """Candidate must agree with the proposer's reference impl on
-        mutated inputs it never saw (kills lookup-table wins). Returns
-        True when no reference is extractable — fuzz is additive, not a
-        new failure mode for tasks without a clean oracle."""
+    def _build_fuzz_script(self, task, candidate_code,
+                           n_fuzz: int = 4) -> str | None:
+        """Fuzz-verify script — or None when no reference is extractable
+        (fuzz is additive, not a failure mode for tasks without an
+        oracle). Shared by _fuzz_verify and the flattened batch scorer."""
         ref = self._task_ref(task)
         if not ref:
-            return True
-        rng = random.Random(7919)
+            return None
+        # Per-task seed: the same fixed seed for every task meant every
+        # task saw the IDENTICAL mutation trajectory — a hardcode tuned to
+        # it would generalize to all tasks. Per-description seeding keeps
+        # it deterministic but diverse across tasks.
+        import zlib
+        rng = random.Random(
+            7919 ^ zlib.crc32(task.description.encode("utf-8", "replace")))
         name = re.escape(task.solve_name)
         ref_code = re.sub(rf"\b{name}\b", "_ref_fn", ref)
         lines = [candidate_code, ref_code]
@@ -2102,7 +2901,17 @@ class InfiniteCurriculum:
                 lines.append(
                     f"assert {task.solve_name}({mut}) == _ref_fn({mut})")
         lines.append("print('FUZZ_PASS')")
-        res = self._execute_sandbox("\n".join(lines), timeout_s=10.0)
+        return "\n".join(lines)
+
+    def _fuzz_verify(self, task, candidate_code, n_fuzz=4) -> bool:
+        """Candidate must agree with the proposer's reference impl on
+        mutated inputs it never saw (kills lookup-table wins). Returns
+        True when no reference is extractable — fuzz is additive, not a
+        new failure mode for tasks without a clean oracle."""
+        script = self._build_fuzz_script(task, candidate_code, n_fuzz)
+        if script is None:
+            return True
+        res = self._execute_sandbox(script, timeout_s=10.0)
         return (res.get("returncode") == 0
                 and "FUZZ_PASS" in res.get("stdout", ""))
 
@@ -2196,63 +3005,92 @@ class InfiniteCurriculum:
             completions = [[c] for c in flat]
         batch_ms = (time.time() - t_batch) * 1000.0
 
+        attempts = {i: [] for i in range(len(tasks))}
+        best_success = {i: False for i in range(len(tasks))}
+        t0 = time.time()
+
+        # Flattened scoring: every solution's verify script goes through
+        # the 4-worker persistent-sandbox pool in ONE map (each worker is
+        # a long-lived jailed interpreter — no per-test cold spawn), then
+        # all fuzz checks for passers in a second map. Replaces the old
+        # serial per-task verify→fuzz→retry chain.
+        def _score(entries):
+            """entries: [(task_i, sample_i, temperature, completion)]."""
+            jobs = []
+            for ti, si, temp, comp in entries:
+                sol = self._assemble_solution(
+                    goal_tasks[ti], prompts[ti], comp)
+                jobs.append({"ti": ti, "si": si, "temp": temp, "sol": sol,
+                             "nonce": random.getrandbits(32)})
+            if not jobs:
+                return
+            scripts = [
+                self._build_verify_script(
+                    goal_tasks[j["ti"]], j["sol"], j["nonce"])
+                for j in jobs]
+            vres = self._execute_sandbox_batch(scripts, timeout_s=10.0)
+            # Second flattened pass: fuzz only the solutions that passed.
+            fuzz_idx, fscripts = [], []
+            for k, (j, res) in enumerate(zip(jobs, vres)):
+                ok, parsed = self._parse_verify_result(
+                    goal_tasks[j["ti"]], res, j["nonce"])
+                j["res"] = (ok, parsed)
+                if ok:
+                    fs = self._build_fuzz_script(tasks[j["ti"]], j["sol"])
+                    if fs is not None:
+                        fuzz_idx.append(k)
+                        fscripts.append(fs)
+            if fscripts:
+                fres = self._execute_sandbox_batch(fscripts,
+                                                   timeout_s=10.0)
+                for k, r in zip(fuzz_idx, fres):
+                    if not (r.get("returncode") == 0
+                            and "FUZZ_PASS" in r.get("stdout", "")):
+                        jobs[k]["res"] = (False, {
+                            "stdout": r.get("stdout", ""),
+                            "stderr": "FUZZ_MISMATCH",
+                            "returncode": r.get("returncode", -1)})
+            for j in jobs:
+                ok, res = j["res"]
+                attempts[j["ti"]].append({
+                    "code": j["sol"], "success": ok,
+                    "error": res.get("stderr", ""),
+                    "round": 0, "sample": j["si"],
+                    "temperature": j["temp"],
+                })
+                if ok:
+                    best_success[j["ti"]] = True
+
+        _score([(i, s, self.retry_policy.temperature_for_attempt(0), c)
+                for i, comps in enumerate(completions)
+                for s, c in enumerate(comps)])
+
+        # Retries — same per-round temperature bump, but ALL still-failing
+        # tasks re-generate in one batch and re-verify in one pool pass.
+        for attempt in range(1, self.retry_policy.max_retries + 1):
+            open_idx = [i for i in range(len(tasks))
+                        if not best_success[i]]
+            if not open_idx:
+                break
+            old_temp = self.temperature
+            retry_temp = self.retry_policy.temperature_for_attempt(attempt)
+            self.temperature = retry_temp
+            retry_flat = self._generate_batch(
+                [prompts[i] for i in open_idx],
+                prefill=_CHAT_SOLVE_PREFILL)
+            self.temperature = old_temp
+            _score([(i, len(attempts[i]), retry_temp, comp)
+                    for i, comp in zip(open_idx, retry_flat)])
+
+        post_ms = (time.time() - t0) * 1000.0
         results = []
-        for i, (task, goal_task, task_comps) in enumerate(
-                zip(tasks, goal_tasks, completions)):
-            t0 = time.time()
-            attempts = []
-            best_success = False
-            for sample_i, completion in enumerate(task_comps):
-                full_solution = self._assemble_solution(
-                    goal_task, prompts[i], completion)
-                success, result = self._verify_solution(
-                    goal_task, full_solution)
-                if success and not self._fuzz_verify(
-                        task, full_solution):
-                    success, result = False, {"stderr": "FUZZ_MISMATCH"}
-                attempts.append({
-                    "code": full_solution, "success": success,
-                    "error": result.get("stderr", ""),
-                    "round": 0, "sample": sample_i,
-                    "temperature": self.retry_policy.temperature_for_attempt(0),
-                })
-                if success and not best_success:
-                    best_success = True
-
-            # Retries stay serial — temperature bump per the retry policy.
-            for attempt in range(1, self.retry_policy.max_retries + 1):
-                if best_success:
-                    break
-                old_temp = self.temperature
-                self.temperature = self.retry_policy.temperature_for_attempt(
-                    attempt)
-                retry_completion = self._generate(
-                    prompts[i], prefill=_CHAT_SOLVE_PREFILL)
-                self.temperature = old_temp
-
-                full_solution = self._assemble_solution(
-                    goal_task, prompts[i], retry_completion)
-                success, result = self._verify_solution(
-                    goal_task, full_solution)
-                if success and not self._fuzz_verify(
-                        task, full_solution):
-                    success, result = False, {"stderr": "FUZZ_MISMATCH"}
-                attempts.append({
-                    "code": full_solution, "success": success,
-                    "error": result.get("stderr", ""),
-                    "round": 0, "sample": len(attempts),
-                    "temperature": self.retry_policy.temperature_for_attempt(
-                        attempt),
-                })
-                if success:
-                    best_success = True
-
-            elapsed_ms = batch_ms / len(tasks) + (time.time() - t0) * 1000.0
+        for i, task in enumerate(tasks):
+            elapsed_ms = (batch_ms + post_ms) / len(tasks)
             results.append((task, {
-                "final_success": best_success,
-                "attempts": attempts,
-                "rounds_used": len(attempts),
-                "best_quality": 1.0 if best_success else 0.0,
+                "final_success": best_success[i],
+                "attempts": attempts[i],
+                "rounds_used": len(attempts[i]),
+                "best_quality": 1.0 if best_success[i] else 0.0,
             }, elapsed_ms))
         return results
 
@@ -2752,6 +3590,14 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
         for f in files[:max_tasks]:
             try:
                 data = loads(f.read_text())
+                # Drop over-payloaded tasks stored before the validation
+                # cap (a 13.8MB task with a 654k-element expected list
+                # produced ~22k-token solve prompts → pad_bias OOM).
+                if sum(len(repr(tc.get("args")))
+                       + len(repr(tc.get("expected")))
+                       for tc in data.get("test_cases", [])) \
+                        > _MAX_TEST_PAYLOAD:
+                    continue
                 task = ProposedTask(
                     id=data["id"],
                     domain=data["domain"],
@@ -2769,7 +3615,10 @@ Provide a simpler version that handles a subset of the problem. Just the descrip
                     fp_key=data.get("fp_key", ""),
                 )
                 self._task_queue.append(task)
-            except (json.JSONDecodeError, KeyError):
+            except Exception:
+                # Corrupt file (truncated write, decode error, missing
+                # key) — skip it; one bad task must not kill the epoch.
+                # msgspec.DecodeError is not a json.JSONDecodeError.
                 continue
 
         print(f"  [Curriculum] Loaded {len(self._task_queue)} tasks from disk")

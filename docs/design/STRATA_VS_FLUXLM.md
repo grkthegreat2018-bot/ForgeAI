@@ -33,7 +33,7 @@ whose real content is the *container*: WEIGHTS `.strata` (labeled
 log-quantized counts, 2-choice cuckoo hash, active/sealed/cold
 lifecycle, per-block undo arenas, memmap container IO), PARAMS `.iq`
 (seeded tensors stored as `{seed,shape}`), KNOBS `.cond` (named scalar
-overlays). Design: docs/STRATA_M1_DESIGN.md.
+overlays). Design: docs/design/STRATA_M1_DESIGN.md.
 
 ## Decision
 

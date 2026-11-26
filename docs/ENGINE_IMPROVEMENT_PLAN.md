@@ -1,7 +1,7 @@
 # ForgeEngine Improvement Plan
 
 **Date:** 2026-09-25 · **Status:** research-complete, awaiting execution approval
-**Sources:** 3-agent static sweep + `docs/CODEBASE_CRITIQUE_2026-09-16.md` (P0–P18, still-open items verified) + live web research (section 8)
+**Sources:** 3-agent static sweep + `docs/archive/CODEBASE_CRITIQUE_2026-09-16.md` (P0–P18, still-open items verified) + live web research (section 8)
 
 **Target model:** ForgeLM V2 (Jamba-hybrid — 26 Mamba-2 SSM + 2 GQA/MQA attention,
 d_model=2560, head_dim=128, vocab=65536, no RoPE, bf16 ~6.1 GB)

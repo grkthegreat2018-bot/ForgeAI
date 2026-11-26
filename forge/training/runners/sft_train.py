@@ -106,8 +106,56 @@ _IM_END = "<|im_end|>"
 
 
 def _turn_end() -> str:
-    """Turn terminator for the active chat format (Spark eos vs ChatML)."""
-    return _SPARK_EOS if _CHAT_FORMAT == "spark" else _IM_END
+    """Turn terminator for the active chat format (Spark eos vs ChatML
+    vs granite <|end_of_text|>)."""
+    if _CHAT_FORMAT == "spark":
+        return _SPARK_EOS
+    if _CHAT_FORMAT == "granite":
+        return "<|end_of_text|>"
+    return _IM_END
+
+
+def _resolve_lora_targets(model, args, none_if_bitnet: bool = False):
+    """LoRA target modules: explicit --lora-targets wins; otherwise detect
+    the attention projection naming actually present in the model.
+
+    Fused-QKV checkpoints (spark, lfm use_fused_gemm) expose a single
+    ``qkv_proj`` — the unfused default list [q_proj, k_proj, v_proj, ...]
+    matches nothing there (zero-grad adapters: only out_proj + FFN got
+    adapters on spark, silently weakening every SFT epoch). Thinking
+    Machines (2025): apply LoRA to ALL weight matrices, not attn-only.
+    """
+    if getattr(args, "lora_targets", None):
+        mods = [t.strip() for t in args.lora_targets.split(",") if t.strip()]
+        if mods:
+            return mods
+    if none_if_bitnet and getattr(args, "bitnet_everywhere", False):
+        return None
+    try:
+        mod_names = {n.split(".")[-1] for n, _ in model.named_modules()}
+    except Exception:
+        mod_names = set()
+    if "qkv_proj" in mod_names:
+        targets = ["qkv_proj", "out_proj", "w_gate", "w_up", "w_down"]
+    else:
+        targets = ["q_proj", "k_proj", "v_proj", "out_proj",
+                   "w_gate", "w_up", "w_down"]
+    # Fused FFN (use_fused_gemm, e.g. lfm3): w_gate+w_up repacked into one
+    # gate_up_proj GEMM — the unfused names match nothing and the entire
+    # FFN gate/up path silently gets no adapter (same bug class as the
+    # fused-qkv miss this function already guards against).
+    if "gate_up_proj" in mod_names:
+        targets.append("gate_up_proj")
+    # Gated-attention out-gate (spark use_attn_out_gate, LFM gated attn) —
+    # a real weight matrix; include when present.
+    if "gate_proj" in mod_names:
+        targets.append("gate_proj")
+    # LFM3 conv blocks (DoubleGatedConvLayer): conv.in_proj is a Linear
+    # d→3d — the largest weight matrix in the conv block. Attention-only
+    # target lists miss it (conv out_proj already matches via "out_proj").
+    if "in_proj" in mod_names:
+        targets.append("in_proj")
+    return targets
 
 
 # ── Chat-format rendering ────────────────────────────────────────────────────
@@ -129,45 +177,33 @@ def _render_tool_call(tc: dict) -> str:
 
 _CHAT_FORMAT = "jamba"  # set from --chat-format; spark = DeepSeek markers
 
-_SPARK_SOS = "<｜start▁of▁sentence｜>"
 _SPARK_EOS = "<｜end▁of▁sentence｜>"
 
 
-def _spark_render(messages: list[dict], add_generation_prompt: bool) -> str:
-    """Spark-X2.6 chat format: user turns render as sos + USER + content
-    + eos; assistant turns as sos + BOT + body + eos; add_generation_prompt
-    appends sos + BOT. Tool results fold into a user turn as tool_response
-    tags (Spark template)."""
-    user_m = "<" + chr(0x7C) + "User" + chr(0x7C) + ">"
-    bot_m = "<" + chr(0x7C) + "Bot" + chr(0x7C) + ">"
-    out = []
-    for m in messages:
-        role = m.get("role")
-        if role == "user":
-            out.append(_SPARK_SOS + user_m + (m.get("content") or "")
-                       + _SPARK_EOS)
-        elif role == "assistant":
-            out.append(_SPARK_SOS + bot_m + _assistant_body(m)
-                       + _SPARK_EOS)
-        elif role == "tool":
-            body = "<tool_response>" + (m.get("content") or "") \
-                   + "</tool_response>"
-            out.append(_SPARK_SOS + user_m + body + _SPARK_EOS)
-    if add_generation_prompt:
-        out.append(_SPARK_SOS + bot_m)
-    return "".join(out)
-
-
 def _chat_render(messages: list[dict], add_generation_prompt: bool) -> str:
-    """Render via the canonical Jamba ChatML port (single source of truth -
-    forge/self_play/discovery/chat_template.py, a faithful port of the
-    tokenizer's built-in Jinja template). thinking=False: SFT data carries
-    direct answers; eval + the self-play solve path also render direct.
-    bos=False: the tokenizer adds BOS itself at encode time.
-    --chat-format spark switches to the DeepSeek-style Spark markers so
-    SFT matches the proposer's inference-time wrap exactly."""
+    """Render via the canonical per-format ports (single source of truth).
+
+    Jamba: forge/self_play/discovery/chat_template.py — faithful port of
+    the tokenizer's built-in Jinja template. bos=False: the tokenizer adds
+    BOS itself at encode time.
+    Spark: qwen_adapter.spark_render_messages — faithful port of
+    Spark-X2.6's chat_template.jinja including the System preamble and
+    </think> direct-mode turns, so SFT rows land in the exact token
+    context inference (propose/solve/eval) uses. thinking=False on both
+    paths: SFT data carries direct answers, and the solve/eval paths also
+    render direct.
+    """
     if _CHAT_FORMAT == "spark":
-        return _spark_render(messages, add_generation_prompt)
+        from forge.self_play.discovery.qwen_adapter import (
+            spark_render_messages)
+        return spark_render_messages(
+            messages, add_generation_prompt=add_generation_prompt,
+            thinking=False)
+    if _CHAT_FORMAT == "granite":
+        from forge.self_play.discovery.qwen_adapter import (
+            granite_render_messages)
+        return granite_render_messages(
+            messages, add_generation_prompt=add_generation_prompt)
     from forge.self_play.discovery.chat_template import apply_chat_template
     return apply_chat_template(
         messages, add_generation_prompt=add_generation_prompt,
@@ -1051,7 +1087,7 @@ def main():
     p.add_argument("--data", nargs="+", required=True,
                    help="Training data file(s) (JSONL or Parquet)")
     p.add_argument("--chat-format", default="jamba",
-                   choices=["jamba", "spark"],
+                   choices=["jamba", "spark", "granite"],
                    help="chat template family for rendering prompt/response and messages rows; spark emits DeepSeek-style sentence/User/Bot markers matching the proposer wrap (default: jamba ChatML)")
     p.add_argument("--data-format", default="jsonl", choices=["jsonl", "parquet"],
                    help="Data format: 'jsonl' (default) or 'parquet'. "
@@ -1350,6 +1386,19 @@ def main():
                         "NF4 and matches inference-time quantization. LoRA "
                         "adapters train on top of ForgeQuantLinear layers "
                         "(which have built-in lora_adapter support).")
+    p.add_argument("--qlora-lb2", action="store_true",
+                   help="LittleBit-2 QLoRA — factorize base to sub-1-bit "
+                        "(Dual-SVID + Joint-ITQ), freeze factors, train fp "
+                        "LoRA adapters on LittleBitLinear. Merge re-runs "
+                        "SVD+ITQ and densifies before save so the checkpoint "
+                        "stays standard fp format. Use with "
+                        "--no-bitnet-everywhere. LoRA is auto-enabled.")
+    p.add_argument("--lb2-eff-bit", type=float, default=0.5,
+                   help="LittleBit-2 target bits/weight (0.1-1.0; ~0.5 is "
+                        "the paper's quality/speed sweet spot)")
+    p.add_argument("--lb2-no-residual", action="store_true",
+                   help="Disable the LB2 residual factor pair (halves "
+                        "factor bits, noticeably worse fidelity)")
     p.add_argument("--save-lora-adapter", action="store_true",
                    help="Additionally save ONLY the trained LoRA tensors to "
                         "'<save-stem>.lora.safetensors' (small file, hot-loadable "
@@ -1486,7 +1535,7 @@ def main():
     # ── SIFT conflicts: needs dense bf16 weights + no adapters ──
     if getattr(args, "sift", False):
         for _a in ("lora", "manual_lora", "bitnet_everywhere", "qlora_nf4",
-                   "forge_quant", "nanoquant_qat"):
+                   "qlora_lb2", "forge_quant", "nanoquant_qat"):
             if getattr(args, _a, False):
                 print(f"  [SIFT] --{_a.replace('_', '-')} ignored "
                       "(incompatible with SIFT)")
@@ -1902,6 +1951,23 @@ def main():
         args.lora = True
         args.manual_lora = True
 
+    # ── LittleBit-2 QLoRA — factorize base to sub-1-bit, then add LoRA ──
+    if getattr(args, 'qlora_lb2', False):
+        from forge.engine.quant.littlebit2 import (
+            estimate_littlebit2_memory, quantize_model_littlebit2)
+        n_q = quantize_model_littlebit2(
+            model, eff_bit=args.lb2_eff_bit,
+            residual=not args.lb2_no_residual, use_itq=True)
+        mem = estimate_littlebit2_memory(model)
+        print(f"LittleBit-2 QLoRA: {n_q} Linear → LittleBitLinear "
+              f"(eff_bit={args.lb2_eff_bit}, "
+              f"residual={not args.lb2_no_residual}, "
+              f"~{mem.get('total_mb', 0):.0f} MB factors). Frozen "
+              f"factorized base + fp LoRA adapters.")
+        # LittleBitLinear has lora_adapter support in forward — manual LoRA
+        args.lora = True
+        args.manual_lora = True
+
     # ── ForgeQuant training — quantize base to INT4+sparse, then add LoRA ──
     if getattr(args, 'forge_quant', False):
         from forge.engine.quant.forge_quant import quantize_model_forge_quant
@@ -1989,13 +2055,8 @@ def main():
                       "(aux loss active; NOT included in sift_only adapter saves)")
     elif use_manual_lora:
         from forge.training.bitnet_lora import add_lora_adapters
-        if args.lora_targets:
-            target_mods = [t.strip() for t in args.lora_targets.split(",")
-                           if t.strip()]
-        else:
-            target_mods = ["q_proj", "k_proj", "v_proj", "out_proj",
-                           "w_gate", "w_up", "w_down"] \
-                if not args.bitnet_everywhere else None
+        target_mods = _resolve_lora_targets(model, args,
+                                            none_if_bitnet=True)
         n_adapters, lora_params = add_lora_adapters(
             model, rank=args.lora_r, alpha=args.lora_alpha,
             target_modules=target_mods,
@@ -2051,11 +2112,7 @@ def main():
             # ffn uses w_gate/w_up/w_down (not gate_proj/up_proj/down_proj).
             # No task_type — ConfigurableResearchLLM is not an HF model;
             # we only train + merge, no generation through PEFT wrapper.
-            target_modules=(
-                [t.strip() for t in args.lora_targets.split(",")
-                 if t.strip()] if args.lora_targets else
-                ["q_proj", "k_proj", "v_proj", "out_proj",
-                 "w_gate", "w_up", "w_down"]),
+            target_modules=_resolve_lora_targets(model, args),
             lora_dropout=0.0,
             bias="none",
         )
@@ -2951,6 +3008,16 @@ def main():
                 from forge.training.bitnet_lora import merge_lora_adapters
                 n_merged = merge_lora_adapters(model)
                 print(f"Merged {n_merged} manual LoRA adapters into base model for standalone save.")
+                if getattr(args, 'qlora_lb2', False):
+                    # Merge refactorized every LB2 layer (SVD+ITQ on
+                    # W_hat+delta). Densify so the checkpoint stays in the
+                    # standard fp format the model builder loads — engines
+                    # re-factorize at activation anyway.
+                    from forge.engine.quant.littlebit2 import (
+                        densify_model_littlebit2)
+                    n_d = densify_model_littlebit2(model)
+                    print(f"Densified {n_d} LittleBitLinear → nn.Linear "
+                          f"for standalone save.")
             elif args.lora and hasattr(model, "merge_and_unload"):
                 model = model.merge_and_unload()
                 print("Merged LoRA adapters into base model for standalone save.")

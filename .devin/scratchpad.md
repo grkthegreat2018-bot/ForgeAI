@@ -3385,3 +3385,532 @@ Orphans: 0 python* procs post-exit (baseline 0). No crash/hang.
 ### Verdict
 PASS on all criteria (>=5 epochs, clean exit, no orphans, RSS bounded, archive rotation verified 8x, no crash). Prior silent ep7-eval death did NOT reproduce - most consistent with external kill at prior session end, not a code defect (no crash signature in 8 clean epochs + clean shutdown path).
 Multi-hour confidence: HIGH for demote-heavy runs. Untested this run: promote->durable-copy path (prior run exercised it twice, SP4/SP6) and >8-epoch archive behavior.
+
+## long run 2026-11-16 - 100-epoch self-play from SP1
+python -u -m forge.self_play.infinite_loop --checkpoint research/checkpoints/ForgeLM_SPARK_X26_1P7B_SP1.safetensors --config spark_x26_1p7b --epochs 100 --tasks-per-epoch 12 --ft-steps 30 --flux-group-size 8 --staging-dir C:\forge_spool --archive-keep 3
+Detached Start-Process. Shim pid 16664 (monitor CHILD pid). Log: .devin/tmp/longrun.log, err: longrun.err, pidfile: longrun.pid.
+Baseline: SP1 = soak2 ep1 promote (fast_eval 0.72). Prior demote-epoch ~230-310s; 100 ep est ~7-10h.
+
+
+## R73 quota+spark self-play round
+
+Diagnosis: epochs trained on 12-19 rows, SFT loss -> 0 in 30 steps
+(memorization, not learning), all 10 observed epochs demoted.
+
+Root causes fixed:
+1. sft_train rendered Jamba ChatML for spark ckpts (loop never passed
+   --chat-format). spark uses SS/SE sentence markers + |User|/|Bot|;
+   im_start/im_end are not even in spark vocab. Now: _finetune passes
+   --chat-format spark; sft_train calls canonical
+   qwen_adapter.spark_render_messages (parity-verified byte-identical).
+2. infinite_curriculum hardcoded Jamba ids: eos_token_ids=[2,519] and
+   _CONTROL_TOKEN_KEEP={2,519,542}. On spark, 2=pad, 519=random BPE,
+   real eos id 1 was BANNED and missing from stops -> every generation
+   ran to cap. Now: _control_keep_ids/_gen_stop_ids/_think_end_ids
+   resolve from the loaded tokenizer (spark: eos=1, think=4).
+   Verified: keep=[1,4], stop=[1], 113 banned, eos clean.
+3. LoRA targets q/k/v_proj never matched spark fused qkv_proj.
+   _resolve_lora_targets detects qkv_proj + gate_proj out-gate.
+
+Quota: Phase 1 now loops propose+solve rounds until solve_quota
+verified rows (0 -> tasks_per_epoch), caps quota_max_rounds=4 and
+quota*K*10 rollouts. STaR ref-fill on solver-missed tasks via
+curriculum._task_ref (ref_fill_frac=0.4 of quota). export_per_task=2
+distinct passes.
+
+Speed: solve_group_size default 4, grad-mixup 3, warmup already capped
+at steps//4, kv-cache standard on spark (was lossy spectral),
+pack-sequences default OFF on spark, eval kv standard on spark
+(was hadamard_int4 inside a 0.02-margin paired decision), fast_eval
+decision_margin early-abort on bound-proven outcomes.
+
+Recommended run:
+venv/Scripts/python -u -m forge.self_play.infinite_loop   --checkpoint research/checkpoints/spark_x26_1p7b.sft6_src   --config spark_x26_1p7b --epochs 8 --solve-quota 24   --tasks-per-epoch 24 --ft-steps 30   --staging-dir C:\forge_spool --archive-keep 3
+
+
+## 2026-11 â€” Spark flat-throughput: continuous-batching root causes + fixes
+
+Final state: ~0.9-1.1k tok/s 64-prompt mixed-length generate_batch,
+~1.9k tok/s at N=96; was ~100 tok/s at session start.
+
+Throughput chain (each verified by bench, in order of impact):
+1. `_fused_gemv=False` + `_cache_w=True` in `_load_engine` â€” cached-bf16
+   cuBLAS beats fused int4 Triton GEMM 3.3x at B>1 (215us vs 18us/call).
+   Self-play path never applied the code_evolve flip.
+2. Lazy per-B decode graphs up to WIDE_CAP=64: b64 replay 12.6ms =
+   5.1 tok/ms vs b32 10.3ms = 3.1 tok/ms. N<=64 runs exact-width â€” NO
+   refills needed; N>64 windows at 64 + `_refill_batch`.
+3. GPU suppress_ids + model-EOS termination replaces Python logits
+   processors (~2x on long gens; also kills per-step .tolist() syncs).
+4. Batched refill prefill (<=16/call, deferred until >=6 free slots):
+   eager B=1 prefill is ~50ms of launch overhead â€” 32 serial refills
+   cost ~4.6s; 5 batched calls cost ~0.4s.
+5. `_compact()` â€” after the pending queue drains, gather surviving rows
+   into the next-smaller captured graph (64->32->16->8->4->2->B=1
+   activation graphs, prefix ""). Tail decodes at ~live-row cost.
+   KV/mask/ring_valid/metadata gathered by active-row index.
+6. k-subset sampling (uniform top_k): softmax+multinomial over k
+   survivors instead of [B,V]; top-k indices are temp-invariant so
+   temp folds into top_v. ~4.5ms/step saved at V=131k.
+
+### Refill correctness â€” the actual bug was POSITION SEMANTICS
+`forge/model/llm.py` derives `position_ids = attention_mask.cumsum(-1)-1`
+â€” positions come from the MASK, not buffer slot index. Consequences:
+- Copy scratch-prefilled KV VERBATIM (K keeps R(src)). Any absolute-
+  position RoPE rebase detunes: refill at pos=131 collapsed to spam,
+  pos~60 looked ok, pos~8 near-perfect â€” error grows with the shift.
+- Refilled row mask = {base..pos} -> stream numbered 0,1,2,... matching
+  the scratch prefill's own numbering. Verified 100/100 token-exact
+  vs standalone greedy at pos=131.
+- Dead-token hole: letting the dead stream's token occupy pos (masked)
+  still shifts every prompt->gen distance +1 -> measurably corrupts.
+  Fix: pre-sample tok1 from scratch prefill logits, feed as
+  next_ids[i] so ITS KV lands at pos â€” contiguous stream.
+- ring_valid[B,W] per ring layer: stale ring slots are MASKED not
+  overwritten with fabricated content. Every fabrication attempt
+  (tiled prompt-tail fill, BOS-wall) degraded output â€” repetition
+  prior. Also unmark left-pad slots after batch prefill (latent pad-KV
+  pollution bug in EVERY unequal-length batch).
+- tok1 must be sampled under the NEW stream's params â€” metadata update
+  BEFORE sampling (was after: dead stream's temp/topk/seed).
+
+Dead ends (documented so nobody retries them):
+- RoPE rebase via inv_freq: inv_freq-derived rotations diverge up to
+  0.275 from the model's cached cos/sin tables anyway â€” and the whole
+  premise was wrong (mask-cumsum, not absolute positions).
+- Scratch prefill at position=base>0: zero-KV prefix region is
+  ATTENDED (full-attn else-branch allows [0,pos); ring n_past reads
+  it) â€” always prefill scratch at position 0.
+- conv/SSM state hypothesis: spark is pure-attention, no state to
+  migrate. Checkpoint itself is healthy (standalone output clean).
+- gate slotted refill for swa_ring_kv: no longer needed â€” refill
+  works on ring caches given ring_valid + verbatim copy.
+
+Debug env vars left in batched_decoding.py (env-gated, zero cost):
+FORGE_DBG_REFILL (refill+compact events), FORGE_DBG_STEPS (per-step
+top5 logits for rows in _dbg_rows).
+Debug scripts: .devin/dbg_refill{,2,3}.py, dbg_geom/padgeo/kvcheck/
+rebase/graphtest/scratch.py, bench_slotted2.py, dbg_steptime.py.
+
+
+## Lacuna research sweep â€” Spark self-play improvements (2026-11-18)
+
+Source: lacuna.tiptreesystems.com (research-direction index, 2.25M papers).
+Scope: AZR RSI loop on spark_x26_1p7b (infinite_loop / infinite_curriculum /
+grpo_trainer / fast_eval / export+SFT path). Findings mapped to code.
+
+### A. Confirmed defects (fix first â€” evidence: code read, not papers)
+
+1. **GRPO PPO ratio is always 1.0** â€” `collect_log_probs` is never called, so
+   `old_log_probs=None` in every `train_step` (grpo_trainer.py:925-35 warns
+   once). Effect: "GRPO" is actually REINFORCE-with-group-baseline; clipping
+   is a no-op, no off-policy correction. Fix: record per-token log-probs
+   during solve rollouts (or a detached first pass) and feed to train_step.
+2. **`_mutate_arg` RNG fixed seed 7919** (infinite_curriculum.py) â€” identical
+   fuzz mutations for every task â†’ `_fuzz_verify` mutation coverage is
+   degenerate; lookup-table hacks survive. Seed per-task.
+3. **sgs.py / soar.py verifiers are heuristics** (`len>50 and "def "`), no
+   executor â€” `--self-play-mode sgs|soar` can promote garbage. Wire
+   `_execute_sandbox`/`io_similarity`, or guard the flags.
+4. **Ref model `.to(cuda)` despite "CPU offloaded" docstring**
+   (infinite_loop.py ~2625) â€” ~3.5GB VRAM on a 12GB card.
+5. Dead surfaces: `--saerl`, `--opmix` print enabled, do nothing;
+   `train_step_advanced` (sc/om/gvpo/turn-level) unreachable;
+   `_propose_one` dead; `_parse_proposal` dead expr; `data_quality.py`,
+   `replay_buffer.py`, `get_training_batch_elo`, `solve_with_ladder` all
+   built and unused.
+
+### B. Task supply â€” the real bottleneck (model-authored proposals are a
+###    documented dead end at 1.7B; external pool ~118k, ~1.3k consumed)
+
+6. **Programmatic variational synthesis (SvS, ICLR'26, +18-22% Pass@32)** â€”
+   mutate VERIFIED tasks: perturb inputs/constants/edge-cases, re-derive
+   expected outputs through the existing `_derive_outputs` executor path.
+   Free verified tasks at ~zero model cost; no LLM authoring required â†’
+   dodges the 1.7B dead end entirely. SvS targets the 12.5-50% solve band.
+   Bonus: sustained problem turnover is the published entropy-collapse
+   antidote.
+7. **Task composition (Composition-RL + Sancaktar'26 "Deep Dive")** â€” chain
+   2-3 verified tasks so A's output feeds B's input; composed asserts derive
+   via executor. Guaranteed-verifiable tasks ABOVE current difficulty â€”
+   ceiling expansion frontier rows can't provide. Also generates easy/med/
+   hard "stepping stone" chains (Sancaktar: structure>volume, medium-
+   difficulty tasks train best).
+8. **Wire `solve_with_ladder`** (implemented, never called) into quota-loop
+   misses â€” recursive easier-variant decomposition is exactly the SGS/
+   Sancaktar stepping-stone idea, already coded.
+9. **Fuzzing environment** (Sancaktar's 4th env): "find an input that breaks
+   this buggy function" â€” mutants come free from the mutation-audit work
+   (item 11). New task type, zero model authoring.
+10. **Teacher-mutation loop if `api` task source is ever used** â€” Sancaktar:
+    in-context teacher mutates problems from student solve-rate summaries,
+    no teacher FT â†’ 4x valid yield vs single-turn generation.
+
+### C. Verification quality
+
+11. **Mutation-testing audit of task test suites** (VeriScale, EvolveCoder,
+    HardTests â€” verifier quality bounds the trained model): mutate the ref
+    impl, confirm the task's own asserts kill mutants; expand weak suites
+    with `_mutate_arg`-style fuzz. `_fuzz_verify` already does candidate-side
+    agreement â€” extend the same machinery to audit the test suite itself.
+12. **Dense rewards via `io_match.io_similarity`** (exists, unused in verify
+    path) + per-assert pass fraction (Beyond Binary'26): graded rewards for
+    GRPO â†’ less advantage collapse; binary pass/fail throws away signal the
+    eval scripts already compute (`per-assert accuracy`).
+13. **V-STaR-style cheap verifier** â€” distill io_similarity labels into a
+    tiny scorer to rank rollouts pre-sandbox â†’ fewer sandbox calls/quota.
+    (Counterpoint worth noting: "A Cheap Verifier is Good Enough"'26 â€”
+    don't over-engineer; executor+fuzz is already strong.)
+
+### D. GRPO dynamics
+
+14. **DAPO dynamic sampling** â€” drop/zero-weight zero-variance groups
+    (all-pass/all-fail). `grpo_concise_bonus` gives nonzero advantage but
+    flat groups still dilute; Sancaktar/Chae confirm medium-difficulty data
+    carries the signal.
+15. **Entropy telemetry** â€” log policy entropy + distinct-solutions-per-group
+    per step; entropy collapse is the documented plateau cause (SGS, SvS,
+    Chae'25) and is currently invisible. The sft-era "extraction decline"
+    may partly have been this. Cheap: count distinct AST-cleaned bodies.
+16. **EAD annealed decoding** (Yang'25) â€” temp highâ†’low within a rollout;
+    cheap k=4 diversity without extra samples.
+17. **ELO keyed on `_functional_fingerprint`** not task.id â€” ratings then
+    persist across re-proposals; enables dead `select_mixed_prompts` (80%
+    Goldilocks/20% explore) and `get_training_batch_elo`.
+
+### E. Data/export + eval hygiene
+
+18. Wire `data_quality.py` semantic dedup (TF-IDF cosine>0.85 + AST Dice â€”
+    built, zero callers) into `_export_trajectories`; n-gram Jaccard misses
+    semantic near-dupes.
+19. Wire `ReplayBuffer` (FOREVER forgetting-curve, built) into
+    `GRPOTrainer._inject_golden_replays` (exists; dead because loop passes
+    replay_buffer=None). Reinforces re-base rule with RL-side replay.
+20. Persist `_ban_question` across runs (per-process now); rotate a second
+    eval seed â€” fixed seed for trend comparability + rotating for honesty
+    (dynamic-evaluation direction; survivorship guard they already believe).
+21. Track Pass@k at larger k in eval â€” binary pass@4 saturates ~2-5/60
+    (documented); Chae: self-play preserves base capacity at large k, so
+    large-k pass + attempt-rate is the honest frontier metric.
+
+### F. Strategic calibration (what the literature says about the loop shape)
+
+22. **External supply + frontier rows is the RIGHT architecture** â€” Chae et
+    al. (NeurIPS MATH-AI'25): self-play is bounded by base-model support
+    ("invisible leash" â€” can't upweight sequences the model can't sample);
+    the published escape hatch is off-policy data mixing. External verified
+    pools + frontier rows ARE that fix; lean in (KodCode, OpenCodeInstruct
+    already queued in lineage).
+23. **Don't train a proposer reward on the 50% target** â€” Chae: explicit
+    50%-success reward shaping had little effect and COST 2% accuracy;
+    R-Zero's version needs a separate challenger model (dead at 1.7B).
+    Keep `1-|rate-0.5|` for frontier weighting only â€” it's a sampler, not
+    a trainer.
+24. **Proposer re-entry path if ever retried**: R-Zero lesson â€” separate
+    checkpoint for challenger (same base is fine, two LoRA heads), majority-
+    vote pseudo-labels where no executor exists; expect label-quality decay
+    (79%->63% over rounds) â†’ cap rounds before collapse.
+25. **Adaptive response length emerges on its own** (Chae) â€” concise_qa +
+    grpo_concise_bonus already push short answers; make sure the length
+    shaping doesn't suppress legitimately long solutions on hard tasks
+    (the stub-abstention collapse was this failure mode in SFT form).
+26. Cleanup: implement or remove `--saerl`/`--opmix`; either finish
+    sgs/soar (executor verify + real `target_problems` = current frontier
+    backlog) or mark experimental-only.
+
+
+## P0 self-play fixes landed (2026-11-18)
+
+- GRPO ratio==1.0 FIXED: _grpo_train now collects behavior-policy log-probs
+  via trainer.collect_log_probs(prompts, completions) BEFORE the step loop
+  (fresh LoRA B=0 -> identical to rollout policy; groups resampled across
+  steps so drift compounds -> real PPO ratio now). Per-batch old_log_probs
+  sliced by the same indices; ExGRPO replay groups get on-demand collection.
+  train_step only uses an old_lp entry on exact numel match (empty/mismatch
+  -> detached fallback, no silent broadcast).
+- collect_log_probs alignment bug FIXED: it appended invalid-completion
+  empties in encounter order then padded the tail -> a short/invalid first
+  completion shifted every later entry. Now preallocated by comp_idx.
+- Ref model ELIMINATED in _grpo_train (was .to(cuda) despite 'CPU offload'
+  docstring, ~3.4GB): ref_model=None -> compute_kl_penalty uses
+  lora_disabled(model) forward (new ctx manager in bitnet_lora.py covering
+  all 3 adapter integration sites: quant lora_adapter=None + patched
+  forward restore via _lora_orig_forward). Docstring VRAM now ~5GB.
+- _fuzz_verify RNG: random.Random(7919 ^ crc32(description)) per task (was
+  fixed 7919 -> identical mutation trajectory for every task, so a
+  hardcode tuned to it passed fuzz-verify on ALL tasks).
+- Tests: tests/unit/test_grpo_offpolicy.py (10 tests, CPU-only, toy LM +
+  word tokenizer). Passing: 10 new + 145 existing (grpo_lambda, grpo_rsi,
+  self_play_components, curriculum_engine_gen, fused_qkv_lora).
+- Note: lora_disabled mutates module attrs during model.modules()
+  iteration — safe (attrs only, tree unchanged). nn.Linear/fused-QKV
+  patched forward restores _lora_orig_forward; quant linears get
+  lora_adapter=None. Adapter-off logits == base logits (verified by test).
+
+## Spark gen-speed research (2026-11-18) — see .devin/_spark_genspeed_research.md
+
+Full mapping in the research file. Headline: at B=64 decode is compute-bound
+(batching paradox) so standard speculative decoding won't help; the
+research-backed paths are post-trained MTP heads on self-distilled data
+(+adaptive K + chain-aware relaxed verify), FR-Spec head crop for drafting,
+and SpecFormer-class NAR drafting for sustained B<=128 speedup. Kernel side:
+Marlin W4A16 / NVFP4 both viable on SM120 — replaces the +3.5GB cached-bf16
+hack AND halves weight traffic. Stability: pipeline the eos .item() sync,
+pre-capture compaction widths, kill the O(L2) eager-KV path reach via
+generate_raw(suppress/stops), denser KV buckets <=4k, side-stream refill
+prefill. cuDNN SDPA supports hd256 GQA+window decode on SM120 — flag bench.
+
+## 2026-11 decode-stability pass (post-genspeed-research)
+
+Landed all P0 items from _spark_genspeed_research.md (detail appended
+there). Key design notes for future sessions:
+
+- EOS pipelining consumes each step's EOS flag ONE step later via
+  pinned-host copies + cuda.Event recorded before the next replay ->
+  sync is instant; <=1 overrun token, trimmed by _finish end index.
+- Subtlety: a refilled slot must ignore flags recorded at steps <= its
+  refill step (they describe the DEAD stream's filler token). Guard is
+  `eos_floor[i]` (0 originals, R+1 refills) in `_drain_eos`; also
+  `_compact` drains both parities before row remap.
+- `_ensure_static_batch(1)` returns the activation B=1 state
+  (prefix ''), so single-prompt suppress/processor/stop requests get
+  graph decode; only multi-token stop strings still need
+  generate_raw/_StopMatcher (last-id check can't express them).
+- _generate_batch_impl tokenizer call: `tokenizer(s,
+  add_special_tokens=False).input_ids` returns flat list[int] for a
+  single string (HF BatchEncoding) â€” len == token count.
+- First two compaction halving widths pre-captured at batch start;
+  ensure() is a no-op on captured widths, failure leaves width lazy.
+- Tests: 203 unit tests green; new spark-routing regression tests in
+  test_curriculum_engine_gen.py.
+
+## Spec run (2026-11, post decode-stability) â€” bench_spark_genmatrix + debug-round
+
+Hardware: RTX 5070 12GB. Checkpoint: spark_x26_1p7b.sft10_fq (fq, BCG).
+
+bench_spark_genmatrix.py batch_fq (BLIST runs; second pass = warm,
+post-capture):
+- Load: FastBuild ~16-17s; activation captures ALL 9 densified B=1
+  buckets; warmup 0.93-2.27s; engine VRAM 1.87-4.36GB (peak 3.97GB
+  incl. pre-captured compaction widths).
+- B=1: 42-65 tok/s (generate() serial path)
+- B=16: 331.9 tok/s warm (2560 tok / 7.71s); cold 252 (capture ~0.7s)
+- B=18: 358.3 tok/s warm (2880 tok / 8.04s); cold 327
+
+infinite_loop --debug-round (real self-play path, sft10_fq):
+- Task pool had 399 tasks on disk -> propose skipped; quota used
+  backlog tasks. Solve batch B=8: 868 tok / 5.34s = 163 tok/s INCLUDING
+  first-call b8 capture + pre-capture of widths 4+2 (~2-3s est) ->
+  warm ~300 tok/s.
+- Single-row solves through the NEW routed path (BatchedDecoding b1
+  graphs, was generate_raw O(L^2)): 120 tok/1.19s = 101 tok/s,
+  25 tok/0.27s = 94 tok/s.
+- sinks/_v0_gate warning: NOT printed -> dormant as designed.
+  KeyStack features: []. Loop completed, clean engine free.
+
+Log: .devin/_debuground_run.log; trace: research/checkpoints/self_play/
+debug_round_ep1.{txt,jsonl}
+
+
+## 2026-11-19 — LittleBit-2 port notes
+- Reference impl cloned at `scratch/littlebit_ref/` (SamsungLabs/LittleBit, --use_itq path).
+- orge/engine/quant/littlebit2.py: LittleBitLinear (Dual-SVID + Joint-ITQ + residual + STEBinary/SmoothSign + int32 packer). quantize='littlebit2'.
+- BUG pattern to remember: computing `W - W_approx` for the residual factor via `_dequantize_weight` included the `torch.empty` UNINITIALIZED _R params -> garbage residual target -> factor explosion (finite-but-huge, intermittently inf). Fix: primary-only reconstruction (matches reference).
+- torch.empty params read before _set_factors = nondeterministic garbage; sanitize via nan_to_num at set time + orthogonality check on ITQ's Procrustes R.
+- Init-time residual gain is only guaranteed when residual is STRUCTURED (low-rank leftover). On noise-like binarization error, init is marginal — real gain comes via QAT (paper consistent).
+- block_recon supports LittleBitLinear (soft-forward: U_soft/V_soft/u1..v2 params, STE grads flow).
+
+
+## 2026-11-19 — Parable-Granite-4.1-3B port DONE
+- `research/checkpoints/parable_granite41_3b` = RAW HF download of AnkitAI/Parable-Granite-4.1-3B-Claude-Fable-5 (2 fp16 shards, 6.34GiB, 362 tensors, tied embeds) + forge_convert.json {forge_config: parable_granite41_3b} written by a prior session.
+- No structural transform needed — `ModelLoader._remap_hf_keys` covers all granite/llama names. Preset carries the 4 granite multipliers.
+- hf download stalled twice on xet at ~55%; `HF_HUB_DISABLE_XET=1 hf download --include <file> --local-dir <dir>` resumed and finished (~710MB/min). .cache/huggingface/download/ holds the stale lock — harmless.
+- VERIFIED: scripts/test_parable_port.py -> argmax-100%, top5 identical, max|dlogit|=0.14 (fp16 kernel noise). ForgeEngine.from_checkpoint(dir) + generate -> coherent text (12.44GB VRAM tight but works; engine auto-restored unquantized after forge_quant attempt).
+- tests/unit/test_parable_port.py: preset fields + multiplier wiring + full remap coverage (3 tests).
+- KNOWN: `granite41_3b_base` dir has TRUNCATED shards (278MB+154MB vs expected ~5GB+1.7GB) — re-download before any base-vs-tune compare. Not needed for the port itself.
+
+## Workspace cleanup pass (2026-11-20)
+- scratch/ purged to littlebit_ref/ + wiki_repo/ only (~700MB smoke ckpts + v1-v7 log series gone).
+- .devin/ purged ~40GB: fisher_sft9/ + loose f_base.pt/f_new.pt (sft9-era Fisher mats, recompute via scripts/fisher_merge.py --save-fisher), .devin/ckpt/*.flux (Sept FluxLM corpus snapshots), tmp/, hf_cache/, corpus/, logs/, triton_fresh/, ruffbase/, torch_cache/, trivia_rows*.pkl, 133 logs + 17 .err. Loose files culled 572->95 (kept: sft-chain launchers/builders/packers/mergers, canonical evals _solver/_onmanifold/_unseen/_bestval, eval_flux_*, bench_corpus/stuck, gsyn_parity, migrate_v2, v2_roundtrip, _parable_*, smoke_grpo, run_*_evolve, scratchpad*.md notes, exp_results.jsonl, test_corpus*.txt, config.local.json).
+- research/ left alone - it is LIVE data: 521GB / 605k files (data/ corpora + checkpoints/ model dirs; 81 refs in forge/).
+- docs/ pruned 47->14 + docs/design/(6) + docs/research/(15) + docs/archive/(1): git rm'd 17 rd_round_* + rd_quant_* + CODEBASE_CRITIQUE 09-09/09-10 + Aug research notes (FFN/GROQ/DIFFUSIONBLOCKS/Gemini/WebScrappers/RND_PLAN_V8). CODEBASE_CRITIQUE_2026-09-16 -> docs/archive/ (exp_flux*.py read it as byte corpus; repointed). Design docs git mv'd to docs/design/; code comments + AGENTS.md paths updated. INDEX.md rewritten.
+- NOTE: AGENTS.md mojibake incident mid-pass (Get-Content cp1252 -> Set-Content utf8); reversed via cp1252 round-trip, verified zero residual.
+## Agent-navigation layer (2026-11-20)
+- NEW docs/CODEBASE_MAP.md: task->file routing, package map, data roots, freshness rules.
+- NEW .devin/rules/ (7 files, TRACKED via .gitignore whitelist): scoped edit rules per subsystem (workspace/engine/model_keys/quant_decoding/training_selfplay/flux_exp/gui_server). Check matching file before editing - the point is a ~30-line read vs 2500-line AGENTS.md.
+- NEW .devin/config.json: machine-readable venvs/test cmd/hardware/data roots.
+- NEW scripts/README.md: auto-generated categorized index of 150 scripts; regenerate via scripts/build_script_index.py (147 auto-categorized by prefix).
+- AGENTS.md: 'Quick Find' block added at top (routing + file-placement rules).
+- Wiki Development.md + Docs-Index.md synced, pushed.
+## Lacuna+web research round 2 (2026-11-20) - see .devin/scratchpad_research_lacuna_r2.md
+
+55-item test queue + 7 theory probes, grouped Tier S/A/B/C with beat-incumbent per item. Key corrections: cuDNN decode caps at hd128 (hd256 spark decode NOT served), FA4/FlashMLA/DeepGEMM no SM120 path, NVFP4 only wins at B>=32 (marlin int4 stays for decode), CLA = capacity not bandwidth. Top items: mid-depth-scored SnapKV, ESP training-free MTP draft, MTP+GatedLoRA for B>=32, LoopSpec intermediate-depth drafting for LoopThink/V14, aLoRA prefix-KV reuse, hedge-collapse capacity-law + whitening fix, CCR task-packing (-80% GRPO tokens), QAD for _fq consolidation bug, SOPHIA state-conditioned loop-breaking, TransMLA on spark, ReadKV progressive codes, KDA for V15, retrofitted-recurrence curriculum.
+## Research round 3 MEGA-PASS (6 subagents) - queue now ~Q260 + 27 theory probes
+
+File: .devin/scratchpad_research_lacuna_r2.md. Lanes: agent/tool/gov (Q110-134), data/curr/eval (Q135-159), V15 arch zoo (Q160-182), selfplay/verify (Q183-210), kernels/serve SM120 (Q211-235), longctx/retrieval (Q236-260).
+Convergent: same-weights triad = collusion risk (monitor-only probes + inoculation prompt); abstention fix = ration+conf channel NOT penalties; ~25% global-attn is hybrid sweet spot; V15 evals need agentic multi-hop; spark RoPE-OOD>2048 plausible (YaRN sweep first); LoopThink gate = two-test loop audit; B=1 launch-bound -> multi-step->WHILE-resident decode.
+New DEAD ENDS: softcap (kernels silently ignore), DyT (data-rich regime), EC-routing text, TMA-multicast sm120 (2000x emu), cudaMallocManaged WDDM, WC-pinning, native stochastic rounding sm120, deception-probe-as-reward (obfuscation), homogeneous debate, second-model review (anchor), LLMLingua on tool ctx, naive PER replay, concat-truncate packing.
+
+## RSI supervised run (chunk 4+, post-fix)
+- chunk1: epoch1 PROMOTED SP1 (tie 0.58/0.58, efficiency win 1174 vs 1912 tok)
+- chunk2-3: dead (msgspec DecodeError pre-fix; supervisor fake-completed)
+- chunk4 epoch1: DEMOTED 0.557 (clean cycle: park/wake/eval/revert all OK)
+- harness_genome.py spike shipped (opt-in --harness-evolve, 16/16 tests)
+- BES proposer agent building
+
+
+## Infinite-goal machinery (OMNI-EPIC/Prism/QD-informed)
+- _validated_descs archive (persisted validated_descriptions.json, cap 400): validated tasks become stepping-stone seeds
+- _sample_desc_hint: 35% archive variant (harder/orthogonal/inverse/gen), 20% cross-domain mix, else bank
+- _coverage_domain: 35% override to least-proposed bank domain when skew >=4
+- _avoid_hint domain-aware via tagged archive; n=8
+- New domains: bit_manipulation/geometry/simulation (15 seeds each + sigs); config.domains + DOMAINS now 8
+- Applies from chunk 10 onward (fresh child reads code)
+
+
+---
+
+## EXP-XTAL — Rule Crystallization Dynamics Harness (2026-11-26, design v1)
+
+Origin: theory session on next-token prediction mechanics. Core hypothesis:
+shared structure accumulates gradient faster than it decays (interference is
+the ENGINE of generalization, not just the enemy). Rule formation = discovery
+of latent equivalence structure. Experiments target: crystallization curves,
+gradient-alignment early signal, rule-formation threshold, spacing effects,
+backward-gated training (dense fwd, jurisdiction-masked updates — virgin
+territory, no compute incentive so unexplored).
+
+### Grammar design (synthetic, fully controlled)
+- vocab 96: 64 item tokens partitioned into 8 latent classes x 8 members
+  (partition NOT given to model — must be discovered from behavior),
+  8 markers, BOS/PAD.
+- Rule A (general): agree-chunks. class(x_{i+1}) = f(class(x_i)), f fixed
+  permutation of 8 classes. Successor member uniform within class ->
+  irreducible floor log(8)=2.08 nats. Ungoverned ceiling ~log(96)=4.56.
+- Rule B (rare, shares the class partition with A -> planted shared
+  sub-structure for transfer/interference tests): marker_B, item x, gap,
+  then successor class g(class(x)), g different permutation.
+- Rule C (copy, independent machinery): marker_C, item x, filler, repeat x.
+  Deterministic -> floor ~0. Orthogonal to class structure (induction-like).
+- Noise chunks: uniform over items. Floor log(64)=4.16.
+- Sequences T=64, chunks concatenated per mixing weights, cross-chunk
+  boundary positions tagged noise.
+
+### Memorization-vs-rule separation (holdout trick)
+- 2 members/class held out from ALL trigger roles in training (never
+  chunk-initial, never agree-trigger). They still appear as successors
+  (uniform within class) and noise -> marginals unchanged, floors match.
+- KNOWN LEAK (documented, accepted): successor co-occurrence stats in
+  principle carry class signal for heldout members. But exploiting it
+  REQUIRES class-level pooling inference — a pure memorizer cannot use it.
+  Any heldout generalization is therefore still evidence of rule structure.
+
+### Key measurements (every K steps)
+- per-tag mean CE (train), per-rule CE on segregated fixed eval batches
+  (train-trigger vs heldout-trigger agree chunks, copy, noise)
+- excess loss = loss - entropy floor per rule
+- gradient alignment: segregated batches per rule -> full-param grad vectors
+  -> pairwise cosine. PREDICTION: align(A,B) > 0 (shared partition),
+  align(A,noise) ~ 0. KEY PREDICTION: alignment rises BEFORE heldout loss
+  improves (early-warning signal of rule formation).
+- embedding geometry: mean within-class vs across-class cosine of input
+  embedding rows — direct observation of equivalence-class discovery.
+  PREDICTION: within-class cosine rises at crystallization onset.
+
+### Model
+tiny decoder-only transformer: d_model 128, 4 layers, 4 heads, GELU MLP
+(d_ff 512), learned pos emb, T=64, vocab 96 -> ~820k params. AdamW lr 3e-3,
+batch 64. Minutes per run on RTX 5070.
+
+### Experiment queue
+1. Exp1 baseline crystallization curves + alignment early signal
+2. Exp3 capacity x data sweep -> rule-formation threshold
+3. Spacing: interleaved vs blocked chunk presentation (same data!)
+4. Exp2 interference cartography (shared machinery map)
+5. Exp4 interventions: backward-gated training, alignment-routed gating,
+   consensus-weighted loss. Phased rule introduction (A, then B, then C):
+   measure TRANSFER (does B crystallize faster post-A?) vs FORGETTING
+   (does C destroy A?) across regimes.
+
+### EXP-XTAL RESULTS 1 — wd sweep (6000 steps, d128, batch 64, lr 3e-3)
+
+Runs: results/xtal/wd001.jsonl, wd03.jsonl, wd10.jsonl. Reader:
+scripts/exp_xtal_read.py (backfills xs/ keys — driver had prefix bug, fixed).
+
+FINDINGS (confirmed across wd 0.01 / 0.3 / 1.0 — remarkably insensitive):
+1. CRYSTALLIZATION ORDERING: memorizable rules crystallize FAST
+   (ruleA xs<1.0 by step 50!, ruleB by ~250), copy — the only rule where
+   memorization is IMPOSSIBLE (answer depends on variable x, not fixed
+   statistics) — crystallizes 10-20x slower (~1200+ steps, still
+   descending at 6000). Memorization is a faster attractor than machinery.
+2. ZERO heldout generalization in ALL conditions, all 6000 steps:
+   AH loss flat at ceiling (~4.16 = uniform-over-items) entire run.
+   Gen-gap INCREASES over training (2.0 -> 2.3). Weight decay 1.0 did NOT
+   produce grokking. Per-token memorized solution is a stable equilibrium
+   at this capacity — nothing pressures the model toward class pooling.
+3. REPRESENTATION/USAGE DECOUPLING (novel-ish observation): input
+   embeddings DO cluster by latent class (within-class cos 0.35-0.39 vs
+   across ~0) — wd10 spikes to 0.59 by step 700 then settles 0.38.
+   The class structure is IN THE EMBEDDINGS but the prediction circuit
+   never uses it. Clustering is a byproduct of shared successor
+   statistics, not a mechanism. Geometry != usage.
+4. INTERFERENCE IS REAL AND PERSISTENT: align/A_C goes negative early
+   and stays (-0.35 to -0.52). Agree vs copy gradients actively fight
+   even after both crystallize. align/A_N ~0 as predicted (noise is
+   orthogonal). NOTE: negative alignment did NOT prevent crystallization
+   of either rule — interference here is cost, not blocker.
+5. Noise floor behavior correct: eval/N ~4.4 vs floor log64=4.16;
+   chain-initial noise in A chunks ~5.2 (uniform over 48 train items,
+   floor log48=3.87 — model imperfectly calibrated there, minor).
+
+INTERPRETATION: capacity is abundant (0.87M params for a 64-token
+behavioral repertoire), so per-token memorization is cheap and nothing
+favors the pooled/class solution — grokking pressure absent. Copy proves
+the model CAN form general machinery when memorization is impossible.
+The control knob is therefore the COST OF MEMORIZATION: capacity,
+data scale, or update interference. -> capacity sweep (cap16/32/64,
+wd0.3) running. Prediction: below some capacity, per-token memorization
+of 64 triggers x successor distributions becomes more expensive than the
+8-class pooled solution, and AH drops — the rule-formation threshold.
+
+### EXP-XTAL RESULTS 2 — capacity/members sweeps + decoupling confirmation (2026-11-26)
+
+CAPACITY SWEEP (cap16/32/64, wd0.3): naive economic theory REFUTED.
+Squeezing capacity STRENGTHENED class geometry (cap16 emb gap 0.56 vs
+0.35 at d128) but produced ZERO generalization, and DAMAGED copy
+machinery formation (1.73 vs 0.08 excess). Memorization wins whenever
+feasible — not a continuous cost tradeoff.
+
+MEMBERS SWEEP (m24/m64, up to 512 items): same — memorization still
+feasible at 512 triggers, still wins. emb gap up to 0.88 transiently
+at m64d32 — strongest clustering, zero usage.
+
+CRITICAL SELF-CATCH — the original holdout design measured an IMPOSSIBLE
+task: full exclusion of holdout members from agree chunks meant zero
+class signal anywhere in training. Even a perfect class-pooling model
+couldn't generalize. Flat AH curves v1 were vacuous. Lesson: check what
+information the data actually contains before interpreting failure.
+REDESIGN v2: holdout members appear as chain-terminating successors
+(p=0.1/position, class-revealing leak) but never as triggers. Tests +
+floors updated. Also fixed: gen_eval_batch used hash() (process-
+randomized) — now crc32 stable salt. NOTE: v1 curves not cross-comparable
+bit-exactly (eval batches differed per process — statistical effect small).
+
+V2 RESULTS — THE DECOUPLING IN PUREST FORM:
+- holdout embeddings JOIN their true class clusters through successor-
+  side statistics alone: emb/holdout_cluster_gap 0.43 (v2m8) / 0.40
+  (v2m64; own-class cos 0.48 vs train within-class 0.51 — nearly
+  indistinguishable). Distributional class inference WORKS.
+- heldout prediction STILL flat at ceiling. Knowledge present, never
+  used. The loophole 'clustering too weak' is closed.
+- Mechanism pinned: usage requires residual gradient on positions where
+  lookup can't complete. Train-trigger positions hit floor in ~100-300
+  steps killing gradient; holdout triggers never trained — no pathway
+  for the class-direction readout to form, ever.
+
+RULE-D (class-copy) added to grammar: [markerD,x,f1,f2,member(class(x))]
+— lookup impossible by construction (x varies). THE forced-usage test.
+Runs v3dm8/v3dm64 in flight. Probe probe_xtal_readout.py in flight:
+linear probes per layer, successor-class vs trigger-class targets,
+train-trigger vs holdout-trigger positions. Decides WHERE the decoupling
+lives (readout-only vs end-to-end).

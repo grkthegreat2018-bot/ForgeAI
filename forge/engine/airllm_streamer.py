@@ -1,6 +1,6 @@
 """AirLLM layer-streaming for models that exceed available VRAM.
 
-R71/B1 "StreamHead" (docs/R71_STREAMED_INTELLIGENCE_DESIGN.md).
+R71/B1 "StreamHead" (docs/design/R71_STREAMED_INTELLIGENCE_DESIGN.md).
 
 Public entry points (unchanged):
 - ``AirLLMStreamer.setup(engine)`` — splits the checkpoint into per-layer

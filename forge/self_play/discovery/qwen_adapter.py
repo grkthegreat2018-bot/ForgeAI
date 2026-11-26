@@ -97,6 +97,44 @@ SPARK_SS = "<｜start▁of▁sentence｜>"
 SPARK_SE = "<｜end▁of▁sentence｜>"
 PIPE = chr(124)
 
+
+# -- LFM3 chat format -----------------------------------------------------
+# Port of LFM3's chat_template.jinja (LiquidAI): <|startoftext|> BOS in the
+# TEXT — this tokenizer does not auto-add bos on encode — then canonical
+# ChatML turns; generation prompt opens <|im_start|>assistant\n + <think>
+# (thinking) or the closed <think></think> (direct mode). Distinct from
+# the Jamba template only in that there is no injected think-instruction
+# and BOS is explicit.
+
+LFM3_BOS = "<|startoftext|>"
+
+
+def lfm3_render_messages(messages: list[dict],
+                         tools: list[dict] | None = None,
+                         add_generation_prompt: bool = True,
+                         thinking: bool = True) -> str:
+    """Render a conversation in LFM3 native chat format."""
+    out = LFM3_BOS
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content") or ""
+        if role == "system":
+            out += "<|im_start|>system\n" + content + "<|im_end|>\n"
+        elif role == "user":
+            out += "<|im_start|>user\n" + content + "<|im_end|>\n"
+        elif role == "assistant":
+            rc = m.get("reasoning_content") or ""
+            out += ("<|im_start|>assistant\n"
+                    + ("<think>" + rc + "</think>" if rc else "")
+                    + content + "<|im_end|>\n")
+        elif role == "tool":
+            out += ("<|im_start|>user\n<tool_response>" + content
+                    + "</tool_response><|im_end|>\n")
+    if add_generation_prompt:
+        out += ("<|im_start|>assistant\n"
+                + ("<think>" if thinking else "<think></think>"))
+    return out
+
 _SPARK_THINK_INSTR = (
     "\n`thinking_effort` guides on how much to think in your thinking "
     "channel (not including the response channel), supported values "
@@ -142,6 +180,40 @@ def spark_render_messages(messages: list[dict],
     return out
 
 
+# -- Granite chat format ---------------------------------------------------
+# Port of granite-4.1's chat_template.jinja (IBM Granite / Parable):
+# <|start_of_role|>user<|end_of_role|>{content}<|end_of_text|>\n with the
+# generation prompt opening an assistant turn. EOS is <|end_of_text|>
+# (id 100257). No thinking block.
+
+GRANITE_SOR = "<|start_of_role|>"
+GRANITE_EOR = "<|end_of_role|>"
+GRANITE_EOT = "<|end_of_text|>"
+
+
+def granite_render_messages(messages: list[dict],
+                            tools: list[dict] | None = None,
+                            add_generation_prompt: bool = True,
+                            thinking: bool = True) -> str:
+    """Render a conversation in Granite-4.1 native chat format."""
+    out = ""
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content") or ""
+        if role == "system":
+            out += (GRANITE_SOR + "system" + GRANITE_EOR + content
+                    + GRANITE_EOT + "\n")
+        elif role == "user":
+            out += (GRANITE_SOR + "user" + GRANITE_EOR + content
+                    + GRANITE_EOT + "\n")
+        elif role == "assistant":
+            out += (GRANITE_SOR + "assistant" + GRANITE_EOR + content
+                    + GRANITE_EOT + "\n")
+    if add_generation_prompt:
+        out += GRANITE_SOR + "assistant" + GRANITE_EOR
+    return out
+
+
 def render_messages_for_config(messages: list[dict],
                                config_name: str | None = None,
                                tools: list[dict] | None = None,
@@ -153,13 +225,20 @@ def render_messages_for_config(messages: list[dict],
     Jamba-Reasoning-3B chat_template -- including its trained thinking
     prefix + open <think> block in the generation prompt.
 
-    llama*-family presets use plain ChatML without thinking.
+    llama*/qwen*-family presets use plain ChatML without thinking.
     spark* presets use Spark's sentence-marker format.
+    granite*/parable* presets use the Granite-4.1 role-marker format.
     """
     if config_name and config_name.startswith("spark"):
         return spark_render_messages(messages, tools,
                                      add_generation_prompt, thinking)
-    if config_name and config_name.startswith("llama"):
+    if config_name and config_name.startswith("lfm"):
+        return lfm3_render_messages(messages, tools,
+                                    add_generation_prompt, thinking)
+    if config_name and config_name.startswith(("granite", "parable")):
+        return granite_render_messages(messages, tools,
+                                       add_generation_prompt)
+    if config_name and config_name.startswith(("llama", "qwen")):
         thinking = False
     return qwen_render_messages(messages, tools, add_generation_prompt,
                                 thinking=thinking)

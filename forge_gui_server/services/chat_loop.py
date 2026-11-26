@@ -207,7 +207,9 @@ def _strip_direct_musing(content: str) -> str:
 
 def _think_cap_processor(budget: int | None, suffix_ids: list[int],
                          exit_flag=None, tool_calls_allowed: bool = True,
-                         track_think: bool | None = None):
+                         track_think: bool | None = None,
+                         ban_ids: list[int] | None = None,
+                         tool_ids: tuple | None = None):
     """Per-step logits guard for chat generation.
 
     - ``track_think`` (default ``budget is not None``): the prompt left a
@@ -240,6 +242,14 @@ def _think_cap_processor(budget: int | None, suffix_ids: list[int],
     """
     queue: list[int] = []
     track = (budget is not None) if track_think is None else track_think
+    # Callers on non-Jamba tokenizers pass their own id sets — the
+    # module-level constants are Jamba structural ids that collide with
+    # ordinary BPE tokens elsewhere.
+    _ban_ids = ((_BANNED_IDS + (_THINK_START_ID,))
+                if ban_ids is None else tuple(ban_ids))
+    _tool_ids = ((_TOOL_CALL_START_ID, _TOOL_CALL_END_ID)
+                 if tool_ids is None else tuple(tool_ids))
+    _ban_t: torch.Tensor | None = None
 
     def proc(logits, generated_ids):
         think_open = track and _THINK_END_ID not in generated_ids
@@ -252,13 +262,22 @@ def _think_cap_processor(budget: int | None, suffix_ids: list[int],
             masked = torch.full_like(logits, float("-inf"))
             masked[..., tid] = logits[..., tid]
             return masked
-        masked = logits.clone()
-        for tid in _BANNED_IDS + (_THINK_START_ID,):
-            masked[..., tid] = float("-inf")
-        if think_open or not tool_calls_allowed:
-            masked[..., _TOOL_CALL_START_ID] = float("-inf")
-        if not tool_calls_allowed:
-            masked[..., _TOOL_CALL_END_ID] = float("-inf")
+        # In-place mask — the caller overwrites its logits row with the
+        # return value, so the 256KB clone per row per step is pure waste.
+        # One index_fill_ kernel beats a per-id advanced-index scatter
+        # (this loop runs per row per decode step in batched generate).
+        nonlocal _ban_t
+        masked = logits
+        if _ban_ids:
+            if _ban_t is None or _ban_t.device != logits.device:
+                _ban_t = torch.tensor(
+                    _ban_ids, dtype=torch.long, device=logits.device)
+            masked.index_fill_(-1, _ban_t, float("-inf"))
+        if _tool_ids:
+            if think_open or not tool_calls_allowed:
+                masked[..., _tool_ids[0]] = float("-inf")
+            if not tool_calls_allowed:
+                masked[..., _tool_ids[-1]] = float("-inf")
         return masked
     return proc
 

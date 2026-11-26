@@ -303,10 +303,36 @@ class ForgeEngine(_CheckpointLoadingMixin, _ActivationMixin,
         resources that hold GPU memory independent of ``self.model``.
 
         Called from ``sleep(level=2)`` before discarding the model to prevent
-        leaks of CUDA graph pools and megakernel capture buffers.
+        leaks of CUDA graph pools and megakernel capture buffers, and by
+        callers that want to free every GPU-side runtime resource while
+        keeping the engine object + weights alive (park-for-training).
+        ``activate()`` rebuilds all of these on demand.
         """
+        # BCG decode-graph state: graphs bake weight/KV pointers at
+        # capture — after sleep() moves weights off-GPU and wake()
+        # reallocates them at new addresses, replaying the surviving
+        # graphs reads freed/reused memory (observed 2026-11-24: CUDA
+        # illegal memory access in fast_eval after park→wake on lfm3).
+        # Drop engine + model mirrors so decode falls back to functional
+        # until activate() recaptures on the new storage.
+        for attr in ("_bcg", "_decode_state"):
+            obj = getattr(self, attr, None)
+            if obj is not None:
+                setattr(self, attr, None)
+            if self.model is not None and getattr(
+                    self.model, attr, None) is not None:
+                setattr(self.model, attr, None)
         for attr in ("_graph_runner", "_megakernel",
-                     "_flex_decoding", "_chunked_prefiller"):
+                     "_flex_decoding", "_chunked_prefiller",
+                     # GPU-buffered runtime objects rebuilt by activate():
+                     # KV strategy pools, prefix/cache-blend KV snapshots,
+                     # decoding speculators, elastic memory pools.
+                     "kv_cache", "decoding", "_prefix_cache", "_cache_blend",
+                     "avmp", "vtensor_pool", "_suffix_mem", "quarot_kv",
+                     "v0_warm", "progressive_kv", "mrl_adapter",
+                     # Graph-capturing schedulers/runners (same stale-
+                     # pointer hazard as _bcg across park→wake).
+                     "_corun", "_foundry"):
             obj = getattr(self, attr, None)
             if obj is None:
                 continue

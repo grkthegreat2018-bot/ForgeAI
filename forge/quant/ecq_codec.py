@@ -1,6 +1,6 @@
 """ECQ — entropy-constrained quantization + arithmetic-coded weight codec.
 
-R71/B2 (docs/R71_STREAMED_INTELLIGENCE_DESIGN.md). Two codecs:
+R71/B2 (docs/design/R71_STREAMED_INTELLIGENCE_DESIGN.md). Two codecs:
 
   1. ecq_pack / ecq_unpack — lossy: per-tensor ECVQ codebook (Lloyd-Max with
      optional entropy penalty) + order-0 range coding of the index stream.

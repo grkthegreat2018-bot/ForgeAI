@@ -1069,23 +1069,36 @@ def update_ema(ema_state, model, decay):
     """
     if ema_state is None:
         return
+    params = dict(model.named_parameters())
     with torch.no_grad():
-        for name, p in model.named_parameters():
-            ema_state[name].mul_(decay).add_(p.detach(), alpha=1.0 - decay)
+        for name, shadow in ema_state.items():
+            p = params.get(name)
+            if p is not None:
+                shadow.mul_(decay).add_(p.detach(), alpha=1.0 - decay)
 
 
 def init_ema(model):
-    """Create EMA shadow weights (deep copy of model params)."""
-    return {name: p.detach().clone() for name, p in model.named_parameters()}
+    """Create EMA shadow weights (deep copy of TRAINABLE params).
+
+    Only requires_grad params are tracked: under LoRA/adapter training
+    that is ~1M params instead of a full-model clone (~3.4GB VRAM for a
+    1.7B bf16 model) plus a full-model mul/add per step. Full-FT keeps
+    the old behavior since every param is trainable.
+    """
+    return {name: p.detach().clone() for name, p in model.named_parameters()
+            if p.requires_grad}
 
 
 def restore_ema(ema_state, model):
     """Restore EMA weights into model (rollback on quality regression)."""
     if ema_state is None:
         return
+    params = dict(model.named_parameters())
     with torch.no_grad():
-        for name, p in model.named_parameters():
-            p.copy_(ema_state[name])
+        for name, shadow in ema_state.items():
+            p = params.get(name)
+            if p is not None:
+                p.copy_(shadow)
 
 
 def compute_ce_loss(model_output, targets):

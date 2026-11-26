@@ -325,7 +325,12 @@ class PreAllocatedKVCache:
             # Ring write stays tensor-driven: slot = pos_t % C.
             idx = self.pos_t % ring_c
         else:
-            idx = self.pos_t
+            # Clamp rather than trust pos_t < cap: an OOB index_copy_
+            # fires an async srcIndex device assert that poisons the
+            # whole context — a wrong-slot write degrades one row
+            # instead (decode callers bound pos < max_seq_len anyway).
+            idx = self.pos_t.clamp(
+                max=self.k_caches[layer_idx].shape[2] - 1)
         self.k_caches[layer_idx].index_copy_(2, idx, k_new)
         self.v_caches[layer_idx].index_copy_(2, idx, v_new)
         if ring_c is not None:

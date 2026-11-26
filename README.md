@@ -11,9 +11,12 @@ CodeEvolve evolutionary optimization + RSI self-improve loop.
 - `forge/` — production code (engine, model, training, evolution, quant)
 - `scripts/` — standalone drivers (evolve campaigns, benches, converters)
 - `tests/unit/` — CPU-runnable unit tests (`tests/integration/` needs GPU)
-- `docs/` — documentation + R&D round notes (`docs/INDEX.md` is the index)
-- `research/` — legacy root still holding live modules (paths, tokenizer
-  cache, port scripts) and checkpoints — new code goes in `forge/`
+- `docs/` — documentation (`docs/INDEX.md` is the index; design docs in
+  `docs/design/`, long-form research in `docs/research/`)
+- `research/` — legacy root still holding live modules (`paths`,
+  `tokenizer_cache`, `persistent_executor` sandbox, `merge_models`,
+  `training_free/`, port scripts) plus the data/checkpoint roots —
+  new code goes in `forge/`
 - `data/`, `checkpoints/`, `logs/` — local artifacts (ignored)
 - `results/` — tracked RSI run summaries + external-eval output
 - `.devin/scratchpad.md` — running R&D working notes

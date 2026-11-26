@@ -659,66 +659,126 @@ def _generate_with_metrics(engine, prompt, max_new_tokens, device="cuda",
 
 def _run_tests_on_engine(engine, name, device="cuda", verbose=False,
                           use_dynamic=True, seed=None, cats=None,
-                          config_name: str | None = None):
+                          config_name: str | None = None,
+                          on_item=None):
     """Run all test categories on an already-loaded engine.
 
     If use_dynamic=True, generates randomized questions + applies ban list
     to prevent overfitting on memorized questions. Pass ``cats`` to run a
     prebuilt question set — REQUIRED when comparing two checkpoints so
     both sides answer identical questions.
+
+    ``on_item(metrics_so_far, done, total)`` — called after each scored
+    test; returning a truthy verdict aborts the remaining tests (the
+    caller marks the result partial and decides on the bound it proved).
     """
     print(f"\n{'='*70}")
     print(f"  Benchmarking: {name}")
     print(f"{'='*70}")
     result = ModelResult(name=name, checkpoint="")
+    verdict = None
 
     # Use dynamic categories (randomized + ban list) or static
     if cats is None:
         cats = _build_dynamic_categories(seed=seed) if use_dynamic else CATEGORIES
+    n_total = sum(len(v) for v in cats.values())
+    n_done = 0
+    all_metrics: list = []
 
     for cat_name, tests in cats.items():
-        if not tests:
+        if not tests or verdict:
             continue
         max_tok = CATEGORY_MAX_TOKENS.get(cat_name, 128)
         print(f"\n  --- {cat_name.upper()} ({len(tests)} tests) ---")
         metrics_list = []
-        for test in tests:
-            m = _generate_with_metrics(engine, test["prompt"], max_tok, device,
-                                       config_name=config_name)
-            m.quality = test["check"](m)
-            metrics_list.append(m)
-            status = "PASS" if m.quality >= 0.7 else "FAIL"
-            print(f"    {test['name']:25s} | {m.tokens:4d} toks | "
-                  f"{m.time_ms:7.0f}ms | {m.vram_mb:6.0f}MB | "
-                  f"Q={m.quality:.2f} | {status}")
-            if verbose:
-                preview = m.output[:120].replace('\n', '\\n')
-                preview = preview.encode('ascii', 'replace').decode('ascii')
-                print(f"      -> {preview}")
-            # Ban high-score questions to prevent overfitting (anti-contamination)
-            # Questions scoring 1.0 are likely memorized — ban from future runs.
-            # NEVER ban real-benchmark items: they're a fixed external set
-            # (resampled per seed anyway), and banning base's passes leaves
-            # only its failures → survivorship inversion → fake promotions.
-            # Same argument applies to the static CATEGORIES yardstick —
-            # only procedurally regenerated names are bannable.
-            if (use_dynamic and m.quality >= 1.0
-                    and cat_name not in HELDOUT_CATS
-                    and test["name"] not in _STATIC_TEST_NAMES):
-                _ban_question(test["name"])
+        # Batched generation: eval items are independent greedy decodes —
+        # routing a whole category through one generate_batch call
+        # replaces ~N serial generate_raw passes (the O(L²) functional
+        # KV path with a Python step loop) with the continuous-batching
+        # decode. Chunks stay small so on_item early-abort still fires
+        # near item granularity and VRAM stays bounded on 12GB.
+        translated = [_translate_prompt(t["prompt"], config_name)
+                      for t in tests]
+        _GEN_BATCH = 8
+        for off in range(0, len(tests), _GEN_BATCH):
+            if verdict:
+                break
+            chunk = tests[off:off + _GEN_BATCH]
+            chunk_prompts = translated[off:off + _GEN_BATCH]
+            torch.cuda.reset_peak_memory_stats(device)
+            t0 = time.perf_counter()
+            try:
+                outs = engine.generate_batch(
+                    chunk_prompts, max_new_tokens=max_tok,
+                    temperature=0.0, top_k=80,
+                    repetition_penalty=1.05,
+                    skip_special_tokens=False)
+            except Exception:
+                # Serial fallback — keep the gate working on engines
+                # without a batch path.
+                outs = [
+                    _generate_with_metrics(
+                        engine, tp, max_tok, device,
+                        config_name=None).output
+                    for tp in chunk_prompts]
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            peak_vram = torch.cuda.max_memory_allocated(device) / 1024 / 1024
+            per_ms = elapsed_ms / max(len(chunk), 1)
+            for test, output_text in zip(chunk, outs):
+                n_tokens = len(engine.tokenizer.encode(
+                    output_text, add_special_tokens=False))
+                m = GenMetrics(tokens=n_tokens, time_ms=per_ms,
+                               vram_mb=peak_vram, output=output_text)
+                m.quality = test["check"](m)
+                metrics_list.append(m)
+                all_metrics.append(m)
+                n_done += 1
+                status = "PASS" if m.quality >= 0.7 else "FAIL"
+                print(f"    {test['name']:25s} | {m.tokens:4d} toks | "
+                      f"{m.time_ms:7.0f}ms | {m.vram_mb:6.0f}MB | "
+                      f"Q={m.quality:.2f} | {status}")
+                if verbose:
+                    preview = m.output[:120].replace('\n', '\\n')
+                    preview = preview.encode('ascii', 'replace').decode('ascii')
+                    print(f"      -> {preview}")
+                # Ban high-score questions to prevent overfitting (anti-contamination)
+                # Questions scoring 1.0 are likely memorized — ban from future runs.
+                # NEVER ban real-benchmark items: they're a fixed external set
+                # (resampled per seed anyway), and banning base's passes leaves
+                # only its failures → survivorship inversion → fake promotions.
+                # Same argument applies to the static CATEGORIES yardstick —
+                # only procedurally regenerated names are bannable.
+                if (use_dynamic and m.quality >= 1.0
+                        and cat_name not in HELDOUT_CATS
+                        and test["name"] not in _STATIC_TEST_NAMES):
+                    _ban_question(test["name"])
+                if on_item is not None:
+                    verdict = on_item(all_metrics, n_done, n_total)
+                    if verdict:
+                        print(f"\n  [FastEval] early abort after {n_done}/"
+                              f"{n_total} items: {verdict} certain")
+                        break
         result.per_category[cat_name] = metrics_list
 
     result.aggregate()
+    # Callers read .partial_verdict to mark the decision as proven-by-bound
+    # rather than a full paired pass.
+    result.partial_verdict = verdict
     return result
 
 
 def _load_state_dict_on_device(checkpoint_path, device, dtype=torch.bfloat16):
-    """Load safetensors state dict directly onto GPU (skip CPU intermediary)."""
-    # Pass map_location=device to load directly to GPU (uses fastsafetensors if available)
+    """Load safetensors state dict directly onto GPU (skip CPU intermediary).
+
+    Do NOT pre-cast to ``dtype``: bf16 has ~8 mantissa bits, so int64 index
+    tensors (sparse_indices, packed positions) ≥256 round on the cast —
+    e.g. 511→512, an out-of-bounds row in ``w[sparse_idx] += w_sparse``
+    that device-asserts mid-eval. ``param.data.copy_`` converts dtypes
+    exactly for free, so native-dtype tensors are both safer and cheaper
+    (the cast also doubled the transient GPU footprint).
+    """
     state = load_checkpoint(checkpoint_path, map_location=device)
-    return {k: v.to(dtype=dtype) if hasattr(v, 'to') and v.dtype != dtype else v
-            for k, v in state.items()
-            if hasattr(v, 'to')}
+    return {k: v for k, v in state.items() if hasattr(v, 'to')}
 
 
 def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
@@ -726,7 +786,8 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
               engine=None, config_name: str = "forgelm_v2",
               eval_scale: float = 1.0, eval_online: int = 0,
               eval_seed: int | None = None,
-              base_cache: dict | None = None) -> dict:
+              base_cache: dict | None = None,
+              decision_margin: float | None = None) -> dict:
     """Run in-process eval with weight swapping.
 
     If engine is provided (from self-play), reuses it to skip model reload (~40s saved).
@@ -749,6 +810,12 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
             comparable, not less. Eval items never enter the SFT corpus,
             so a frozen set is not an overfit channel. A promotion changes
             the key → next epoch re-baselines automatically.
+        decision_margin: when set, the candidate pass early-aborts once
+            the strict outcome is proven by bound — candidate at
+            floor-quality can't reach base+margin (demote certain) or
+            at ceiling-quality can't fall below base+margin (promote
+            certain). The reported quality is the proven bound, not a
+            completed mean. None runs the full pass (default).
     """
     t_total = time.perf_counter()
 
@@ -771,11 +838,18 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
                       and base_cache.get("base_result") is not None
                       and base_cache.get("cats") is not None)
 
+    # Eval KV: hadamard_int4 was tuned on the forgelm family; on spark the
+    # int4 rotation noise lands inside a 0.02-margin paired decision and
+    # flips borderline calls — spark/lfm3 evaluate on the standard cache
+    # (same physics: int4 rotation noise >> the promote margin).
+    _eval_kv = ("standard" if str(config_name).startswith(("spark", "lfm"))
+                else "hadamard_int4")
+
     if engine is not None:
         # Reuse existing engine from self-play — just re-activate with standard decoding
         print("  [FastEval] Reusing self-play engine (skipping model reload)")
         # Re-activate: switch from mtp_selfspec to standard decoding for eval
-        engine.activate(kv_cache="hadamard_int4", decoding="standard",
+        engine.activate(kv_cache=_eval_kv, decoding="standard",
                         use_triton_conv=True,
                         kv_cache_tokens=4096, warmup=True)
     else:
@@ -798,7 +872,7 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
             # 12GB card that left 0MB free and capped KV at 64 tokens.
             auto_activate=False,
         )
-        engine.activate(kv_cache="hadamard_int4", decoding="standard",
+        engine.activate(kv_cache=_eval_kv, decoding="standard",
                         use_triton_conv=True,
                         kv_cache_tokens=4096, warmup=True)
 
@@ -839,9 +913,31 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
         t_swap = time.perf_counter()
         candidate_state = _load_state_dict_on_device(candidate_checkpoint, device)
         with torch.no_grad():
+            n_params = 0
             for name, param in engine.model.named_parameters():
                 if name in candidate_state:
                     param.data.copy_(candidate_state[name])
+                    n_params += 1
+            # Factorized-quant modules (LittleBitLinear) have no .weight
+            # parameter — the copy loop skipped them entirely. Re-factorize
+            # each from the fp candidate state or the eval runs stale base
+            # weights on every LB2 layer.
+            from forge.engine.quant.littlebit2 import (
+                LittleBitLinear, refactorize_from_state_dict)
+            if any(isinstance(m, LittleBitLinear)
+                   for m in engine.model.modules()):
+                n_r = refactorize_from_state_dict(
+                    engine.model, candidate_state)
+                print(f"  [FastEval] {n_r} LB2 layers re-factorized "
+                      f"to candidate")
+            # Invalidate dequantized-weight caches: _cache_w/_rotated_dense
+            # snapshots still hold BASE weights — the candidate pass would
+            # silently run stale weights on every cached layer.
+            for m in engine.model.modules():
+                if getattr(m, "_cached_weight", None) is not None:
+                    m._cached_weight = None
+                if getattr(m, "_cached_weight_rot", None) is not None:
+                    m._cached_weight_rot = None
         del candidate_state
 
         # Invalidate cached KV — prefix-cache and CacheBlend entries were
@@ -858,11 +954,44 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
             torch.cuda.synchronize()
         print(f"  [FastEval] Weight swap done in {time.perf_counter() - t_swap:.1f}s")
 
-    # Run candidate tests — same question set as base
-    candidate_result = _run_tests_on_engine(engine, "CANDIDATE (SFT)",
-                                            device, verbose, cats=cats,
-                                            config_name=config_name)
+    # Run candidate tests — same question set as base. With
+    # decision_margin set, abort once the strict promote/demote outcome is
+    # proven by bound: remaining items can't change the call.
+    _abort_state = {"bound_q": None}
+
+    def _decide(all_metrics, done, total):
+        if decision_margin is None or total <= 0:
+            return None
+        cand_sum = sum(m.quality for m in all_metrics)
+        remaining = total - done
+        base_q = base_result.total_quality
+        # Floor (all remaining score 0) already clears base+margin →
+        # strict promotion is certain, stop generating.
+        if cand_sum / total >= base_q + decision_margin:
+            _abort_state["bound_q"] = cand_sum / total
+            return "promote"
+        # Ceiling (all remaining score 1) still below base-margin →
+        # neither strict promote NOR the efficiency path (needs
+        # cand_q >= base-margin) can fire → demote certain.
+        if (cand_sum + remaining) / total < base_q - decision_margin:
+            _abort_state["bound_q"] = (cand_sum + remaining) / total
+            return "demote"
+        return None
+
+    candidate_result = _run_tests_on_engine(
+        engine, "CANDIDATE (SFT)", device, verbose, cats=cats,
+        config_name=config_name,
+        on_item=_decide if decision_margin is not None else None)
     candidate_result.checkpoint = candidate_checkpoint
+    # On early abort, report the proven BOUND as the quality — the
+    # partial mean over completed categories is a biased estimate; the
+    # bound is the conservative number the decision already proved.
+    if (getattr(candidate_result, "partial_verdict", None)
+            and _abort_state["bound_q"] is not None):
+        print(f"  [FastEval] candidate quality reported as proven bound "
+              f"{_abort_state['bound_q']:.3f} "
+              f"({candidate_result.partial_verdict})")
+        candidate_result.total_quality = _abort_state["bound_q"]
 
     # If we created the engine internally (engine=None path), free it now.
     # The caller can't get a reference back (fast_eval returns a dict), so
@@ -910,6 +1039,7 @@ def fast_eval(base_checkpoint: str, candidate_checkpoint: str,
             "tokens_per_sec": candidate_result.avg_tokens_per_sec,
             "heldout_q": _split_q(candidate_result, HELDOUT_CATS),
             "adjacent_q": _split_q(candidate_result, ADJACENT_CATS),
+            "early_abort": getattr(candidate_result, "partial_verdict", None),
         },
         "winner": "",
     }

@@ -165,8 +165,14 @@ class BreakableCudaGraph:
                     self._static_buffers[key]['output'] = output
             except Exception as e:
                 logger.warning(f"  [BCG] decode capture failed {key=}: {e}")
+                # A failed capture abandons the private mempool
+                # (torch #190308 — reserved-but-untracked). Drop the
+                # half-populated buffers and purge the cache so later
+                # decode can't land on corrupted pool storage.
+                self._static_buffers.pop(key, None)
                 with contextlib.suppress(Exception):
                     torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
                 continue
 
             self._decode_graphs[key] = graph

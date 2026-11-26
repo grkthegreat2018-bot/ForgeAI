@@ -88,7 +88,7 @@ def main():
 
     data = b""
     for p in sorted((ROOT / "docs" / "research").glob("*.md")) + \
-            [ROOT / "docs" / "CODEBASE_CRITIQUE_2026-09-16.md"]:
+            [ROOT / "docs" / "archive" / "CODEBASE_CRITIQUE_2026-09-16.md"]:
         data += p.read_bytes()
     data = list(data)
     run("text", 256, (3, 4, 6, 8, 12, 16, 24, 32, 48, 64),

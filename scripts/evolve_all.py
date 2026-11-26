@@ -64,8 +64,10 @@ def main() -> int:
     ap.add_argument("--quiet-rounds", type=int, default=3,
                     help="infinite mode: stop after N straight rounds "
                          "with zero verified promotions on ANY target")
-    ap.add_argument("--proposer", choices=["mut", "mix", "llm", "basin"],
-                    default="mut")
+    ap.add_argument("--proposer", choices=["mut", "mix", "llm", "basin",
+                                         "bes"],
+                    default="mut",
+                    help="bes=backward goal-decomposition + joint solve")
     ap.add_argument("--llm-every", type=int, default=6)
     ap.add_argument("--basin-batch", type=int, default=8,
                     help="basin proposer: LLM parents per generate_batch pass")

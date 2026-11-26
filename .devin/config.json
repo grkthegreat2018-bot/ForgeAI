@@ -1,0 +1,36 @@
+{
+  "project": "ForgeAI",
+  "purpose": "Machine-readable environment facts for agents — read this first instead of probing.",
+  "python": {
+    "main_venv": "venv/Scripts/python.exe",
+    "venv_ov": "venv_ov/Scripts/python.exe (OpenVINO NPU)",
+    "venv_train": "venv_train/Scripts/python.exe (training)",
+    "required_env": { "PYTHONPATH": "D:\\windsurf\\ForgeAI" }
+  },
+  "commands": {
+    "test_all": "$env:PYTHONPATH=\"$PWD\"; .\\venv\\Scripts\\python.exe -m pytest tests/ --tb=short -q",
+    "test_unit_cpu": "pytest tests/unit/ -q (CPU-safe; tests/integration/ needs GPU)",
+    "smoke_model_load": "python -c \"from forge.model_loader import ConfigurableResearchLLM; print('OK')\"",
+    "load_bench": "python scripts/bench_load_time.py"
+  },
+  "hardware": {
+    "gpu": "RTX 5070 12GB VRAM (SM120 Blackwell)",
+    "ram": "32GB",
+    "drive_D": "4TB SMR over USB-BOT — sequential ~230MB/s, random writes collapse <10MB/s. Keep many-small-file IO on C: NVMe; D: for checkpoints/datasets/packed caches only.",
+    "vram_budget": "Any feature pushing >12GB on the 1.2B model needs a mixed CPU/GPU fallback"
+  },
+  "navigation": {
+    "codebase_map": "docs/CODEBASE_MAP.md",
+    "doc_index": "docs/INDEX.md",
+    "script_index": "scripts/README.md",
+    "scoped_rules": ".devin/rules/<area>.md",
+    "working_notes": ".devin/scratchpad.md",
+    "experiment_log": ".devin/exp_results.jsonl"
+  },
+  "data_roots": {
+    "research/": "live legacy package + data/checkpoint roots (521GB, referenced by 46 import sites — NOT dead code)",
+    "data/ checkpoints/ results/ logs/": "local artifacts (mostly ignored)",
+    ".devin/": "gitignored scratch except scratchpad.md, rules/, config.json",
+    "scratch/": "untracked temp — wiki_repo/ + reference clones only"
+  }
+}

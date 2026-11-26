@@ -700,9 +700,14 @@ class ConfigurableResearchLLM(nn.Module):
                     # [:, -1] reads the bucket's LAST column (always 0) —
                     # zeroing every conv's gated input on replay. The live
                     # column is the write position — index it by the
-                    # device tensor so the op stays capturable.
+                    # device tensor so the op stays capturable. Clamped to
+                    # the view width: a pos_t past the bucket (shouldn't
+                    # happen — the decode tag pick enforces pos < b)
+                    # otherwise fires an async srcIndex assert that
+                    # poisons the whole CUDA context.
                     block._pad_mask = attention_mask.index_select(
-                        1, preallocated_cache.pos_t)
+                        1, preallocated_cache.pos_t.clamp(
+                            max=attention_mask.shape[1] - 1))
                 else:
                     block._pad_mask = attention_mask[:, -idx.shape[1]:]
             past = past_key_values[i] if past_key_values is not None else None

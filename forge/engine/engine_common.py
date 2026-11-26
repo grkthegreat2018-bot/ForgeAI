@@ -155,6 +155,11 @@ class SamplingParams:
     # (KV-cache models).  None = engine default; <=0 disables the lift
     # for this request; >0 scales it.
     suffix_gate: float | None = None
+    # GPU-side token suppression: ids forced to -inf every step. Shared
+    # by the serial and batched paths so structural bans (control/special
+    # tokens) don't need a per-step Python logits_processor callback —
+    # a single index_fill kernel replaces the callback's D2H + Python.
+    suppress_ids: tuple[int, ...] | list[int] | None = None
     # DeepInfer-style deterministic sampling (seq_seed): when set and
     # temperature > 0, the token draw is SplitMix64(seed, 3*pos+case)
     # inverted through the probability CDF — a pure function of

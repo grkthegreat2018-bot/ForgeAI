@@ -617,7 +617,7 @@ Prometheus-text `/metrics` (JSON endpoint exists), `--purge-generator-weights`
   applied-rate / stage distribution / per-target bests. Remaining gap is
   outcome-side: the ledger still shows 0 applied discoveries — the
   machinery to see that is what was missing.
-- **A12 STRATA vs FluxLM** — CLOSED: `docs/STRATA_VS_FLUXLM.md` holds the
+- **A12 STRATA vs FluxLM** — CLOSED: `docs/design/STRATA_VS_FLUXLM.md` holds the
   division-of-labor decision (FluxLM = research vehicle, STRATA =
   deployment-artifact format; duplicated components kept in both for now —
   no consolidation without a bit-exact comparison).

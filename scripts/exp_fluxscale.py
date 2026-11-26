@@ -27,7 +27,7 @@ V = 151936
 def pool_bytes():
     eval_list = sorted(
         (ROOT / "docs" / "research").glob("*.md")) + \
-        [ROOT / "docs" / "CODEBASE_CRITIQUE_2026-09-16.md"]
+        [ROOT / "docs" / "archive" / "CODEBASE_CRITIQUE_2026-09-16.md"]
     docs = b""
     for p in eval_list:                  # original order = same held
         docs += p.read_bytes()
@@ -57,7 +57,7 @@ def pool_segments(tok):
     tr_docs, _pool, held = pool_bytes()
     eval_list = sorted(
         (ROOT / "docs" / "research").glob("*.md")) + \
-        [ROOT / "docs" / "CODEBASE_CRITIQUE_2026-09-16.md"]
+        [ROOT / "docs" / "archive" / "CODEBASE_CRITIQUE_2026-09-16.md"]
     eval_files = {p.resolve() for p in eval_list}
     segs = [(tok(tr_docs.decode("utf-8", "ignore"))["input_ids"],
              "prose")]

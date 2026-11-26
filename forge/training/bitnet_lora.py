@@ -11,6 +11,7 @@ Validated in .devin/test_bitnet_native.py on real V3 1.2B:
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
 
 import torch
 import torch.nn as nn
@@ -91,8 +92,12 @@ class NF4Linear(QuantizedLinearMixin):
         # Pack: 2 indices per byte (each 0-15 → 4 bits)
         idx_flat = idx.reshape(self.out_features, -1).to(torch.uint8)
         packed = idx_flat[:, ::2] | (idx_flat[:, 1::2] << 4)
-        self.weight_packed.data = packed.to('cpu')
-        self.weight_scales.data = scales.squeeze(-1).to(torch.float16).to('cpu')
+        # In-place writes preserve device + CUDA-graph storage (rebinding
+        # .data to fresh CPU tensors silently broke both — see
+        # forge/engine/quant/forge_quant.py ForgeQuantLinear note).
+        self.weight_packed.data.copy_(packed)
+        self.weight_scales.data.copy_(
+            scales.squeeze(-1).to(torch.float16))
         self._cached_weight = None
 
     def _dequantize_weight(self, dtype: torch.dtype = torch.bfloat16,
@@ -399,6 +404,45 @@ def add_lora_adapters(
 
     find_and_add(model)
     return n_adapters, lora_params
+
+
+@contextmanager
+def lora_disabled(model: nn.Module):
+    """Temporarily disable every LoRAAdapter on the model.
+
+    Turns a LoRA-adapted policy model into its own frozen reference: the
+    base weights are unchanged, so a forward inside this context produces
+    pre-adapter logits. Used by GRPO-style trainers to compute
+    KL(pi || pi_ref) WITHOUT a second model in memory (saves ~3.4GB on
+    spark_x26_1p7b, ~6GB on Jamba-3B).
+
+    Covers all three integration sites used by ``add_lora_adapters``:
+      - quantized linears: their forward checks ``lora_adapter is not
+        None`` → temporarily set to None
+      - nn.Linear/BitNetLinear + fused-QKV: monkey-patched forwards with
+        the original saved on ``_lora_orig_forward`` → temporarily restore
+
+    Everything is restored on exit (exception-safe). Read-only w.r.t.
+    weights — no Parameter is touched.
+    """
+    saved_fwd: list[tuple[nn.Module, object]] = []
+    saved_attr: list[tuple[nn.Module, object]] = []
+    for m in model.modules():
+        if getattr(m, 'lora_adapter', None) is None:
+            continue
+        if getattr(m, '_lora_orig_forward', None) is not None:
+            saved_fwd.append((m, m.forward))
+            m.forward = m._lora_orig_forward
+        else:
+            saved_attr.append((m, m.lora_adapter))
+            m.lora_adapter = None
+    try:
+        yield
+    finally:
+        for m, fwd in saved_fwd:
+            m.forward = fwd
+        for m, adapter in saved_attr:
+            m.lora_adapter = adapter
 
 
 def merge_lora_adapters(model: nn.Module) -> int:

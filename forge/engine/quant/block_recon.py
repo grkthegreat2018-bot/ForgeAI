@@ -218,6 +218,16 @@ def _get_optimizable_params(block: nn.Module) -> dict[str, torch.Tensor]:
                 params[f"{name}.s1"] = module.s1.clone()
                 params[f"{name}.s2"] = module.s2.clone()
 
+        # LittleBit-2: optimize latent factors (U, V as _soft) + all scales
+        elif cls_name == 'LittleBitLinear':
+            suffixes = ('', '_R') if module.residual else ('',)
+            for suf in suffixes:
+                params[f"{name}.U{suf}_soft"] = getattr(module, f"U{suf}").data.clone()
+                params[f"{name}.V{suf}_soft"] = getattr(module, f"V{suf}").data.clone()
+                for s_name in ('u1', 'u2', 'v1', 'v2'):
+                    params[f"{name}.{s_name}{suf}"] = getattr(
+                        module, f"{s_name}{suf}").data.clone()
+
         # BTC: optimize scales (codebook is discrete, hard to optimize)
         elif cls_name == 'BTCQuantLinear' or cls_name == 'TernaryPTQLinear':
             if module.scales.numel() > 0:
@@ -286,6 +296,18 @@ def _apply_optimized_params(block: nn.Module, params: dict[str, torch.Tensor]):
             if f"{name}.s2" in params:
                 module.s2 = params[f"{name}.s2"].to(torch.float16)
                 module._invalidate_cache()
+
+        elif cls_name == 'LittleBitLinear':
+            # Write back the SOFT latents/scales — the module binarizes
+            # through its quant_func at forward, so keeping the continuous
+            # values preserves QAT state.
+            for k, v in params.items():
+                if not k.startswith(f"{name}."):
+                    continue
+                short = k[len(name) + 1:]
+                attr = short[:-5] if short.endswith('_soft') else short
+                if hasattr(module, attr):
+                    getattr(module, attr).data = v.to(getattr(module, attr).dtype)
 
         elif cls_name == 'BTCQuantLinear' or cls_name == 'TernaryPTQLinear':
             if f"{name}.scales" in params:
@@ -375,6 +397,46 @@ def _install_soft_forward(block: nn.Module, opt_params: dict[str, torch.Tensor])
                     return soft_forward
 
                 module.forward = make_soft_forward(module, patches[id(module)])
+
+        elif cls_name == 'LittleBitLinear':
+            # Route the factorized forward through the opt_params tensors
+            # (module._factor_forward applies the quant STE to U/V).
+            lb_keys = [k for k in opt_params if k.startswith(prefix)]
+            if lb_keys:
+                orig_forward = module.forward
+                patches[id(module)] = {
+                    'module': module,
+                    'orig_forward': orig_forward,
+                    'type': 'littlebit2',
+                }
+
+                def make_soft_forward_lb(mod, pfx):
+                    def soft_forward(x):
+                        def g(p):
+                            # Latent factors live under '<p>_soft' keys;
+                            # scales under '<p>'; fall back to module params.
+                            sk, hk = f"{pfx}{p}_soft", f"{pfx}{p}"
+                            if sk in opt_params:
+                                t = opt_params[sk]
+                            elif hk in opt_params:
+                                t = opt_params[hk]
+                            else:
+                                t = getattr(mod, p).data
+                            return t.to(x.dtype)
+                        lead = x.shape[:-1]
+                        xf = x.reshape(-1, mod.in_features)
+                        y = mod._factor_forward(xf, g('V'), g('U'), g('v2'),
+                                                g('v1'), g('u2'), g('u1'))
+                        if mod.residual:
+                            y = y + mod._factor_forward(
+                                xf, g('V_R'), g('U_R'), g('v2_R'), g('v1_R'),
+                                g('u2_R'), g('u1_R'))
+                        if mod.bias is not None:
+                            y = y + mod.bias.to(y.dtype)
+                        return y.reshape(*lead, mod.out_features)
+                    return soft_forward
+
+                module.forward = make_soft_forward_lb(module, prefix)
 
         elif cls_name in ('TernaryPTQLinear', 'BTCQuantLinear'):
             s_key = prefix + "scales"
@@ -736,7 +798,7 @@ class BlockReconstructor:
         else:
             # Only optimize continuous scales — safer but less powerful
             params_dict = {k: v for k, v in all_params.items()
-                           if not (k.endswith('.U_soft') or k.endswith('.V_soft'))}
+                           if not k.endswith('_soft')}
             if not params_dict:
                 params_dict = all_params  # fallback
         if not params_dict:
@@ -752,7 +814,7 @@ class BlockReconstructor:
         for name, val in params_dict.items():
             p = val.clone().to(self.device).requires_grad_(True)
             opt_params[name] = p
-            if name.endswith('.U_soft') or name.endswith('.V_soft'):
+            if name.endswith('_soft'):
                 binary_params.append(p)
             else:
                 scale_params.append(p)
@@ -1052,7 +1114,7 @@ class BlockReconstructor:
             block_params = _get_optimizable_params(block)
             for name, val in block_params.items():
                 # Only optimize scales, not binary factors (those are done in block recon)
-                if not (name.endswith('.U_soft') or name.endswith('.V_soft')):
+                if not name.endswith('_soft'):
                     key = f"block{i}.{name}"
                     p = val.clone().to(self.device).requires_grad_(True)
                     all_scale_params[key] = p

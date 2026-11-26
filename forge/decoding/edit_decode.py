@@ -1,4 +1,4 @@
-"""CopySpan edit-mode decoding driver (V14-RSI, docs/V14_RSI_DESIGN.md §3a).
+"""CopySpan edit-mode decoding driver (V14-RSI, docs/design/V14_RSI_DESIGN.md §3a).
 
 When the LM emits the <copy> op token, the pointer head emits (start, end)
 over the source span's prefill-cached hiddens; the driver splices

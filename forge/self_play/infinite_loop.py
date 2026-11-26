@@ -68,8 +68,16 @@ class LoopConfig:
     temperature: float = 0.7         # exploration temperature
     top_k: int = 80                  # LFM2.5-recommended
     top_p: float = 0.95
-    propose_batch_size: int = 8      # parallel task proposal
-    domains: tuple = ("algorithms", "math", "strings", "logic", "data_structures")
+    propose_batch_size: int = 64     # parallel task proposal — the
+                                     # static-graph decode window is 32
+                                     # slots wide; N>32 engages the
+                                     # refill queue so every step emits
+                                     # ~32 real tokens (flat throughput)
+                                     # instead of idling on early
+                                     # finishers' tails.
+    domains: tuple = ("algorithms", "math", "strings", "logic",
+                      "data_structures", "bit_manipulation",
+                      "geometry", "simulation")
 
     # Frontier re-queue: re-offer backlog tasks in the learnable band
     # (attempted, not saturated) before proposing fresh ones — measured
@@ -93,12 +101,25 @@ class LoopConfig:
                                      # checkpoints (spark) the old
                                      # mtp_selfspec default silently
                                      # degraded to standard anyway.
-    quantize: str | None = None      # weight quantization (None=bf16, "w8a8", "nvfp4")
+    quantize: str | None = None      # weight quantization (None=bf16, "w8a8",
+                                     # "nvfp4", "littlebit2")
+    # LittleBit-2 sub-1-bit knobs — read by engine_activation from
+    # model.config; mirrored there by _selfplay_activation_kwargs.
+    lb2_eff_bit: float = 0.5         # target bits/weight (paper sweet spot ~0.5;
+                                     # 0.1 is destructive even after QAT)
+    lb2_residual: bool = True        # residual factor pair (~2x factor bits,
+                                     # much better fidelity at low BPW)
+    lb2_kv_ratio: float | None = None  # optional rank multiplier for k/v proj
     acceleration: str | None = None  # "cuda_graph", "megakernel", "flex_decoding"
     use_compile: bool = False        # torch.compile (experimental on Windows)
     use_triton_conv: bool = True     # Triton fused conv kernel (89% conv bottleneck cut)
     use_prefix_cache: bool = True    # prefix KV cache (repeated prompt prefixes)
     use_chunked_prefill: bool = True # chunked prefill (long prompts)
+    # Breakable CUDA graphs: captured decode-step graphs incl. the batched
+    # (B<=32) static path — measured 913 tok/s at B=32 on spark vs ~500
+    # eager. None = auto (on for pure-attention configs e.g. spark; off
+    # for mamba hybrids where capture is unvalidated).
+    use_breakable_cuda_graph: bool | None = None
     # NOTE: disabled — FusedQKNormRopeCacheWrapper has a RoPE-convention
     # mismatch on V10 (model uses NeoX full-dim cos/sin via cat((freqs,freqs)),
     # but the wrapper's _py_qk_norm_rope expects GPT-J half-dim cos/sin →
@@ -138,8 +159,22 @@ class LoopConfig:
                                      # this epoch fall below — replay and
                                      # concise-QA padding do not count; 0=off
 
+    # ── Verified-example quota (Phase 1) ──
+    # The epoch keeps proposing+solving rounds until `solve_quota` verified
+    # rows land — a QUOTA, not "whatever number of solves happened". Replay,
+    # concise-QA, and failed attempts never count; STaR-style reference
+    # fills (the proposer's own executor-verified impl on tasks the solver
+    # missed) count up to ref_fill_frac of the quota.
+    solve_quota: int = 0             # 0 = tasks_per_epoch
+    quota_max_rounds: int = 4        # propose+solve rounds per epoch cap
+    quota_max_rollouts: int = 0      # rollout budget cap; 0 = quota*K*10
+    export_per_task: int = 2         # distinct passing attempts exported
+                                     # per solved task (shortest-first)
+    ref_fill: bool = True            # STaR ref-fill on failed tasks
+    ref_fill_frac: float = 0.4       # max quota share ref fills may satisfy
+
     # ── Training tricks (R&D round 14+, wired to sft_train) ──
-    ft_grad_mixup: int = 1           # N-batch grad averaging (1=off, 3=1.25× convergence)
+    ft_grad_mixup: int = 3           # N-batch grad averaging (1=off, 3=1.25× convergence)
     ft_curriculum: str = "frontier"  # hardest-first (probe winner); see
                                      # sft_train --curriculum for all modes
     ft_augment: bool = False         # token noise + FIM + target offset (anti-overfit)
@@ -320,7 +355,7 @@ class LoopConfig:
     # ── GRPO config (only used when training_mode="grpo") ──
     grpo_max_steps: int = 50         # GRPO steps per epoch
     grpo_group_size: int = 4         # G completions per prompt (MC-GRPO)
-    solve_group_size: int = 1        # rollouts per task in sft mode — >1
+    solve_group_size: int = 4        # rollouts per task in sft mode — >1
                                      # activates shortest-pass export
                                      # (terse verified data) + raises
                                      # solve yield; costs K× solve gen
@@ -332,6 +367,10 @@ class LoopConfig:
     grpo_max_seq_len: int = 512      # max seq len for GRPO training
     grpo_grad_accum: int = 2         # gradient accumulation steps
     grpo_use_repetition_penalty: bool = True  # doom-loop mitigation
+    # Sign advantage (SIGN-GRPO): uniform binary groups (all-pass/all-fail)
+    # get A=2r−1 instead of being dropped — rescues the ~2/3 of G=4 groups
+    # that otherwise produce zero gradient.
+    grpo_sign_advantage: bool = True
     grpo_rl_algorithm: str = "grpo"  # grpo/gtpo/cispo/sppo/psppo/evpo/grpo_or
     grpo_min_trajectories: int = 4   # skip GRPO if fewer verified trajectories
     # ExGRPO (ICLR'26 experience replay): persist each epoch's rollout
@@ -377,7 +416,8 @@ class LoopConfig:
     grpo_concise_bonus: float = 0.1  # 0 disables
 
     # Task source: "model" (AZR self-propose) or "api" (distillation APIs)
-    task_source: str = "model"       # "model" or "api"
+    task_source: str = "model"       # "model" or "api" or "external"
+    external_task_pool: str = "data/external/opc_sft2_pool_union.json"
 
     # Live telemetry: status.json + heartbeat.json + events.jsonl under
     # status_dir, polled by the GUI Self-Play page (EventsReader/StatusReader)
@@ -651,6 +691,13 @@ class InfiniteSelfPlayLoop:
         self._gen_trace: GenTracer | None = None
         # ForgeEngine retained across self-play → eval for weight-swap reuse.
         self._engine = None
+        # Resident-engine bookkeeping: which checkpoint's weights are
+        # loaded (None = unknown/mixed → force re-swap) and which
+        # activation profile is live ("selfplay"/"eval"). Lets
+        # _load_engine skip both the disk reload and re-activation when
+        # nothing changed between phases.
+        self._engine_weights: str | None = None
+        self._engine_mode: str | None = None
         # ExGRPO experience-replay buffer (persists across epochs; lazily
         # created on first _grpo_train when config.use_exgrpo is set).
         self._exgrpo = None
@@ -757,12 +804,36 @@ class InfiniteSelfPlayLoop:
         When False, falls back to the bare ``load_default_model`` path
         (legacy, no V10 inference features — kept for debugging/ablation).
         """
+        cfg = self.config
+        # Reuse path: a parked (sleep-1, weights on CPU) or still-awake
+        # engine skips from_checkpoint entirely — wake() is a CPU→GPU copy
+        # (~2-3s) vs a ~40s+ SMR-disk reload, and param.copy_ weight-swap
+        # restores the best weights when eval left a demoted candidate
+        # resident. Saves one of the two full engine loads every epoch
+        # used to pay.
+        eng = self._engine
+        if (eng is not None and cfg.use_forge_engine
+                and getattr(eng, "model", None) is not None
+                and eng.model.__class__.__name__ != "FluxLM"):
+            try:
+                if not eng.is_awake:
+                    eng.wake()
+                self._swap_engine_weights(eng)
+                eng._release_acceleration_resources()
+                eng.activate(**self._selfplay_activation_kwargs(eng))
+                self._engine_weights = self.best_checkpoint
+                self._engine_mode = "selfplay"
+                print("  [ForgeEngine] Reused resident engine "
+                      "(wake+activate, no checkpoint reload)")
+                return eng
+            except Exception:
+                logger.debug("engine reuse failed — fresh load",
+                             exc_info=True)
         # Drop any engine left over from a crashed epoch before loading —
         # otherwise a second ~4GB engine stacks on the first (VRAM ratchet
         # → OOM), and its KV/prefix caches belong to weights that a merged
         # checkpoint may already have replaced.
         self._free_engine()
-        cfg = self.config
         if cfg.use_forge_engine:
             from forge.engine.forge_engine import ForgeEngine
             engine = ForgeEngine.from_checkpoint(
@@ -784,27 +855,70 @@ class InfiniteSelfPlayLoop:
             # (keystack detection — same signal _auto_activate_optimal
             # uses); asking for mtp_selfspec on an mtp-less checkpoint
             # silently degraded to standard anyway.
-            decoding = cfg.decoding
-            if (decoding == "standard"
-                    and "mtp" in getattr(engine, "keystack_features", ())):
-                decoding = "mtp_selfspec"
-            engine.activate(
-                kv_cache=cfg.kv_cache,
-                decoding=decoding,
-                quantize=cfg.quantize,
-                acceleration=cfg.acceleration,
-                kv_cache_tokens=cfg.kv_cache_tokens,
-                use_compile=cfg.use_compile,
-                use_triton_conv=cfg.use_triton_conv,
-                use_prefix_cache=cfg.use_prefix_cache,
-                use_chunked_prefill=cfg.use_chunked_prefill,
-                use_fused_qk_norm_rope_cache=cfg.use_fused_qk_norm_rope_cache,
-                use_seq_split=cfg.use_seq_split,
-                warmup=cfg.warmup,
-            )
+            engine.activate(**self._selfplay_activation_kwargs(engine))
+            self._engine_weights = self.best_checkpoint
+            self._engine_mode = "selfplay"
             print(f"  [ForgeEngine] V10 features active: kv={cfg.kv_cache}, "
-                  f"decoding={decoding}, triton_conv={cfg.use_triton_conv}, "
+                  f"decoding={self._selfplay_activation_kwargs(engine)['decoding']}, "
+                  f"triton_conv={cfg.use_triton_conv}, "
                   f"prefix_cache={cfg.use_prefix_cache}")
+            # cuBLAS decode path for ForgeQuant checkpoints — same flip
+            # code_evolve._load_engine_obj applies: the fused Triton int4
+            # GEMM at M=2..32 has no tensor cores (~42ms/step replay),
+            # while a dequant-once bf16 weight + cuBLAS GEMM is ~3.3x
+            # faster. Costs ~3.5GB on the 1.75B spark; skip when free
+            # VRAM can't cover the extra resident bf16 copy. Must run
+            # BEFORE the first generate_batch so lazy b{B} graph
+            # captures record cuBLAS kernels (post-capture flips don't
+            # retro-patch a captured graph).
+            if cfg.device == "cuda":
+                try:
+                    _d = getattr(engine, "device", None)
+                    _idx = getattr(_d, "index", None) or 0
+                    free_mb = torch.cuda.mem_get_info(_idx)[0] >> 20
+                except Exception:
+                    free_mb = 0
+                need_mb = sum(
+                    p.numel() for p in engine.model.parameters()
+                ) * 2 // (1 << 20)
+                if free_mb > need_mb + 2048:
+                    w_dtype = getattr(
+                        getattr(engine.model, "embed", None),
+                        "weight", None)
+                    w_dtype = (w_dtype.dtype if w_dtype is not None
+                               else torch.bfloat16)
+                    n_cu = 0
+                    with torch.no_grad():
+                        for m in engine.model.modules():
+                            if (hasattr(m, "_fused_gemv")
+                                    and hasattr(m, "_dequantize_weight")):
+                                m._fused_gemv = False
+                                m._cache_w = True
+                                if getattr(m, "use_rotation", False):
+                                    m._rotated_dense(w_dtype)
+                                else:
+                                    m._dequantize_weight(
+                                        w_dtype, cache=True)
+                                n_cu += 1
+                    if n_cu:
+                        print(f"  [ForgeEngine] cuBLAS decode: {n_cu} "
+                              f"quantized linears dequant-cached "
+                              f"(+~{need_mb}MB, {free_mb}MB free)")
+            # Dormant-feature check: attn sinks (_v0_gate) run an
+            # .item() host sync EVERY layer/step when enabled — 28
+            # pipeline drains per decode step on spark_x26. Spark
+            # enables neither; if a future keystack turns one on, make
+            # the cost visible instead of silently flattening decode.
+            _n_sink = _n_v0 = 0
+            for m in engine.model.modules():
+                if getattr(m, "sinks", None) is not None:
+                    _n_sink += 1
+                if getattr(m, "_v0_gate", None) is not None:
+                    _n_v0 += 1
+            if _n_sink or _n_v0:
+                print(f"  [ForgeEngine] WARNING: per-layer host syncs "
+                      f"active — sinks on {_n_sink} modules, _v0_gate "
+                      f"on {_n_v0} (each costs an .item() per forward)")
             return engine
 
         # Legacy bare-model path (no V10 inference features)
@@ -821,7 +935,112 @@ class InfiniteSelfPlayLoop:
         # path still works (engine.model + engine.tokenizer).
         engine = ForgeEngine(model, tokenizer, device=cfg.device,
                              checkpoint_path=self.best_checkpoint)
+        self._engine_weights = self.best_checkpoint
+        self._engine_mode = None
         return engine
+
+    def _selfplay_activation_kwargs(self, engine) -> dict:
+        """ActivationConfig kwargs for the self-play generation profile.
+
+        Shared by the fresh-load and resident-engine reuse paths so both
+        activate the identical V10 feature set. ``standard`` decoding
+        auto-upgrades to mtp_selfspec when the checkpoint ships MTP heads
+        (keystack detection — same signal _auto_activate_optimal uses).
+        """
+        cfg = self.config
+        decoding = cfg.decoding
+        if (decoding == "standard"
+                and "mtp" in getattr(engine, "keystack_features", ())):
+            decoding = "mtp_selfspec"
+        # engine_activation reads LB2 knobs off model.config, not the
+        # activate() kwargs — mirror LoopConfig onto it before activation.
+        if cfg.quantize == "littlebit2":
+            mcfg = getattr(engine.model, "config", None)
+            if mcfg is not None:
+                mcfg.littlebit2_eff_bit = cfg.lb2_eff_bit
+                mcfg.littlebit2_residual = cfg.lb2_residual
+                mcfg.littlebit2_kv_ratio = cfg.lb2_kv_ratio
+        return dict(
+            kv_cache=cfg.kv_cache,
+            decoding=decoding,
+            quantize=cfg.quantize,
+            acceleration=cfg.acceleration,
+            kv_cache_tokens=cfg.kv_cache_tokens,
+            use_compile=cfg.use_compile,
+            use_triton_conv=cfg.use_triton_conv,
+            use_prefix_cache=cfg.use_prefix_cache,
+            use_chunked_prefill=cfg.use_chunked_prefill,
+            use_fused_qk_norm_rope_cache=cfg.use_fused_qk_norm_rope_cache,
+            use_seq_split=cfg.use_seq_split,
+            use_breakable_cuda_graph=(
+                cfg.use_breakable_cuda_graph
+                if cfg.use_breakable_cuda_graph is not None
+                # Pure-attention configs — same class of decode graphs
+                # spark validated. parable/granite added after a
+                # bit-identical greedy parity check (B=1/8/16) on the
+                # 3B port: 2.1x decode (899 vs 442 tok/s @ B=16).
+                # lfm added 2026-11-24: conv-state banked-buffer ports +
+                # pos_t make capture/replay correct (verified: b8 graphs
+                # capture once ~97s then replay ~0.5s/batch, 8/8 valid
+                # completions through the real self-play render+stop
+                # path). The earlier heap-corruption crashes were the
+                # code_evolve PREWARM thread, not BCG — see BUG_LOG.
+                else cfg.config_name.startswith(
+                    ("spark", "qwen", "granite", "parable", "lfm"))),
+            warmup=cfg.warmup,
+        )
+
+    def _swap_engine_weights(self, engine) -> bool:
+        """Restore ``best_checkpoint`` weights into the resident engine via
+        ``param.data.copy_`` — same swap fast_eval uses for candidates.
+
+        No-op when the engine already holds best weights. After a demote
+        the engine is still wearing the rejected candidate; after an eval
+        error the weights are an unknown mix (``_engine_weights=None``
+        forces the re-swap). ~5-10s of H2D copies vs a full checkpoint
+        reload. Prefix/cache-blend entries are cleared — stale KV under
+        different weights would contaminate generation.
+        """
+        if self._engine_weights == self.best_checkpoint:
+            return False
+        print(f"  [ForgeEngine] Swapping resident weights -> "
+              f"{os.path.basename(self.best_checkpoint)}")
+        t_swap = time.perf_counter()
+        from forge.self_play.discovery.fast_eval import (
+            _load_state_dict_on_device)
+        state = _load_state_dict_on_device(
+            self.best_checkpoint, self.config.device)
+        with torch.no_grad():
+            for name, param in engine.model.named_parameters():
+                if name in state:
+                    param.data.copy_(state[name])
+            # Invalidate dequantized-weight caches: _cache_w/_rotated_dense
+            # snapshots still hold the previous weights.
+            n_lb2 = 0
+            if self.config.quantize == "littlebit2":
+                # LB2 modules have no .weight param — the copy_ loop above
+                # skipped every factorized layer. Re-factorize each one
+                # from the fp state so the swap actually takes.
+                from forge.engine.quant.littlebit2 import (
+                    refactorize_from_state_dict)
+                n_lb2 = refactorize_from_state_dict(engine.model, state)
+            for m in engine.model.modules():
+                if getattr(m, "_cached_weight", None) is not None:
+                    m._cached_weight = None
+                if getattr(m, "_cached_weight_rot", None) is not None:
+                    m._cached_weight_rot = None
+        del state
+        for cache in (getattr(engine, "_prefix_cache", None),
+                      getattr(engine, "_cache_blend", None)):
+            if cache is not None and hasattr(cache, "clear"):
+                cache.clear()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        print(f"  [ForgeEngine] Weight swap done in "
+              f"{time.perf_counter() - t_swap:.1f}s"
+              + (f" ({n_lb2} LB2 layers re-factorized)" if n_lb2 else ""))
+        return True
 
     # ── FluxLM RSI mode (training_mode="flux") ───────────────────────
     # Live-learning RSI: attempt verified tasks → reinforce successes /
@@ -1655,20 +1874,47 @@ class InfiniteSelfPlayLoop:
         # so the model can re-propose similar tasks (it has limited vocabulary).
         # The clone filter still prevents exact duplicates within this epoch.
         curriculum._seen_descriptions = set()
+        curriculum._seen_desc_tokens = []  # keep token mirror in sync
         from research.paths import CURRICULUM_DIR
         seen_path = CURRICULUM_DIR / "seen_descriptions.json"
         if seen_path.exists():
             with contextlib.suppress(OSError):
                 seen_path.unlink()
 
-        # ── Propose + validate tasks ──
+        # ── Quota-driven propose + solve rounds ──
+        # tasks_per_epoch now sizes each propose BATCH; the epoch keeps
+        # proposing+solving until fresh_quota VERIFIED rows land or the
+        # round/rollout budgets trip. Fixes the old mode where a fixed
+        # proposal count yielded whatever luck gave (12-19 rows/epoch).
+        # Replay, concise-QA, and failures never count toward the quota;
+        # STaR-style ref fills do, up to ref_fill_frac.
         n_target = self.config.tasks_per_epoch
-        validated: list = []
+        fresh_quota = (self.config.solve_quota
+                       if self.config.solve_quota > 0 else n_target)
+        ref_cap = int(fresh_quota * self.config.ref_fill_frac)
+        max_rounds = max(1, self.config.quota_max_rounds)
+        # GRPO needs K rollouts of the SAME task prompt per group —
+        # within-group reward variance produces the nonzero advantage.
+        group_k = (self.config.grpo_group_size
+                   if self.config.training_mode == "grpo"
+                   else max(1, self.config.solve_group_size))
+        max_rollouts = (self.config.quota_max_rollouts
+                        if self.config.quota_max_rollouts > 0
+                        else fresh_quota * group_k * 10)
+        successes = 0        # solver-verified solves
+        ref_filled = 0       # verified reference fills (solver missed)
+        failures = 0
+        attempted = 0
+        total_rollouts = 0
+        round_idx = 0
+        domain = self.config.domains[
+            self.epoch % len(self.config.domains)]
+        self._trajectories = []
 
-        # Frontier re-queue: seed the epoch with learnable-band backlog
+        # Frontier re-queue: seed round 0 with learnable-band backlog
         # tasks before paying propose-tokens for fresh ones. Score-key
-        # dedup + the saturation ban keep repeats out; a task that reaches
-        # saturation through re-attempts bans itself naturally.
+        # dedup + the saturation ban keep repeats out.
+        pending: list = []
         n_frontier = 0
         if (self.config.frontier_requeue
                 and self.config.task_source != "api"):
@@ -1678,68 +1924,184 @@ class InfiniteSelfPlayLoop:
                 self.config.frontier_requeue_max))
             for t in frontier:
                 t.archetype = "frontier_requeue"
-            validated.extend(frontier)
+            pending.extend(frontier)
             n_frontier = len(frontier)
             if frontier:
                 print(f"  [Frontier] Re-queued {n_frontier} learnable-band "
                       f"tasks from backlog")
 
         if sw:
-            sw.set_phase("proposing", detail=f"epoch {self.epoch}: target {n_target} tasks")
+            sw.set_phase("proposing",
+                         detail=f"epoch {self.epoch}: quota "
+                                f"{fresh_quota} verified examples")
 
-        if self.config.task_source == "api":
-            # API-driven: use distillation teacher models to generate diverse tasks.
-            # The local model still does all solving — APIs only provide task diversity.
-            print("  [Propose] Using API teachers for task generation...")
-            domain = self.config.domains[self.epoch % len(self.config.domains)]
-            # Request more than needed — some will be filtered
-            api_batch = max(n_target * 2, 30)
-            proposed = curriculum.api_propose_tasks(
-                n=api_batch, domain=domain, difficulty="medium")
-            validated.extend(proposed)
-            propose_attempts = 1
-            print(f"  [Propose] {len(validated)} validated tasks from API "
-                  f"(domain={domain})")
-        else:
-            # Model-driven: rotate domains + modes across propose attempts for diversity.
-            # The model has limited task vocabulary — rotating domains and using
-            # different reasoning modes (induction/abduction/deduction) forces
-            # diverse task generation instead of repeating the same 5-6 tasks.
-            import random as _rng
-            _rng.Random(42 + self.epoch)
-            modes = ["induction", "abduction", "deduction"]
+        seen_descs: set = set()  # re-proposing a task burns rollout budget
+        while (successes + ref_filled < fresh_quota
+               and round_idx < max_rounds
+               and total_rollouts < max_rollouts):
+            if pending:
+                batch = pending
+                pending = []
+            else:
+                deficit = fresh_quota - (successes + ref_filled)
+                # Overshoot by the running solver yield (floor 0.12 so a
+                # bad round can't blow the batch past n_target anyway).
+                est_yield = (successes / attempted) if attempted else 0.35
+                n_want = min(n_target,
+                             max(4, int(deficit / max(est_yield, 0.12))))
+                batch, domain = self._propose_tasks(
+                    curriculum, n_want, sw, round_idx)
+                batch = [t for t in batch
+                         if t.description not in seen_descs]
+            if not batch:
+                print(f"  [Quota] round {round_idx}: no new tasks — "
+                      f"stopping at {successes + ref_filled}/{fresh_quota}")
+                break
+            for t in batch:
+                seen_descs.add(t.description)
 
-            propose_attempts = 0
-            max_propose_attempts = (n_target // 3) + 5  # more attempts for diversity
-
-            while len(validated) < n_target and propose_attempts < max_propose_attempts:
-                # Rotate domain + mode per attempt
-                domain = self.config.domains[propose_attempts % len(self.config.domains)]
-                mode = modes[propose_attempts % len(modes)]
-                batch_n = min(self.config.propose_batch_size,
-                              n_target - len(validated) + 5)
-                # Vary temperature slightly per attempt for diversity
-                old_temp = curriculum.temperature
-                curriculum.temperature = self.config.temperature * (1.0 + 0.1 * (propose_attempts % 3))
-                proposed = curriculum.propose_tasks(
-                    domain=domain, n=batch_n, batch_size=batch_n, mode=mode)
-                curriculum.temperature = old_temp
-                validated.extend(proposed)
-                propose_attempts += 1
+            if sw:
+                sw.set_phase("solving",
+                             detail=f"epoch {self.epoch} round {round_idx}: "
+                                    f"{successes + ref_filled}/"
+                                    f"{fresh_quota} verified")
+            for i, task in enumerate(batch):
                 if sw:
-                    sw.curriculum_progress(
-                        proposed=curriculum.stats.total_proposed,
-                        validated=len(validated), parse_failed=0)
-                print(f"  [Propose] Attempt {propose_attempts} ({domain}/{mode}): "
-                      f"{len(proposed)} validated, {len(validated)}/{n_target} total")
+                    sw.task_started(task.description, i, len(batch),
+                                    domain=task.domain)
+            # All first attempts go through ONE concurrent
+            # engine.generate_batch call; retries + sandbox verification
+            # run per-task afterward.
+            results_ordered = curriculum.solve_tasks_batch(
+                batch, group_size=group_k)
+            total_rollouts += len(batch) * group_k
 
-            print(f"  [Propose] {len(validated)} validated tasks from "
-                  f"{propose_attempts} attempts (domain={domain})")
+            for i, item in enumerate(
+                    r for r in results_ordered if r is not None):
+                task, result, elapsed_ms = item
+                success = result.get("final_success", False)
+                attempts = result.get("attempts", [])
+                attempted += 1
+                if sw:
+                    per_attempt_ms = elapsed_ms / max(len(attempts), 1)
+                    for att in attempts:
+                        sw.round_done(
+                            i, att.get("sample", 0),
+                            att.get("success", False),
+                            quality=1.0 if att.get("success") else 0.0,
+                            gen_ms=per_attempt_ms, exec_ms=0.0,
+                            error=att.get("error", ""))
+                    best_code = next(
+                        (a.get("code", "") for a in attempts
+                         if a.get("success")),
+                        attempts[0].get("code", "") if attempts else "")
+                    sw.task_done(
+                        i, task.description, success,
+                        rounds_used=result.get(
+                            "rounds_used", len(attempts)),
+                        best_quality=result.get(
+                            "best_quality", 1.0 if success else 0.0),
+                        preview=best_code)
+                self._record_step_metrics({
+                    "mean_reward": 1.0 if success else 0.0,
+                    "diversity_score": curriculum.stats.diversity_score,
+                })
 
-        if not validated:
+                # GRPO group: all K rollouts of this task's prompt with
+                # their binary rewards — the trainer needs per-prompt
+                # reward variance for a nonzero advantage.
+                group_comps = [a["code"] for a in attempts]
+                group_rews = [1.0 if a.get("success") else 0.0
+                              for a in attempts]
+
+                if success and attempts:
+                    # Export up to export_per_task DISTINCT passes,
+                    # shortest first — terse solutions teach concise
+                    # answers; a second variant doubles yield on easy
+                    # tasks. Dedup on whitespace-normalized code.
+                    passes = sorted(
+                        (a for a in attempts if a.get("success")),
+                        key=lambda a: len(a.get("code") or ""))
+                    seen_norm: set = set()
+                    n_export = 0
+                    for att in passes:
+                        norm = " ".join(
+                            (att.get("code") or "").split())
+                        if not norm or norm in seen_norm:
+                            continue
+                        seen_norm.add(norm)
+                        self._trajectories.append({
+                            "task_description": task.description,
+                            "signature": task.signature,
+                            "test_cases": task.test_cases,
+                            "solution_code": att["code"],
+                            "domain": task.domain,
+                            "difficulty": task.difficulty,
+                            "reward": 1.0,
+                            "variant": n_export,
+                            "group_completions": group_comps,
+                            "group_rewards": group_rews,
+                        })
+                        n_export += 1
+                        if n_export >= self.config.export_per_task:
+                            break
+                    successes += 1
+                else:
+                    failures += 1
+                    # STaR-style reference fill: the proposer's own
+                    # executor-verified reference impl is correct
+                    # supervision for the task the solver missed — train
+                    # on it (bounded quota share) instead of discarding.
+                    ref = (curriculum._task_ref(task)
+                           if self.config.ref_fill else "")
+                    if ref and ref_filled < ref_cap:
+                        self._trajectories.append({
+                            "task_description": task.description,
+                            "signature": task.signature,
+                            "test_cases": task.test_cases,
+                            "solution_code": ref,
+                            "domain": task.domain,
+                            "difficulty": task.difficulty,
+                            "reward": 1.0,
+                            "ref_fill": True,
+                            "group_completions": group_comps,
+                            "group_rewards": group_rews,
+                        })
+                        ref_filled += 1
+                    elif attempts:
+                        # Keep failed attempts for analysis/GRPO metadata.
+                        self._trajectories.append({
+                            "task_description": task.description,
+                            "signature": task.signature,
+                            "test_cases": task.test_cases,
+                            "solution_code": attempts[0]["code"],
+                            "domain": task.domain,
+                            "difficulty": task.difficulty,
+                            "reward": 0.0,
+                            "error": attempts[0].get("error", ""),
+                            "group_completions": group_comps,
+                            "group_rewards": group_rews,
+                        })
+
+                curriculum.record_result(task, success)
+                if (i + 1) % 10 == 0 or i == len(batch) - 1:
+                    rate = successes / max(1, successes + failures)
+                    print(f"  [Solve] {i+1}/{len(batch)}: "
+                          f"{successes} passed, {failures} failed "
+                          f"({rate:.0%} success rate)")
+
+            round_idx += 1
+            print(f"  [Quota] round {round_idx}: {successes} solves + "
+                  f"{ref_filled} ref-fills = "
+                  f"{successes + ref_filled}/{fresh_quota} "
+                  f"({total_rollouts} rollouts)")
+
+        quota_met = (successes + ref_filled) >= fresh_quota
+        if not quota_met and attempted == 0:
             print("  [Propose] No valid tasks generated, skipping epoch")
             if sw:
-                sw.alert("warn", f"epoch {self.epoch}: no valid tasks proposed")
+                sw.alert("warn",
+                         f"epoch {self.epoch}: no valid tasks proposed")
             self._free_engine()
             del curriculum
             gc.collect()
@@ -1749,119 +2111,10 @@ class InfiniteSelfPlayLoop:
                 torch.cuda.synchronize()
             return {"error": "no_valid_tasks", "n_proposed": 0}
 
-        # ── Solve tasks ──
-        # All first attempts go through ONE concurrent engine.generate_batch
-        # call (true parallel decode with per-sequence controls); retries and
-        # sandbox verification run per-task afterward. Replaces the old
-        # lock-serialized per-task generation loop.
-        successes = 0
-        failures = 0
-        self._trajectories = []
-
-        if sw:
-            sw.set_phase("solving",
-                         detail=f"epoch {self.epoch}: solving {len(validated)} tasks")
-
-        # All tasks are in-flight simultaneously in the batched decode —
-        # emit task_started for every task up front so the live feed shows
-        # them, then task_done as results land in order.
-        for i, task in enumerate(validated):
-            if sw:
-                sw.task_started(task.description, i, len(validated),
-                                domain=task.domain)
-        # GRPO needs K rollouts of the SAME task prompt per group —
-        # within-group reward variance is what produces nonzero advantage.
-        # (Cross-task pairing collapsed to identical rewards → loss 0.)
-        group_k = (self.config.grpo_group_size
-                   if self.config.training_mode == "grpo"
-                   else max(1, self.config.solve_group_size))
-        results_ordered = curriculum.solve_tasks_batch(
-            validated, group_size=group_k)
-
-        for i, item in enumerate(r for r in results_ordered if r is not None):
-            task, result, elapsed_ms = item
-            success = result.get("final_success", False)
-            attempts = result.get("attempts", [])
-            if sw:
-                # One "round" event per solve attempt for the live feed.
-                per_attempt_ms = elapsed_ms / max(len(attempts), 1)
-                for att in attempts:
-                    sw.round_done(
-                        i, att.get("sample", 0), att.get("success", False),
-                        quality=1.0 if att.get("success") else 0.0,
-                        gen_ms=per_attempt_ms, exec_ms=0.0,
-                        error=att.get("error", ""))
-                best_code = next(
-                    (a.get("code", "") for a in attempts
-                     if a.get("success")),
-                    attempts[0].get("code", "") if attempts else "")
-                sw.task_done(i, task.description, success,
-                             rounds_used=result.get("rounds_used", len(attempts)),
-                             best_quality=result.get("best_quality",
-                                                     1.0 if success else 0.0),
-                             preview=best_code)
-            self._record_step_metrics({
-                "mean_reward": 1.0 if success else 0.0,
-                "diversity_score": curriculum.stats.diversity_score,
-            })
-
-            # GRPO group: all K rollouts of this task's prompt with their
-            # binary rewards — the trainer needs per-prompt reward variance
-            # for a nonzero advantage.
-            group_comps = [a["code"] for a in attempts]
-            group_rews = [1.0 if a.get("success") else 0.0
-                          for a in attempts]
-
-            if success and attempts:
-                # Export the SHORTEST passing attempt — earlier passes can
-                # carry scaffolding/dead code; the terse solution teaches
-                # concise answers (anti-overthinking data pressure).
-                best_att = min(
-                    (a for a in attempts if a.get("success")),
-                    key=lambda a: len(a.get("code") or ""), default=None)
-                if best_att is not None:
-                    self._trajectories.append({
-                        "task_description": task.description,
-                        "signature": task.signature,
-                        "test_cases": task.test_cases,
-                        "solution_code": best_att["code"],
-                        "domain": task.domain,
-                        "difficulty": task.difficulty,
-                        "reward": 1.0,
-                        "group_completions": group_comps,
-                        "group_rewards": group_rews,
-                    })
-                successes += 1
-            else:
-                failures += 1
-                # Keep failed attempts too (for negative examples / analysis)
-                if attempts:
-                    self._trajectories.append({
-                        "task_description": task.description,
-                        "signature": task.signature,
-                        "test_cases": task.test_cases,
-                        "solution_code": attempts[0]["code"],
-                        "domain": task.domain,
-                        "difficulty": task.difficulty,
-                        "reward": 0.0,
-                        "error": attempts[0].get("error", ""),
-                        "group_completions": group_comps,
-                        "group_rewards": group_rews,
-                    })
-
-            # Record result for curriculum difficulty adaptation
-            curriculum.record_result(task, success)
-
-            if (i + 1) % 10 == 0 or i == len(validated) - 1:
-                rate = successes / (i + 1)
-                print(f"  [Solve] {i+1}/{len(validated)}: "
-                      f"{successes} passed, {failures} failed "
-                      f"({rate:.0%} success rate)")
-
-        # Surface a few distinct failure errors so a 0% epoch is diagnosable
-        # from the log instead of a black box.
+        # Surface a few distinct failure errors so a 0% epoch is
+        # diagnosable from the log instead of a black box.
         if failures:
-            seen_errs: list[str] = []
+            seen_errs: list = []
             for t in self._trajectories:
                 err = (t.get("error") or "").strip().split("\n")
                 err = err[-1][:160] if err and err[-1] else ""
@@ -1871,11 +2124,16 @@ class InfiniteSelfPlayLoop:
                 print(f"  [Solve] sample error: {e}")
 
         stats = {
-            "n_proposed": len(validated),
+            "n_proposed": attempted,
             "n_frontier_requeued": n_frontier,
             "n_solved": successes,
+            "n_ref_filled": ref_filled,
             "n_failed": failures,
-            "success_rate": successes / max(len(validated), 1),
+            "n_quota_rounds": round_idx,
+            "n_rollouts": total_rollouts,
+            "quota": fresh_quota,
+            "quota_met": quota_met,
+            "success_rate": successes / max(attempted, 1),
             "domain": domain,
             "curriculum_stats": {
                 "total_proposed": curriculum.stats.total_proposed,
@@ -1885,13 +2143,15 @@ class InfiniteSelfPlayLoop:
                 "diversity_score": curriculum.stats.diversity_score,
             },
         }
-        print(f"\n  [Self-Play] {successes}/{len(validated)} solved "
-              f"({stats['success_rate']:.0%}), domain={domain}")
+        status = "MET" if quota_met else "SHORT"
+        print(f"\n  [Self-Play] {successes} solves + {ref_filled} "
+              f"ref-fills / quota {fresh_quota} ({status}), "
+              f"{failures} failed, domain={domain}")
 
         # Free curriculum (holds self.model = engine.model reference).
-        # The engine itself is retained on self._engine for fast_eval reuse
-        # (weight-swap skips ~40s model reload). It is freed after eval/promote
-        # via _free_engine().
+        # The engine itself is retained on self._engine for fast_eval
+        # reuse (weight-swap skips ~40s model reload). It is freed after
+        # eval/promote via _free_engine().
         del curriculum
         gc.collect()
         if torch.cuda.is_available():
@@ -1899,6 +2159,68 @@ class InfiniteSelfPlayLoop:
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
         return stats
+
+    def _propose_tasks(self, curriculum, n_target: int, sw,
+                       round_idx: int):
+        """One propose round → (validated_tasks, last_domain).
+
+        API mode: a single teacher batch. Model mode: rotating
+        domain + reasoning-mode propose attempts until n_target
+        validated (bounded) — rotation forces task diversity instead
+        of the same 5-6 tasks every attempt.
+        """
+        domain = self.config.domains[
+            (self.epoch + round_idx) % len(self.config.domains)]
+        if self.config.task_source == "api":
+            api_batch = max(n_target * 2, 30)
+            proposed = curriculum.api_propose_tasks(
+                n=api_batch, domain=domain, difficulty="medium")
+            print(f"  [Propose] {len(proposed)} validated tasks from API "
+                  f"(domain={domain})")
+            return list(proposed), domain
+        if self.config.task_source == "external":
+            # Verified pool supply — no proposer tokens spent, every task
+            # carries a sandbox-checked reference (validated=True).
+            proposed = curriculum.external_propose_tasks(
+                n=max(n_target * 2, 20),
+                pool_path=self.config.external_task_pool,
+                domain=domain, difficulty="medium")
+            print(f"  [Propose] {len(proposed)} validated tasks from "
+                  f"external pool (domain={domain})")
+            return list(proposed), domain
+
+        import random as _rng
+        _rng.Random(42 + self.epoch * 97 + round_idx)
+        modes = ["induction", "abduction", "deduction"]
+        validated: list = []
+        propose_attempts = 0
+        max_propose_attempts = (n_target // 3) + 5
+        while (len(validated) < n_target
+               and propose_attempts < max_propose_attempts):
+            domain = self.config.domains[
+                (round_idx * 3 + propose_attempts)
+                % len(self.config.domains)]
+            mode = modes[propose_attempts % len(modes)]
+            batch_n = min(self.config.propose_batch_size,
+                          n_target - len(validated) + 5)
+            old_temp = curriculum.temperature
+            curriculum.temperature = self.config.temperature * (
+                1.0 + 0.1 * (propose_attempts % 3))
+            proposed = curriculum.propose_tasks(
+                domain=domain, n=batch_n, batch_size=batch_n, mode=mode)
+            curriculum.temperature = old_temp
+            validated.extend(proposed)
+            propose_attempts += 1
+            if sw:
+                sw.curriculum_progress(
+                    proposed=curriculum.stats.total_proposed,
+                    validated=len(validated), parse_failed=0)
+            print(f"  [Propose] Attempt {propose_attempts} "
+                  f"({domain}/{mode}): {len(proposed)} validated, "
+                  f"{len(validated)}/{n_target} round target")
+        print(f"  [Propose] {len(validated)} validated tasks from "
+              f"{propose_attempts} attempts (domain={domain})")
+        return validated, domain
 
     def _free_engine(self):
         """Free the ForgeEngine from VRAM + verify release.
@@ -1940,6 +2262,77 @@ class InfiniteSelfPlayLoop:
             reserved = torch.cuda.memory_reserved() / 1e9
             print(f"  [VRAM] After engine free: {allocated:.2f} GB allocated, "
                   f"{reserved:.2f} GB reserved")
+
+    def _park_engine(self):
+        """Park the resident engine for the training phase: release every
+        GPU-side runtime resource (CUDA graphs, KV pool, prefix cache,
+        decoding speculators) and offload weights to CPU RAM, keeping the
+        engine object + model alive.
+
+        Replaces the old free→reload cycle: a full from_checkpoint +
+        activate costs ~40s+ (SMR-disk weight read, 9 decode-graph
+        captures, warmup) and was paid twice per epoch — once for
+        self-play and once inside fast_eval because ``self._engine`` was
+        always None by then. Parking frees the same VRAM (weights leave
+        the GPU) but wake()+activate is seconds, and fast_eval's
+        weight-swap path — plus the previously dead _capability_probe —
+        finally engage.
+        """
+        engine = self._engine
+        if engine is None:
+            return
+        # Host-RAM gate: sleep(1) keeps a full CPU-side weight copy. When
+        # that copy is a large fraction of free RAM, the training phase's
+        # own model + merged-save state dict overflows the commit limit
+        # (observed: 6.5GB parable parked + ~7.3GB train copy + ~7GB
+        # merge buffer → "paging file too small" os error 1455 at save
+        # on this 32GB box). Below ~3.5× checkpoint of free RAM, drop to
+        # sleep(2) — weights discarded entirely; eval wakes from disk
+        # (~40s) — far cheaper than losing the whole epoch at save time.
+        level = 1
+        try:
+            import psutil
+            ckpt = self.best_checkpoint
+            if os.path.isdir(ckpt):
+                ckpt_bytes = sum(
+                    p.stat().st_size for p in Path(ckpt).glob("*.safetensors"))
+            elif os.path.isfile(ckpt):
+                ckpt_bytes = os.path.getsize(ckpt)
+            else:
+                ckpt_bytes = 0
+            if ckpt_bytes and (psutil.virtual_memory().available
+                               < ckpt_bytes * 3.5):
+                level = 2
+                print(f"  [Engine] Low host RAM for parked weights "
+                      f"({ckpt_bytes/1e9:.1f}GB ckpt vs "
+                      f"{psutil.virtual_memory().available/1e9:.1f}GB free) "
+                      f"— sleeping level 2 (weights discarded)")
+        except ImportError:
+            pass
+        try:
+            if hasattr(engine, "_release_acceleration_resources"):
+                engine._release_acceleration_resources()
+            engine.sleep(level=level)
+        except Exception:
+            logger.debug("engine park failed — freeing instead",
+                         exc_info=True)
+            self._free_engine()
+            return
+        self._engine_mode = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            try:
+                from forge.model_loader import ModelLoader
+                ModelLoader.clear_cache()
+            except Exception:
+                pass
+            allocated = torch.cuda.memory_allocated() / 1e9
+            reserved = torch.cuda.memory_reserved() / 1e9
+            print(f"  [VRAM] After engine park: {allocated:.2f} GB "
+                  f"allocated, {reserved:.2f} GB reserved")
 
     def _dump_debug_round(self) -> dict:
         """Dump the debug-round generation transcript, then free the engine.
@@ -1996,8 +2389,11 @@ class InfiniteSelfPlayLoop:
             self.config.data_dir, f"azr_epoch{epoch}.jsonl"))
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        # Only export successful trajectories for SFT
+        # Only export VERIFIED trajectories for SFT — solver passes plus
+        # STaR ref fills (proposer's executor-verified impl); failed
+        # attempts stay analysis-only.
         successful = [t for t in self._trajectories if t["reward"] > 0.5]
+        n_ref = sum(1 for t in successful if t.get("ref_fill"))
         examples = []
 
         for t in successful:
@@ -2061,8 +2457,9 @@ class InfiniteSelfPlayLoop:
             for ex in examples:
                 f.write(json.dumps(ex, ensure_ascii=False) + "\n")
 
-        print(f"  [Export] {len(successful)} successful + "
-              f"{len(examples) - len(successful)} replay = "
+        print(f"  [Export] {len(successful)} verified rows "
+              f"({len(successful) - n_ref} solver-made, {n_ref} ref-fills) "
+              f"+ {len(examples) - len(successful)} replay/QA = "
               f"{len(examples)} total -> {output_path}")
         return output_path, len(successful)
 
@@ -2089,9 +2486,10 @@ class InfiniteSelfPlayLoop:
                 f"({self.config.ft_optimizer}, {self.config.ft_max_steps} steps)",
                 stall_hold=True)
 
-        # Free the self-play engine before finetuning — training needs the
-        # full VRAM budget. The engine is reloaded fresh next epoch.
-        self._free_engine()
+        # Park the self-play engine before finetuning — training needs the
+        # full VRAM budget, but the engine object + CPU-resident weights
+        # survive for fast_eval's weight-swap and next epoch's wake().
+        self._park_engine()
 
         save_path = self._epoch_checkpoint_path(epoch)
         c = self.config
@@ -2102,6 +2500,16 @@ class InfiniteSelfPlayLoop:
             "--checkpoint", self.best_checkpoint,
             "--save", save_path,
             "--config", c.config_name,
+            # Match the chat format inference actually uses — SFT on the
+            # wrong template (jamba ChatML vs spark sentence markers vs
+            # granite role markers) means every epoch trains tokens the
+            # model never sees at solve time. Mirrors the
+            # render_messages_for_config family dispatch.
+            "--chat-format", (
+                "spark" if c.config_name.startswith("spark")
+                else "granite" if c.config_name.startswith(
+                    ("granite", "parable"))
+                else "jamba"),
             "--max-steps", str(c.ft_max_steps),
             "--lr", str(c.ft_lr),
             "--min-lr", str(c.ft_min_lr),
@@ -2148,12 +2556,34 @@ class InfiniteSelfPlayLoop:
                         "--lora-alpha", str(c.ft_lora_alpha)])
         else:
             cmd.append("--no-lora")
-        if c.ft_bitnet_everywhere:
+        # BitNet-everywhere QAT only makes sense on BitNet-native configs
+        # (ForgeLM use_bitnet/bitnet_int8_training). On an fp port
+        # (granite/qwen/hermes) it ternarizes every Linear — transiently
+        # doubling weight memory (~14.6GB on the 3B → hard OOM at step 0)
+        # and destroying the fp-trained quality until the QAT re-learns.
+        try:
+            from forge.config import get_config as _gc
+            _mcfg = _gc(c.config_name, device=c.device)
+            _bitnet_native = bool(
+                getattr(_mcfg, "use_bitnet", False)
+                or getattr(_mcfg, "bitnet_int8_training", False))
+        except Exception:
+            _bitnet_native = c.ft_bitnet_everywhere
+        if c.ft_bitnet_everywhere and _bitnet_native:
             cmd.append("--bitnet-everywhere")
         else:
             cmd.append("--no-bitnet-everywhere")
         if c.ft_manual_lora:
             cmd.append("--manual-lora")
+        # QLoRA on the SAME factorized base the generation engine runs:
+        # adapters learn on top of LB2(W), merge refactorizes, densify
+        # keeps the checkpoint fp-format. Re-factorization at the next
+        # engine load is near-idempotent (W_hat is already rank-s).
+        if c.quantize == "littlebit2":
+            cmd.extend(["--qlora-lb2",
+                        "--lb2-eff-bit", str(c.lb2_eff_bit)])
+            if not c.lb2_residual:
+                cmd.append("--lb2-no-residual")
 
         # ── Gradient checkpointing ──
         if c.ft_grad_checkpoint:
@@ -2259,7 +2689,7 @@ class InfiniteSelfPlayLoop:
               f"{' '.join(cli_args[:3])}... ({len(cli_args)} args)")
 
         # Cleanup VRAM from self-play before starting training
-        self._free_engine()
+        self._park_engine()
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -2323,13 +2753,15 @@ class InfiniteSelfPlayLoop:
         The binary reward (1.0 if test_passed, 0.0 otherwise) IS the strict
         data gate — no external reward model needed.
 
-        VRAM budget on 12GB RTX 5070 with 3B Jamba model:
-          - Model (bf16): ~6 GB
-          - Ref model (bf16, frozen): ~6 GB → CPU offloaded
+        VRAM budget on 12GB RTX 5070 with spark 1.7B (bf16):
+          - Model (bf16): ~3.4 GB
+          - Ref model: NONE — KL uses the LoRA-disabled base forward on
+            the same weights (adapter-off policy == reference policy,
+            saves ~3.4GB + a full second checkpoint load)
           - LoRA adapters: ~50 MB
           - KV cache (short seq): ~0.5 GB
           - Activations + grads: ~1 GB
-          Total GPU: ~7.5 GB (fits with cpu_offload optimizer)
+          Total GPU: ~5 GB (fits with cpu_offload optimizer)
 
         Uses GRPOTrainer with:
           - MC-GRPO median baseline (robust for group_size=4)
@@ -2345,8 +2777,9 @@ class InfiniteSelfPlayLoop:
                 "grpo", detail=f"epoch {epoch}: {self.config.grpo_rl_algorithm} "
                 f"({self.config.grpo_max_steps} steps)")
 
-        # Free the self-play engine — GRPO needs the full VRAM budget
-        self._free_engine()
+        # Park the self-play engine — GRPO needs the full VRAM budget,
+        # but the engine survives on CPU for eval + next epoch.
+        self._park_engine()
 
         save_path = self._epoch_checkpoint_path(epoch)
         c = self.config
@@ -2396,6 +2829,25 @@ class InfiniteSelfPlayLoop:
                         [t1["solution_code"], t2["solution_code"]])
                     rewards.append([t1["reward"], t2["reward"]])
 
+        # Pre-filter degenerate groups: all-identical rewards → all-zero
+        # advantages → train_step skips every completion, but
+        # collect_log_probs would still forward the whole group.
+        # With sign-advantage on, uniform binary groups are NOT dead —
+        # they get A=2r−1 (all-pass→+1, all-fail→−1) — so only groups
+        # that are uniform AND non-binary remain dead.
+        def _dead_group(r):
+            if len({round(x, 6) for x in r}) > 1:
+                return False
+            if c.grpo_sign_advantage and all(
+                    x < 0.05 or x > 0.95 for x in r):
+                return False
+            return True
+        _live = [(p, cm, r) for p, cm, r
+                 in zip(prompts, completions, rewards)
+                 if not _dead_group(r)]
+        if _live:
+            prompts, completions, rewards = [list(t) for t in zip(*_live)]
+
         if not prompts:
             print("  No valid GRPO groups formed, skipping")
             return ""
@@ -2435,16 +2887,11 @@ class InfiniteSelfPlayLoop:
               f"{sum(p.numel() for p in lora_params)/1e6:.2f}M trainable params")
         model = model.to(c.device)
 
-        # Reference model (frozen, for KL penalty) — CPU offloaded to save VRAM
-        ref_model = ModelLoader.build_model_fast(
-            cfg, checkpoint_path=self.best_checkpoint,
-            dtype=torch.bfloat16 if "cuda" in c.device else torch.float32,
-        )
-        ref_model = ref_model.to(c.device)
-        for p in ref_model.parameters():
-            p.requires_grad = False
-        ref_model.eval()
-
+        # Reference model: ELIMINATED. The policy model carries LoRA
+        # adapters, so the frozen reference is the same weights with
+        # adapters off — compute_kl_penalty falls back to a
+        # lora_disabled(model) forward when ref_model=None (saves ~3.4GB
+        # VRAM and a second checkpoint build).
         tokenizer = get_tokenizer()
 
         grpo_config = GRPOConfig(
@@ -2457,6 +2904,7 @@ class InfiniteSelfPlayLoop:
             grad_accum_steps=c.grpo_grad_accum,
             rl_algorithm=c.grpo_rl_algorithm,
             use_repetition_penalty=c.grpo_use_repetition_penalty,
+            sign_advantage_binary=c.grpo_sign_advantage,
             use_exgrpo=c.use_exgrpo,
             exgrpo_replay_size=c.exgrpo_replay_size,
             exgrpo_replay_fraction=c.exgrpo_replay_fraction,
@@ -2464,9 +2912,19 @@ class InfiniteSelfPlayLoop:
         grpo_config.optimizer = "cpu_offload"  # 12GB VRAM safe
 
         trainer = GRPOTrainer(
-            model=model, tokenizer=tokenizer, ref_model=ref_model,
+            model=model, tokenizer=tokenizer, ref_model=None,
             device=c.device, config=grpo_config,
         )
+
+        # Behavior-policy log-probs, collected once on the pre-update
+        # weights for ALL groups. Without them train_step falls back to
+        # detached current-policy log-probs → PPO ratio ≡ 1.0 → clipping
+        # dead and no off-policy correction as weights drift across steps
+        # (groups are resampled, so drift compounds).
+        t_lp = time.time()
+        all_old_lps = trainer.collect_log_probs(prompts, completions)
+        print(f"  behavior log-probs: {len(all_old_lps)} groups "
+              f"in {time.time() - t_lp:.0f}s")
 
         # ExGRPO (ICLR'26 experience replay): record this epoch's rollout
         # groups into the persistent buffer.  Value = correctness_flag *
@@ -2509,14 +2967,25 @@ class InfiniteSelfPlayLoop:
             batch_prompts = [prompts[i] for i in indices]
             batch_comps = [completions[i] for i in indices]
             batch_rewards = [rewards[i] for i in indices]
+            batch_old_lps = [all_old_lps[i] for i in indices]
             if n_replay:
+                replay_prompts: list[str] = []
+                replay_comps: list[list[str]] = []
                 for e in self._exgrpo.sample(n_replay, rng=_rng):
                     batch_prompts.append(e["prompt"])
                     batch_comps.append(e["completions"])
                     batch_rewards.append(e["rewards"])
+                    replay_prompts.append(e["prompt"])
+                    replay_comps.append(e["completions"])
+                # Replayed groups came from an older policy too — collect
+                # their behavior log-probs on demand (≤ n_replay groups).
+                batch_old_lps += trainer.collect_log_probs(
+                    replay_prompts, replay_comps)
 
             with oom_guard(c.device, label="grpo_step") as safe:
-                stats = trainer.train_step(batch_prompts, batch_comps, batch_rewards)
+                stats = trainer.train_step(
+                    batch_prompts, batch_comps, batch_rewards,
+                    old_log_probs=batch_old_lps)
             if safe.skipped:
                 continue
             step += 1
@@ -2550,7 +3019,7 @@ class InfiniteSelfPlayLoop:
                                  optimizer=trainer.optimizer, step=step)
 
         # Free VRAM
-        del model, ref_model, trainer
+        del model, trainer
         import gc; gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -2577,29 +3046,61 @@ class InfiniteSelfPlayLoop:
 
         from forge.self_play.discovery.fast_eval import fast_eval
 
+        # Wake the parked engine — fast_eval activates its eval profile on
+        # it (standard decoding + eval KV) and weight-swaps to the
+        # candidate, skipping the ~40s reload the old free-everything flow
+        # forced every epoch.
+        eng = self._engine
+        if eng is not None:
+            try:
+                if not eng.is_awake:
+                    eng.wake()
+            except Exception:
+                logger.debug("engine wake failed before eval — "
+                             "fast_eval loads fresh", exc_info=True)
+                eng = None
+                self._engine = None
+                self._engine_weights = None
+                self._engine_mode = None
+
         capability = None
         try:
             results = fast_eval(
                 base_checkpoint=self.best_checkpoint,
                 candidate_checkpoint=checkpoint,
                 device=self.config.device,
-                engine=self._engine,           # reuse self-play engine
+                engine=eng,                    # reuse self-play engine
                 config_name=self.config.config_name,  # V10 config
                 eval_scale=self.config.eval_scale,
                 eval_online=self.config.eval_online,
                 eval_seed=self.config.eval_seed,
                 base_cache=self._eval_base_cache,
+                # Early-abort once the promote/demote outcome is bound-
+                # proven — demote-certain candidates don't finish the
+                # ~46-item pass; saves most of the eval budget on the
+                # common all-demote trajectory.
+                decision_margin=self.config.promote_margin,
             )
+            # The engine now holds candidate weights under the eval
+            # activation profile — record that so the next epoch's
+            # _load_engine knows whether a restore-swap is needed.
+            if eng is not None:
+                self._engine_weights = checkpoint
+                self._engine_mode = "eval"
             # Engine still holds the candidate weights here — run the
-            # frozen capability probe before _free_engine() (A14).
+            # frozen capability probe (A14). Previously dead code:
+            # _finetune freed the engine, so this always returned None.
             capability = self._capability_probe()
         except Exception as e:
             print(f"  Eval failed: {e}")
             import traceback; traceback.print_exc()
+            # Mid-swap crashes can leave a weight mix resident — mark
+            # unknown so the next epoch force-restores best weights.
+            self._engine_weights = None
+            self._engine_mode = None
             return {"passed": False, "error": str(e)}
-        finally:
-            # Engine is no longer needed after eval — free VRAM for next epoch.
-            self._free_engine()
+        # NOTE: engine intentionally stays resident after eval — the next
+        # epoch's _load_engine wakes/reuses it (no more free→reload).
 
         base_q = results.get("base", {}).get("quality", 0)
         cand_q = results.get("candidate", {}).get("quality", 0)
@@ -2743,6 +3244,11 @@ class InfiniteSelfPlayLoop:
                 os.makedirs(os.path.dirname(best), exist_ok=True)
                 self._move_with_sidecars(candidate, best)
             self.best_checkpoint = best if os.path.exists(best) else candidate
+            # The resident engine already wears the candidate's weights —
+            # which are now the best. Without this the next epoch sees a
+            # weights/path mismatch and needlessly re-swaps.
+            if self._engine is not None:
+                self._engine_weights = self.best_checkpoint
             self.best_score = eval_result.get("candidate_quality", 0)
             print(f"  PROMOTED: {self.best_checkpoint} is the new best checkpoint")
             if self._status_writer:
@@ -2790,6 +3296,8 @@ class InfiniteSelfPlayLoop:
         self.epoch += 1
         epoch_start = time.time()
         phases = {}
+        _pt: dict[str, float] = {}   # per-phase wall-clock seconds
+        _t0 = time.time()
         self._status_update(step=self.epoch, max_steps=self.config.max_epochs)
 
         # Phase 1: Self-play (AZR curriculum)
@@ -2798,6 +3306,7 @@ class InfiniteSelfPlayLoop:
                 sp_stats = self._flux_self_play()
             else:
                 sp_stats = self._run_self_play()
+            _pt["self_play"] = round(time.time() - _t0, 1)
             phases["self_play"] = sp_stats
             # Debug round: Phase 1 only — dump the full generation
             # transcript (every rendered prompt + raw output + token ids)
@@ -2819,29 +3328,37 @@ class InfiniteSelfPlayLoop:
                 self._flux_finish(phases)
             elif self.config.training_mode == "grpo":
                 # GRPO-only RSI mode: train directly on verified trajectories
+                _t0 = time.time()
                 candidate = self._grpo_train(self.epoch)
+                _pt["grpo_train"] = round(time.time() - _t0, 1)
                 if not candidate:
                     phases["grpo"] = {"skipped": True}
                 else:
                     phases["grpo"] = {"checkpoint": candidate}
                     # Phase 3: Evaluate
+                    _t0 = time.time()
                     eval_result = self._evaluate(candidate)
+                    _pt["evaluate"] = round(time.time() - _t0, 1)
                     phases["evaluate"] = eval_result
                     # Phase 4: Promote/Demote
+                    _t0 = time.time()
                     promoted = self._maybe_promote(candidate, eval_result)
+                    _pt["promote"] = round(time.time() - _t0, 1)
                     phases["promoted"] = promoted
             else:
                 # SFT mode (default): export → finetune → eval → promote
+                _t0 = time.time()
                 data_path, n_fresh = self._export_trajectories(self.epoch)
+                _pt["export"] = round(time.time() - _t0, 1)
                 with open(data_path, encoding='utf-8') as _f:
                     n_examples = sum(1 for _ in _f)
 
                 if n_examples < self.config.ft_min_examples:
                     print(f"  Too few examples ({n_examples}), skipping finetune")
                     phases["finetune"] = {"skipped": True, "n_examples": n_examples}
-                    # Free the self-play engine — otherwise it stays resident
-                    # and the next epoch loads a second engine on top (OOM).
-                    self._free_engine()
+                    # Park the self-play engine — weights stay CPU-resident
+                    # so the next epoch wakes instead of reloading.
+                    self._park_engine()
                 elif n_fresh < self.config.ft_min_fresh:
                     print(f"  Too few fresh solves ({n_fresh} < "
                           f"{self.config.ft_min_fresh}), skipping "
@@ -2850,19 +3367,25 @@ class InfiniteSelfPlayLoop:
                                           "n_examples": n_examples,
                                           "n_fresh": n_fresh,
                                           "reason": "min_fresh"}
-                    self._free_engine()
+                    self._park_engine()
                 else:
+                    _t0 = time.time()
                     candidate = self._finetune(data_path, self.epoch)
+                    _pt["finetune"] = round(time.time() - _t0, 1)
                     phases["finetune"] = {"checkpoint": candidate,
                                           "n_examples": n_examples,
                                           "n_fresh": n_fresh}
 
                     # Phase 3: Evaluate
+                    _t0 = time.time()
                     eval_result = self._evaluate(candidate)
+                    _pt["evaluate"] = round(time.time() - _t0, 1)
                     phases["evaluate"] = eval_result
 
                     # Phase 4: Promote/Demote
+                    _t0 = time.time()
                     promoted = self._maybe_promote(candidate, eval_result)
+                    _pt["promote"] = round(time.time() - _t0, 1)
                     phases["promoted"] = promoted
         except Exception as e:
             print(f"  Train/eval failed: {e}")
@@ -2876,6 +3399,7 @@ class InfiniteSelfPlayLoop:
             "epoch": self.epoch,
             "best_checkpoint": self.best_checkpoint,
             "elapsed_s": elapsed,
+            "phase_secs": _pt,
             **phases,
         }
         self.history.append(epoch_summary)
@@ -2951,6 +3475,8 @@ class InfiniteSelfPlayLoop:
                     sw.alert("error", f"epoch {self.epoch} crashed: {e}")
 
         self._print_summary()
+        # The engine now lives across epochs — free it only at loop end.
+        self._free_engine()
         # Reclaim the module-global sandbox ThreadPool (workers + pipe
         # handles) at the same lifecycle boundary as the status writer —
         # otherwise it lingers for the life of the process.
@@ -3065,9 +3591,15 @@ def main():
                         help="Length-efficiency bonus for passing GRPO "
                              "completions (shorter earns more; 0 disables)")
     parser.add_argument("--task-source", type=str, default="model",
-                        choices=["model", "api"],
-                        help="Task source: 'model' (AZR self-propose) or "
-                             "'api' (distillation teacher APIs)")
+                        choices=["model", "api", "external"],
+                        help="Task source: 'model' (AZR self-propose), "
+                             "'api' (distillation teacher APIs), or "
+                             "'external' (verified HF task pool JSON — "
+                             "model proposals are a dead end at 1.7B)")
+    parser.add_argument("--external-task-pool", type=str,
+                        default="data/external/opc_sft2_pool_union.json",
+                        help="Task pool JSON for --task-source external "
+                             "(fetch_external_tasks.py format)")
     parser.add_argument("--config", type=str, default="forgelm_v2",
                         help="Model config name")
     parser.add_argument("--eval-threshold", type=float, default=0.5,
@@ -3108,10 +3640,39 @@ def main():
                         help="GRPO steps per epoch (training_mode=grpo)")
     parser.add_argument("--grpo-lr", type=float, default=5e-6,
                         help="GRPO learning rate")
-    parser.add_argument("--solve-group-size", type=int, default=1,
+    parser.add_argument("--solve-group-size", type=int, default=4,
                         help="Rollouts per task in SFT mode — >1 activates "
                              "shortest-pass export and raises solve yield "
-                             "(K× solve gen cost)")
+                             "(K× solve gen cost). RFT literature: 10-30+ "
+                             "completions/prompt; 4 is the compute-balanced "
+                             "default on this GPU.")
+    parser.add_argument("--solve-quota", type=int, default=0,
+                        help="Verified examples required per epoch — the "
+                             "loop proposes+solves rounds until this QUOTA "
+                             "is met (0 = tasks_per_epoch). Replay/QA/failed "
+                             "attempts never count; STaR ref fills count up "
+                             "to --ref-fill-frac of the quota.")
+    parser.add_argument("--quota-max-rounds", type=int, default=4,
+                        help="Max propose+solve rounds per epoch")
+    parser.add_argument("--propose-batch-size", type=int, default=64,
+                        help="Prompts per propose attempt — the 32-slot "
+                             "static decode window refills from the "
+                             "pending queue when N>32, keeping per-step "
+                             "yield ~flat (~32 real tokens/step) instead "
+                             "of draining to the longest row's tail")
+    parser.add_argument("--quota-max-rollouts", type=int, default=0,
+                        help="Rollout budget cap (0 = quota*group_size*10)")
+    parser.add_argument("--export-per-task", type=int, default=2,
+                        help="Distinct passing attempts exported per solved "
+                             "task, shortest-first")
+    parser.add_argument("--ref-fill", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="STaR-style reference fill: train on the "
+                             "proposer's executor-verified impl for tasks "
+                             "the solver missed")
+    parser.add_argument("--ref-fill-frac", type=float, default=0.4,
+                        help="Max share of the solve quota ref fills may "
+                             "satisfy (solver solves stay the majority)")
     parser.add_argument("--grpo-group-size", type=int, default=4,
                         help="GRPO group size (G completions per prompt)")
     parser.add_argument("--grpo-kl", type=float, default=0.02,
@@ -3195,8 +3756,12 @@ def main():
     # ── V10 ForgeEngine inference features ──
     parser.add_argument("--no-forge-engine", action="store_true",
                         help="Disable ForgeEngine (use bare model path, no V10 inference features)")
-    parser.add_argument("--kv-cache", type=str, default="spectral",
-                        help="KV cache strategy for self-play generation (V10 default: spectral)")
+    parser.add_argument("--kv-cache", type=str, default=None,
+                        help="KV cache strategy for self-play generation. "
+                             "Default: spectral on forgelm-family configs "
+                             "(validated), standard on spark — spectral is "
+                             "lossy Fourier compression that blurs the exact "
+                             "test-case recall solve prompts depend on.")
     parser.add_argument("--decoding", type=str, default="standard",
                         choices=["standard", "speculative", "medusa", "dspark",
                                  "eagle3", "mtp_selfspec", "specbound"],
@@ -3206,11 +3771,23 @@ def main():
                              "detection); explicit mtp_selfspec on an "
                              "mtp-less model silently degrades.")
     parser.add_argument("--quantize", type=str, default=None,
-                        choices=[None, "int8", "int4", "fp8", "w8a8", "nvfp4"],
+                        choices=[None, "int8", "int4", "fp8", "w8a8", "nvfp4",
+                                 "littlebit2"],
                         help="Weight quantization for self-play generation")
+    parser.add_argument("--lb2-eff-bit", type=float, default=0.5,
+                        help="LittleBit-2 target bits/weight (0.1-1.0)")
+    parser.add_argument("--lb2-no-residual", action="store_true",
+                        help="Disable the LB2 residual factor pair")
+    parser.add_argument("--lb2-kv-ratio", type=float, default=None,
+                        help="LB2 rank multiplier for k/v projections")
     parser.add_argument("--acceleration", type=str, default=None,
                         choices=[None, "cuda_graph", "megakernel", "flex_decoding"],
                         help="Acceleration strategy")
+    parser.add_argument("--bcg", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="Breakable CUDA graphs for decode steps incl. "
+                             "the batched static path (default: on for "
+                             "spark-family configs, off for mamba hybrids)")
     parser.add_argument("--use-compile", action="store_true",
                         help="torch.compile the self-play model (experimental on Windows)")
     parser.add_argument("--no-triton-conv", action="store_true",
@@ -3229,7 +3806,7 @@ def main():
                         help="Focal loss gamma (evolution optimum: 4.93)")
     parser.add_argument("--ft-entropy-alpha", type=float, default=0.5,
                         help="Token entropy weighting alpha (0 disables)")
-    parser.add_argument("--ft-grad-mixup", type=int, default=1,
+    parser.add_argument("--ft-grad-mixup", type=int, default=3,
                         help="N-batch grad averaging (1=off, 3=1.25x convergence)")
     parser.add_argument("--ft-curriculum", type=str, default="frontier",
                         choices=["none", "vanilla", "pacing", "interleaved",
@@ -3272,10 +3849,12 @@ def main():
                              "others — QAT ternary conversion destroyed spark "
                              "candidates (measured ~24s/step, loss ≈26).")
     parser.add_argument("--ft-pack-sequences", action=argparse.BooleanOptionalAction,
-                        default=True,
+                        default=None,
                         help="Pack variable-length sequences (Llama-3 style). "
-                             "--no- for configs without cu_seqlens isolation — "
-                             "packing leaks attention across packed docs.")
+                             "Default: ON for configs with verified cu_seqlens "
+                             "isolation, OFF for spark (fused-GEMM attention "
+                             "lacks a verified isolation test — packing leaks "
+                             "attention across packed docs).")
     parser.add_argument("--ft-sift", action="store_true",
                         help="SIFT structured slice training instead of LoRA")
     parser.add_argument("--ft-sift-score-mode", type=str, default="fro",
@@ -3350,7 +3929,15 @@ def main():
             # weights (spark: loss ≈26, ~24s/step — candidate always
             # demoted, epoch compute wasted).
             else args.config.startswith(("forgelm", "lfm"))),
-        ft_pack_sequences=args.ft_pack_sequences,
+        ft_pack_sequences=(
+            args.ft_pack_sequences
+            if args.ft_pack_sequences is not None
+            # Sequence packing joins examples into one stream — correct only
+            # when attention isolation via cu_seqlens is verified for the
+            # architecture. Spark's fused-GEMM path has no verified
+            # isolation test; packing there cross-contaminates examples
+            # (attn bleeds across boundaries). Default off for spark.
+            else not args.config.startswith("spark")),
         ft_sift=args.ft_sift,
         ft_sift_score_mode=args.ft_sift_score_mode,
         ft_sift_calib_batches=args.ft_sift_calib_batches,
@@ -3363,10 +3950,20 @@ def main():
         eval_seed=args.eval_seed,
         # V10 inference features
         use_forge_engine=not args.no_forge_engine,
-        kv_cache=args.kv_cache,
+        kv_cache=(
+            args.kv_cache
+            if args.kv_cache is not None
+            # Spectral KV blurs exact test-case recall — only default it on
+            # the forgelm family where it was validated.
+            else ("standard" if args.config.startswith(("spark", "qwen"))
+                  else "spectral")),
         decoding=args.decoding,
         quantize=args.quantize,
+        lb2_eff_bit=args.lb2_eff_bit,
+        lb2_residual=not args.lb2_no_residual,
+        lb2_kv_ratio=args.lb2_kv_ratio,
         acceleration=args.acceleration,
+        use_breakable_cuda_graph=args.bcg,
         use_compile=args.use_compile,
         use_triton_conv=not args.no_triton_conv,
         use_prefix_cache=not args.no_prefix_cache,
@@ -3381,6 +3978,7 @@ def main():
         concise_qa_per_epoch=args.concise_qa_per_epoch,
         grpo_concise_bonus=args.grpo_concise_bonus,
         task_source=args.task_source,
+        external_task_pool=args.external_task_pool,
         eval_threshold=args.eval_threshold,
         strict_promote=not args.lenient_promote,
         promote_margin=args.promote_margin,
@@ -3409,6 +4007,13 @@ def main():
         grpo_lr=args.grpo_lr,
         grpo_group_size=args.grpo_group_size,
         solve_group_size=args.solve_group_size,
+        solve_quota=args.solve_quota,
+        quota_max_rounds=args.quota_max_rounds,
+        propose_batch_size=args.propose_batch_size,
+        quota_max_rollouts=args.quota_max_rollouts,
+        export_per_task=args.export_per_task,
+        ref_fill=args.ref_fill,
+        ref_fill_frac=args.ref_fill_frac,
         grpo_kl_coeff=args.grpo_kl,
         grpo_clip_range=args.grpo_clip,
         grpo_rl_algorithm=args.grpo_algorithm,

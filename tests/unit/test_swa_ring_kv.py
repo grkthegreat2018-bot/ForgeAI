@@ -132,6 +132,45 @@ def test_ring_decode_equivalent_vs_linear():
     assert (a - b).abs().max().item() < 2e-5
 
 
+def test_ring_valid_tracks_written_slots():
+    """ring_valid marks exactly the slots each row's append wrote —
+    the per-row validity mask continuous-batching refill and batched
+    left-padding rely on to exclude stale/pad ring KV."""
+    model = _build(ring=True)
+    cache = create_kv_cache(model, max_total=64, batch=2,
+                            device=torch.device("cpu"))
+    rv = cache.ring_valid[1]
+    assert rv.shape == (2, W) and not rv.any()
+    ks = torch.randn(2, 2, 5, 16)
+    vs = torch.randn(2, 2, 5, 16)
+    cache.append(1, ks, vs)
+    # prefill wrote ring slots 0..4 on BOTH rows
+    want = torch.zeros(2, W, dtype=torch.bool)
+    want[:, :5] = True
+    assert torch.equal(rv, want)
+    # unmarking row 0's tail is per-row: row 1 keeps its marks
+    rv[0, 2:5] = False
+    assert not rv[0, 2:5].any() and rv[1, 2:5].all()
+    cache.reset()
+    assert not cache.ring_valid[1].any()
+
+
+def test_ring_valid_append_t_marks_wrapped_slot():
+    """append_t (graph-safe decode path) marks pos%W per row."""
+    model = _build(ring=True)
+    cache = create_kv_cache(model, max_total=64, batch=2,
+                            device=torch.device("cpu"))
+    cache.enable_tensor_pos()
+    for p in range(W + 2):  # wraps past the window
+        cache.append_t(1, torch.randn(2, 2, 1, 16),
+                       torch.randn(2, 2, 1, 16))
+        cache.advance(1)
+        cache.sync_tensor_pos()
+    rv = cache.ring_valid[1]
+    # every slot written at least once after wrapping
+    assert rv.all()
+
+
 def test_ring_prefill_chunked_equivalent():
     """T>1 continuation forward over a wrapped ring == linear cache."""
     torch.manual_seed(0)

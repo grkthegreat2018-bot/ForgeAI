@@ -368,19 +368,23 @@ class TestEngineCleanup:
             pass
 
     def test_skipped_finetune_frees_engine(self):
-        """Too-few-examples path must free the engine."""
+        """Too-few-examples path parks the engine (VRAM released via
+        sleep-1 + accel release) instead of freeing it — the resident
+        engine is what the next epoch wakes instead of reloading."""
         loop = InfiniteSelfPlayLoop("fake.ckpt", LoopConfig(training_mode="sft"))
         loop._run_self_play = MagicMock(return_value={"success_rate": 0.0})
         loop._export_trajectories = MagicMock(
             return_value=("/tmp/data.jsonl", 0))
         loop._finetune = MagicMock()
         loop._evaluate = MagicMock()
+        loop._park_engine = MagicMock()
         loop._free_engine = MagicMock()
 
         with patch("builtins.open", self._MockFile([])):  # 0 examples
             result = loop.run_epoch()
 
-        loop._free_engine.assert_called_once()
+        loop._park_engine.assert_called_once()
+        loop._free_engine.assert_not_called()
         loop._finetune.assert_not_called()
         assert result["finetune"]["skipped"] is True
 
@@ -395,12 +399,14 @@ class TestEngineCleanup:
             return_value=("/tmp/data.jsonl", 1))  # 1 fresh < 2
         loop._finetune = MagicMock()
         loop._evaluate = MagicMock()
+        loop._park_engine = MagicMock()
         loop._free_engine = MagicMock()
 
         with patch("builtins.open", self._MockFile(["line"] * 13)):
             result = loop.run_epoch()
 
-        loop._free_engine.assert_called_once()
+        loop._park_engine.assert_called_once()
+        loop._free_engine.assert_not_called()
         loop._finetune.assert_not_called()
         loop._evaluate.assert_not_called()
         assert result["finetune"]["skipped"] is True

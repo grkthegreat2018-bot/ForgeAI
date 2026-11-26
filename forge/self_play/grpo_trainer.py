@@ -187,6 +187,15 @@ class GRPOConfig:
     use_grpo_lambda: bool = False       # enable GRPO-λ dynamic length penalty
     length_penalty_coeff: float = 0.01  # λ: penalty per token of completion
     length_penalty_threshold: float = 0.6  # correctness ratio to activate penalty
+    # Sign advantage for uniform binary groups (SIGN-GRPO family): at G=4
+    # with binary pass/fail rewards, all-pass and all-fail groups produce
+    # identically-zero group-relative advantages — in one study ~69% of
+    # groups were wasted. Substituting A = 2r−1 (all-pass → +1, all-fail
+    # → −1) keeps a real gradient signal on those groups; a large gain
+    # over dropping them was reported on GSM8K-class evals. The concise
+    # bonus already differentiates *varying-length* all-pass groups —
+    # this only fires when rewards are uniform after adjustment.
+    sign_advantage_binary: bool = True
     length_penalty_warmup: int = 0      # steps before penalty can activate
 
     # Advanced RL algorithm selection (2026 research):
@@ -282,6 +291,7 @@ class GRPOStats:
     kl_divergences: list[float] = field(default_factory=list)
     policy_losses: list[float] = field(default_factory=list)
     advantage_collapse_count: int = 0  # ACR numerator
+    sign_advantage_groups: int = 0     # uniform-binary groups given A=2r−1
     # Advantage Collapse Rate (ACR): fraction of groups where all advantages ≈ 0
     # Alert if ACR > 0.3 (AVSPO paper)
     # GRPO-λ: track correctness ratios and length penalty activation
@@ -428,8 +438,17 @@ class GRPOTrainer:
         advantages = [(r - baseline) / (std + 1e-8) for r in rewards]
 
         # Track advantage collapse (all advantages ≈ 0)
-        if all(abs(a) < 0.01 for a in advantages):
+        collapsed = all(abs(a) < 0.01 for a in advantages)
+        if collapsed:
             self.stats.advantage_collapse_count += 1
+            # Sign advantage: uniform binary outcomes carry no relative
+            # signal but still carry absolute signal — all-pass pushes
+            # toward success mode (+1), all-fail pushes away (−1).
+            if (self.config.sign_advantage_binary and rewards
+                    and all((r < 0.05 or r > 0.95) for r in rewards)):
+                advantages = [2.0 * (1.0 if r > 0.5 else 0.0) - 1.0
+                              for r in rewards]
+                self.stats.sign_advantage_groups += 1
 
         return advantages
 

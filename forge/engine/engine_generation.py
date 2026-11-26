@@ -259,11 +259,11 @@ class _GenerationMixin:
         # explicit "no cap" (the old `or` silently turned it into the
         # hotswap default); only None falls back to the default.
         if context_limit is None:
-            ctx_limit = self.hotswap.current.max_context_tokens
+            ctx_limit = self._effective_prompt_cap(1)
         elif context_limit <= 0:
             ctx_limit = None
         else:
-            ctx_limit = context_limit
+            ctx_limit = min(context_limit, self._effective_prompt_cap(1))
 
         _t0 = time.perf_counter()
         # Models with unbounded_context (e.g. FluxLM) never truncate —
@@ -643,6 +643,7 @@ class _GenerationMixin:
         skip_special_tokens: bool = True,
         prompt_rewards: bool = True,
         cf_topk: int = 0,
+        suppress_ids: list[int] | None = None,
     ) -> list[str]:
         """Generate text for multiple prompts in a single batched forward pass.
 
@@ -673,6 +674,12 @@ class _GenerationMixin:
                 hedge drift only — canonical memory is never touched and
                 packets are re-ingested on apply anyway). Ignored by
                 KV-cache models.
+            suppress_ids: optional token ids forced to -inf every step on
+                every sequence — GPU-side structural ban (special/control
+                tokens). One index_fill per step for the whole batch;
+                prefer this over a logits_processor for static ban sets
+                (processors force a growing gen_ids .tolist() D2H every
+                step — quadratic CPU cost that flattens throughput).
             cf_topk: FluxLM only — >0 logs each generated token's top-k
                 alternative propensities into ``FluxPacket.alts`` for
                 counterfactual credit (``reinforce_alts``).
@@ -704,7 +711,8 @@ class _GenerationMixin:
                 repetition_penalties=repetition_penalties,
                 seeds=seeds, stops=stops,
                 logits_processors=logits_processors,
-                skip_special_tokens=skip_special_tokens)
+                skip_special_tokens=skip_special_tokens,
+                suppress_ids=suppress_ids)
 
     def _generate_batch_flux(
         self, prompts, max_new_tokens, temperature, top_p, top_k,
@@ -806,6 +814,28 @@ class _GenerationMixin:
         packets = getattr(self, "last_flux_packets", None) or []
         return self.model.apply_packets(packets, accept=accept)
 
+    def _effective_prompt_cap(self, n_prompts: int) -> int:
+        """Max prompt length this engine can actually serve.
+
+        min(user context ceiling, KV token cap, model max_seq_len, and a
+        ~4GiB pad-bias budget that shrinks with batch width — the batch
+        prefill builds a [B,1,T,T] additive mask, so T is quadratic in
+        memory). Anything past these bounds either OOMs or lands decode
+        positions beyond the RoPE/KV tables (async gather/index asserts
+        that poison the whole CUDA context).
+        """
+        cur = self.hotswap.current
+        cap = cur.max_context_tokens or 32768
+        kv_cap = getattr(cur, "kv_cache_tokens", None)
+        if kv_cap:
+            cap = min(cap, kv_cap)
+        cfg_cap = getattr(getattr(self.model, "config", None),
+                          "max_seq_len", None)
+        if cfg_cap:
+            cap = min(cap, cfg_cap)
+        bias_cap = max(2048, ((1 << 32) // (max(n_prompts, 1) * 4)) ** 0.5)
+        return int(min(cap, bias_cap))
+
     def _generate_batch_impl(
         self,
         prompts: list[str],
@@ -822,31 +852,57 @@ class _GenerationMixin:
         stops: list[list[str] | None] | None = None,
         logits_processors: list | None = None,
         skip_special_tokens: bool = True,
+        suppress_ids: list[int] | None = None,
     ) -> list[str]:
         if not prompts:
             return []
 
         # For single prompt, fall back to regular generate — generate_raw
-        # when a logits processor is supplied (generate() has no such arg).
+        # only when stops have multi-token ids (the batched path checks
+        # the stop's LAST token id per step; _StopMatcher does proper
+        # incremental suffix matching on decoded text). Suppression sets
+        # and processors are both handled GPU-side / per-row by
+        # BatchedDecoding, which keeps O(1) KV appends via the b1 graphs
+        # — generate_raw's functional path grows KV by torch.cat (O(L²)).
         if len(prompts) == 1:
-            if logits_processors and logits_processors[0] is not None:
+            _multi_tok_stops = False
+            if stops and stops[0] and self.tokenizer is not None:
+                for s in stops[0]:
+                    ids = self.tokenizer(
+                        s, add_special_tokens=False).input_ids
+                    if len(ids) > 1:
+                        _multi_tok_stops = True
+                        break
+            if _multi_tok_stops:
                 return [self.generate_raw(
                     prompts[0], max_new_tokens=max_new_tokens,
                     temperature=temperature, top_p=top_p, top_k=top_k,
                     repetition_penalty=repetition_penalty,
-                    logits_processor=logits_processors[0],
-                    skip_special_tokens=skip_special_tokens)]
-            return [self.generate(
-                prompts[0], max_new_tokens=max_new_tokens,
-                temperature=temperature, top_p=top_p, top_k=top_k,
-                repetition_penalty=repetition_penalty)]
+                    logits_processor=(
+                        logits_processors[0] if logits_processors else None),
+                    skip_special_tokens=skip_special_tokens,
+                    suppress_ids=suppress_ids,
+                    stop=stops[0] if stops else None)]
+            if not ((logits_processors
+                     and logits_processors[0] is not None)
+                    or suppress_ids or (stops and stops[0])):
+                return [self.generate(
+                    prompts[0], max_new_tokens=max_new_tokens,
+                    temperature=temperature, top_p=top_p, top_k=top_k,
+                    repetition_penalty=repetition_penalty)]
+            # Single-token stops / suppress_ids / processors fall through
+            # to BatchedDecoding below (graph path, O(1) KV appends).
 
-        # Tokenize all prompts
+        # Tokenize all prompts, clamped to the engine's real limits (see
+        # _effective_prompt_cap — a pathological 22k-token prompt made the
+        # batch pad_bias ~48GiB → OOM → serial fallback → positions past
+        # the RoPE/KV cap → vectorized-gather device assert, 2026-11-24).
+        prompt_cap = self._effective_prompt_cap(len(prompts))
         all_ids = []
         for p in prompts:
             ids = self.tokenizer(
                 p, return_tensors="pt", truncation=True,
-                max_length=self.hotswap.current.max_context_tokens
+                max_length=prompt_cap
             ).input_ids.to(self.device)
             all_ids.append(ids)
 
@@ -858,31 +914,56 @@ class _GenerationMixin:
         batched = BatchedDecoding(eos_token_ids=self._eos_token_ids())
 
         n = len(prompts)
+        # One call for the whole request — BatchedDecoding runs a
+        # ≤32-slot graph window and refills freed slots from the pending
+        # queue (continuous batching). The old per-32 wave split stays
+        # only as the OOM fallback path.
+        max_wave = getattr(self, "batch_max_width", 0) or 32
         _t0 = time.perf_counter()
+        output_ids = []
         try:
             output_ids = batched.generate_batch(
                 self.model, all_ids,
                 max_tokens_list=[max_new_tokens] * n,
-                temperatures=temperatures or [temperature] * n,
-                top_ps=top_ps or [top_p] * n,
-                top_k_list=top_ks or [top_k] * n,
+                temperatures=(temperatures if temperatures
+                              else [temperature] * n),
+                top_ps=(top_ps if top_ps else [top_p] * n),
+                top_k_list=(top_ks if top_ks else [top_k] * n),
                 repetition_penalty_list=(
-                    repetition_penalties or [repetition_penalty] * n),
+                    repetition_penalties if repetition_penalties
+                    else [repetition_penalty] * n),
                 seed_list=seeds,
                 stop_list=stops,
                 tokenizer=self.tokenizer,
                 processor_list=logits_processors,
+                suppress_ids=suppress_ids,
             )
         except torch.cuda.OutOfMemoryError:
-            # Fallback: serial generation
             self._log(
-                f"Batched OOM ({len(prompts)} prompts), falling back to serial",
-                level="warn")
+                f"Batched OOM ({n} prompts), falling back to per-wave "
+                "serial", level="warn")
             self._clear_cuda_cache()
-            return [self.generate(
-                p, max_new_tokens=max_new_tokens,
-                temperature=temperature, top_p=top_p, top_k=top_k,
-                repetition_penalty=repetition_penalty) for p in prompts]
+            for off in range(0, n, max_wave):
+                hi = min(off + max_wave, n)
+                for j in range(off, hi):
+                    output_ids += batched.generate_batch(
+                        self.model, all_ids[j:j + 1],
+                        max_tokens_list=[max_new_tokens],
+                        temperatures=[
+                            (temperatures or [temperature] * n)[j]],
+                        top_ps=[(top_ps or [top_p] * n)[j]],
+                        top_k_list=[(top_ks or [top_k] * n)[j]],
+                        repetition_penalty_list=[
+                            (repetition_penalties
+                             or [repetition_penalty] * n)[j]],
+                        seed_list=[seeds[j]] if seeds else None,
+                        stop_list=[stops[j]] if stops else None,
+                        tokenizer=self.tokenizer,
+                        processor_list=(
+                            [logits_processors[j]]
+                            if logits_processors else None),
+                        suppress_ids=suppress_ids,
+                    )
 
         # Decode each output
         results = []
@@ -1299,7 +1380,7 @@ class _GenerationMixin:
         # Custom EOS ids MERGE with the defaults — replacing them would
         # silently unstop <|im_end|> etc. (a request passing a lone FIM
         # or reasoning terminator still wants EOS honored).
-        token_ids = set(_DEFAULT_EOS_TOKEN_IDS)
+        token_ids = set(self._default_eos_ids())
         if custom_ids:
             token_ids.update(custom_ids)
         sources = (
@@ -1314,6 +1395,46 @@ class _GenerationMixin:
             elif token_id is not None:
                 token_ids.add(token_id)
         return token_ids
+
+    def _default_eos_ids(self) -> frozenset:
+        """``_DEFAULT_EOS_TOKEN_IDS`` filtered to ids that are special
+        tokens on THIS tokenizer.
+
+        The default set unions every supported model family's eos ids
+        (Jamba 2/519, LFM 7, Qwen 151xxx, Llama 128xxx). On a different
+        vocab the same integer ids are ordinary BPE tokens — granite:
+        2='#', 7='(', 519='ant' — so an unfiltered union terminates
+        generation the first time the model emits one (observed: every
+        parable AZR proposal died at its first '#'). Keep an id iff this
+        tokenizer marks it an added token, or its token string is
+        control-looking (<|...|>), covering wrappers without
+        get_added_vocab."""
+        cache = getattr(self, "_default_eos_cache", None)
+        if cache is not None:
+            return cache
+        keep: set[int] = set()
+        added: set[int] | None = None
+        try:
+            added = set(self.tokenizer.get_added_vocab().values())
+        except Exception:
+            added = None
+        for tid in _DEFAULT_EOS_TOKEN_IDS:
+            if added is not None and tid in added:
+                keep.add(tid)
+                continue
+            tok_str = None
+            try:
+                tok_str = self.tokenizer.convert_ids_to_tokens(tid)
+            except Exception:
+                try:
+                    tok_str = self.tokenizer.decode([tid])
+                except Exception:
+                    tok_str = None
+            if (isinstance(tok_str, str) and len(tok_str) > 4
+                    and tok_str.startswith("<|") and tok_str.endswith("|>")):
+                keep.add(tid)
+        self._default_eos_cache = frozenset(keep)
+        return self._default_eos_cache
 
     def _decode_tokens(
         self, logits, past_kv, params: SamplingParams,
@@ -1344,6 +1465,7 @@ class _GenerationMixin:
                          params.skip_special_tokens)
             if params.stop and check_stop else None)
         _loop_last = 0
+        _sup_t = None
         # Zero-overhead scheduling (plan 4.6 + DeepInfer ZOS): each
         # step's forward launches BEFORE the .item() sync, so stop
         # checks/observers overlap GPU work.  Hybrid models snapshot
@@ -1368,6 +1490,15 @@ class _GenerationMixin:
                 # Constrained decoding: apply logits processor BEFORE sampling
                 if logits_processor is not None:
                     next_logits = logits_processor(next_logits, generated_ids)
+                # GPU-side structural ban — one index_fill per step, no
+                # Python callback + no generated_ids D2H round-trip.
+                if params.suppress_ids:
+                    if _sup_t is None:
+                        _sup_t = torch.tensor(
+                            params.suppress_ids, dtype=torch.long,
+                            device=next_logits.device)
+                    next_logits = next_logits.index_fill(
+                        -1, _sup_t, float("-inf"))
                 if suffix_mem is not None:
                     next_logits = next_logits + suffix_mem.lift_last(
                         device=next_logits.device, dtype=next_logits.dtype)
@@ -1669,6 +1800,8 @@ class _GenerationMixin:
         dry_penalty_last_n: int = 512,
         json_schema: dict | None = None,
         seed: int | None = None,
+        suppress_ids: list[int] | None = None,
+        stop: list[str] | None = None,
     ) -> str:
         """Generate text with raw control — for self-play / agentic loops.
 
@@ -1697,6 +1830,11 @@ class _GenerationMixin:
                 Self-play needs False to preserve tool-call markers.
             min_p: Min-p sampling threshold (0 = disabled).
             min_k: Min-k semantic-cliff sampling (0 = disabled).
+            suppress_ids: optional token ids forced to -inf every step —
+                GPU-side structural ban (special/control tokens) without
+                a per-step Python logits_processor callback.
+            stop: optional stop strings — output ends at the earliest
+                occurrence (same semantics as ``generate``).
             json_schema: Optional JSON schema dict for constrained decoding.
                 When provided (and logits_processor is None), an
                 XGrammarConstrainer is built and used as the logits
@@ -1715,7 +1853,8 @@ class _GenerationMixin:
             min_k=min_k, dry_multiplier=dry_multiplier, dry_base=dry_base,
             dry_allowed_length=dry_allowed_length,
             dry_penalty_last_n=dry_penalty_last_n,
-            skip_special_tokens=skip_special_tokens, seed=seed)
+            skip_special_tokens=skip_special_tokens, seed=seed,
+            suppress_ids=suppress_ids, stop=stop)
         self._validate_generation_params(prompt, params)
         self._check_vram_and_offload_if_needed()
         self.hotswap.apply_pending()

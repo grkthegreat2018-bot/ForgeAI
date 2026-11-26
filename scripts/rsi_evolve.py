@@ -130,8 +130,9 @@ def main() -> int:
     ap.add_argument("--quiet-rounds", type=int, default=3,
                     help="stop after N straight zero-promotion rounds")
     ap.add_argument("--proposer", default="basin",
-                    choices=["basin", "mix", "mut", "llm"],
-                    help="basin=async LLM parents + mutator fan-out")
+                    choices=["basin", "mix", "mut", "llm", "bes"],
+                    help="basin=async LLM parents + mutator fan-out; "
+                         "bes=backward goal-decomposition + joint solve")
     ap.add_argument("--llm-every", type=int, default=6)
     ap.add_argument("--basin-batch", type=int, default=8)
     ap.add_argument("--fanout", type=int, default=32)
@@ -184,6 +185,15 @@ def main() -> int:
     ap.add_argument("--research-budget", type=int, default=32,
                     help="uncached web searches per process (~daily "
                          "quota; cached queries are free)")
+    ap.add_argument("--harness-evolve", action="store_true",
+                    help="SPIKE: evolve the harness itself — sampling "
+                         "params, gen budgets, hint template, stop "
+                         "suffixes, mutator weights as a genome with "
+                         "preserve-and-extend admission into "
+                         "<db>.harness.json")
+    ap.add_argument("--harness-evolve-every", type=int, default=32,
+                    help="evals per genome window before fitness is "
+                         "recorded and the next genome sampled")
     args = ap.parse_args()
 
     from forge.evolution.code_evolve import (
@@ -270,6 +280,8 @@ def main() -> int:
                     str(ROOT / "docs" / "evolve_research.md")
                     if args.research else None),
                 db_path=args.db, timeout_s=args.timeout,
+                harness_evolve=args.harness_evolve,
+                harness_evolve_every=args.harness_evolve_every,
                 workers=args.workers, max_workers=args.max_workers,
                 status_file=(f"{args.status}.{name}.json"
                              if args.status else None),

@@ -105,6 +105,46 @@ class TestEngineGeneration:
         assert forced[0, 10].item() != float("-inf")  # forced suffix token
         assert forced.argmax(-1).item() == 10
 
+    def test_spark_generate_routes_through_generate_batch(self, tmp_path):
+        """Spark single-row gen must use the graph-backed batch path —
+        generate_raw's functional KV path grows by torch.cat (O(L^2)).
+        """
+        import types
+        eng = MagicMock()
+        eng.tokenizer = types.SimpleNamespace(
+            encode=lambda s, add_special_tokens=False: [7])
+        eng.generate_batch.return_value = ["pass\n```"]
+        cur = _make_curriculum(tmp_path, engine=eng)
+        cur.config_name = "spark_x26_1p7b"
+
+        out = cur._generate("do a thing", prefill="```python\n")
+
+        # prefill prepended after the echoed opener is stripped
+        assert out == "```python\npass\n```"
+        eng.generate_batch.assert_called_once()
+        eng.generate_raw.assert_not_called()
+        kw = eng.generate_batch.call_args.kwargs
+        assert kw["stops"] == [["```"]]
+        assert kw["suppress_ids"] is not None
+        assert kw["skip_special_tokens"] is False
+
+    def test_spark_generate_raw_for_multitoken_stop(self, tmp_path):
+        """A multi-token stop id falls back to generate_raw — the
+        batched path checks only the stop's last id."""
+        import types
+        eng = MagicMock()
+        eng.tokenizer = types.SimpleNamespace(
+            encode=lambda s, add_special_tokens=False: [7, 8])
+        eng.generate_raw.return_value = "pass\n```"
+        cur = _make_curriculum(tmp_path, engine=eng)
+        cur.config_name = "spark_x26_1p7b"
+
+        out = cur._generate("do a thing", prefill="```python\n")
+
+        assert out == "```python\npass\n```"
+        eng.generate_raw.assert_called_once()
+        eng.generate_batch.assert_not_called()
+
     def test_generate_batch_single_engine_call(self, tmp_path):
         eng = MagicMock()
         eng.generate_batch.return_value = ["a", "b", "c"]
@@ -330,3 +370,109 @@ class TestCloneGuards:
             out = proc(logits, [])
         assert out[0, 518].item() == float("-inf")  # im_start banned
         assert out[0, 519].item() == 0.0  # eos NOT banned
+
+
+# -- Infinite-goal machinery (OMNI-EPIC archive + Prism coverage + QD mix)
+
+
+class _FixedRng:
+    """Deterministic rng stand-in: fixed roll, first-item picks."""
+
+    def __init__(self, roll):
+        self.roll = roll
+
+    def random(self):
+        return self.roll
+
+    def choice(self, seq):
+        return seq[0]
+
+    def sample(self, seq, k):
+        return list(seq)[:k]
+
+
+def _fake_task(desc, domain):
+    import types
+    return types.SimpleNamespace(description=desc, domain=domain)
+
+
+class TestInfiniteGoals:
+    def test_bank_covers_new_domains(self):
+        from forge.self_play.infinite_curriculum import _DESC_HINT_BANK
+        for d in ("bit_manipulation", "geometry", "simulation"):
+            assert len(_DESC_HINT_BANK[d]) >= 12, d
+
+    def test_signature_hints_for_new_domains(self, tmp_path):
+        cur = _make_curriculum(tmp_path)
+        assert "(" in cur._random_signature("geometry")
+        assert "->" in cur._random_signature("simulation")
+        assert "int" in cur._random_signature("bit_manipulation")
+
+    def test_hint_falls_back_to_bank_when_archive_empty(self, tmp_path):
+        cur = _make_curriculum(tmp_path)
+        cur.rng = _FixedRng(0.9)   # bank branch
+        from forge.self_play.infinite_curriculum import _DESC_HINT_BANK
+        hint = cur._sample_desc_hint("math")
+        assert hint in _DESC_HINT_BANK["math"]
+
+    def test_hint_archive_variant(self, tmp_path):
+        """OMNI-EPIC stepping-stone: validated descs become variant seeds."""
+        cur = _make_curriculum(tmp_path)
+        cur._validated_descs = [{"desc": "Find the k-th prime", "domain": "math"}]
+        cur.rng = _FixedRng(0.1)   # < _GOAL_VARIANT_P
+        hint = cur._sample_desc_hint("math")
+        assert "variant of" in hint or "inverse problem" in hint or "generalization" in hint
+        assert "k-th prime" in hint
+
+    def test_hint_cross_domain_mix(self, tmp_path):
+        cur = _make_curriculum(tmp_path)
+        cur.rng = _FixedRng(0.45)  # variant..variant+mix window
+        hint = cur._sample_desc_hint("math")
+        assert hint.startswith("combine the ideas:")
+
+    def test_note_validated_records_and_caps(self, tmp_path):
+        cur = _make_curriculum(tmp_path)
+        cur._VALIDATED_CAP = 3
+        for i in range(5):
+            cur._note_validated(_fake_task(f"task number {i}", "math"))
+        assert len(cur._validated_descs) == 3
+        assert cur._validated_descs[-1]["desc"] == "task number 4"
+        assert cur._validated_path.exists()
+
+    def test_validated_archive_roundtrips(self, tmp_path):
+        cur = _make_curriculum(tmp_path)
+        cur._note_validated(_fake_task("persist me", "logic"))
+        cur2 = _make_curriculum(tmp_path)
+        assert cur2._validated_descs == [{"desc": "persist me", "domain": "logic"}]
+
+    def test_coverage_override_picks_least_proposed(self, tmp_path):
+        cur = _make_curriculum(tmp_path)
+        cur.rng = _FixedRng(0.1)   # < _GOAL_COVERAGE_P
+        cur._domain_counts = {"math": 10, "algorithms": 10}
+        pick = cur._coverage_domain("math")
+        assert pick != "math"     # steered to a 0-count domain
+
+    def test_coverage_keeps_domain_when_balanced(self, tmp_path):
+        cur = _make_curriculum(tmp_path)
+        cur.rng = _FixedRng(0.1)
+        cur._domain_counts = {d: 5 for d in
+                              ("math", "algorithms", "strings", "logic",
+                               "data_structures", "bit_manipulation",
+                               "geometry", "simulation")}
+        assert cur._coverage_domain("math") == "math"
+
+    def test_coverage_respects_probability_gate(self, tmp_path):
+        cur = _make_curriculum(tmp_path)
+        cur.rng = _FixedRng(0.9)   # >= _GOAL_COVERAGE_P
+        cur._domain_counts = {"math": 50}
+        assert cur._coverage_domain("math") == "math"
+
+    def test_avoid_hint_prefers_same_domain(self, tmp_path):
+        cur = _make_curriculum(tmp_path)
+        cur._validated_descs = [
+            {"desc": "math task alpha", "domain": "math"},
+            {"desc": "strings task beta", "domain": "strings"},
+        ]
+        out = cur._avoid_hint(domain="math", n=4)
+        assert "Do NOT repeat" in out
+        assert "math task alpha" in out and "strings task beta" in out

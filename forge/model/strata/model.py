@@ -1,6 +1,6 @@
 """StrataLM - the M1 model skeleton on the packed-cell substrate.
 
-CPU-eager reference per docs/STRATA_M1_DESIGN.md: rolling suffix-hash
+CPU-eager reference per docs/design/STRATA_M1_DESIGN.md: rolling suffix-hash
 context keys (10 orders), a channel registry (order/uni/backoff/
 recency/fatigue), a hedge-weighted geometric mixture, surprise-gated
 writes, and teach/learn/observe.

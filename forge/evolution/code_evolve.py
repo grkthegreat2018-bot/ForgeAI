@@ -160,7 +160,7 @@ class CodeEvolveConfig:
     hop_after: int = 12                        # dry evals before basin hop
     patience: int = 30                         # dry evals before stop
     proposer: str = "mut"                      # mut | mix | llm | basin
-                                               # | api | none
+                                               # | api | bes | none
     api_url: str = ""                          # api: OpenAI-compat chat
                                                # endpoint (empty ->
                                                # FORGE_API_PROPOSER_URL)
@@ -186,6 +186,11 @@ class CodeEvolveConfig:
                                                # variant) before a dry
                                                # stall counts — covers
                                                # model load + slow batches
+    bes_subgoals: int = 8                      # bes: sub-goal bound on the
+                                               # backward decomposition
+                                               # pass (numbered list the
+                                               # forward joint-solve must
+                                               # satisfy)
     fanout: int = 32                           # basin: mutator variants
                                                # enumerated per parent
     inc_stale: int = 48                        # verify: re-bench incumbent
@@ -230,6 +235,38 @@ class CodeEvolveConfig:
                                                # default; enable for long
                                                # campaigns where prefill time
                                                # amortizes it.
+    proposer_bcg: bool = True                  # Breakable CUDA Graph decode
+                                               # for the proposer. EXONERATED
+                                               # 2026-11-24: every crash it
+                                               # was blamed for ran with
+                                               # proposer_prewarm on — the
+                                               # daemon-thread engine build
+                                               # was the actual corruptor.
+                                               # BCG on + prewarm off:
+                                               # 5/5 clean (~30s/6 gens).
+    proposer_prewarm: bool = False             # Daemon-thread engine prewarm —
+                                               # THE identified heap
+                                               # corruptor (python311.dll
+                                               # 0xc0000005): ForgeEngine
+                                               # build on a background thread
+                                               # races main-thread torch/GC
+                                               # traffic → freed-but-
+                                               # referenced PyObjects.
+                                               # 11/11 clean with it off vs
+                                               # ~25-45% with it on. Keep off
+                                               # — use proposer_prefetch for
+                                               # the safe subset.
+    proposer_prefetch: bool = True             # I/O-only prewarm: daemon
+                                               # thread reads the checkpoint
+                                               # files into the OS page cache
+                                               # (no torch/CUDA objects
+                                               # created → no cross-thread
+                                               # refcount surface → cannot
+                                               # corrupt the heap). Recovers
+                                               # most of prewarm's win on
+                                               # repeat builds; first cold
+                                               # build still pays the D:
+                                               # HDD read once.
     lora_root: str | None = None               # tagged-LoRA registry dir;
                                                # proposer hot-swaps per target
     lora_tag: str | None = None                # adapter tag override
@@ -238,6 +275,24 @@ class CodeEvolveConfig:
     max_gen_tokens: int = 640                  # <think> block ~150 tok + fenced code ~300
                                                # 640 wasted ~35% decode
     temperature: float = 0.8
+    top_p: float = 0.95                        # proposer nucleus sampling —
+                                               # was a 0.95 literal at the
+                                               # generate call sites; a
+                                               # field so HarnessGenome
+                                               # can steer it
+    top_k: int = 80                            # same — was a literal 80
+    harness_evolve: bool = False               # SPIKE (RSI recon row C1):
+                                               # evolve the harness itself
+                                               # — sampling params, gen
+                                               # budgets, hint template,
+                                               # stop suffixes, mutator
+                                               # weights as a genome with
+                                               # preserve-and-extend
+                                               # admission into
+                                               # <db>.harness.json
+    harness_evolve_every: int = 32             # evals per genome window:
+                                               # fitness recorded +
+                                               # genome resampled
     db_path: str = "forge_evolve.db"
     timeout_s: float = 120.0
     n_insights: int = 5
@@ -563,18 +618,43 @@ class LLMProposer:
         self._hint_by_prompt: dict[str, int] = {}
         self._hint_rng = None
         self._last_hint: int | None = None
-        # Prewarm: begin the engine build on a daemon thread NOW — weight
-        # load + tokenizer + kernel warmup overlap pool boot and seed
-        # eval instead of blocking the first proposal call (~15-25s
-        # stolen off the critical path). A build failure here just
-        # evicts the cache entry; the real call retries and surfaces it.
-        def _prewarm():
-            try:
-                self._engine()
-            except Exception:
-                pass
-        threading.Thread(target=_prewarm, daemon=True,
-                         name="proposer_prewarm").start()
+        # Harness-genome (opt-in, cfg.harness_evolve): a HarnessGenome
+        # CodeEvolve sets on the proposer — _pick_hint honors hint_idx
+        # over the bandit and the forge-path generate calls append
+        # stop_suffixes. None = today's frozen behavior.
+        self._genome = None
+        # Prewarm (FULL build on a daemon thread) is OFF — identified as
+        # the heap corruptor on this stack (see cfg.proposer_prewarm doc
+        # + docs/BUG_LOG.md). The safe subset stays: a daemon thread that
+        # only READS the checkpoint files into the OS page cache — pure
+        # Python file I/O, no torch/CUDA objects are created, so there is
+        # no cross-thread refcount surface to corrupt. The later
+        # safetensors load then hits page cache instead of the D: HDD.
+        if self.cfg.proposer_prefetch:
+            def _prefetch():
+                try:
+                    d = Path(self._model_id)
+                    if not d.is_dir():
+                        from forge.exp.harness import snap_dir
+                        d = Path(snap_dir(self._model_id))
+                    buf = bytearray(1 << 20)
+                    for f in sorted(d.rglob("*")):
+                        if f.is_file() and f.stat().st_size > 1 << 16:
+                            with open(f, "rb") as h:
+                                while h.readinto(buf):
+                                    pass
+                except Exception:
+                    pass
+            threading.Thread(target=_prefetch, daemon=True,
+                             name="proposer_prefetch").start()
+        if self.cfg.proposer_prewarm:
+            def _prewarm():
+                try:
+                    self._engine()
+                except Exception:
+                    pass
+            threading.Thread(target=_prewarm, daemon=True,
+                             name="proposer_prewarm").start()
 
     @property
     def primed(self) -> bool:
@@ -839,7 +919,9 @@ class LLMProposer:
                     # Verified by scripts/bench_lfm3_evolve.py token-
                     # equality + tok/s harness; functional decode remains
                     # the fallback when a batch can't be captured.
-                    use_breakable_cuda_graph=True,
+                    # GATED by proposer_bcg (default False): the subsystem
+                    # intermittently corrupts process memory — see flag doc.
+                    use_breakable_cuda_graph=self.cfg.proposer_bcg,
                     use_block_fusion=False,
                     use_chunked_prefix_cache=True,
                     use_learned_prefix_cache=False,
@@ -1113,9 +1195,22 @@ class LLMProposer:
         except Exception:
             pass
 
+    def _xstops(self) -> list[str]:
+        """Extra stop suffixes from the active harness genome ([] when
+        harness_evolve is off or the genome carries none)."""
+        g = getattr(self, "_genome", None)
+        return list(getattr(g, "stop_suffixes", ()) or ()) \
+            if g is not None else []
+
     def _pick_hint(self) -> int:
         """Thompson-sampled hint index. Cold start (all Beta(1,1)) ==
-        the old uniform rotation; verified promotion credit sharpens it."""
+        the old uniform rotation; verified promotion credit sharpens
+        it. A harness genome with hint_idx >= 0 pins the prompt-
+        template variant directly (bandit bypassed)."""
+        g = getattr(self, "_genome", None)
+        hi = getattr(g, "hint_idx", -1) if g is not None else -1
+        if 0 <= hi < len(self._HINTS):
+            return int(hi)
         if not getattr(self.cfg, "hint_bandit", True):
             import random as _r
             return _r.randrange(len(self._HINTS))
@@ -1202,14 +1297,21 @@ class LLMProposer:
             # assistant turn so the completion still continues the code.
             # Raw primed prompts (no template) made this chat-tuned ckpt
             # emit token soup — the dominant proposal killer.
-            i = prompt.rfind("```python")
+            # Match the fence OPENER ("```python\n") — bare "```python"
+            # also matches prose mentions like "inside one ```python
+            # fence." in the instruction tail, which truncated the user
+            # turn mid-word and left the assistant prefill as literal
+            # "fence." text (the 0%-valid proposer-bench failure).
+            i = prompt.rfind("```python\n")
             if i >= 0:
                 # \x3c = '<' — keeps the ChatML literals consistent
                 # with the unprimed wrap below.
                 return (bos + "\x3c|im_start|>user\n" + prompt[:i]
                         + "\x3c|im_end|>\n\x3c|im_start|>assistant\n"
                         + think + prompt[i:])
-            return prompt
+            # No code block → instruction-style prompt: fall through to
+            # the unprimed ChatML wrap rather than emitting raw text —
+            # this ckpt is chat-tuned, raw prompts still token-soup.
         return (bos + "\x3c|im_start|>user\n" + prompt + "\x3c|im_end|>\n"
                 "\x3c|im_start|>assistant\n" + think
                 # LFM3 Claude-Code answers agentically when the turn is
@@ -1226,7 +1328,7 @@ class LLMProposer:
         """Insert the diversity hint BEFORE the primed ```python block —
         appending it after the signature line makes the model continue
         the hint sentence instead of the function body."""
-        i = prompt.rfind("```python")
+        i = prompt.rfind("```python\n")
         if self.primed and i >= 0:
             return prompt[:i] + f"{hint}\n" + prompt[i:]
         return prompt + f"\n{hint}"
@@ -1450,7 +1552,7 @@ class LLMProposer:
         """Insert before the primed ```python block (same rule as
         _with_hint) so completion models keep the signature prime;
         plain append otherwise."""
-        i = prompt.rfind("```python")
+        i = prompt.rfind("```python\n")
         if self.primed and i >= 0:
             return prompt[:i] + block + "\n" + prompt[i:]
         return prompt + "\n" + block
@@ -1573,17 +1675,19 @@ class LLMProposer:
                     think_max = int(self.cfg.think_budget)
                     t = eng.generate(
                         wrapped, max_new_tokens=think_max,
-                        temperature=self.cfg.temperature, top_p=0.95,
-                        top_k=80, finish_sentence=False,
-                        stop=["</think>", im_end])
+                        temperature=self.cfg.temperature,
+                        top_p=self.cfg.top_p,
+                        top_k=self.cfg.top_k, finish_sentence=False,
+                        stop=["</think>", im_end] + self._xstops())
                     think = t if isinstance(t, str) else t.get("text", "")
                     think = think.split("</think>")[0]
                     prefix = wrapped + think + "</think>\n```python\n"
                     c = eng.generate(
                         prefix, max_new_tokens=self.cfg.max_gen_tokens,
-                        temperature=self.cfg.temperature, top_p=0.95,
-                        top_k=80, finish_sentence=False,
-                        stop=[im_end])
+                        temperature=self.cfg.temperature,
+                        top_p=self.cfg.top_p,
+                        top_k=self.cfg.top_k, finish_sentence=False,
+                        stop=[im_end] + self._xstops())
                     code = c if isinstance(c, str) else c.get("text", "")
                     # Tag the think region so _extract_code strips it
                     # before candidate selection.
@@ -1591,9 +1695,10 @@ class LLMProposer:
                 out = eng.generate(
                     wrapped,
                     max_new_tokens=self.cfg.max_gen_tokens,
-                    temperature=self.cfg.temperature, top_p=0.95,
-                    top_k=80, finish_sentence=False,
-                    stop=[im_end])
+                    temperature=self.cfg.temperature,
+                    top_p=self.cfg.top_p,
+                    top_k=self.cfg.top_k, finish_sentence=False,
+                    stop=[im_end] + self._xstops())
             return out if isinstance(out, str) else out.get("text", "")
         model, tok = eng
         import torch   # lazy — module stays importable without torch
@@ -1606,7 +1711,8 @@ class LLMProposer:
                     ids.input_ids,
                     max_new_tokens=self.cfg.max_gen_tokens,
                     do_sample=True, temperature=self.cfg.temperature,
-                    top_p=0.95, top_k=80, pad_token_id=tok.eos_token_id)
+                    top_p=self.cfg.top_p, top_k=self.cfg.top_k,
+                    pad_token_id=tok.eos_token_id)
             return tok.decode(out[0][n_in:], skip_special_tokens=True)
         msgs = [{"role": "user", "content": prompt}]
         ids = tok.apply_chat_template(msgs, add_generation_prompt=True,
@@ -1614,7 +1720,8 @@ class LLMProposer:
         with torch.no_grad(), elock:
             out = model.generate(
                 ids, max_new_tokens=self.cfg.max_gen_tokens, do_sample=True,
-                temperature=self.cfg.temperature, top_p=0.95, top_k=80,
+                temperature=self.cfg.temperature, top_p=self.cfg.top_p,
+                top_k=self.cfg.top_k,
                 pad_token_id=tok.eos_token_id)
         return tok.decode(out[0][ids.shape[1]:], skip_special_tokens=True)
 
@@ -1636,6 +1743,7 @@ class LLMProposer:
             temps = [_rnd.uniform(0.7, 1.25) for _ in range(n)]
             reps = [1.0 + 0.25 * _rnd.random() for _ in range(n)]
             seeds = [_rnd.randrange(1 << 60) for _ in range(n)]
+            xs = self._xstops()      # harness-genome extra stops
             tools = [self._with_tools(p) for p in prompts]
             hint_idxs = [self._pick_hint() for _ in tools]
             hinted = [self._with_hint(
@@ -1661,10 +1769,11 @@ class LLMProposer:
                         thinks = eng.generate_batch(
                             wrapped,
                             max_new_tokens=int(self.cfg.think_budget),
-                            temperature=self.cfg.temperature, top_p=0.95,
-                            top_k=80, temperatures=temps,
+                            temperature=self.cfg.temperature,
+                            top_p=self.cfg.top_p,
+                            top_k=self.cfg.top_k, temperatures=temps,
                             repetition_penalties=reps, seeds=seeds,
-                            stops=[["</think>", im_end]] * n,
+                            stops=[["</think>", im_end] + xs] * n,
                             skip_special_tokens=True)
                         thinks = [(t.split("</think>")[0] if t else "")
                                   for t in thinks]
@@ -1674,14 +1783,15 @@ class LLMProposer:
                             [w + t + "</think>\n```python\n"
                              for w, t in zip(wrapped, thinks)],
                             max_new_tokens=self.cfg.max_gen_tokens,
-                            temperature=self.cfg.temperature, top_p=0.95,
-                            top_k=80,
+                            temperature=self.cfg.temperature,
+                            top_p=self.cfg.top_p,
+                            top_k=self.cfg.top_k,
                             temperatures=[_rnd.uniform(0.7, 1.25)
                                           for _ in range(n)],
                             repetition_penalties=[
                                 1.0 + 0.25 * _rnd.random()
                                 for _ in range(n)],
-                            seeds=seeds2, stops=[[im_end]] * n,
+                            seeds=seeds2, stops=[[im_end] + xs] * n,
                             skip_special_tokens=True)
                         raws = ["<think>" + t + "</think>\n```python\n"
                                 + (c or "")
@@ -1690,10 +1800,12 @@ class LLMProposer:
                         raws = eng.generate_batch(
                             wrapped,
                             max_new_tokens=self.cfg.max_gen_tokens,
-                            temperature=self.cfg.temperature, top_p=0.95,
-                            top_k=80, temperatures=temps,
+                            temperature=self.cfg.temperature,
+                            top_p=self.cfg.top_p,
+                            top_k=self.cfg.top_k, temperatures=temps,
                             repetition_penalties=reps, seeds=seeds,
-                            stops=[[im_end]] * n, skip_special_tokens=True)
+                            stops=[[im_end] + xs] * n,
+                            skip_special_tokens=True)
                     # SEARCH: rows get ONE batched regen — the extra
                     # round-trip is shared across all lookups.
                     return self._research_followup(
@@ -1701,8 +1813,9 @@ class LLMProposer:
                         lambda ps: eng.generate_batch(
                             [self._wrap(p) for p in ps],
                             max_new_tokens=self.cfg.max_gen_tokens,
-                            temperature=self.cfg.temperature, top_p=0.95,
-                            top_k=80,
+                            temperature=self.cfg.temperature,
+                            top_p=self.cfg.top_p,
+                            top_k=self.cfg.top_k,
                             # Regen rows get the same anti-collapse
                             # jitter as the first pass — one shared
                             # temp/seed made all regens drift to the
@@ -1714,7 +1827,7 @@ class LLMProposer:
                                 for _ in ps],
                             seeds=[_rnd.randrange(1 << 60)
                                    for _ in ps],
-                            stops=[[im_end]] * len(ps),
+                            stops=[[im_end] + xs] * len(ps),
                             skip_special_tokens=True))
             except Exception:
                 pass
@@ -1752,7 +1865,8 @@ class LLMProposer:
                     do_sample=True,
                     temperature=max(0.2, self.cfg.temperature)
                     + _rnd.uniform(-0.1, 0.1),
-                    top_p=0.95, top_k=80, pad_token_id=tok.eos_token_id)
+                    top_p=self.cfg.top_p, top_k=self.cfg.top_k,
+                    pad_token_id=tok.eos_token_id)
             start = enc.input_ids.shape[1]   # left-padded: gen starts here
             raws = [tok.decode(o[start:], skip_special_tokens=True)
                     for o in out]
@@ -2120,6 +2234,15 @@ class CodeEvolve:
                 llm_every=cfg.llm_every)
         elif cfg.proposer == "api":
             self._proposer = APIProposer(cfg, db=self.db,
+                                         tag_sig=self._tag_sig())
+        elif cfg.proposer == "bes":
+            # BES bidirectional search (RSI recon §E.2): backward goal-
+            # decomposition into <=bes_subgoals sub-goals, then one
+            # forward joint-solve pass conditioned on them. Wraps an
+            # LLMProposer — same engine/LoRA machinery, 2 gen passes
+            # per proposal instead of 1.
+            from .bes_proposer import BESProposer
+            self._proposer = BESProposer(cfg, db=self.db,
                                          tag_sig=self._tag_sig())
         elif cfg.proposer == "basin":
             # LLM emits basin parents on a background thread; the
@@ -2883,6 +3006,91 @@ class CodeEvolve:
         keep.sort(key=lambda x: -x[1])
         e[:] = keep
 
+    # ── harness-genome evolution (opt-in, cfg.harness_evolve) ────────
+    def _harness_setup(self) -> None:
+        """SPIKE (RSI recon row C1): evolve the harness around the
+        frozen proposer — sampling params, gen budgets, hint template,
+        stop suffixes, mutator op weights — as a genome with preserve-
+        and-extend admission into <db>.harness.json. Off = no state, no
+        behavior change. Called once per run() AFTER the basin LLM
+        exists so _apply_genome reaches every proposer."""
+        self._harness_archive = None
+        self._genome = None
+        self._harness_mark = None   # (eval_n, gen_n, gen_ok, promos)
+        if not getattr(self.cfg, "harness_evolve", False):
+            return
+        try:
+            from .harness_genome import HarnessArchive
+            arch = HarnessArchive(
+                Path(self.cfg.db_path).with_suffix(".harness.json"))
+            self._harness_archive = arch
+            self._genome = arch.sample(self.rng)
+            self._apply_genome(self._genome)
+            # The mark zeroes the fitness window at application time —
+            # evals/proposals from BEFORE this genome was live can't
+            # leak into its score.
+            self._harness_mark = (self._eval_n, self._gen_n,
+                                  self._gen_ok, self._promos)
+            if self.cfg.verbose:
+                print(f"[cevolve] harness genome {self._genome.genome_id}"
+                      f" (gen {self._genome.gen}, archive "
+                      f"{len(arch.entries)}/{arch.top_k}): "
+                      f"{self._genome.to_dict()}", flush=True)
+        except Exception as e:
+            print(f"[cevolve] harness genome disabled ({e})", flush=True)
+            self._harness_archive = None
+            self._genome = None
+
+    def _apply_genome(self, g) -> None:
+        """Push a genome onto the live harness: cfg sampling/budget
+        fields (read at every generate call), the proposer's
+        hint/stop seams (proposer._genome), and the mutator's op
+        weights."""
+        g.apply_cfg(self.cfg)
+        for prop in (self._proposer, self._basin_llm, self._mutator):
+            if prop is None:
+                continue
+            try:
+                prop._genome = g        # read by _pick_hint/_xstops;
+            except (AttributeError, TypeError):
+                pass                    # bound methods/builtins can't
+                                        # carry attrs — genome still
+                                        # applies via cfg fields
+        if self._mutator is not None:
+            g.apply_mutator(self._mutator)
+
+    def _harness_maybe(self, force: bool = False) -> None:
+        """Windowed fitness -> archive -> resample. Called once per
+        outer-loop iteration (covers all proposer modes) and once at
+        run end with force=True to close the final window."""
+        arch = getattr(self, "_harness_archive", None)
+        if arch is None:
+            return
+        every = max(1, int(getattr(self.cfg, "harness_evolve_every", 32)))
+        mark = self._harness_mark
+        if mark is None or (not force
+                            and self._eval_n - mark[0] < every):
+            return
+        try:
+            from .harness_genome import default_fitness
+            e0, g0, ok0, p0 = mark
+            fit = default_fitness({
+                "evals": self._eval_n - e0,
+                "raws": self._gen_n - g0,
+                "gated": self._gen_ok - ok0,
+                "promos": self._promos - p0})
+            arch.record(self._genome, fit)
+            self._genome = arch.sample(self.rng)
+            self._apply_genome(self._genome)
+            self._harness_mark = (self._eval_n, self._gen_n,
+                                  self._gen_ok, self._promos)
+            if self.cfg.verbose:
+                print(f"[cevolve] harness fitness={fit:.3f} -> genome "
+                      f"{self._genome.genome_id} (gen "
+                      f"{self._genome.gen})", flush=True)
+        except Exception:
+            pass                     # advisory — never break a run
+
     # ── per-cycle halves (shared by serial and pooled modes) ─────────
     def _stagnation_check(self) -> bool:
         """Patience/basin-hop enforcement — True means stop."""
@@ -3536,7 +3744,7 @@ class CodeEvolve:
         # Same insertion rule as _with_hint/_queue_repair: BEFORE the
         # primed fence — appending after the signature corrupts the
         # continuation.
-        i = prompt.rfind("```python")
+        i = prompt.rfind("```python\n")
         tail = prompt[i + len("```python"):] if i >= 0 else ""
         prime = "" if "```" in tail else tail.strip()
         rep = (prompt[:i] + block + "\n" + prompt[i:]
@@ -3578,7 +3786,7 @@ class CodeEvolve:
         # appending after the signature corrupts the continuation. The
         # tail after the last ```python is the prime iff it was never
         # closed by a second fence.
-        i = prompt.rfind("```python")
+        i = prompt.rfind("```python\n")
         tail = prompt[i + len("```python"):] if i >= 0 else ""
         prime = "" if "```" in tail else tail.strip()
         rep = (prompt[:i] + block + "\n" + prompt[i:]
@@ -3787,6 +3995,11 @@ class CodeEvolve:
                     name="cev_basin")
                 self._basin_t.start()
 
+        # Opt-in harness-genome evolution — no-op unless
+        # cfg.harness_evolve. Must run AFTER basin_llm exists so the
+        # genome reaches it via _apply_genome.
+        self._harness_setup()
+
         # Baseline: the original code is champion #0 (re-benched honestly).
         # First eval eats worker boot + per-worker CUDA-context init —
         # give it a longer leash than steady-state candidates.
@@ -3834,6 +4047,9 @@ class CodeEvolve:
         try:
             while not stop and self._eval_n + len(pending) \
                     + len(carry) < cfg.evals_budget:
+                # Harness-genome window: score the genome that produced
+                # the last `every` evals, archive it, sample the next.
+                self._harness_maybe()
                 # Fill the pipe — cheap gates run inline either way.
                 while (not parallel or len(pending) < self._limit) \
                         and self._eval_n + len(pending) + len(carry) \
@@ -3953,6 +4169,8 @@ class CodeEvolve:
                         self._drain_repairs(workdir, None, pool,
                                             pending, carry)
                         break
+            # Close the last genome window — its fitness counts too.
+            self._harness_maybe(force=True)
         finally:
             self._stop_evt.set()
             if self._basin_t is not None:
@@ -4036,6 +4254,15 @@ class CodeEvolve:
                               "valid_pct": round(
                                   self._gen_ok / max(1, self._gen_n)
                                   * 100, 1)},
+                # harness-genome observability — only present when the
+                # spike is enabled (key absent otherwise, not None)
+                **({"harness": {
+                    "genome": (self._genome.to_dict()
+                               if getattr(self, "_genome", None)
+                               else None),
+                    "archive": str(Path(self.cfg.db_path)
+                                   .with_suffix(".harness.json"))}}
+                   if getattr(self, "_harness_archive", None) else {}),
                 "elapsed_s": round(time.time() - t0, 1)}
 
     def _stage(self, s: str) -> None:

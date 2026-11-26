@@ -414,8 +414,21 @@ class ForgeQuantLinear(QuantizedLinearMixin):
         return out.to(x2d.dtype)
 
     @torch.no_grad()
-    def load_from_weight(self, w: torch.Tensor):
-        """Quantize a float weight tensor into ForgeQuant format."""
+    def load_from_weight(self, w: torch.Tensor,
+                         outlier_rows: torch.Tensor | None = None):
+        """Quantize a float weight tensor into ForgeQuant format.
+
+        Writes packed storage IN PLACE (copy_ into existing params) —
+        rebinding ``.data`` to fresh CPU tensors silently moves weights
+        off GPU (killing the fused-GEMV path's ``is_cuda`` check) and
+        invalidates captured CUDA-graph storage.
+
+        ``outlier_rows``: fixed sparse-outlier row indices. Pass the
+        existing ``sparse_indices`` when re-packing a merge result so
+        the outlier partition doesn't churn between rounds (a LoRA
+        delta shouldn't change which rows are outliers — re-picking
+        adds a full re-partition error on top of the RTN error).
+        """
         assert w.shape == (self.out_features, self.in_features)
         gs = self.group_size
         n_groups = (self.in_features + gs - 1) // gs
@@ -430,21 +443,24 @@ class ForgeQuantLinear(QuantizedLinearMixin):
             w_eff = w
 
         # 1. Identify outlier channels by per-row L2 norm
-        row_norms = w_eff.norm(dim=1)  # (out_features,)
-        _, top_indices = row_norms.topk(self.n_sparse)
-        top_indices = top_indices.sort().values  # keep sorted for cache
-        self.sparse_indices.data = top_indices.to('cpu')
+        if outlier_rows is not None:
+            top_indices = outlier_rows.to(w.device).long()
+        else:
+            row_norms = w_eff.norm(dim=1)  # (out_features,)
+            _, top_indices = row_norms.topk(self.n_sparse)
+            top_indices = top_indices.sort().values  # keep sorted for cache
+        self.sparse_indices.data.copy_(top_indices)
 
         # 2. Extract sparse outlier rows — ALWAYS the original basis, so
         # the correction contracts with un-rotated activations at forward.
         w_sparse = w[top_indices]  # (n_sparse, in_features)
         sparse_scales = w_sparse.abs().amax(dim=1, keepdim=True).clamp(min=1e-8) / 127.0
-        self.sparse_scales.data = sparse_scales.to(torch.float16).to('cpu')
+        self.sparse_scales.data.copy_(sparse_scales.to(torch.float16))
 
         # Quantize sparse to INT8 (high precision for outliers)
         w_sparse_norm = (w_sparse / sparse_scales).clamp(-128, 127)
         sparse_q = torch.round(w_sparse_norm).clamp(-128, 127).to(torch.int8)
-        self.sparse_packed.data = sparse_q.to('cpu')
+        self.sparse_packed.data.copy_(sparse_q)
 
         # 3. Quantize dense in the STORAGE basis: zero the outlier rows
         # (zero rows stay zero under rotation), then pad/quantize.
@@ -466,8 +482,9 @@ class ForgeQuantLinear(QuantizedLinearMixin):
         # Pack 2 per byte
         int4_flat = int4_u.reshape(self.out_features, -1)
         packed_dense = int4_flat[:, 0::2] | (int4_flat[:, 1::2] << 4)
-        self.dense_packed.data = packed_dense.to('cpu')
-        self.dense_scales.data = dense_scales.squeeze(-1).to(torch.float16).to('cpu')
+        self.dense_packed.data.copy_(packed_dense)
+        self.dense_scales.data.copy_(
+            dense_scales.squeeze(-1).to(torch.float16))
         self._cached_weight = None
         self._cached_weight_rot = None
 
@@ -590,7 +607,10 @@ class ForgeQuantLinear(QuantizedLinearMixin):
         w = self._dequantize_weight(torch.float32, cache=False)
         delta = lora.scale * (lora.lora_B @ lora.lora_A)
         w = w + delta.to(torch.float32)
-        self.load_from_weight(w)
+        # Keep the outlier-row partition stable across merges — re-picking
+        # top-k rows every round folds an extra re-partition error into
+        # the canonical weights on each merge cycle.
+        self.load_from_weight(w, outlier_rows=self.sparse_indices.data)
         self.lora_adapter = None
         self._cached_weight = None
         self._cached_weight_rot = None
@@ -756,8 +776,11 @@ class NF4QuantLinear(QuantizedLinearMixin):
         idx = dist.argmin(dim=-1)
         idx_flat = idx.reshape(self.out_features, -1).to(torch.uint8)
         packed = idx_flat[:, ::2] | (idx_flat[:, 1::2] << 4)
-        self.weight_packed.data = packed.to('cpu')
-        self.weight_scales.data = scales.squeeze(-1).to(torch.float16).to('cpu')
+        # In-place writes — see ForgeQuantLinear.load_from_weight note:
+        # rebinding .data moves weights to CPU and breaks graph storage.
+        self.weight_packed.data.copy_(packed)
+        self.weight_scales.data.copy_(
+            scales.squeeze(-1).to(torch.float16))
         self._cached_weight = None
 
     def _dequantize_weight(self, dtype: torch.dtype = torch.bfloat16,

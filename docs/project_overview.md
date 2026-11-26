@@ -65,7 +65,7 @@ undo + `explain()` cell provenance; the competitive set is agent memory
 (mem0/MemGPT/Letta), not transformers. Head-to-head vs a TF-IDF RAG
 baseline on held-out doc-grounded QA: `scripts/bench_flux_vs_rag.py`.
 STRATA is the deployment container format — division of labor in
-`docs/STRATA_VS_FLUXLM.md`.
+`docs/design/STRATA_VS_FLUXLM.md`.
 
 ---
 
@@ -249,7 +249,7 @@ Key: `tool_trajectories` stores full multi-turn conversations with reward scores
 **Files**: `forge/evolution/` (engine: `engine.py`, domains: `domains/`, DB: `database.py`), `forge/evolution/code_evolve.py`, `forge/evolution/targets/`, `forge/evolution/eval_pool.py`, `forge/evolution/mutator.py`
 
 - **ForgeEvolve** — MAP-Elites/bandit evolutionary optimizer over `BaseDomain` specs; CLI `python -m forge.evolution --domain <name>`. `scout.py` is the OpenEvolve-lite discovery engine (TPE proposer + domain bandit + cross-domain param priors).
-- **CodeEvolve** — OpenEvolve-style *program* evolution: `Target` files declare `SEED_CODE`/`REQUIRED`/`test(ns)`/`bench(ns)`/`METRIC`/`GOAL`; proposers (`mut`/`mix`/`llm`/`basin`/`none`) emit candidates → free gates → isolated eval (`_candidate_eval.py` subprocess or persistent `EvalPool` workers) → replicated verify → promote on verified win only.
+- **CodeEvolve** — OpenEvolve-style *program* evolution: `Target` files declare `SEED_CODE`/`REQUIRED`/`test(ns)`/`bench(ns)`/`METRIC`/`GOAL`; proposers (`mut`/`mix`/`llm`/`basin`/`api`/`bes`/`none`) emit candidates → free gates → isolated eval (`_candidate_eval.py` subprocess or persistent `EvalPool` workers) → replicated verify → promote on verified win only.
 - **RSI loop** — `scripts/rsi_evolve.py` runs the target set per round, exports `export_sft` (verified child>parent pairs) + `export_validity_pairs` (validity-DPO: malformed/dup emissions as rejected), then `finetune_proposer --mode lora` hones tagged adapters that hot-swap next round — the proposer trains on its own verified wins.
 - **CLIs** — `scripts/fn_evolve.py` (single target), `scripts/evolve_all.py` (evolve-only campaign), `scripts/rsi_evolve.py` (evolve+hone campaign).
 - See `docs/EVOLVE_ROADMAP.md` for the shipped/queued list and AGENTS.md for the full parameter reference.

@@ -1,0 +1,185 @@
+"""EXP-XTAL driver â€” rule crystallization dynamics on the synthetic grammar.
+
+Trains a vanilla tiny transformer (ConfigurableResearchLLM via livet_config,
+GDN2/Titan disabled) on XtalGrammar streams, logging per-rule loss
+crystallization curves, gradient alignment between rules, and embedding
+class-geometry over training.
+
+Curve records append to results/xtal/<run>.jsonl; the run summary logs via
+forge.exp.harness.log_result (.devin/exp_results.jsonl) per repo convention.
+
+Usage:
+  python scripts/exp_xtal.py --steps 3000 --run baseline
+  python scripts/exp_xtal.py --steps 200 --run smoke
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import sys
+import time
+
+import torch
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from forge.exp.xtal_grammar import VOCAB, XtalGrammar
+from forge.exp.xtal_probe import (embedding_geometry, eval_fixed_batches,
+                                  grad_alignment, batch_loss)
+from forge.exp.harness import log_result
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT_DIR = os.path.join(ROOT, "results", "xtal")
+
+
+def build_model(args, vocab=None):
+    from forge.model.live import livet_config
+    from forge.model_loader import ConfigurableResearchLLM
+    cfg = livet_config(
+        vocab_size=vocab or VOCAB, d_model=args.d_model, n_layers=args.n_layers,
+        n_heads=args.n_heads, max_seq_len=128, device=args.device,
+        dtype="float32",
+        use_gdn2=False, use_titan_memory=False,   # vanilla transformer
+    )
+    model = ConfigurableResearchLLM(cfg)
+    from forge.training.runners.train_8b_all import (
+        initialize_weights_, normalize_logit_scale_)
+    initialize_weights_(model, args.n_layers)
+    model.to(args.device)
+    normalize_logit_scale_(model, torch.device(args.device), cfg)
+    return model
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--steps", type=int, default=3000)
+    ap.add_argument("--batch", type=int, default=64)
+    ap.add_argument("--lr", type=float, default=3e-3)
+    ap.add_argument("--wd", type=float, default=0.01)
+    ap.add_argument("--warmup", type=int, default=100)
+    ap.add_argument("--d-model", type=int, default=128)
+    ap.add_argument("--n-layers", type=int, default=4)
+    ap.add_argument("--n-heads", type=int, default=4)
+    ap.add_argument("--members", type=int, default=8)
+    ap.add_argument("--n-classes", type=int, default=8)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--eval-every", type=int, default=50)
+    ap.add_argument("--grad-every", type=int, default=100)
+    ap.add_argument("--eval-batches", type=int, default=64)
+    ap.add_argument("--ruled", action="store_true",
+                    help="add rule-D (class-copy) chunks to the mix")
+    ap.add_argument("--ruler", action="store_true",
+                    help="add rule-R (relational composition) chunks to the mix")
+    ap.add_argument("--run", default="baseline")
+    args = ap.parse_args()
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+    curve_path = os.path.join(OUT_DIR, f"{args.run}.jsonl")
+    torch.manual_seed(args.seed)
+
+    mix = None
+    if args.ruled:
+        mix = {"A": 0.45, "B": 0.05, "C": 0.2, "D": 0.15, "N": 0.15}
+    elif args.ruler:
+        mix = {"A": 0.4, "B": 0.05, "C": 0.2, "R": 0.2, "N": 0.15}
+    grammar = XtalGrammar(seed=args.seed, device=args.device,
+                          n_classes=args.n_classes, members=args.members,
+                          mix=mix)
+    model = build_model(args, vocab=grammar.vocab)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"[xtal] params={n_params/1e6:.2f}M device={args.device}")
+
+    # fixed eval batches â€” identical across all runs
+    kinds = ("A", "AH", "B", "C", "N")
+    if args.ruled:
+        kinds += ("D", "DH")
+    if args.ruler:
+        kinds += ("R", "RH")
+    eval_sets = {k: grammar.gen_eval_batch(k, batch_size=args.eval_batches)
+                 for k in kinds}
+    floors = grammar.floors()
+
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr,
+                            betas=(0.9, 0.95), weight_decay=args.wd)
+
+    def lr_at(step):
+        if step < args.warmup:
+            return args.lr * (step + 1) / args.warmup
+        return args.lr
+
+    curve = open(curve_path, "a")
+
+    def emit(step, rec):
+        rec["step"] = step
+        rec["run"] = args.run
+        curve.write(json.dumps(rec) + "\n")
+        curve.flush()
+
+    t0 = time.time()
+    tokens_seen = 0
+    model.train()
+    for step in range(args.steps):
+        for g in opt.param_groups:
+            g["lr"] = lr_at(step)
+        toks, tags = grammar.gen_batch(args.batch)
+        loss = batch_loss(model, toks, tags)
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        opt.step()
+        tokens_seen += toks.numel()
+
+        if step % args.eval_every == 0 or step == args.steps - 1:
+            model.eval()
+            res = eval_fixed_batches(model, eval_sets)
+            rec = {"kind": "eval", "train_loss": float(loss.detach())}
+            for k, v in res.items():
+                rec[f"eval/{k}"] = round(v, 4)
+            # excess loss above analytic floor for the governed tags
+            from forge.exp.xtal_grammar import (TAG_A, TAG_AH, TAG_B, TAG_C,
+                                                TAG_D, TAG_R)
+            for tag, key in ((TAG_A, "A/ruleA"), (TAG_AH, "AH/ruleA_heldout"),
+                             (TAG_B, "B/ruleB"), (TAG_C, "C/ruleC"),
+                             (TAG_D, "D/ruleD"), (TAG_D, "DH/ruleD"),
+                             (TAG_R, "R/ruleR"), (TAG_R, "RH/ruleR")):
+                if key in res:
+                    rec[f"xs/{key}"] = round(res[key] - floors[tag], 4)
+            emit(step, rec)
+            model.train()
+
+        if step % args.grad_every == 0 or step == args.steps - 1:
+            model.eval()
+            ga = grad_alignment(model, {k: eval_sets[k] for k in ("A", "C", "N")})
+            eg = embedding_geometry(model, n_classes=grammar.n_classes,
+                                    members=grammar.members)
+            rec = {"kind": "grad"}
+            rec.update({k: round(v, 5) for k, v in ga.items()})
+            rec.update({k: round(v, 5) for k, v in eg.items()})
+            emit(step, rec)
+            model.train()
+
+    dt = time.time() - t0
+    final = eval_fixed_batches(model, eval_sets)
+    summary = dict(
+        run=args.run, steps=args.steps, params=n_params,
+        tokens=tokens_seen, wall_s=round(dt, 1),
+        tok_s=int(tokens_seen / max(dt, 1e-9)),
+        final_A=round(final["A/ruleA"], 4),
+        final_AH=round(final.get("AH/ruleA_heldout", float("nan")), 4),
+        final_B=round(final.get("B/ruleB", float("nan")), 4),
+        final_C=round(final.get("C/ruleC", float("nan")), 4),
+        final_D=round(final.get("D/ruleD", float("nan")), 4),
+        final_DH=round(final.get("DH/ruleD", float("nan")), 4),
+        final_R=round(final.get("R/ruleR", float("nan")), 4),
+        final_RH=round(final.get("RH/ruleR", float("nan")), 4),
+        final_N=round(final["N"], 4),
+    )
+    log_result("exp_xtal", **summary)
+    print(f"[xtal] done in {dt:.0f}s â€” curve at {curve_path}")
+
+
+if __name__ == "__main__":
+    main()

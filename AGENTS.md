@@ -1,5 +1,23 @@
 # ForgeAI — Agent Notes
 
+## Quick Find
+
+| Need | Go to |
+|---|---|
+| Task→file routing + package map | `docs/CODEBASE_MAP.md` |
+| Scoped edit rules per subsystem | `.devin/rules/<area>.md` — check BEFORE editing |
+| Script lookup (148 drivers) | `scripts/README.md` |
+| Doc index | `docs/INDEX.md` |
+| Env/test facts, machine-readable | `.devin/config.json` |
+| Working notes / shelved ideas | `.devin/scratchpad.md` |
+| Bug + failure history | `docs/BUG_LOG.md` · `docs/FAILURE_CATALOG.md` |
+
+**File placement:** production code → `forge/<pkg>/` · drivers/benches →
+`scripts/` (prefix conventions in `scripts/README.md`) · tests →
+`tests/unit/` (CPU) or `tests/integration/` (GPU) · one-off probes →
+`.devin/` (gitignored — nothing there is durable) · docs → `docs/` +
+`design/` + `research/` + `archive/` subdirs.
+
 ## Agent Operating Directives (READ FIRST)
 
 These directives govern how work is done in ForgeAI. They are non-negotiable
@@ -13,7 +31,7 @@ unless the user explicitly overrides them for a specific task.
   `forgelm_v13_gdn2` (R60: Gated DeltaNet-2 side-paths, KDA-superset) →
   `forgelm_v14_rsi` (V14: ~2.5B RSI-loop coder, conv/mamba3/GLA + MoE-FFN +
   CopySpan/Verifier heads — non-lossless new topology, all divergences
-  documented in dropped_keys; see docs/V14_RSI_DESIGN.md).
+  documented in dropped_keys; see docs/design/V14_RSI_DESIGN.md).
 - **Port-first, train-second**: when introducing a new architecture key or
   attention variant, write the lossless checkpoint-conversion path
   (`XxxKey` class, identity/zero-init warm start, bit-exact load test)
@@ -264,7 +282,7 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   13.3 pageable GB/s + streaming tok/s model — int4 FFN-only prefetch ≈75
   tok/s vs airllm-today ≈4.4), `scripts/bench_lossless_weights.py` (bf16
   lossless ceiling ≈10.7 b/param, split-zlib 69.9%, minmax-int4 codes
-  ~incompressible H=3.86/4). Design: `docs/R71_STREAMED_INTELLIGENCE_DESIGN.md`.
+  ~incompressible H=3.86/4). Design: `docs/design/R71_STREAMED_INTELLIGENCE_DESIGN.md`.
   R71 lanes shipped: `airllm_streamer.py`+`airllm_ring.py` (StreamHead —
   per-layer xp_shards + pinned cache + ring prefetch; numeric shard sort —
   lexicographic order scrambles layers ≥10, verified bit-exact vs resident;
@@ -275,111 +293,7 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   when both apply), `ecq_codec.py` (entropy-bound lossless weight codec,
   3.84 b/p), `lora_es.py` (fwd-only ES tuning — fp32 masters + randn_ab,
   evalCE -14% @ 3.94GB), `loopdepth.py` (VerifierGate+LoopGates — FORGE_
-  LOOPTHINK=k,max,g[,thr],gates.pt; holdout -5.5..-8.1% CE, cross-domain
-  -2.6%; ungated recurrence diverges — gates are the mechanism), 
-  `fisher_merge`/`fisher_diag` (--alpha-new dial, grouped bf16 GPU fisher
-  ≈9.4GB; reverts damage on bad donors, keeps 36-74% of skill on good).
-- `forge/engine/forge_engine.py` — ForgeEngine (inference engine; core init +
-  8 mixins: engine_checkpoints, engine_activation, engine_generation,
-  engine_diagnostics, engine_merging, engine_lora, engine_lifecycle,
-  engine_sessions; shared helpers in engine_common.py).
-  R60-4: `engine_generation._maybe_compact_past_kv` is the live bridge
-  between the registered `kv_cache` strategy (beacon/anchor/metakv) and
-  the per-request `past_kv` — it compacts only `(k, v)` tuple entries
-  (dict SSM/conv state passes through), throttled to `compact_over`
-  watermark crossings + every 32 steps + once forced after prefill.
-  IMPORTANT invariant: any T>1 forward mid-sequence (chunked prefill,
-  spec verify) must see the committed conv/SSM left context —
-  `DoubleGatedConvLayer`/`MambaLayer`/`Mamba3Block` now read live
-  state/`past["conv_state"]` as the continuation prefix; do NOT add
-  T>1 decode-time paths that bypass this.
-  R66 static-KV decode graphs: `PreAllocatedKVCache` gained `pos_t`
-  tensor-position mode (`enable_tensor_pos`/`sync_tensor_pos`/
-  `append_t` — `index_copy_` device-indexed writes, no python-int
-  `[:pos]` slicing); GLA + GQA attention read the FULL buffer under
-  `pos_t` with future slots masked by `attention_bias` (mask_buf is
-  both the position_ids source via cumsum and the future-slot mask).
-  `BreakableCudaGraph.capture_decode(decode_step=)` requires a
-  static-KV step callable (refuses context-free captures — they were
-  silently wrong) and validates warmup OUTSIDE `torch.cuda.graph`
-  (exceptions inside capture poison the stream).
-  `feature_registry._h_breakable_cuda_graph` builds the shared
-  cache+mask at activation and captures one graph PER KV-LENGTH
-  BUCKET (512..8192): each capture sets `cache.view_len=b` and
-  passes a `mask_buf[:, :b]` view, so the recorded attention reads
-  only [:b] of the shared storage — a bucket switch costs zero data
-  movement and bounds wasted attention to ~4x (vs ~30x full-buffer).
-  Compiled-model step tried ×2 per bucket, eager fallback per bucket;
-  `_decode_state['compiled_step']` = all-buckets-fused.
-  `StandardDecoding._generate_static` replays per token
-  (mask_buf[pos]=1 → pos_t=pos → input copy → pick smallest bucket ≥
-  pos+1 → replay).  Measured proposer_mla_moe RTX 5070
-  (int4+rotorquant, 256-token decode, BIT-IDENTICAL output):
-  eager-KV ~39, compiled-functional 598, **bucketed static-graph
-  1258 tok/s (2.1x)**.  The "Triton cache race" was actually Windows
-  MAX_PATH: ~200-char fused-kernel names + long cache base + ~85
-  chars hash/tmp > 260 → deterministic tmp-dir FileNotFoundError.
-  `configure.py` pins `TRITON_CACHE_DIR` to a ≤24-char drive-root
-  dir (same rule as flux/model.py).
-  `_forward_impl` skips conv/SSM state reset when
-  `preallocated_cache.position > 0` so captured steps don't bake
-  resets. Equivalence contract test:
-  `TestKVCacheEquivalence.test_gqa_tensor_pos_equivalence`.
-  R66-batched: `model._ensure_static_batch(B, plen, need_len)` lazily
-  allocates a batch-B cache (own `pos_t`/mask) and captures only the
-  buckets covering (plen..need_len] — tags `b{B}_kv{b}` share the
-  `bcg._decode_graphs/_static_buffers` dicts with B=1's `kv{b}`.
-  The batch cache is sized to the smallest covering bucket and any
-  resize evicts the stale `b{B}_*` graphs (they hold pointers into
-  the old storage).  `BatchedDecoding.generate_batch` drives it
-  through a `step_fn` seam (left-pad → per-seq positions emerge from
-  per-row mask cumsum; finished rows keep replaying, outputs masked
-  by `active`).  B≤32 supported; need_len>max bucket → functional
-  fallback.
-  LFM3 (lfm3_1p7b_cc_fq) verified: conv-state is a single owned
-  bank buffer + per-batch views (position-0 reset writes in place —
-  captured graphs never lose storage), conv pad-mask reads the
-  current position via `attention_mask.index_select(1, pos_t)` (the
-  bucket-view `[:, -1]` column is always 0 → was zeroing all 13
-  conv layers per replay).  All fused-attention wrappers route
-  through `_finish_attn` so the per-head sigmoid output gate is
-  applied — the functional path had been silently skipping it.
-  Measured greedy equality static-vs-functional-batched with kernel
-  parity (`--no-wrappers --no-compile`): B=8 8/8, B=16 16/16,
-  B=32 32/32 exact rows; `compile=True` flips ~6% of rows at B=32
-  on argmax near-ties (inductor numerics — coherent output, not
-  corruption; irrelevant under temperature sampling).  Throughput
-  (RTX 5070, cached-bf16 `_cache_w=True`): B=16 ~1.05k tok/s,
-  **B=32 1271 tok/s aggregate** (peak 5.8GB).  int4-fused Triton
-  GEMM at M=16 measured 3.3x SLOWER than dequant-cached cuBLAS —
-  `_fused_gemv=False` is correct at batch decode.  Harness:
-  `scripts/bench_lfm3_evolve.py` (equality + tok/s, releases the
-  functional engine before loading static to avoid 12GB contention).
-  R66-MoE probes (overclock_probe E5): proposer_mla_moe experts are
-  DIVERGENT in all 24 layers (port-side specialization, not a load
-  bug); the `_experts_identical` dense_bypass fast path is correct
-  armor for fresh ports but never fires here.  Router is untrained
-  (gating entropy 0.000): routed-k4 NLL +2.8, k2 +10.1, k1 +12.0 vs
-  mean-of-4 baseline 3.41 — dense_bypass IS the semantics; cutting
-  the 4x expert compute needs distillation, not a flag.
-- `forge/model/llm.py` — runtime loop dial (Dory-style latent
-  recurrence): `model._loop_iters/_loop_begin/_loop_end/_loop_reinject`
-  re-run `blocks[begin:end)` K times per forward with last-loop-KV +
-  conv/ssm state rollback on non-final passes (functional KV path only —
-  raises on preallocated/static caches). Default 1 = plain schedule,
-  zero overhead; train-time backprop flows through all passes (loop-FT
-  ready). Probe `scripts/probe_lfm3_loops.py` on lfm3_1p7b_cc: zero-shot
-  loops HURT — PPL 5.21→8.46@K2→45.7@K4 (reinject=1: 7.81/20.6), task
-  checks 6/6→2/6@K2→1/6@K4 (reinject=1: 5/6@K2), decode cost 1.8x@K2 /
-  3.1x@K4 per token. Verdict: needs Dory-style loop-sampled FT to pay
-  off; reinjection halves the damage and is the right starting shape.
-- `forge/aux_models.py` — generic non-LLM inference runner
-  (`load_aux_model(manifest, ckpt)`): safetensors + manifest-declared
-  `mlp`/`module` archs, VRAM-aware CUDA/CPU pick, `layer{i}` key remap.
-- `forge/aux_train.py` — train-side sibling: `train_mlp(X, Y, ...)` on
-  numpy arrays (AdamW + cosine, input-norm folded into layer0 so exported
-  nets take raw features), `export_aux_checkpoint` writes `layer{i}.*`
-  safetensors via `save_checkpoint`. Used by Oposition's `neural/train.py`.
+  LOOPTHINK=k,max,g[,thr],gates.pt; 2026-11 two-test audit FAILED on spark AND granite (gated CE within +-0.4% = noise at equal params; equal-FLOPs extended context wins 20-50x; CKA->1.0 undifferentiated — keep for train-loop lane only; see scratchpad_research_lacuna_r2.md Round-2 results. Earlier -5.5..-8.1% were seq256/on-dist artifacts)`neural/train.py`.
 - `forge/model/live.py` — LiveT live-training session wrapper
   (`LiveConfig`, `LiveSession`, `livet_config`): journaled live learning
   over ConfigurableResearchLLM. Live surfaces = GDN2 recurrent states
@@ -389,7 +303,7 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   stays frozen — params are never written by ingest; only journaled
   buffers move. `mark()`/`revert()`/`snapshot()`/`load()` give exact
   undo; `eval_nll(use_live_state=)` measures without mutating.
-  Design doc: `docs/LIVET_DESIGN.md`; tests `tests/unit/test_livet.py`.
+  Design doc: `docs/design/LIVET_DESIGN.md`; tests `tests/unit/test_livet.py`.
   TitanMemory v2 (titan_memory_key.py): learned k/v/q/o projections +
   buffer fast weights + momentum/forget inner loop; `update()` target
   defaults to successor-token embedding (context→next-token store);
@@ -411,7 +325,7 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   memory (mem0/MemGPT/Letta), not transformers.**  Held-out doc-grounded
   QA head-to-head vs a TF-IDF RAG baseline:
   `scripts/bench_flux_vs_rag.py`; STRATA division of labor:
-  `docs/STRATA_VS_FLUXLM.md`.  Package layout: `config.py` (FluxConfig),
+  `docs/design/STRATA_VS_FLUXLM.md`.  Package layout: `config.py` (FluxConfig),
   `helpers.py` (`_mix64`/`_s64`/`_scatter_sum`/teacher loader),
   `journal.py` (FluxJournal), `tables.py` (_GPUCellTables),
   `kernels.py` (triton, HAS_TRITON-gated), `model.py` (FluxLM =
@@ -996,14 +910,14 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   surprise-gated writes, ingest/teach/observe/learn, forward→
   (logits,None,None), generate+knobs, explain/audit/revert/snapshot —
   CPU-eager reference, ~86 tok/s learn.  Design =
-  `docs/STRATA_M1_DESIGN.md`; further milestones (dense gsyn channel
+  `docs/design/STRATA_M1_DESIGN.md`; further milestones (dense gsyn channel
   should reuse FLUX's r_live live-feature pattern — params+knobs, no
   distill).  Bench: `.tmp/bench_strata_step.py` — eager is
   launch-bound dead (~28 tok/s); graph replay 585µs for 10
   probes+dense; `pk_of` per-call salt alloc breaks capture; add() not
   graphable → two-tier thin-write + deferred repair.  Tests:
   `tests/unit/test_strata.py` (27) + `test_strata_m1.py` (25).
-  Division of labor (audit A12, `docs/STRATA_VS_FLUXLM.md`): FluxLM =
+  Division of labor (audit A12, `docs/design/STRATA_VS_FLUXLM.md`): FluxLM =
   research vehicle, STRATA = deployment artifact format — new
   capabilities land in FluxLM first; STRATA ports only stabilized
   pieces.  Consolidation trigger: fold into flux/ if the container
@@ -1214,6 +1128,35 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   `--load-quantize int4`, `--kv-tokens N` (caps KV prealloc).
   Validated on Hermes-3-8B: ~11.5s load, ~7.6GB VRAM incl. KV,
   ~34 tok/s, 28k-token KV budget. Tests: `tests/unit/test_llama31_w4.py`.
+- `forge/engine/quant/littlebit2.py` — LittleBit-2 (ICML 2026) sub-1-bit
+  latent-factorized quantization: `LittleBitLinear` replaces W with
+  diag(u1)·U_q·diag(u2·v1)·V_q·diag(v2) — binarized ±1 latent factors
+  from Dual-SVID init + LittleBit-2's Joint-ITQ shared latent rotation
+  (lossless in FP, aligns SVD factors with the binary hypercube, zero
+  inference overhead). Params stay learnable for QAT (SmoothSign/STEBinary
+  STEs); optional residual factor pair; `pack_weights()` → 1-bit int32
+  export. Wired as `quantize="littlebit2"` (config: `littlebit2_eff_bit`,
+  `littlebit2_split_dim`, `littlebit2_residual`, `littlebit2_use_itq`,
+  `littlebit2_iters`, `littlebit2_kv_ratio`; falls back via nanoquant).
+  Supported by block_recon (soft-forward path optimizes latents+scales).
+  NOTE: PTQ-only quality at <1 BPW is limited — this is a QAT-first
+  method (R45 showed binary PTQ without training is catastrophic).
+  Tests: `tests/unit/test_littlebit2.py`.
+  Self-play integration (2026-11): `LittleBitLinear.forward` applies
+  `lora_adapter`; `merge_lora()` re-factorizes W_hat+delta (lossy —
+  adapter-swap preferred over repeated merge); `densify_model_littlebit2`
+  converts back to nn.Linear so checkpoints stay fp-format;
+  `refactorize_from_state_dict` is required on weight swaps (LB2 layers
+  have no `.weight` param — the copy_ loop silently skips them);
+  `freeze_binarized(dtype)` snaps factors to ±1 in compute dtype;
+  sidecar `<ckpt>.lb2_e*_r*_i*.safetensors` caches the ~7min SVD+ITQ
+  conversion per checkpoint. Loop: `--quantize littlebit2 --lb2-eff-bit`
+  (auto-passes `--qlora-lb2` to sft_train so adapters train on the same
+  factorized base). MEASURED on parable 3B @0.5bpw: PTQ quality dead
+  (0% greedy overlap) and unfused factor chain is ~4x SLOWER than bf16
+  decode (208 vs 926 tok/s B=16) — LB2 is a QAT/memory substrate,
+  not a decode-speed path. nvfp4 (dequant-per-forward) and w8a8
+  (fp-restore snapshot) both OOM at 3.66B/12GB.
 - `forge/decoding/` — Decoding implementations
 - `forge/training/` — Training runners + optimizers; `training/data/`
   holds the dataset pipeline modules (`efficient_pipeline`,
@@ -1306,7 +1249,7 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   qlora/forge_quant; re-base rule unchanged (train from base ckpt).
 - `forge/evolution/` — Evolutionary optimizer (ForgeEvolve); CLI: `python -m forge.evolution --domain <name> --steps <N>` (use `--list-domains` to see all domains). Domain specs + run/focus profiles live in `forge/evolution/configs/` (canonical; the legacy `tests/evolution/configs/` copy was removed — the tests/evolution harness scripts now point at the canonical dir). `--fixate` pins a run to one domain: no cross-domain transfer, no refinement spawning, plateaus re-diversify in place (`_fixate_rediversify`); `run_evolve.py --fixate` additionally kills auto-discover/revisit/parallel waves. `forge/evolution/domains/livet_domains.py` — `MicroLiveLM` (R64): the micro live-format search domain; REAL evaluator (builds ConfigurableResearchLLM+LiveSession on CUDA, measures fact-recall live_gain, bs=1 decode tps, ingest tps, params, revert parity — not synthetic). Structural grid via `discrete_choices` (240 cells) + 9 continuous dims. Focus topic: `--focus micro_format`. Results: conv+titan+ngram substrate dominates the micro frontier (d64-class ~0.2-0.5M params, gain ~5, ~250tps); see scratchpad R64. `forge/evolution/domains/flux_domains.py` — `FluxTune` (R65): FluxLM self-tuning domain; builds real FluxLM (cuda_primary, graphs+compile_dev off — concurrent captures/poisoned RNG state crash threaded evals) and measures held-out NLL, 1-hop + 2-hop chain recall, pred/ingest/gen tps, memory_report+VRAM, argmax diversity; score = weighted log2 ratios vs production defaults (baseline anchors at 25). `forge/evolution/domains/meta_domains.py` — `EvolverTune` (R65): meta-evolution — candidates are ForgeEvolveConfig knobs scored by real inner ForgeEvolve runs on SyntheticDomain (progress vs random-floor + eval efficiency); fixated+warm_start=False inner runs isolate proposal quality. Both set `eval_thread_safe=False` (engine opt-out of `_threaded_eval` side-stream pools — added in engine.py `_gpu_batch_eval`). Categories/focus topics: `fluxlm`, `evolver`. DBs: `forge_evolve_flux.db`, `forge_evolve_meta.db`, `forge_evolve_meta_inner.db` (scratch). R66 proposal frontier (engine.py): proposals are submitted to a pending frontier every gen and popped for eval later — submission is decoupled from eval throughput (`_submitted` counter in logs; measured ~2.1K unique proposals/s on synthetic). `ForgeEvolveConfig.propose_mult` (proposals/gen = n_generators×propose_mult, multi-sample grouped-einsum forward in `BatchedGenerator`), `frontier_cap` (evict lowest surrogate-scored pending), `quick_ratio` (multi-fidelity: pop quick_ratio×, domain `quick_eval` ranks, top fraction promotes to full eval). Domains may set `cpu_eval_ok=False` to opt out of the `parallel_eval` CPU pool (FluxTune/EvolverTune do — GPU-bound/nested-CUDA). Dedup is one D2H transfer + vectorized round for all candidates (was per-candidate `.cpu()`, ~100x). FluxTune quick_eval: ~1/3 corpus, 200 held positions, no decode probe, quality+mem terms only (tps is wall-clock noise at that fidelity), ~3x cheaper, deterministic prod=25.0 anchor. FluxTune hop2 probe is real chain recall (`#V>` -> V_next, the hop-1 value becomes the hop-2 key — measures association chaining, baseline ~2.35 nats). R66b literature fixes (AlphaEvolve/FunSearch/pyribs/MEMES parity): dedup keys on the DECODED config (discrete-bin domains were re-evaluating identical configs under different param vectors); per-generator archive-conditioned contexts (60% UCB elite / 15% random cell / 15% two-elite blend / 10% best — was one shared elite for all generators); rank-shaped scores for trainer+evolve (OpenAI-ES centered-rank fitness shaping — -1e9 failure spikes no longer poison fitness_ema); explore emitters (first 20% of generators credited on rank-shaped novelty, MEMES-style); crossover emitter (`crossover_frac`, blends two elite encodings + jitter as direct proposals, generator_idx=-2); islands (`n_islands` deme archives — generator g feeds island g%K, weakest half import global elites every `island_migrate_gens`).
 - `forge/evolution/scout.py` — Scout (OpenEvolve-lite): lightweight goal-driven discovery engine layered on the same domain specs + simulators + FindingsDB, replacing the 500-generator MLP population / gen-model manager / weight-BLOB storage with three small ML components: (1) numpy-only TPE proposer (Parzen l(x)/g(x) density-ratio over top-γ history + elite archive parents; per-dim bandwidths shrink where |corr(param,score)| is high — learned knob importance; `--mode random` = baseline), (2) Thompson-sampling Beta bandit over domains so cycles flow to whichever domain keeps paying off, (3) cross-domain param priors — `scout_param_stats` holds global per-(param-name, bin) Welford stats of within-domain z-scored evals, so a fresh domain inherits good regions for params shared with other domains (`transferable=false` specs neither leak nor receive). Promotion gate: candidate must beat the incumbent's re-measured mean by max(min_delta, rel_delta·|inc|, k·pooled SEM) over `--verify-reps` replicated evals of BOTH configs (fresh seeds; z-score recorded in metadata) — only then is it written to `discoveries`. Stagnation: domain retires after `--patience-dom` (40) dry cycles (basin hop at `--hop-after` 12 first), run stops after `--patience` (30) globally dry cycles or when all domains retire. Goal routing: `--focus memory|speed|quality|training` maps to spec categories (mirrors focus_profiles.json); `--require "metric>=v"` adds an end-result gate on promotions. CLI: `scripts/scout_loop.py` (e.g. `--focus memory --cycles 300`, `--report` for discoveries + cross-domain insights). ~20 evals/s on CPU, zero VRAM. Tests: `tests/unit/test_scout.py` (10). Measured smoke: 37 verified discoveries / 640 evals / 32s on `--focus memory`.
-- `forge/evolution/code_evolve.py` — CodeEvolve (OpenEvolve-style *program* evolution, the code-level sibling of Scout): evolves actual implementations, not just parameter values. A `Target` file declares `SEED_CODE` + `REQUIRED` names + `test(ns)` correctness gate + `bench(ns)` returning real metrics + `METRIC`/`GOAL`/`BUDGETS`/`TAGS`. Loop: proposer -> free syntax/required-name/dup gates -> `_candidate_eval.py` subprocess runs test+bench in isolation (invoked BY FILE PATH, pure-stdlib, never imports `forge.evolution.__init__` = ~0.2s not ~10s/eval; preamble injects `np`/`torch` only if referenced) -> score = sign*metric vs incumbent -> replicated verification re-benches challenger AND incumbent `reps` times (mean/SEM/z + min_delta + rel margin) -> promote only on verified win. Compares vs original seed, last best, AND the round's own candidates (per-island elite archives feed parent selection). Islands + Thompson arms + basin hop at `hop_after`; stagnation check sits at TOP of loop so every cheap-reject `continue` still counts — run stops after `patience` dry cycles. Proposers (`--proposer`): `mut` = `forge/evolution/mutator.py` AST mutation engine (default; no model, ~0ms/candidate — sort-reuse, `_ctor` ctor hoisting, diff/masked_fill/funcify swaps, literal perturb, elite crossover) with a **Thompson bandit per op persisted in `mutator_op_stats`** — every eval feeds credit back via `Mutator.note()`, so the policy literally resumes across runs and shares by target tag_sig; `mix` = mutations + LLM leap every `--llm-every`; `llm` = coder model via forge/exp harness (Qwen2.5-Coder-0.5B default — measured weak: 17/21 verbatim copies; any other `--model` routes through transformers AutoModel + chat template, e.g. cached Instruct variants); `none` = seed-eval only. **Resume** (default on, `--fresh` to disable): prior best program becomes incumbent (re-measured), last-2000 code hashes pre-seed dedup, top-24 programs repopulate island elites. `code_programs`/`code_insights`/`mutator_op_stats` all live in the same FindingsDB; `--export-pairs out.jsonl` writes DPO pairs (chosen=improved child, rejected=parent) for the future proposer fine-tune. `--emit-target pkg.mod:fn` scaffolds a target file from any codebase function. Targets: `forge/evolution/targets/` — ForgeEngine hot paths: `sample_pipeline` (`_sample_next_token`'s rep→temp→DRY→min_p→min_k→top_k→top_p→vocab-order chain, every decoded token), `suffix_mem` (SuffixMemory feed/lift/draft per-token sidecar), `radix_prefix` (RadixPrefixCache match/insert/evict, list-API so the surface is the tree logic), `stop_matcher` (`_StopMatcher` incremental stop-string matching), `prefix_hash` (blake2b rolling chain), `canon_key` (mutator's own canonicalizer — self-target), plus `min_k_filter` (mutator found +33% verified, ~+50% cumulative — the production win is wired into `engine_common`), `top_p_filter`, `top_p_probs`, `quantize_4bit`, `dequantize_4bit`, `dry_penalties`, `fast_softmax`. Tests: `tests/unit/test_code_evolve.py` (26). Fixed bugs: `continue`-paths skipped bottom-of-loop stagnation check (infinite reject loop); `_load_insights` SELECT missed the `target` col → resume-time KeyError; module-level `sqlite3` import missing (ALTER-race handler would NameError); `_promos` never incremented (status/watch reported 0); `_detect_cuda_target` body-only AST scan missed module-level `.to("cuda")` (VRAM-capped autoscaler); `LLMProposer._engine` waiters crashed unpacking on a failed builder's entry (now retries on a fresh entry so the real error surfaces); `_seed_signature` couldn't prime `class` targets (SuffixMem/RadixPrefixCache got `def SuffixMem(` primes → function proposals, guaranteed test-fail).
+- `forge/evolution/code_evolve.py` — CodeEvolve (OpenEvolve-style *program* evolution, the code-level sibling of Scout): evolves actual implementations, not just parameter values. A `Target` file declares `SEED_CODE` + `REQUIRED` names + `test(ns)` correctness gate + `bench(ns)` returning real metrics + `METRIC`/`GOAL`/`BUDGETS`/`TAGS`. Loop: proposer -> free syntax/required-name/dup gates -> `_candidate_eval.py` subprocess runs test+bench in isolation (invoked BY FILE PATH, pure-stdlib, never imports `forge.evolution.__init__` = ~0.2s not ~10s/eval; preamble injects `np`/`torch` only if referenced) -> score = sign*metric vs incumbent -> replicated verification re-benches challenger AND incumbent `reps` times (mean/SEM/z + min_delta + rel margin) -> promote only on verified win. Compares vs original seed, last best, AND the round's own candidates (per-island elite archives feed parent selection). Islands + Thompson arms + basin hop at `hop_after`; stagnation check sits at TOP of loop so every cheap-reject `continue` still counts — run stops after `patience` dry cycles. Proposers (`--proposer`): `mut` = `forge/evolution/mutator.py` AST mutation engine (default; no model, ~0ms/candidate — sort-reuse, `_ctor` ctor hoisting, diff/masked_fill/funcify swaps, literal perturb, elite crossover) with a **Thompson bandit per op persisted in `mutator_op_stats`** — every eval feeds credit back via `Mutator.note()`, so the policy literally resumes across runs and shares by target tag_sig; `mix` = mutations + LLM leap every `--llm-every`; `llm` = coder model via forge/exp harness (Qwen2.5-Coder-0.5B default — measured weak: 17/21 verbatim copies; any other `--model` routes through transformers AutoModel + chat template, e.g. cached Instruct variants); `bes` = `forge/evolution/bes_proposer.py` BES bidirectional search (RSI whitespace recon §E.2) — wraps LLMProposer: a backward goal-decomposition pass emits a bounded sub-goal list (`cfg.bes_subgoals`, <=8), then a forward joint-solve pass emits ONE fenced program satisfying all sub-goals (2 gen passes/proposal; batched bursts = 2 generate_batch calls; judge/critique prompts pass through single-pass, decompose failure degrades to plain `llm`); `none` = seed-eval only. **Resume** (default on, `--fresh` to disable): prior best program becomes incumbent (re-measured), last-2000 code hashes pre-seed dedup, top-24 programs repopulate island elites. `code_programs`/`code_insights`/`mutator_op_stats` all live in the same FindingsDB; `--export-pairs out.jsonl` writes DPO pairs (chosen=improved child, rejected=parent) for the future proposer fine-tune. `--emit-target pkg.mod:fn` scaffolds a target file from any codebase function. Targets: `forge/evolution/targets/` — ForgeEngine hot paths: `sample_pipeline` (`_sample_next_token`'s rep→temp→DRY→min_p→min_k→top_k→top_p→vocab-order chain, every decoded token), `suffix_mem` (SuffixMemory feed/lift/draft per-token sidecar), `radix_prefix` (RadixPrefixCache match/insert/evict, list-API so the surface is the tree logic), `stop_matcher` (`_StopMatcher` incremental stop-string matching), `prefix_hash` (blake2b rolling chain), `canon_key` (mutator's own canonicalizer — self-target), plus `min_k_filter` (mutator found +33% verified, ~+50% cumulative — the production win is wired into `engine_common`), `top_p_filter`, `top_p_probs`, `quantize_4bit`, `dequantize_4bit`, `dry_penalties`, `fast_softmax`. Tests: `tests/unit/test_code_evolve.py` (26). Fixed bugs: `continue`-paths skipped bottom-of-loop stagnation check (infinite reject loop); `_load_insights` SELECT missed the `target` col → resume-time KeyError; module-level `sqlite3` import missing (ALTER-race handler would NameError); `_promos` never incremented (status/watch reported 0); `_detect_cuda_target` body-only AST scan missed module-level `.to("cuda")` (VRAM-capped autoscaler); `LLMProposer._engine` waiters crashed unpacking on a failed builder's entry (now retries on a fresh entry so the real error surfaces); `_seed_signature` couldn't prime `class` targets (SuffixMem/RadixPrefixCache got `def SuffixMem(` primes → function proposals, guaranteed test-fail).
   - **Throughput pipeline** (post-audit rebuild; measured 0.92→~23 evals/min on top_p_filter, dup rejects 91.6%→~6%): `forge/evolution/__init__.py` is LAZY (PEP 562 `__getattr__` exports) — spawn workers used to import the whole legacy chain (torch+engine+domains) just to resolve `_worker_main`, ~335MB RSS + seconds per worker; `domains/__init__.py` `DOMAINS` is a deferred-merge registry (`_DomainRegistry`) since domain_spec↔domains is a real import cycle once the package init stopped loading domains first. `forge/evolution/eval_pool.py` — `EvalPool`: N persistent `spawn` workers, target preloaded once, candidates over per-worker `mp.Queue`s, hung/dead workers killed+respawned (`max_jobs` self-recycle bounds RSS); `eval_many()` = parallel verify reps; `eval_sync()` for seed/resume. Default ON via `eval_pool=True` whenever `workers != 1` (`--no-eval-pool` / workers=1 = old subprocess path); pool size `min(max_workers, 4|16)` by cuda-target scan. Dead-job sweep distinguishes clean exit (`exitcode==0` = recycle raced our submit → job never started → REQUEUED onto the respawned worker) from crash (nonzero → fail); boot-failure circuit breaker: `_boot_trip` consecutive zero-completion worker deaths (target import crash, spawn env failure) opens the circuit → `submit()` returns staged `stage="spawn"` results instead of respawn-burning a process per proposal forever. `FindingsDB.release()` transiently drops the WAL conn between campaign rounds (lazy-reopen on next access — open conns pinned frames across sequential `evolve_all` targets); `close()` stays terminal. `_verified` caches the incumbent's rep scores for `inc_stale` (48) evals instead of re-benching every attempt. `Mutator.mutants_for(src, insp)` — deterministic op×site enumeration (per-site literal/funcify/masked_where/locals_bind/crossover + singles + two-op compositions, bandit-ordered) yields `(op_sig, code)` — uniqueness by construction keyed `(parent_h, op_sig)`; `proposer=basin`: background thread emits batched LLM parents (`LLMProposer.propose_batch`, `basin_batch`=8/pass) into `_basin_q`; families drain via `_propose_basin` — blocks up to 2.5s for a basin when the enumeration runs dry, `_dry` only when the emitter is dead/absent. Measured: +23.2% verified promotion on top_p_filter at eval 20 of a 44-eval run. **Promotion-integrity invariants** (regression-ratchet fix): `_handle_result` requires the verified `challenger_mean` to beat the *recorded* `incumbent_score`, not just the same-regime re-measure — the stored bar is monotonic within a run (kills the inflate-incumbent-remeasure-under-contention ratchet: measured 0.294->0.345->0.703 ms fake promotions on quantize_4bit). `_resume` floors the incumbent score at the resumed program's own DB-recorded score (`max(fresh, recorded)`) so a boot-contention-inflated re-measure can't lower the bar across runs either. Worker RSS watchdog: `worker_mem_mb` (default 2048) polls busy workers ~2Hz via psutil, kills+respawns on breach, result tagged `stage="mem"`; spawn baseline ~335MB (torch via forge chain) so caps must exceed it. `rsi_evolve.py` honing checks `manifest.json` (LoRARegistry.MANIFEST), not registry.json.
   - **Prior-art ports (R&D round: FunSearch/OpenEvolve mechanisms)**: `island_cull=True` basin hop now discards the worst ~half of islands and clones the best island's elite set + bandit arm into the least-bad culled slot (emptied slots reseed via `_pick_island`'s fresh-island preference; `island_cull=False` = legacy top-1 reset). `map_elites=True` adds a second elite feature dim — `_push_elite` keeps per-(island, code-length-bin) cells (bin = code_len vs island median; each bin gets a guaranteed floor of ⌊n_elites/4⌋ elites then remaining slots fill by score) so short and long program families both survive without shrinking a single-bin pool. `cheap_bench=True` eval cascade: first-pass candidate evals carry a `cheap={reps,metric,incumbent,goal,margin}` spec into `_candidate_eval.py`/`EvalPool` workers — when the spec defines `BENCH_REPS > cheap_reps` a reduced-rep bench runs first and candidates landing >`cheap_margin` (default 1.0 = ~2x) worse than the incumbent report `stage="cheap_gate"` and skip the full bench (verify/seed/resume evals always run full reps). `hint_bandit=True`: `LLMProposer._HINTS` strategy lines are now a Thompson Beta bandit persisted in `mutator_op_stats` as `op='hint:<idx>'` keyed by tag_sig — attribution flows prompt→hint via `_hint_by_prompt`, credit via `LLMProposer.note(code, credit, delta, prompt)` on the same scale as `Mutator.note` (which now takes the optional `prompt` kwarg; `_feedback` notifies both `self._proposer` and `self._basin_llm`, old 3-arg note() still works). `export_pairs`/`export_sft` write atomically (tmp+`os.replace`), as does sft_train's `--save-lora-adapter` snapshot. `sft_train --resume <ckpt>` consumes the `.train.pt` sidecar via `load_training_state` (optimizer+RNG+EMA+step, `start_step=step+1`, overrides `--checkpoint`) and a SIGINT handler emergency-saves `interrupt_step<N>` (dpo_align pattern, `current["step"]` tracked per step). Tests: `test_hint_bandit_attribution`, `test_island_cull_clone`, `test_map_elites_len_bins`, `test_cheap_gate_cascade`.
   - `scripts/rsi_evolve.py` — RSI campaign driver: per round runs every engine-target (basin proposer default, workers=0 auto — the 15-entry `DEFAULT_TARGETS`: 13 code targets incl. the engine decode/cache hot paths + `cev_math_solver`/`cev_rle_codec`, plus auto-harvested `auto_*` targets merged via `collect_targets()` — `--no-auto-targets` skips), then `export_sft` → `finetune_proposer --mode lora` → tagged adapters + router → next round's `lora_root` hot-swaps them — the proposer literally trains on its own verified wins (`--no-train` to evolve only, `--min-new` gates honing, `--quiet-rounds`/`--minutes` stop conditions, `--status` per-target + `.events.jsonl`). Each round also runs `export_validity_pairs` → `<sft>.validity.jsonl` (validity-DPO: chosen=gated program, rejected=the model's own malformed/dup emission — the format-compliance signal; a `dup` row whose stored code IS the gated program gets a DIFFERENT sibling as chosen, or is skipped when none differs). `scripts/evolve_all.py` — the evolve-only campaign sibling (13 code targets + `cev_math_solver`/`cev_rle_codec`; `--auto-targets` merges `collect_targets()` output as in rsi_evolve; `--rounds 0` = until quiet, `--status <stem>` per-target JSON for evolve_watch, basin/fanout knobs, `--workers 0` auto pool default, `--export-pairs`/`--export-validity` at campaign end); both drivers derive per-target seeds via `zlib.crc32(name)` (deterministic across processes — `hash()` salted by PYTHONHASHSEED made the same campaign config unreproducible). Prompt side: `_parents` also returns FunSearch best-shot **k=2 shots** — when an island holds ≥2 programs the prompt shows the pair sorted worst→best as `v0 (score X)`/`v1 (score Y)` and asks for `v2` (single parent = old "Current best" framing). Artifact feedback (`cfg.repair_regen`, `repair_per_batch`=4/batch): a REAL error result (exec/test/bench `detail` — tracebacks, not bare "failed" score-misses) queues ONE repair regen — original prompt + `# Previous attempt failed with:` + error truncated ~400 chars — drained by `_drain_repairs` as a single batched regen (same pattern as `_research_followup`), re-gated + re-submitted like a fresh candidate; the marker in the prompt prevents chained re-repairs, basin mode repairs through `_basin_llm`.
@@ -1321,6 +1264,7 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
 - `scripts/finetune_proposer.py` — proposer fine-tune driver on the canonical trainer: exports verified parent->improved-child pairs from `code_programs` via `export_sft` (`{prompt, response}` — sft_train's contract; real logged prompts where present, template-reconstructed otherwise, `# Candidate: <parent_hash8>` line keeps rows unique under sft_train's prompt[:200] dedup), then invokes `forge.training.runners.sft_train --hf-model <HF id> --no-bitnet-everywhere` (bitnet/lora default ON — bitnet-everywhere keys would break plain HF reload; PEFT LoRA merges at save), and assembles the saved safetensors + base tokenizer/config into a loadable HF dir (`forge/evolution/proposer_ckpt`) that `fn_evolve --model <dir>` loads via `load_hf`. Acceptance on 33 rows/60 steps: ckpt loads, ChatML path consistent (`primed=False`), 3/3 batched candidates compile. `LLMProposer.primed` auto-detects: qwen25_05b ForgeEngine path = completion-primed; dirs with a chat_template / HF ids = chat path. Proposer engine is ALWAYS ForgeEngine (transformers only on arch mismatch): `use_chunked_prefix_cache=True` on every path — basin batches share ~90% prompt prefix, measured ~10x on warm shared-prefix batches (0.8s vs 8.2s). `__init__` spawns a `proposer_prewarm` daemon thread so engine build (~5s weights+warmup) overlaps pool boot — model ready before first basin. `rlvr_train.py` (GRPO, task-type code) and `dpo_align.py` remain the next tiers if SFT saturates.
 - **Ported proposer (default since this round)**: `forge/evolution/proposer_mla_moe/` = `proposer_ckpt` (SFT'd Qwen2.5-Coder-0.5B) ported to ForgeAI MLA+MoE by `scripts/port_qwen_mla_moe.py` (GQA→latent-KV SVD d_c=256 full-rank, dense SwiGLU→4 experts dense_bypass; preset `qwen25_05b_mla_moe`; logit parity vs source cos≈0.99999). `LLMProposer._model_id` defaults to this dir when `forge_convert.json` exists — the evolve loop now dogfoods the engine's GLA/MoE path. `forge_convert.json` may carry `"primed": bool` — explicit override checked BEFORE the chat_template heuristic; proposer_mla_moe sets `primed:true` because its tokenizer ships a chat_template but the weights only produce code on primed completion prompts (ChatML wrap → degenerate output, verified). HF fallback after a ForgeEngine load failure is skipped for forge_convert dirs (renamed keys can never load in transformers — surfaces the real engine error instead). Basin emitter builds prompts with the LLM's own `primed` mode and logs EVERY raw completion as `stage='gen'` rows (~9x more captured SFT/DPO pairs; previously ~90% of model output was dropped silently). `FindingsDB._connect` sets `busy_timeout` BEFORE `journal_mode=WAL` + retries — parallel targets on a fresh db no longer crash on the WAL race.
 - **Proposer default (audit A5, 2026-10-31)**: `LLMProposer._model_id` now prefers `Qwen/Qwen2.5-Coder-3B-Instruct` when already in the HF cache (`snap_dir` local check — no implicit download), then `research/checkpoints/lfm3_1p7b_cc_fq`/`lfm3_1p7b_cc` as the offline fallback. Gate-rate head-to-head (`scripts/bench_proposer.py`, 12-prompt grid → `results/proposer_bench*.json`): Qwen-3B **100% valid / 100% syntax** vs lfm3_1p7b_cc_fq 33%/50% and unquantized lfm3_1p7b_cc 50%/75% — int4 costs ~17pts, capability gap is the rest.
+- **Harness-genome spike** (`forge/evolution/harness_genome.py`, RSI whitespace recon row C1 — DarwinX/Mem2Evolve axis): `HarnessGenome` carries the previously-frozen harness knobs — `temperature`/`top_p`/`top_k`/`max_gen_tokens`/`think_budget`/`n_insights` (real `CodeEvolveConfig` fields — top_p/top_k were 0.95/80 literals promoted to cfg fields), `hint_idx` (forces a `LLMProposer._HINTS` template variant, -1 = Thompson bandit), `stop_suffixes` (extra stops appended at the forge-path generate calls), `mut_op_w` (per-op multipliers instance-shadowing `Mutator._BASE_W`), plus `genome_id`/`parents`/`gen` lineage. `mutate(rng)` = per-field perturbation (gaussian floats, stepped ints, enum re-pick) clamped to `_BOUNDS`; `to_dict/from_dict` clamp on load too. `HarnessArchive` (persisted as `<db>.harness.json`, top-k=8) admits only when not-full-or-beats-min (preserve-and-extend); `sample()` exploits the best elite or extends via a mutated child. Opt-in via `cfg.harness_evolve` (+`harness_evolve_every` window, default 32 evals; `rsi_evolve.py --harness-evolve`): `CodeEvolve._harness_setup` applies the sampled genome (cfg fields + `proposer._genome` + mutator weights), `_harness_maybe` scores each window with `default_fitness` (valid-rate + promo-rate), records it, and resamples. Default OFF = zero behavior change. Tests: `tests/unit/test_harness_genome.py`.
 - **Tagged-LoRA subsystem** (per-topic hot-swap adapters; base weights never touched):
   - `forge/evolution/lora_registry.py` — `LoRARegistry` (manifest.json: tag -> {file, rank, alpha, target_modules, base, meta}) + `LoRAManager.plan(rows)`: decides per training group — existing tag → `update` (warm-start via sft_train `--lora-init`), ≥`min_new` rows unknown tag → `new`, small groups → fold into `default` (anti-spam), `stale` meta/`--lora-fresh` → `retrain` same tag fresh weights. `reg.mark(tag, **meta)` writes post-campaign health stats the next plan reads.
   - `forge/evolution/lora_router.py` — `LoRARouter`: decision-model routing. Features = `ForgeEngine.embed()` (model's OWN mean-pooled last hidden state), head = aux MLP (`train_mlp`/`load_aux_model`), stored as `router.safetensors`+`router.json` in the registry. Uncertain/untrained → registry fallback chain. Trained at end of `finetune_proposer --mode lora` on each tag's prompt corpus (disable: `--no-train-router`).
@@ -1344,7 +1288,8 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   `flux_channels` hedge weights into status.json for the FLUX memory card. RSI data path
   (anti-overthinking): `_assemble_solution` AST-cleans every reply
   (comments + docstrings stripped — model musing can't leak into SFT/GRPO
-  data); export picks the SHORTEST passing attempt and mixes
+  data); export ships up to `--export-per-task` (default 2) DISTINCT
+  passing attempts per task, shortest-first, and mixes
   `concise_qa_per_epoch` verified short-answer pairs (default 12, computed/
   curated answers — never model-generated) so each epoch trains direct
   minimal answers; GRPO groups get `grpo_concise_bonus` (default 0.1)
@@ -1375,6 +1320,38 @@ Production code: `forge/` (was `research/`, migrated commit f1a7542)
   `spark*`→`spark_render_messages`, `llama*`→ChatML no-think, forgelm→
   Jamba think-ChatML (`qwen_adapter.py`); `--lenient-promote` flips
   strict_promote off (`eval_threshold` = max fractional regression).
+  R73 quota+spark round: `--solve-quota N` (0→tasks_per_epoch) makes Phase 1
+  loop propose+solve ROUNDS until N verified rows land (caps:
+  `--quota-max-rounds` 4, `--quota-max-rollouts` 0→quota*K*10); replay,
+  concise-QA and failures NEVER count — `--ref-fill` exports the proposer's
+  own executor-verified impl on solver-missed tasks (STaR-style, capped at
+  `--ref-fill-frac` 0.4 of quota), `--export-per-task` 2 ships up to 2
+  distinct passes/task (shortest-first, deduped). Spark correctness fixes:
+  `_finetune` passes `--chat-format spark` (was Jamba ChatML — trained
+  markup inference never sees); `infinite_curriculum` derives eos/stop/
+  keep/`</think>` ids from the loaded tokenizer (was hardcoded Jamba
+  {2,519,542}: kept pad+random ids, banned spark's REAL eos id 1, so every
+  gen ran to cap); `sft_train._resolve_lora_targets` detects fused
+  `qkv_proj` (+`gate_proj` out-gate) — the unfused q/k/v_proj default
+  silently matched nothing on spark. Config-aware defaults: `--kv-cache`
+  standard on spark (spectral is lossy vs exact test-case recall),
+  `--ft-pack-sequences` off on spark (no verified cu_seqlens isolation),
+  fast_eval uses `kv_cache=standard` on spark + `decision_margin=
+  promote_margin` early-abort (demote/promote bound-proven → stop mid-pass);
+  `--solve-group-size` 4, `--ft-grad-mixup` 3. GRPO off-policy fix
+  (2026-11-18): `_grpo_train` now calls `trainer.collect_log_probs` on the
+  pre-update policy (fresh LoRA B=0 → identical to rollout policy) and feeds
+  per-batch `old_log_probs` into `train_step` — was never passed, so the PPO
+  ratio was ≡1.0 (REINFORCE-with-baseline, dead clip). `collect_log_probs`
+  returns positionally-aligned tensors (invalid completions → empty tensor
+  at their own comp_idx, no shifting); `train_step` uses an old_lp entry
+  only on exact length match. Ref model ELIMINATED: `ref_model=None` +
+  `compute_kl_penalty` falls back to a `lora_disabled(model)` forward
+  (`forge/training/bitnet_lora.lora_disabled` ctx manager restores all 3
+  adapter integration sites) — saves ~3.4GB VRAM + a checkpoint build;
+  `_fuzz_verify` seeds `random.Random(7919 ^ crc32(description))` per task
+  (was one fixed seed → identical mutation trajectory for every task).
+  Regression: `tests/unit/test_grpo_offpolicy.py`.
 - `forge_gui/` — Qt-free domain layer (`api/` only; PySide6 shell removed).
   Web tools live in `forge_gui/api/web_tools.py` (defs + dispatch) backed by
   stdlib-only `forge/web_primitives.py`: `web_search` (multi-engine chain:
@@ -1460,7 +1437,7 @@ Config presets in `forge/config.py`:
   adds `use_gdn2` (Gated DeltaNet-2 side-paths alongside each block,
   gate=0 → bit-exact warm start; supersedes KDA — mutually exclusive).
 - `forgelm_v14_rsi` — V14 preset derived from `forgelm_v13_gdn2`
-  (intentionally non-lossless new topology; docs/V14_RSI_DESIGN.md).
+  (intentionally non-lossless new topology; docs/design/V14_RSI_DESIGN.md).
   ~2.465B params (int4 ~1.23GB), ~1.26B active/step: 24 layers =
   16 DoubleGatedConv + 4 Mamba3 + 4 GLA (d_c=256); MoE FFN (8 experts
   top-2 + shared, d_ff=768); GDN2 at n_heads=4/head_dim=128 on all blocks;
@@ -1603,6 +1580,72 @@ Config presets in `forge/config.py`:
   act_mode), and the q_k_v_proj/g_proj/embedding keymap in
   `_remap_hf_keys`. NOTE: Spark tokenizer needs the plain-HF fallback
   (gigatoken can't parse its CJK pre-tokenizer).
+
+  Spark batched decode (2026-11, self-play flat-throughput pass):
+  force `_fused_gemv=False`+`_cache_w=True` (cached-bf16 cuBLAS GEMM —
+  3.3x the fused int4 Triton GEMM at B>1) in `_load_engine` before graph
+  capture; GPU `suppress_ids` replaces Python logits processors
+  (Spark eos=1 + "```" stop give model-side termination); lazy per-B
+  decode graphs up to WIDE_CAP=64 (`_ensure_static_batch`, ~5.1 tok/ms
+  at B=64 vs 3.1 at B=32). Continuous batching: N>WIDE_CAP windows at
+  64 and `_refill_batch` splices scratch-prefilled prompts into freed
+  slots (batched ≤16/call, deferred ≥6 free); `_compact` gathers
+  survivors into smaller captured graphs (64→…→2→B=1 eager graphs) once
+  the queue drains. **Position semantics**: `position_ids =
+  attention_mask.cumsum(-1)-1` — KV must be copied VERBATIM on refill
+  (any absolute-position RoPE rebase detunes; measured 100/100
+  token-exact refilled-vs-standalone greedy). Ring layers carry
+  per-row `ring_valid[B,W]` (append/append_t mark, reset clears) so
+  stale slots are masked not fabricated; left-pad slots unmarked after
+  prefill. First refilled token is pre-sampled from the scratch prefill
+  logits so its KV lands contiguously at `pos` (a masked dead-token
+  hole shifts every prompt→gen distance +1 and collapses output).
+  k-subset sampling when uniform top_k (softmax+multinomial over k
+  survivors); top-k indices are temp-invariant so scaling folds into
+  top_v. Measured: ~0.9-1.1k tok/s 64-prompt mixed-length,
+  ~1.9k tok/s N=96; was ~100 tok/s.
+  Decode-stability pass (2026-11, same pass): the per-step
+  `eos_mask.any().item()` host sync is now PIPELINED — each step's
+  flag+mask copy to pinned host buffers is async, recorded on a
+  cuda.Event, and consumed one step later in `_drain_eos` (the event
+  precedes the in-flight replay, so the sync is instant). Cost ≤1
+  overrun token per row, trimmed by `_finish`'s end index. Invariant:
+  a slot refilled at step R owns only flags from steps > R —
+  `eos_floor[i]` guards against a dead predecessor's filler token
+  falsely finishing the new stream; `_compact` drains both parities
+  before remapping rows, then rebuilds the parity buffers for the new
+  B. Single-row calls with suppress_ids/stops/processors no longer
+  route to `generate_raw` (its functional KV path grows via torch.cat
+  — O(L²)); `_ensure_static_batch(1)` now returns the
+  activation-captured B=1 state (prefix `''`) so singles get graph
+  decode; multi-token stop strings still use `generate_raw`'s
+  `_StopMatcher` (batched checks the stop's last id only), and
+  `infinite_curriculum._generate` mirrors that split. `_compact`'s
+  first two halving widths are pre-captured at the run's horizon in
+  `generate_batch` (was a multi-second lazy-capture stall mid-decode).
+  KV buckets densified ≤4096 (…1536, 3072 midpoints — ≤~1.5x
+  stair-steps where self-play lives; views share cache storage).
+  `_load_engine` warns when `sinks`/`_v0_gate` modules are present —
+  each costs an `.item()` host sync per layer per step (~28/step on
+  spark_x26); dormant on spark today.
+- `parable_granite41_3b` — ported AnkitAI/Parable-Granite-4.1-3B-Claude-
+  Fable-5 (Granite-4.1-3B ft on real Fable-5 agent traces; self-play
+  solver candidate). Stock GraniteForCausalLM: 40L pure attention, GQA
+  40Q/8KV head_dim 64, SwiGLU 8192, RMSNorm 1e-5, RoPE θ10M full rotary,
+  tied embeds, vocab 100352, no biases. Granite multipliers wired via
+  `attn_scale`/`embedding_multiplier`/`residual_multiplier`/
+  `logits_scaling` (embeds×12, block×0.22, attn logits×1/64, head÷10 —
+  keep `use_chunked_ce` OFF: CE must see post-÷10 logits). No structural
+  transform: `_remap_hf_keys` covers llama-style names, so the ckpt dir
+  is the RAW HF download + `forge_convert.json`. Checkpoint:
+  `research/checkpoints/parable_granite41_3b` (fp16 2-shard safetensors
+  + tokenizer.json + chat_template.jinja; granite role-marker format
+  auto-selected by config name via `granite_render_messages`).
+  Parity `scripts/test_parable_port.py`: fp16 CUDA argmax-100%,
+  top-5 identical, max|dlogit|=0.14; engine `from_checkpoint` gen
+  verified coherent. NOTE `research/checkpoints/granite41_3b_base`
+  holds TRUNCATED partial shards of the raw base — re-download before
+  any base-vs-tune comparison.
 
 All legacy presets (`forgelm_v2_light`, `forgelm_v2_pro`, `forgelm_v12`,
 `forgelm_v10_1.2b`, `forgelm_v11_3b_vl`, `lfm25_tiny`, `lfm25_1.2b`, V3–V9)

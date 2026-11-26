@@ -27,7 +27,7 @@ V = 151936
 def corpus_ids(tok):
     data = b""
     for p in sorted((ROOT / "docs" / "research").glob("*.md")) + \
-            [ROOT / "docs" / "CODEBASE_CRITIQUE_2026-09-16.md"]:
+            [ROOT / "docs" / "archive" / "CODEBASE_CRITIQUE_2026-09-16.md"]:
         data += p.read_bytes()
     tr_b, te_b = data[:-8000], data[-8000:]
     tr = tok(tr_b.decode("utf-8", "ignore"))["input_ids"]
