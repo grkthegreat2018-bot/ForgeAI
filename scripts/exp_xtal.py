@@ -102,6 +102,8 @@ def main():
                     help="save resume checkpoint every N steps (0=off)")
     ap.add_argument("--resume", action="store_true",
                     help="resume from results/xtal/<run>.ckpt.pt if present")
+    ap.add_argument("--mix", type=str, default="",
+                    help="custom chunk mix, e.g. 'A:0.4,B:0.05,C:0.1,R:0.35,N:0.1' — overrides presets")
     ap.add_argument("--run", default="baseline")
     args = ap.parse_args()
 
@@ -118,6 +120,9 @@ def main():
         mix = {"A": 0.4, "B": 0.05, "C": 0.2, "R": 0.2, "N": 0.15}
     if args.recruit:
         mix = {"C": 0.35, "R": 0.45, "N": 0.2}
+    if args.mix:
+        mix = {kv.split(":")[0]: float(kv.split(":")[1])
+               for kv in args.mix.split(",")}
     grammar = XtalGrammar(seed=args.seed, device=args.device,
                           n_classes=args.n_classes, members=args.members,
                           mix=mix)
