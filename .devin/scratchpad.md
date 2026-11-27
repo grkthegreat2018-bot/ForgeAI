@@ -4170,3 +4170,26 @@ SUGGESTED LOCAL CONFIG: 6-12 layer transformer d512-1024 ctx192 word-vocab4K or 
 REBOOT RECIPE (validated by research): fp32 master weights + bf16 autocast (NO GradScaler — bf16 doesn't need it), AdamW fused=True, torch.backends.cuda.matmul.fp32_precision='tf32', batch 64 (matches tiny-model stats AND fixes GEMM tiling M=1984 divisible by 32), torch.compile(mode='reduce-overhead', dynamic=False) after pip install triton-windows<3.7, env TORCHINDUCTOR_CACHE_DIR=C:\tic TRITON_CACHE_DIR=C:\tic\triton PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True, never run >11GB VRAM. Expected: tens of ms/step not seconds = 10-50x speedup. Activation checkpointing is NEGATIVE speed — only for memory emergencies. External flash-attn pointless at seq31.
 
 KEY MEMORY MATH 359M fp32: weights+grads+adam = 5.4GiB persistent. bnb AdamW8bit saves 2GiB if needed. Optimizer traffic ~10GB/step at fp32 — batch 64 amortizes 4x better.
+
+## v12qwen ENDGAME VERDICTS (8000 steps complete, 359M scale bridge)
+
+1. Copy crystallized: xsC 6.4 -> 0.69. Phase transition scale-invariant.
+2. Bistability scale-invariant and wilder: copy collapsed to ceiling twice
+   (steps 6600: 4.03, 7400: 6.34) and re-crystallized in 200-400 steps each.
+3. alignAC -0.04 -> -0.88 endgame: memorization vs machinery gradients
+   nearly antiparallel. Interference measured directly, emerged endogenously.
+4. Scaffold erosion at scale: class_gap peaked 0.084 -> 0.072, holdgap
+   +0.031 -> +0.011, while xsA deepened to 0.25. Memorization consumes
+   its own scaffold (duality replicated at scale).
+5. Relational never ignited, went backwards (2.1 -> 2.9) as copy won the
+   mode war. Hypothesis: mode competition casualty, not capacity.
+   Test: scaffold sequencing or R-heavy mix should ignite relational.
+6. holdgap positive most of the run: holdout entities DO join true class
+   clusters at scale — abstraction real, but erodes late.
+7. Copy ignition onset ~step 4000 vs tiny ~600-1200: scale clock ~4-6x slower.
+
+NEXT EXPERIMENTS (priority):
+- R-heavy mix / scaffold-sequencing run: test whether relational ignition
+  appears when competition pressure is reduced (mechanistic prediction).
+- Seeded interference-engine replication at scale (lit says strongest claim).
+- slingshot control: log last-layer norm in future runs (not yet implemented).
