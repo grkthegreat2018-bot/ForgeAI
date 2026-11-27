@@ -22,6 +22,7 @@ import sys
 import time
 
 import torch
+torch.backends.cuda.matmul.fp32_precision = "tf32"
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -166,7 +167,8 @@ def main():
         opt = configure_optimizer(model, args.lr, args.wd, optimizer_name="bnb")
     else:
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                                betas=(0.9, 0.95), weight_decay=args.wd)
+                                betas=(0.9, 0.95), weight_decay=args.wd,
+                                fused=True)
 
     def lr_at(step):
         if step < args.warmup:
@@ -238,7 +240,11 @@ def main():
                 for k, p in enumerate(params):
                     p.grad = sum(group_grads[tg][k] for tg in keys).clone()
         else:
-            loss = batch_loss(model, toks, tags)
+            if args.arch == "qwen":
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    loss = batch_loss(model, toks, tags)
+            else:
+                loss = batch_loss(model, toks, tags)
             loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
@@ -246,7 +252,11 @@ def main():
 
         if step % args.eval_every == 0 or step == args.steps - 1:
             model.eval()
-            res = eval_fixed_batches(model, eval_sets)
+            if args.arch == "qwen":
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    res = eval_fixed_batches(model, eval_sets)
+            else:
+                res = eval_fixed_batches(model, eval_sets)
             rec = {"kind": "eval", "train_loss": float(loss.detach())}
             for k, v in res.items():
                 rec[f"eval/{k}"] = round(v, 4)
