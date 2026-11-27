@@ -4142,3 +4142,23 @@ STATE: v10qwen at step 3000/8000 (batch16 lr2e-3) STILL RUNNING — trainA 1.00 
 USER DIRECTIVE QUEUED: LITERATURE REVIEW BEFORE FURTHER RUNS — never surveyed existing knowledge. Topics: grokking literature (Power et al 2022, Nanda et al modular arithmetic reverse-engineering, Liu et al omnigrok), double descent, neural scaling law training dynamics, gradient starvation (Pezeshki et al), slingshot mechanism, task competition in multitask learning, memory consolidation in continual learning. Goal: calibrate our findings against known results + steal optimizations for harness. DO THIS BEFORE killing/relaunching v10qwen.
 
 UNCOMMITTED: exp_xtal.py grad-ckpt flag.
+
+## LITERATURE CALIBRATION (subagent, 2026-11-27) — full text in session history
+
+NOVEL CLAIMS (pursue): interference-as-engine causal ablation (F6); context-gated multiplexing (F4); memorization-as-scaffold duality (F8); sustained bistable oscillation (F5); memorizer-specific depth-destruction profile (F3).
+REPOSITION: starvation mechanism exists (2605.15787) — correct 'gradient dies' for Soudry residual CE; decoupling known (Allen-Zhu 3.1 MUST cite); selective erosion = circuit-efficiency null (Varma 2023 MASTER NULL MODEL); critical windows known (Achille 2019).
+MANDATORY CONTROLS before strong claims: (1) slingshot artifact — monitor last-layer norm cyclicity (Thilak 2022) before claiming mode oscillation; (2) suppression-vs-deletion — need causal activation patching not just probes (2609.27593); (3) efficiency null for wd decomposition (correlation confound: copy is both precision-heavy AND inefficient).
+TECHNIQUES TO STEAL: restricted-loss circuit ablation (Nanda); amnesic probing/INLP+LEACE for use-vs-decodability; forgetting-event tracking (Toneva); deficit-window methodology (Achille) for critical-window assay; P-probing at token positions; compound-divergence control (Keysers) for generalization tests.
+SPEED/EXPERIMENT DESIGN: rich-vs-lazy regimes (init scale x width controls memorization vs feature learning — new harness knob); noise magnitude (batch/LR) controls attractor dwell time — sharp oscillation test; interleaved-vs-blocked curriculum as direct interference-engine test.
+
+## TUFAZIP RESEARCH (subagent, 2026-11-27) — compression testbed feasibility
+
+VERDICT: tufazip itself NOT replicable (Linux-only, 2xB200, exact torch 2.12 stack, decode-only repo — encoder never released). VIABLE alternatives: DNA4-RWKV (single RTX 4090, 105.55MB enwik9, PyTorch), tunazip (device-independent, 10M-param small config), neuralzip (NumPy educational), StateSMix (CPU-only, evaluated exactly at 1-10MB enwik8 slices).
+
+KEY SCIENCE: compression converts lookup-vs-machinery into MARKET-PRICED quantities (bits). Two-part MDL cost: offline weights = paid machinery, online weight updates = free local adaptation, in-context attention = free bounded lookup. cmix leaders ablate per-component: 'caches pay more as they fill' = lookup signature. Dynamic-eval lit: adaptation gains concentrate on NEW WORDS (39.6% ppl reduction) = lookup-like content. Chan 2210.05675: in-weights = rule-based, in-context = exemplar-based.
+
+GAPS = OUR OPPORTUNITY: nobody has decomposed online-adaptation gains (verbatim vs entity vs style), layer concentration of online updates, or forgetting curves. Measurable in 10MB replication, invisible to synthetic grammar.
+
+RED FLAGS: determinism trap (fp non-associativity — one wrong token corrupts all downstream decode; decide same-machine-fast vs exact-3x-cost early); prior contamination (train priors on DISJOINT text or lookup smuggles into 'machinery'); cmix/lstm-compress GPL — no code copying into ForgeAI.
+
+SUGGESTED LOCAL CONFIG: 6-12 layer transformer d512-1024 ctx192 word-vocab4K or byte256, Adam beta1=0 beta2=0.9999 lr~1e-4 decaying, batch64 overlapping segments, replay window 1-3M tokens, 10MB enwik8 slice, expect 1.5-2.0 bpb online-only.
