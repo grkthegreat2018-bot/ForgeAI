@@ -241,9 +241,9 @@ class XtalGrammar:
 
     def _sample_chunk(self, rng, heldout: bool = False):
         r = float(torch.rand(1, generator=rng).item())
-        mA = self.mix["A"]
+        mA = self.mix.get("A", 0.0)
         mB = mA + self.mix.get("B", 0.0)
-        mC = mB + self.mix["C"]
+        mC = mB + self.mix.get("C", 0.0)
         mD = mC + self.mix.get("D", 0.0)
         mR = mD + self.mix.get("R", 0.0)
         mR2 = mR + self.mix.get("R2", 0.0)
