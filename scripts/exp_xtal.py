@@ -98,6 +98,10 @@ def main():
     ap.add_argument("--gate", action="store_true",
                     help="PCGrad-style: project out negative-cosine components "
                          "between per-tag group gradients each step")
+    ap.add_argument("--ckpt-every", type=int, default=0,
+                    help="save resume checkpoint every N steps (0=off)")
+    ap.add_argument("--resume", action="store_true",
+                    help="resume from results/xtal/<run>.ckpt.pt if present")
     ap.add_argument("--run", default="baseline")
     args = ap.parse_args()
 
@@ -177,6 +181,31 @@ def main():
             return args.lr * (step + 1) / args.warmup
         return args.lr
 
+    # pause/resume: full training state — weights, optimizer, grammar RNG,
+    # step counter. Grammar batches are reproducible given the generator
+    # state, so a resumed run continues the identical data stream.
+    ckpt_path = os.path.join(OUT_DIR, f"{args.run}.ckpt.pt")
+    start_step = 0
+    tokens_seen0 = 0
+    if args.resume and os.path.exists(ckpt_path):
+        ck = torch.load(ckpt_path, map_location=args.device,
+                        weights_only=False)
+        model.load_state_dict(ck["model"])
+        opt.load_state_dict(ck["opt"])
+        grammar._train_rng.set_state(ck["train_rng"].cpu())
+        start_step = ck["step"] + 1
+        tokens_seen0 = ck["tokens_seen"]
+        print(f"[xtal] resumed from step {start_step}")
+
+    def save_ckpt(step, tokens_seen):
+        torch.save({
+            "model": model.state_dict(),
+            "opt": opt.state_dict(),
+            "train_rng": grammar._train_rng.get_state(),
+            "step": step,
+            "tokens_seen": tokens_seen,
+        }, ckpt_path)
+
     curve = open(curve_path, "a")
 
     def emit(step, rec):
@@ -186,9 +215,9 @@ def main():
         curve.flush()
 
     t0 = time.time()
-    tokens_seen = 0
+    tokens_seen = tokens_seen0
     model.train()
-    for step in range(args.steps):
+    for step in range(start_step, args.steps):
         for g in opt.param_groups:
             g["lr"] = lr_at(step)
         if args.recruit and step == args.steps // 2:
@@ -252,6 +281,8 @@ def main():
         opt.step()
         tokens_seen += toks.numel()
 
+        if args.ckpt_every and step % args.ckpt_every == 0:
+            save_ckpt(step, tokens_seen)
         if step % args.eval_every == 0 or step == args.steps - 1:
             model.eval()
             if args.arch == "qwen":
