@@ -42,7 +42,7 @@ def build_model(args, vocab=None):
                           num_attention_heads=14, num_key_value_heads=2,
                           max_position_embeddings=512)
         model = Qwen2ForCausalLM(cfg)
-        model.to(device=args.device, dtype=torch.bfloat16)
+        model.to(device=args.device)
         return model
     from forge.model.live import livet_config
     from forge.model_loader import ConfigurableResearchLLM

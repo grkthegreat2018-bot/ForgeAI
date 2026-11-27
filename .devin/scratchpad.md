@@ -4131,3 +4131,6 @@ RUNNING NOW: v8mem + v8nomem pressure-valve pair in results/xtal/. ANALYZE FIRST
 QWEN BRIDGE BLOCKED: random-init Qwen2-0.5B vocab256 OOMed 12GB even with bnb optimizer (fp32 param+grad+moments ~7GB). FIXES: run solo after v8 finishes; add model.to(torch.bfloat16) in build_model qwen path; batch 4 steps 3000; cpu_offload in forge/training/training_utils.py. Smoke then full run v8qwen --steps 4000 --batch 8 --members 64 --ruler --arch qwen. KEY Q: do xtal phenomena replicate at 0.5B?
 
 UNCOMMITTED: exp_xtal.py mem/arch/optimizer changes — commit after qwen smoke passes.
+
+## v9qwen32 INTERIM RESULT (2026-11-27): healthy but under-trained
+fp32 fixed bf16 stall (user instinct correct). At 2500 steps lr1e-3: trainA crystallizing 0.71, emb_gap rising monotonic +0.119 (slow), trainR not ignited (consistent with substrate threshold ~0.3-0.4 not crossed), copy STILL at ceiling 6.28 — watch item. Token-equivalent: batch16x2500 = tiny-model step ~625 — everything consistent with tiny ordering so far, just slower. RELAUNCHED v10qwen: 8000 steps lr 2e-3 batch 16, eval/grad every 200. VERDICT KEYS: does emb_gap pass 0.3 then trainR ignite (substrate pipeline scale-invariant)? does copy ever crystallize (geometry-independent canary)? RH oscillation at scale?
