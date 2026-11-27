@@ -4162,3 +4162,11 @@ GAPS = OUR OPPORTUNITY: nobody has decomposed online-adaptation gains (verbatim 
 RED FLAGS: determinism trap (fp non-associativity — one wrong token corrupts all downstream decode; decide same-machine-fast vs exact-3x-cost early); prior contamination (train priors on DISJOINT text or lookup smuggles into 'machinery'); cmix/lstm-compress GPL — no code copying into ForgeAI.
 
 SUGGESTED LOCAL CONFIG: 6-12 layer transformer d512-1024 ctx192 word-vocab4K or byte256, Adam beta1=0 beta2=0.9999 lr~1e-4 decaying, batch64 overlapping segments, replay window 1-3M tokens, 10MB enwik8 slice, expect 1.5-2.0 bpb online-only.
+
+## SPEEDUP RESEARCH (subagent, 2026-11-27) — the 5s/step mystery solved
+
+5s/step at 359M/batch16/seq31 = 0.7% MFU — NOT normal. Prime suspect: WDDM sysmem fallback paging (we ran at 11.8/12GB — paging almost certainly active, explains slowdown AND system lag). USER ACTION: NVIDIA Control Panel > Manage 3D settings > Program Settings > python.exe > CUDA Sysmem Fallback Policy > Prefer No Sysmem Fallback.
+
+REBOOT RECIPE (validated by research): fp32 master weights + bf16 autocast (NO GradScaler — bf16 doesn't need it), AdamW fused=True, torch.backends.cuda.matmul.fp32_precision='tf32', batch 64 (matches tiny-model stats AND fixes GEMM tiling M=1984 divisible by 32), torch.compile(mode='reduce-overhead', dynamic=False) after pip install triton-windows<3.7, env TORCHINDUCTOR_CACHE_DIR=C:\tic TRITON_CACHE_DIR=C:\tic\triton PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True, never run >11GB VRAM. Expected: tens of ms/step not seconds = 10-50x speedup. Activation checkpointing is NEGATIVE speed — only for memory emergencies. External flash-attn pointless at seq31.
+
+KEY MEMORY MATH 359M fp32: weights+grads+adam = 5.4GiB persistent. bnb AdamW8bit saves 2GiB if needed. Optimizer traffic ~10GB/step at fp32 — batch 64 amortizes 4x better.
