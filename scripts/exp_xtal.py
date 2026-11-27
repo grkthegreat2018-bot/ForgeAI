@@ -42,6 +42,8 @@ def build_model(args, vocab=None):
                           num_attention_heads=14, num_key_value_heads=2,
                           max_position_embeddings=512)
         model = Qwen2ForCausalLM(cfg)
+        if getattr(args, "grad_ckpt", False):
+            model.gradient_checkpointing_enable()
         model.to(device=args.device)
         return model
     from forge.model.live import livet_config
@@ -86,6 +88,8 @@ def main():
                     help="split relational fraction between add-table R and xor-table R2")
     ap.add_argument("--arch", default="tiny", choices=["tiny", "qwen"],
                     help="qwen = random-init Qwen2-0.5B architecture (scale-transfer bridge)")
+    ap.add_argument("--grad-ckpt", action="store_true",
+                    help="gradient checkpointing (qwen arch) — memory for larger batches")
     ap.add_argument("--mem", type=int, default=0,
                     help="bigram logit-bias sidecar buckets (pressure-valve test); 0=off")
     ap.add_argument("--recruit", action="store_true",

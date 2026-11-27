@@ -4134,3 +4134,11 @@ UNCOMMITTED: exp_xtal.py mem/arch/optimizer changes — commit after qwen smoke 
 
 ## v9qwen32 INTERIM RESULT (2026-11-27): healthy but under-trained
 fp32 fixed bf16 stall (user instinct correct). At 2500 steps lr1e-3: trainA crystallizing 0.71, emb_gap rising monotonic +0.119 (slow), trainR not ignited (consistent with substrate threshold ~0.3-0.4 not crossed), copy STILL at ceiling 6.28 — watch item. Token-equivalent: batch16x2500 = tiny-model step ~625 — everything consistent with tiny ordering so far, just slower. RELAUNCHED v10qwen: 8000 steps lr 2e-3 batch 16, eval/grad every 200. VERDICT KEYS: does emb_gap pass 0.3 then trainR ignite (substrate pipeline scale-invariant)? does copy ever crystallize (geometry-independent canary)? RH oscillation at scale?
+
+## URGENT HANDOFF (2026-11-27 late) — system memory pressure
+
+STATE: v10qwen at step 3000/8000 (batch16 lr2e-3) STILL RUNNING — trainA 1.00 crystallizing, emb_gap +0.105 slowly rising, copy FLAT 6.5 (canary failing?), trainR dormant. grad-ckpt flag ADDED to driver (untested solo — smoke killed for memory). KEY PENDING DECISION: batch-16-vs-64 confound — tiny-model crystallization stats all at batch64, qwen at batch16 = noise-scale confound in every cross-scale comparison. Options: let v10qwen finish (5h left) vs kill+reboot batch64+grad-ckpt.
+
+USER DIRECTIVE QUEUED: LITERATURE REVIEW BEFORE FURTHER RUNS — never surveyed existing knowledge. Topics: grokking literature (Power et al 2022, Nanda et al modular arithmetic reverse-engineering, Liu et al omnigrok), double descent, neural scaling law training dynamics, gradient starvation (Pezeshki et al), slingshot mechanism, task competition in multitask learning, memory consolidation in continual learning. Goal: calibrate our findings against known results + steal optimizations for harness. DO THIS BEFORE killing/relaunching v10qwen.
+
+UNCOMMITTED: exp_xtal.py grad-ckpt flag.
