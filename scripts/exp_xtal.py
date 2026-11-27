@@ -127,6 +127,8 @@ def main():
             def forward(self, x):
                 return (self.base(x).logits,)
         model = _Ad(model)
+        if getattr(args, "compile", True):
+            model.base = torch.compile(model.base, mode="reduce-overhead")
     if args.mem > 0:
         V = grammar.vocab
         K = args.mem

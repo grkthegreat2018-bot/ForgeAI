@@ -70,7 +70,7 @@ def flat_grad(model, loss: torch.Tensor) -> torch.Tensor:
     grads = []
     for p in model.parameters():
         if p.grad is not None:
-            grads.append(p.grad.detach().reshape(-1).clone())
+            grads.append(p.grad.detach().reshape(-1).clone().to(torch.bfloat16))
     model.zero_grad(set_to_none=True)
     return torch.cat(grads)
 
