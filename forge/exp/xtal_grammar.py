@@ -41,7 +41,8 @@ TAG_C = 3       # rule-C governed (copy repeat position)
 TAG_AH = 4      # heldout-trigger agree successors (eval only)
 TAG_D = 5       # rule-D governed (class-copy target)
 TAG_R = 6       # rule-R governed (relational class composition target)
-TAG_NAMES = {0: "noise", 1: "ruleA", 2: "ruleB", 3: "ruleC", 4: "ruleA_heldout", 5: "ruleD", 6: "ruleR"}
+TAG_R2 = 7      # rule-R2 governed (XOR composition: different table, same classes)
+TAG_NAMES = {0: "noise", 1: "ruleA", 2: "ruleB", 3: "ruleC", 4: "ruleA_heldout", 5: "ruleD", 6: "ruleR", 7: "ruleR"}
 
 PAD = 0
 BOS = 1
@@ -49,6 +50,7 @@ MARKER_B = 2
 MARKER_C = 3
 MARKER_D = 4
 MARKER_R = 5
+MARKER_R2 = 6
 ITEM0 = 16          # items occupy [16, 16 + n_classes*members)
 
 # default-layout module constants (members=8) â kept for tests/compat
@@ -205,7 +207,7 @@ class XtalGrammar:
         tags = [TAG_NOISE, TAG_NOISE, TAG_NOISE, TAG_NOISE, TAG_D]
         return toks, tags
 
-    def _chunk_ruler(self, rng, x_holdout: bool = False):
+    def _chunk_ruler(self, rng, x_holdout: bool = False, xor: bool = False):
         """[marker_R, x1, x2, target]: target class = (class(x1)+class(x2))
         mod n_classes — relational composition. Lookup surface is
         items^2 pairs (2304 train-pairs at members=8, 262144 at members=64)
@@ -226,10 +228,10 @@ class XtalGrammar:
         else:
             x1 = self._rand_item(rng, train_only=True)
             x2 = self._rand_item(rng, train_only=True)
-        csum = (self.cls_of(x1) + self.cls_of(x2)) % self.n_classes
+        csum = ((self.cls_of(x1) ^ self.cls_of(x2)) if xor else (self.cls_of(x1) + self.cls_of(x2))) % self.n_classes
         tm = int(torch.randint(self.members, (1,), generator=rng).item())
-        toks = [MARKER_R, x1, x2, self.mk_item(csum, tm)]
-        tags = [TAG_NOISE, TAG_NOISE, TAG_NOISE, TAG_R]
+        toks = [MARKER_R2 if xor else MARKER_R, x1, x2, self.mk_item(csum, tm)]
+        tags = [TAG_NOISE, TAG_NOISE, TAG_NOISE, TAG_R2 if xor else TAG_R]
         return toks, tags
 
     def _chunk_noise(self, rng):
@@ -244,7 +246,8 @@ class XtalGrammar:
         mC = mB + self.mix["C"]
         mD = mC + self.mix.get("D", 0.0)
         mR = mD + self.mix.get("R", 0.0)
-        tot = mR + self.mix["N"]
+        mR2 = mR + self.mix.get("R2", 0.0)
+        tot = mR2 + self.mix["N"]
         if r < mA / tot:
             return self._chunk_agree(rng, heldout=heldout)
         if r < mB / tot:
@@ -255,6 +258,8 @@ class XtalGrammar:
             return self._chunk_ruled(rng)
         if r < mR / tot:
             return self._chunk_ruler(rng)
+        if r < mR2 / tot:
+            return self._chunk_ruler(rng, xor=True)
         return self._chunk_noise(rng)
 
     def gen_seq(self, rng, heldout: bool = False):
@@ -294,6 +299,8 @@ class XtalGrammar:
             "DH": lambda: self._chunk_ruled(rng, x_holdout=True),
             "R": lambda: self._chunk_ruler(rng, x_holdout=False),
             "RH": lambda: self._chunk_ruler(rng, x_holdout=True),
+            "R2": lambda: self._chunk_ruler(rng, x_holdout=False, xor=True),
+            "R2H": lambda: self._chunk_ruler(rng, x_holdout=True, xor=True),
             "N": lambda: self._chunk_noise(rng),
         }[kind]
         all_toks, all_tags = [], []
@@ -334,5 +341,6 @@ class XtalGrammar:
             TAG_D: math.log(self.members),
             # rule-R target: uniform over all members of one class
             TAG_R: math.log(self.members),
+            TAG_R2: math.log(self.members),
             TAG_NOISE: math.log(self.n_items),  # upper bound, not tight
         }

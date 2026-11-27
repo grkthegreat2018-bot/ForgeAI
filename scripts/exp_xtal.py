@@ -73,6 +73,10 @@ def main():
                     help="add rule-D (class-copy) chunks to the mix")
     ap.add_argument("--ruler", action="store_true",
                     help="add rule-R (relational composition) chunks to the mix")
+    ap.add_argument("--ruler2", action="store_true",
+                    help="split relational fraction between add-table R and xor-table R2")
+    ap.add_argument("--recruit", action="store_true",
+                    help="phase 1 (first half): no rule-A in mix (machinery-only pretrain); phase 2: full ruler mix")
     ap.add_argument("--gate", action="store_true",
                     help="PCGrad-style: project out negative-cosine components "
                          "between per-tag group gradients each step")
@@ -86,8 +90,12 @@ def main():
     mix = None
     if args.ruled:
         mix = {"A": 0.45, "B": 0.05, "C": 0.2, "D": 0.15, "N": 0.15}
+    elif args.ruler2:
+        mix = {"A": 0.4, "B": 0.05, "C": 0.2, "R": 0.1, "R2": 0.1, "N": 0.15}
     elif args.ruler:
         mix = {"A": 0.4, "B": 0.05, "C": 0.2, "R": 0.2, "N": 0.15}
+    if args.recruit:
+        mix = {"C": 0.35, "R": 0.45, "N": 0.2}
     grammar = XtalGrammar(seed=args.seed, device=args.device,
                           n_classes=args.n_classes, members=args.members,
                           mix=mix)
@@ -101,6 +109,8 @@ def main():
         kinds += ("D", "DH")
     if args.ruler:
         kinds += ("R", "RH")
+    if args.ruler2:
+        kinds += ("R", "RH", "R2", "R2H")
     eval_sets = {k: grammar.gen_eval_batch(k, batch_size=args.eval_batches)
                  for k in kinds}
     floors = grammar.floors()
@@ -127,6 +137,9 @@ def main():
     for step in range(args.steps):
         for g in opt.param_groups:
             g["lr"] = lr_at(step)
+        if args.recruit and step == args.steps // 2:
+            grammar.mix = {"A": 0.4, "B": 0.05, "C": 0.2, "R": 0.2, "N": 0.15}
+            print(f"[xtal] step {step}: recruitment phase 2 — rule-A enters mix")
         toks, tags = grammar.gen_batch(args.batch)
         opt.zero_grad(set_to_none=True)
         if args.gate:
@@ -189,11 +202,12 @@ def main():
                 rec[f"eval/{k}"] = round(v, 4)
             # excess loss above analytic floor for the governed tags
             from forge.exp.xtal_grammar import (TAG_A, TAG_AH, TAG_B, TAG_C,
-                                                TAG_D, TAG_R)
+                                                TAG_D, TAG_R, TAG_R2)
             for tag, key in ((TAG_A, "A/ruleA"), (TAG_AH, "AH/ruleA_heldout"),
                              (TAG_B, "B/ruleB"), (TAG_C, "C/ruleC"),
                              (TAG_D, "D/ruleD"), (TAG_D, "DH/ruleD"),
-                             (TAG_R, "R/ruleR"), (TAG_R, "RH/ruleR")):
+                             (TAG_R, "R/ruleR"), (TAG_R, "RH/ruleR"),
+                             (TAG_R2, "R2/ruleR"), (TAG_R2, "R2H/ruleR")):
                 if key in res:
                     rec[f"xs/{key}"] = round(res[key] - floors[tag], 4)
             emit(step, rec)
