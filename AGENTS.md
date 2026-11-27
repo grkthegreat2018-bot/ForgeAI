@@ -2072,8 +2072,26 @@ under memorization pressure (2.27→2.50 drift, invisible in train metrics).
 Relational rule-R v5: lookup-feasibility threshold confirmed — m64 (262k-pair
 lookup surface, infeasible) forced genuine class-composition machinery with
 holdout excess 1.19 vs ceiling 2.08; m8 (4k pairs, memorizable) stayed at
-ceiling. Next interventions: mode-injection, backward-gating,
-memory-as-pressure-valve.
+ceiling. v6-v8: oscillation (not simple erosion) is the dynamics — mode flips
+on ~1000-step timescales; interference is the engine (PCGrad deconfliction
+destroys relational generalization entirely — never deconflict compositional
+mixtures); wd is a mode selector (favors composition, taxes precision/copy);
+memorization-as-scaffold duality with critical window (compositional pressure
+must be present from the start); memory-sidecar valve test inconclusive —
+within-cell chaotic variance dwarfs intervention effects, single-seed
+comparisons in this regime are meaningless.
+
+Scale bridge (2026-11, v12qwen): same protocol on random-init Qwen2 359M
+(`--arch qwen --grad-ckpt`, fp32 masters + bf16 autocast + bnb moments +
+torch.compile — batch 64 ~0.28s/step, 8000 steps ≈ 40 min). Verdicts:
+ordering/crystallization/oscillation all scale-invariant; copy crystallized
+6.4→0.69 with TWO full collapse-and-reassembly events; align(A,C) → -0.88
+(interference measured directly); scaffold erosion replicated; relational
+never ignited — mode-war casualty, not capacity (R-heavy mix is the next
+test). CRITICAL perf lesson: bf16 master weights silently stall training;
+WDDM paging (reserved>physical VRAM) is a silent 10-30x collapse — never
+exceed ~11GB reserved on the 5070. Driver has `--ckpt-every`/`--resume`
+pause/resume. Full writeup: wiki `XTAL-Rule-Crystallization`.
 
 ## Build & Test Commands
 
