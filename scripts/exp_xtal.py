@@ -73,6 +73,9 @@ def main():
                     help="add rule-D (class-copy) chunks to the mix")
     ap.add_argument("--ruler", action="store_true",
                     help="add rule-R (relational composition) chunks to the mix")
+    ap.add_argument("--gate", action="store_true",
+                    help="PCGrad-style: project out negative-cosine components "
+                         "between per-tag group gradients each step")
     ap.add_argument("--run", default="baseline")
     args = ap.parse_args()
 
@@ -125,9 +128,55 @@ def main():
         for g in opt.param_groups:
             g["lr"] = lr_at(step)
         toks, tags = grammar.gen_batch(args.batch)
-        loss = batch_loss(model, toks, tags)
         opt.zero_grad(set_to_none=True)
-        loss.backward()
+        if args.gate:
+            # per-tag group losses sharing one forward; PCGrad-project pairs
+            # with negative cosine, then apply the summed modified gradient
+            from forge.exp.xtal_grammar import (TAG_A, TAG_B, TAG_C, TAG_D,
+                                                TAG_R, TAG_NOISE)
+            tags_present = [TAG_A, TAG_B, TAG_C, TAG_NOISE]
+            if args.ruled:
+                tags_present.append(TAG_D)
+            if args.ruler:
+                tags_present.append(TAG_R)
+            logits = model(toks[:, :-1])[0]
+            ce = torch.nn.functional.cross_entropy(
+                logits.reshape(-1, logits.size(-1)).float(),
+                toks[:, 1:].reshape(-1), reduction="none").view(toks.size(0), -1)
+            npos = ce.numel()
+            params = [p for p in model.parameters() if p.requires_grad]
+            group_grads = {}
+            loss = torch.zeros((), device=toks.device)
+            for i, tg in enumerate(tags_present):
+                mask = (tags[:, 1:] == tg).float()
+                lg = (ce * mask).sum() / npos
+                loss = loss + lg.detach()
+                retain = i < len(tags_present) - 1
+                gs = torch.autograd.grad(lg, params, retain_graph=retain,
+                                         allow_unused=True)
+                group_grads[tg] = [g.detach().clone() if g is not None
+                                   else torch.zeros_like(p)
+                                   for g, p in zip(gs, params)]
+            # PCGrad: for each pair with negative cosine, remove the
+            # conflicting component from both directions (symmetric variant)
+            keys = list(group_grads)
+            for i in range(len(keys)):
+                for j in range(len(keys)):
+                    if i == j:
+                        continue
+                    gi = group_grads[keys[i]]
+                    gj = group_grads[keys[j]]
+                    dot = sum((a * b).sum() for a, b in zip(gi, gj))
+                    nj = sum((b * b).sum() for b in gj).clamp_min(1e-12)
+                    if dot < 0:
+                        for a, b in zip(gi, gj):
+                            a.sub_((dot / nj) * b)
+            with torch.no_grad():
+                for k, p in enumerate(params):
+                    p.grad = sum(group_grads[tg][k] for tg in keys).clone()
+        else:
+            loss = batch_loss(model, toks, tags)
+            loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         tokens_seen += toks.numel()

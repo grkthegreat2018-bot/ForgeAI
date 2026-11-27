@@ -3927,3 +3927,74 @@ machinery + the same erosion signature as rule-D. Copy slightly damaged
 Rule-A holdout flat at ceiling in both: modes never cross-recruit.
 => THE control knob is lookup feasibility. Program pivot: interventions
 (mode-injection, backward-gating, memory-as-pressure-valve).
+
+## EXP-XTAL theory synthesis v1 (2026-11-26, pre-intervention-results)
+
+THE ECONOMIC MODEL OF RULE FORMATION
+For each position type there are two loss-reduction paths:
+- lookup path: fast initial loss reduction per unit gradient, but plateaus
+  at completion (memorizable rules) or at partial capture (non-completable
+  rules with marginal structure)
+- machinery path: slow initial progress (requires coordination: embeddings
+  cluster AND readout aligns AND attention extracts), but ceiling is the
+  full structure
+Lookup wins early everywhere because it is fast. Machinery forms only where
+the lookup ceiling sits below the machinery ceiling AND residual error
+survives long enough to fund coordination. Error is the only fuel.
+
+WHY OSCILLATION (v5rm64 finding, replaces monotonic-erosion model)
+In rule-R, single-token marginals carry partial information: knowing x1
+alone constrains the answer distribution. So lookup has a partial plateau
+that keeps pulling even though completion is impossible. The system
+oscillates: machinery consolidates (RH xs -> 0.5-0.7), partial-lookup
+encroaches (RH xs -> 2+), period ~1000-1500 steps, amplitude large.
+Step-6400 event: copy xs spiked 0.14->0.38 for one eval exactly when RH hit
+its best — transient wholesale flip into structural mode. Neither attractor
+is absorbing -> heteroclinic-style cycling driven by momentum+noise.
+PREDICTION: oscillation amplitude should scale with the marginal-vs-joint
+informativeness gap of the composition table. Sweepable dial.
+PREDICTION: weight decay should damp oscillation because lookup needs
+precise high-magnitude weights while distributed machinery is cheaper to
+maintain under decay. v6rm64wd10 tests this.
+GEOMETRY COROLLA: holdout-own cosine pinned at 0.42 throughout while
+cross-class cosine rises 0.005->0.073 — slow representational collapse is
+continuous but behavioral crashes are abrupt: circuit-level threshold
+effect, not representation drift.
+
+MODE-INJECTION question (next intervention): what flips attention into
+structural mode? In D/R contexts the answer depends on a variable token
+that attention must fetch — the attention pattern IS the mode selector.
+Test: pretrain machinery with R-forcing, then introduce A positions — do
+they recruit machinery or lookup? (recruitment test)
+PRESSURE-VALVE test (user hypothesis): sidecar cheap memory should drain
+machinery formation even where lookup is infeasible in weights — because
+the sidecar completes the lookup OUTSIDE the gradient economy.
+
+REAL-WORLD PAYLOAD
+- repetition/epochs make lookup completable = kill machinery funding
+- compositional holdout performance should oscillate during long training
+  even as train loss monotonically improves — checkable in real LLM logs
+- holdout-probe monitoring is necessary: train metrics are blind to mode
+
+## EXP-XTAL v6 intervention results (2026-11-26) — INTERFERENCE IS THE ENGINE
+
+stats over step>2000, RH_xs (ceiling 2.08, floor 0):
+v5rm64     mean 1.32 min 0.32 frac_below_ceiling 0.84
+v6rm64long mean 2.12 min 1.08 frac 0.46 (12000 steps — cuda nondeterminism
+           makes oscillation phase chaotic; single runs noisy, need seeds)
+v6rm64wd10 mean 1.16 min 0.30 frac 0.99 — wd 1.0 IMPROVED relational
+           generalization but copy NEVER crystallized (xs 1.196): strong
+           decay holds net in fuzzy-structural regime; class machinery
+           tolerates fuzz (directions), copy precision does not.
+v6rm64gate mean 2.75 min 2.21 frac 0.00 — PCGrad deconfliction DESTROYED
+           relational generalization entirely while copy crystallized BEST
+           (0.018) and trainR fine (0.026). Interference is not the cost of
+           generalization — it is the PRESSURE that forces shared (class)
+           structure. Self-contained circuits (copy/induction) benefit from
+           deconfliction; cross-cutting compositional structure dies without
+           conflict. Directly contradicts PCGrad-style intervention premise
+           for compositional learning.
+
+NEXT: recruitment test (does pre-formed machinery absorb new positions?);
+marginal-informativeness dial on composition table; pressure-valve sidecar;
+multi-seed replication discipline (min 3 seeds for any strong claim).
