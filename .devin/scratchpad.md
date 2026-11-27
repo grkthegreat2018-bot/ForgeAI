@@ -3998,3 +3998,99 @@ v6rm64gate mean 2.75 min 2.21 frac 0.00 — PCGrad deconfliction DESTROYED
 NEXT: recruitment test (does pre-formed machinery absorb new positions?);
 marginal-informativeness dial on composition table; pressure-valve sidecar;
 multi-seed replication discipline (min 3 seeds for any strong claim).
+
+## EXP-XTAL theory synthesis v2 (2026-11-26) — interference-filter + limit-cycle model
+
+THE INTERFERENCE FILTER (mechanism behind v6gate inversion)
+Gradient descent is myopic: it follows whichever direction reduces loss
+fastest. When one rule owns the network, that direction is the rule's
+private optimum (lookup). When multiple rules with different private optima
+share weights, the idiosyncratic gradient components cancel and only the
+ALIGNED components survive. Rules can only agree on shared structure ->
+conflict is a coincidence detector that passes only structure-aligned
+gradient. Mixture-of-rules loss is a voting system where only shared
+structure gets elected.
+DESIGN LAW: maximize surface diversity at fixed latent structure. Each
+task's lookup-gradient is idiosyncratic (cancels); structure-gradient is
+shared (amplifies). SHARP TEST: add rule-R2 (different composition table,
+same classes) to R-m64 mix — class-direction gradient doubles while lookup
+components cancel => faster/more stable machinery than single-R. If
+machinery formation is only about lookup-infeasibility, R2 should not
+matter. Discriminates interference-filter vs pure-feasibility theories.
+SECOND mechanism for why repetition hurts (independent of lookup
+completion): repetition reduces surface diversity, weakening cancellation.
+Templated-but-unique synthetic data should still fail to form machinery if
+surface diversity is low. Directly relevant to synthetic-data pipeline
+design.
+
+LIMIT-CYCLE MODEL OF THE OSCILLATION
+Project dynamics onto (L=lookup strength, M=machinery strength). Identity
+codes and class codes compete for the SAME representation bandwidth. M
+consolidation rewrites dimensions L was using -> partial-lookup collapses
+-> train error rises -> gradient rebuilds L -> re-scrambles class dims ->
+M erodes -> repeat. Predator-prey structure: lookup preys on bandwidth
+machinery needs; machinery growth destroys lookup substrate. NOT noise —
+a deterministic limit cycle with chaotic phase (explains seed
+irreproducibility). PREDICTION: oscillation amplitude should shrink with
+capacity (d_model) at fixed members, because bandwidth scarcity drives the
+competition — capacity dial discriminates bandwidth-competition vs
+feasibility-only models. PREDICTION: period scales with the ratio of
+crystallization timescales.
+
+RECRUITMENT THEORY (ahead of the experiment)
+New positions are absorbed by whichever mode their initial error-gradient
+aligns with. Existing machinery gets strengthened when new positions'
+gradients point along it (positive feedback: more positions = more funding
+for machinery). Curriculum art: introduce positions whose initial errors
+align with existing machinery — surface similarity to machinery-served
+positions should promote recruitment. TEST: rule-A positions surface-
+similar to R chunks vs surface-distinct.
+
+PRESCRIPTIVE PRINCIPLES FOR DATA DESIGN (program output so far)
+P1 never let lookup complete (relational targets, big entity vocabs)
+P2 maximize surface diversity at fixed latent structure
+P3 mixture unified in latent structure, diverse in surface
+P4 weight decay selects directional over precision machinery
+P5 train metrics are blind to mode oscillation — probe holdouts
+P6 capacity is not the lever; feasibility economics is
+
+## v7 experiment matrix launched (2026-11-26) — AWAITING ANALYSIS
+- v7cap32/v7cap256: capacity-amplitude test of limit-cycle model (d32/d256
+  vs d128 baseline=v6rm64long). PREDICTION: oscillation amplitude shrinks
+  with capacity if bandwidth-competition drives the cycle. Measure: std of
+  RH_xs oscillation + min/max spread per run.
+- v7r2m64: interference-filter discriminator. R(add)+R2(xor) mixed, same
+  total relational fraction. PREDICTION (filter theory): R2H/RH generalize
+  faster+stabler than single-R control. PREDICTION (feasibility-only): no
+  difference. Compare mean/frac_below_ceiling vs v5rm64.
+- v7recruit: phase1 no-A machinery pretrain, phase2 (step 4000) rule-A
+  enters. KEY MEASURE: does AH drop below ceiling in phase 2 (machinery
+  recruitment) or stay flat (lookup colonizes)? Also rule-A crystallization
+  speed in phase 2 vs baseline ~step50.
+ANALYSIS CODE hint: xs/RH/ruleR xs/R2H/ruleR xs/AH/ruleA_heldout keys in
+results/xtal/v7*.jsonl — remember chaotic phase caveat, need care.
+
+## v7recruit — THE BOOTSTRAPPING RESULT (2026-11-27) — major
+
+Phase 1 (no rule-A, steps 0-4000): rule-R NEVER crystallizes even on TRAIN
+(xs pinned at exactly 2.08 = blind-uniform for 4000 straight steps) and
+emb/class_gap stays +0.000 — NO class geometry forms without rule-A.
+Copy crystallizes fine (0.001). Copy is self-contained; R is not.
+Phase 2 (rule-A enters step 4000): class_gap explodes 0.000->0.278 in 800
+steps; ONLY THEN does trainR crystallize (1.81->0.056 over 1600 steps).
+
+REINTERPRETATION OF GEOMETRY/USAGE DECOUPLING: the useless geometry was
+never useless — it is the SUBSTRATE relational machinery builds on.
+Pipeline: (1) simple rules memorize per-token, (2) class geometry forms as
+free byproduct, (3) hard-rule machinery pays to use the substrate.
+Memorization is both enemy AND scaffold of machinery — the tension IS the
+dynamics. Relational rules are not learnable from scratch in isolation;
+they need pre-existing class structure.
+
+RECRUITMENT VERDICT: negative. AH never below ceiling in phase 2 — new
+positions are colonized by lookup even when machinery exists. RH in phase
+2 EXPLODED above ceiling (4.57) as trainR crystallized: late-arriving
+geometry funneled R into lookup-memorization rather than machinery —
+suggests a CRITICAL WINDOW: machinery must form early while plastic;
+positions trained as uniform-noise for 4000 steps develop an entrenched
+habit that later learning routes around via lookup.
