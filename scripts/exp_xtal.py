@@ -35,6 +35,15 @@ OUT_DIR = os.path.join(ROOT, "results", "xtal")
 
 
 def build_model(args, vocab=None):
+    if getattr(args, "arch", "tiny") == "qwen":
+        from transformers import Qwen2Config, Qwen2ForCausalLM
+        cfg = Qwen2Config(vocab_size=vocab or VOCAB, hidden_size=896,
+                          intermediate_size=4864, num_hidden_layers=24,
+                          num_attention_heads=14, num_key_value_heads=2,
+                          max_position_embeddings=512)
+        model = Qwen2ForCausalLM(cfg)
+        model.to(args.device)
+        return model
     from forge.model.live import livet_config
     from forge.model_loader import ConfigurableResearchLLM
     cfg = livet_config(
@@ -75,6 +84,10 @@ def main():
                     help="add rule-R (relational composition) chunks to the mix")
     ap.add_argument("--ruler2", action="store_true",
                     help="split relational fraction between add-table R and xor-table R2")
+    ap.add_argument("--arch", default="tiny", choices=["tiny", "qwen"],
+                    help="qwen = random-init Qwen2-0.5B architecture (scale-transfer bridge)")
+    ap.add_argument("--mem", type=int, default=0,
+                    help="bigram logit-bias sidecar buckets (pressure-valve test); 0=off")
     ap.add_argument("--recruit", action="store_true",
                     help="phase 1 (first half): no rule-A in mix (machinery-only pretrain); phase 2: full ruler mix")
     ap.add_argument("--gate", action="store_true",
@@ -100,6 +113,34 @@ def main():
                           n_classes=args.n_classes, members=args.members,
                           mix=mix)
     model = build_model(args, vocab=grammar.vocab)
+    if args.arch == "qwen":
+        class _Ad(torch.nn.Module):
+            def __init__(self, m):
+                super().__init__()
+                self.base = m
+            def forward(self, x):
+                return (self.base(x).logits,)
+        model = _Ad(model)
+    if args.mem > 0:
+        V = grammar.vocab
+        K = args.mem
+        class _Mem(torch.nn.Module):
+            def __init__(self, base):
+                super().__init__()
+                self.base = base
+                self.mem = torch.nn.Parameter(torch.zeros(K, V, device=args.device))
+            def __getattr__(self, k):
+                try:
+                    return super().__getattr__(k)
+                except AttributeError:
+                    return getattr(self._modules["base"], k)
+            def forward(self, x):
+                logits = self.base(x)[0]
+                x1 = torch.roll(x, 1, dims=1)
+                x1[:, 0] = 0
+                bucket = (x1.long() * V + x.long()) % K
+                return (logits + self.mem[bucket],)
+        model = _Mem(model)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"[xtal] params={n_params/1e6:.2f}M device={args.device}")
 
@@ -115,8 +156,12 @@ def main():
                  for k in kinds}
     floors = grammar.floors()
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                            betas=(0.9, 0.95), weight_decay=args.wd)
+    if args.arch == "qwen":
+        from forge.training.training_utils import configure_optimizer
+        opt = configure_optimizer(model, args.lr, args.wd, optimizer_name="bnb")
+    else:
+        opt = torch.optim.AdamW(model.parameters(), lr=args.lr,
+                                betas=(0.9, 0.95), weight_decay=args.wd)
 
     def lr_at(step):
         if step < args.warmup:

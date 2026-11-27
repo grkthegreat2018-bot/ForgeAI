@@ -4094,3 +4094,40 @@ geometry funneled R into lookup-memorization rather than machinery —
 suggests a CRITICAL WINDOW: machinery must form early while plastic;
 positions trained as uniform-noise for 4000 steps develop an entrenched
 habit that later learning routes around via lookup.
+
+## EXP-XTAL pressure-valve design (2026-11-27) — HIGHEST-IMPACT BRIDGE
+
+HYPOTHESIS (user-originated): cheap lookup memory is a pressure valve that
+drains rule formation. If confirmed => memory-augmented architectures
+(FluxLM/STRATA/NGramMemory line) have a FUNDAMENTAL rule-formation deficit
+unless consolidation pressure is designed in. Central question for the L2
+consolidation program: what pressure moves memory content into machinery?
+
+DESIGN: bigram logit-bias sidecar. For relational chunk [MARKER_R,x1,x2,
+target], the target is predicted right after x2 — so the last-2-tokens
+bigram context IS exactly the lookup surface. A learned table mem[K, V=256]
+indexed by bucket=(x1*V+x2)%K added to logits is the easiest possible
+lookup circuit: no coordination, pure addressing. Trained end-to-end as
+part of model params. K=32768 (8.4M params) — compressed but large.
+CONTROL: same run --mem 0 (machinery forced, v5rm64-equivalent).
+PREDICTION (valve): trainR crystallizes FAST through the table, machinery
+never forms, RH stays at ceiling even at m64 where it previously could
+not. RH osc gone. If instead RH still dips below ceiling => machinery is
+robust to cheap memory, valve hypothesis dead.
+READOUT: compare trainR crystallization step + RH frac_below_ceiling vs
+control. ALSO track mem-table gradient share: if table absorbs the R
+gradient, main-net class geometry should NOT form (emb/class_gap lower).
+Implementation: driver-level loss override in exp_xtal.py — when args.mem>0,
+compute logits via model(toks[:,:-1])[0], build bucket ids from shifted
+token pairs (pad bucket 0 at position 0), add mem[bucket] before CE.
+Applied at ALL positions (noise positions cannot benefit — control for
+table capacity theft). Flag: --mem K.
+RUNS: v8mem (mem on) + v8nomem (control) both m64 ruler 8000 steps.
+
+## SESSION HANDOFF (2026-11-27) — READ FIRST NEXT SESSION
+
+RUNNING NOW: v8mem + v8nomem pressure-valve pair in results/xtal/. ANALYZE FIRST: trainR crystallization speed + xs/RH/ruleR frac_below_ceiling vs v5rm64 baseline; emb/class_gap shows whether table absorbs gradient (valve confirmed => geometry does NOT form).
+
+QWEN BRIDGE BLOCKED: random-init Qwen2-0.5B vocab256 OOMed 12GB even with bnb optimizer (fp32 param+grad+moments ~7GB). FIXES: run solo after v8 finishes; add model.to(torch.bfloat16) in build_model qwen path; batch 4 steps 3000; cpu_offload in forge/training/training_utils.py. Smoke then full run v8qwen --steps 4000 --batch 8 --members 64 --ruler --arch qwen. KEY Q: do xtal phenomena replicate at 0.5B?
+
+UNCOMMITTED: exp_xtal.py mem/arch/optimizer changes — commit after qwen smoke passes.
