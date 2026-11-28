@@ -4193,3 +4193,25 @@ NEXT EXPERIMENTS (priority):
   appears when competition pressure is reduced (mechanistic prediction).
 - Seeded interference-engine replication at scale (lit says strongest claim).
 - slingshot control: log last-layer norm in future runs (not yet implemented).
+
+## v14m256 FINAL (24k steps, members=256 R-heavy) — scale program verdicts
+
+1. NO relational ignition even at 24k steps (3x tiny ignition, ideal race
+   conditions, exposure-starved lookup). Scale-clock hypothesis dead.
+2. trainR 0.94 -> 2.02 reversal in final 3k: late-training churn — even
+   memorized structure unstable when nothing crystallizes. No equilibrium.
+3. Copy at 0.1 frequency: descent yes (6.8->4.8) but crystallization never
+   completed. Frequency shapes crystallization: dense=sharp switch,
+   sparse=creep/stall. New phenomenology.
+4. trainR/RH anti-correlated in lockstep mid-run: starvation signature
+   textbook-clean at scale.
+5. SYNTHESIS: forcing function is capacity-relative infeasibility. At 359M
+   nothing in grammar is unmemorizable, so lookup always wins. Scale
+   subsidizes lookup — makes rule-learning HARDER not easier.
+
+INTERVENTION MENU (next experiments, ranked):
+1. Architectural bottleneck — make lookup informationally expensive in the
+   architecture itself (first model-design candidate).
+2. Curriculum freezing — crystallize composition small, then expand entities.
+3. Holdout rotation — memorized lookup decays in value mid-training.
+4. Loss masking on memorizable positions — blunt proof-of-concept.
