@@ -98,6 +98,9 @@ def main():
     ap.add_argument("--gate", action="store_true",
                     help="PCGrad-style: project out negative-cosine components "
                          "between per-tag group gradients each step")
+    ap.add_argument("--no-compile", action="store_true",
+                    help="disable torch.compile (cuda-graph memory pools can "
+                         "grow past physical VRAM on long runs -> WDDM paging)")
     ap.add_argument("--ckpt-every", type=int, default=0,
                     help="save resume checkpoint every N steps (0=off)")
     ap.add_argument("--resume", action="store_true",
@@ -136,7 +139,7 @@ def main():
             def forward(self, x):
                 return (self.base(x).logits,)
         model = _Ad(model)
-        if getattr(args, "compile", True):
+        if getattr(args, "compile", True) and not getattr(args, "no_compile", False):
             model.base = torch.compile(model.base, mode="reduce-overhead")
     if args.mem > 0:
         V = grammar.vocab
