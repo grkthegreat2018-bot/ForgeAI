@@ -140,7 +140,7 @@ def main():
                 return (self.base(x).logits,)
         model = _Ad(model)
         if getattr(args, "compile", True) and not getattr(args, "no_compile", False):
-            model.base = torch.compile(model.base, mode="reduce-overhead")
+            model.base = torch.compile(model.base)
     if args.mem > 0:
         V = grammar.vocab
         K = args.mem
